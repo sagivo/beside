@@ -77,11 +77,21 @@ class McpExport implements IExport {
         'export-mcp: services not bound. Call bindServices() before start().',
       );
     }
-    const server = createMcpServer(this.services, this.logger);
     if (this.transport === 'stdio') {
+      // stdio is single-session by definition, so one server is enough.
+      const server = createMcpServer(this.services, this.logger);
       this.stdioHandle = await startStdioServer(server, this.logger);
     } else {
-      this.httpServer = await startHttpServer(server, this.host, this.port, this.logger);
+      // HTTP is multi-session; the SDK requires a fresh McpServer per
+      // transport, so we hand startHttpServer a factory rather than a
+      // single instance.
+      const services = this.services;
+      this.httpServer = await startHttpServer(
+        () => createMcpServer(services, this.logger),
+        this.host,
+        this.port,
+        this.logger,
+      );
     }
     this.running = true;
   }

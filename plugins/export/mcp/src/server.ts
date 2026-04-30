@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -515,7 +516,7 @@ export interface RunningHttpServer {
 }
 
 export async function startHttpServer(
-  server: McpServer,
+  createServer: () => McpServer,
   host: string,
   port: number,
   logger: Logger,
@@ -532,35 +533,68 @@ export async function startHttpServer(
 
     try {
       const sessionId = (req.headers['mcp-session-id'] as string | undefined) ?? undefined;
+      // Drain the request body — handleRequest expects a parsed JSON body
+      // and we also need it to detect MCP `initialize` calls.
+      const body = await readBody(req);
 
       let transport: StreamableHTTPServerTransport;
       if (sessionId && sessions.has(sessionId)) {
         transport = sessions.get(sessionId)!;
-      } else {
-        transport = new StreamableHTTPServerTransport({
+      } else if (!sessionId && req.method === 'POST' && isInitializeRequest(body)) {
+        // The MCP SDK enforces one Protocol/Server instance per transport,
+        // so every new HTTP session gets its own freshly-created McpServer.
+        // The factory closes over the shared services, so all servers see
+        // the same storage / strategy / reindex hook.
+        const newTransport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
-            sessions.set(id, transport);
+            sessions.set(id, newTransport);
             log.debug(`session opened ${id}`);
           },
         });
-        transport.onclose = () => {
-          if (transport.sessionId) {
-            sessions.delete(transport.sessionId);
-            log.debug(`session closed ${transport.sessionId}`);
+        newTransport.onclose = () => {
+          if (newTransport.sessionId) {
+            sessions.delete(newTransport.sessionId);
+            log.debug(`session closed ${newTransport.sessionId}`);
           }
         };
-        await server.connect(transport);
+        const server = createServer();
+        await server.connect(newTransport);
+        transport = newTransport;
+      } else {
+        // No session id and not an `initialize` request → reject rather
+        // than silently spawning a stray transport (which is what produced
+        // the "Already connected to a transport" error cascade).
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: 'Bad Request: missing or unknown mcp-session-id',
+            },
+            id: null,
+          }),
+        );
+        return;
       }
 
-      // Drain the request body — handleRequest expects a parsed JSON body.
-      const body = await readBody(req);
       await transport.handleRequest(req, res, body);
     } catch (err) {
-      log.error('mcp http handler failed', { err: String(err) });
+      const e = err as Error;
+      log.error('mcp http handler failed', {
+        err: e?.message ?? String(err),
+        stack: e?.stack,
+      });
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: 'internal' }));
+        res.end(
+          JSON.stringify({
+            error: 'internal',
+            message: e?.message ?? String(err),
+            stack: e?.stack?.split('\n').slice(0, 8),
+          }),
+        );
       }
     }
   });

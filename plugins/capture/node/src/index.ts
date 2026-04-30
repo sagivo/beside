@@ -237,6 +237,34 @@ const BROWSER_URL_SCRIPTS: Record<string, string> = {
 const LOOKS_LIKE_BROWSER =
   /\b(?:browser|chrome|chromium|safari|edge|brave|firefox|mozilla|tor|opera|vivaldi|arc|orion|librewolf|floorp|zen|waterfox|mullvad)\b/i;
 
+/**
+ * Reduce an osascript failure to its meaningful one-line message. Node's
+ * `execFile` rejection embeds the full command (and therefore the entire
+ * AppleScript source) in `error.message`, which makes log lines unreadable.
+ * osascript itself prints its real diagnostic to stderr in the form
+ * `<line>:<col>: execution error: <message> (<code>)`; if we have it, that's
+ * all the operator needs.
+ */
+function extractOsascriptError(err: unknown): string {
+  const e = err as { stderr?: unknown; message?: unknown; code?: unknown } | null;
+  const stderr =
+    typeof e?.stderr === 'string'
+      ? e.stderr
+      : Buffer.isBuffer(e?.stderr)
+      ? e!.stderr.toString('utf8')
+      : '';
+  const match = stderr.match(/execution error:[^\n]*/);
+  if (match) return match[0].trim();
+  if (stderr.trim()) return stderr.trim().split('\n').pop()!.trim();
+  if (typeof e?.code === 'string' && e.code) return `osascript ${e.code}`;
+  if (typeof e?.message === 'string') {
+    // Strip the "Command failed: osascript -e <huge script>" prefix.
+    const m = e.message.match(/^Command failed:[^\n]*\n([\s\S]*)$/);
+    return (m ? m[1] : e.message).trim().split('\n').pop()!.trim();
+  }
+  return String(err);
+}
+
 class NodeCapture implements ICapture {
   private readonly logger: Logger;
   private readonly config: Required<
@@ -1018,44 +1046,56 @@ class NodeCapture implements ICapture {
     // Fields are NUL-separated; position/size are space-separated pairs and
     // may be empty strings if AppleScript can't read them (e.g. fullscreen
     // Spaces, login window).
+    //
+    // The whole `tell System Events` block is wrapped in a try because
+    // `first application process whose frontmost is true` transiently throws
+    // error -1719 ("Invalid index") when there is no frontmost process at the
+    // exact instant we query — common during Spaces switches, screen-lock
+    // transitions, screensaver, login window, and wake-from-sleep. In those
+    // cases we return all-empty fields and the JS side treats it as "no
+    // active window right now", which is the correct semantic.
     const metaScript = `
       set sep to (ASCII character 0)
-      tell application "System Events"
-        set frontApp to first application process whose frontmost is true
-        set appName to name of frontApp
-        set appPid to unix id of frontApp
-        try
-          set bid to bundle identifier of frontApp
-        on error
-          set bid to ""
-        end try
-        try
-          set winTitle to name of front window of frontApp
-        on error
-          set winTitle to ""
-        end try
-        try
-          set winPos to position of front window of frontApp
-          set posStr to ((item 1 of winPos) as text) & " " & ((item 2 of winPos) as text)
-        on error
-          set posStr to ""
-        end try
-        try
-          set winSize to size of front window of frontApp
-          set sizeStr to ((item 1 of winSize) as text) & " " & ((item 2 of winSize) as text)
-        on error
-          set sizeStr to ""
-        end try
-      end tell
-      return appName & sep & bid & sep & (appPid as text) & sep & winTitle & sep & posStr & sep & sizeStr
+      set appName to ""
+      set bid to ""
+      set appPid to "0"
+      set winTitle to ""
+      set posStr to ""
+      set sizeStr to ""
+      try
+        tell application "System Events"
+          set frontApp to first application process whose frontmost is true
+          set appName to name of frontApp
+          set appPid to (unix id of frontApp) as text
+          try
+            set bid to bundle identifier of frontApp
+          end try
+          try
+            set winTitle to name of front window of frontApp
+          end try
+          try
+            set winPos to position of front window of frontApp
+            set posStr to ((item 1 of winPos) as text) & " " & ((item 2 of winPos) as text)
+          end try
+          try
+            set winSize to size of front window of frontApp
+            set sizeStr to ((item 1 of winSize) as text) & " " & ((item 2 of winSize) as text)
+          end try
+        end tell
+      end try
+      return appName & sep & bid & sep & appPid & sep & winTitle & sep & posStr & sep & sizeStr
     `;
     try {
       const { stdout } = await execFileP('osascript', ['-e', metaScript], { timeout: 1500 });
       const parts = stdout.replace(/\n$/, '').split('\u0000');
       if (parts.length < 4) return null;
       const [app, bundleId, pidStr, title, posStr, sizeStr] = parts;
+      // No frontmost process at this instant (transient: Spaces switch,
+      // lock screen, screensaver, login window). Caller falls back to the
+      // 'unknown' placeholder; we don't warn since this is expected.
+      if (!app) return null;
       const pid = Number.parseInt(pidStr ?? '', 10);
-      const url = await this.queryBrowserUrlOsascript(app ?? '');
+      const url = await this.queryBrowserUrlOsascript(app);
       let screenIndex = 0;
       if (posStr && sizeStr) {
         const [pxStr, pyStr] = posStr.split(' ');
@@ -1069,7 +1109,7 @@ class NodeCapture implements ICapture {
         }
       }
       return {
-        app: app || 'unknown',
+        app,
         bundleId: bundleId || 'unknown',
         title: title ?? '',
         url,
@@ -1080,7 +1120,7 @@ class NodeCapture implements ICapture {
       if (!this.osascriptErrorNotified) {
         this.osascriptErrorNotified = true;
         this.logger.warn('osascript active-window fallback failed (will retry silently)', {
-          err: String(err),
+          err: extractOsascriptError(err),
         });
       }
       return null;
