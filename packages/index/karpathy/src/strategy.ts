@@ -1,5 +1,7 @@
 import path from 'node:path';
 import type {
+  EntityRecord,
+  Frame,
   IIndexStrategy,
   IModelAdapter,
   IndexPage,
@@ -11,24 +13,22 @@ import type {
   ReorganisationSummary,
 } from '@cofounderos/interfaces';
 import { isoTimestamp } from '@cofounderos/core';
-import { bucketEvent, slugify, type BucketAssignment } from './bucketer.js';
+import { slugify } from './bucketer.js';
 import { PageStore } from './page-store.js';
 
 const STRATEGY_NAME = 'karpathy';
 
-const SYSTEM_PROMPT = `You are the indexer for a personal knowledge wiki called CofounderOS.
-Each wiki page summarises one project, contact, meeting, tool, or topic the user spends time on.
-You receive the existing page (if any) plus a batch of new raw activity events, and you produce
-the new page content. Your output must be markdown only, no preamble.
+const SYSTEM_PROMPT = `You write one-paragraph descriptions for entries in a personal knowledge wiki.
+You receive STRUCTURED EVIDENCE about one entity (a project, repo, meeting, channel, doc, person, app, or webpage)
+and (when applicable) the existing prose paragraph. You return ONLY the new prose — 1-3 sentences, plain markdown,
+no headers, no list bullets, no metadata.
 
-Rules:
-- Keep the page concise and useful. Aim for 80-300 words.
-- Always begin with a single H1 line containing the page title (no metadata in the title).
-- Use these sections when relevant: Summary, Recent activity, Key context, Related.
-- "Recent activity" is a chronological bullet list. Newest first. Each bullet starts with the date.
-- "Related" links use [[other/page]] markdown wiki links.
-- Preserve existing useful detail unless the new events contradict it.
-- Never invent facts the events do not support.`;
+Hard rules:
+- Ground every claim in the evidence. If the evidence says "Cursor was used to edit README.md", say so.
+- Never invent facts. Never describe features the evidence does not mention.
+- If the evidence is thin, write a short factual sentence and stop.
+- Preserve correct facts from the existing prose if you have them.
+- Plain prose only. No "Summary:" prefix. No headers. No bullet lists.`;
 
 const REORG_SYSTEM_PROMPT = `You maintain the structure of a personal knowledge wiki.
 Identify structural improvements (merges, splits, archives, summary pages, reclassifications).
@@ -52,6 +52,12 @@ export class KarpathyStrategy implements IIndexStrategy {
   private readonly archiveAfterDays: number;
   private readonly summaryThresholdPages: number;
   private store!: PageStore;
+  /**
+   * Captured on the first `getUnindexedEvents` call. We use it inside
+   * `indexBatch` to fetch entities + frames since the IIndexStrategy
+   * contract doesn't pass `IStorage` into that method directly.
+   */
+  private storage: IStorage | null = null;
 
   constructor(private readonly config: StrategyConfig, logger: Logger) {
     this.logger = logger.child(`index-${STRATEGY_NAME}`);
@@ -66,6 +72,7 @@ export class KarpathyStrategy implements IIndexStrategy {
   }
 
   async getUnindexedEvents(storage: IStorage): Promise<RawEvent[]> {
+    this.storage = storage;
     return await storage.readEvents({
       unindexed_for_strategy: STRATEGY_NAME,
       limit: this.batchSize,
@@ -77,34 +84,63 @@ export class KarpathyStrategy implements IIndexStrategy {
     currentIndex: IndexState,
     model: IModelAdapter,
   ): Promise<IndexUpdate> {
+    const empty = (): IndexUpdate => ({
+      pagesToCreate: [],
+      pagesToUpdate: [],
+      pagesToDelete: [],
+      newRootIndex: '',
+      reorganisationNotes: '',
+    });
+
+    if (!this.storage) {
+      this.logger.warn(
+        'storage handle not set — call getUnindexedEvents first; skipping batch',
+      );
+      return empty();
+    }
+
     if (events.length === 0) {
       return {
+        ...(await this.renderRootIndexUpdate(currentIndex)),
         pagesToCreate: [],
         pagesToUpdate: [],
         pagesToDelete: [],
-        newRootIndex: await this.store.readRootIndex(),
         reorganisationNotes: '',
       };
     }
 
-    // Group events by target page.
-    const grouped = new Map<string, { assignment: BucketAssignment; events: RawEvent[] }>();
-    for (const event of events) {
-      const a = bucketEvent(event);
-      if (!a) continue;
-      const slot = grouped.get(a.path);
-      if (slot) slot.events.push(event);
-      else grouped.set(a.path, { assignment: a, events: [event] });
+    // Determine which entities saw new activity. Two paths:
+    //   1. If we have a checkpoint (lastIncrementalRun), use the entities
+    //      table directly: any entity whose `last_seen >= checkpoint`.
+    //   2. As a sanity backstop, also pull entities reachable from the
+    //      events in this batch — covers brand-new entities created after
+    //      the last run.
+    const since = currentIndex.lastIncrementalRun ?? '0000';
+    const recent = await this.storage.listEntities({
+      sinceLastSeen: since,
+      limit: 200,
+    });
+    const dirtyByPath = new Map<string, EntityRecord>(
+      recent.map((e) => [e.path, e]),
+    );
+
+    if (dirtyByPath.size === 0) {
+      this.logger.debug(
+        'no entities updated since last run — frame builder may not have caught up yet',
+      );
+      return empty();
     }
 
     const pagesToCreate: IndexPage[] = [];
     const pagesToUpdate: IndexPage[] = [];
 
-    for (const { assignment, events: bucketEvents } of grouped.values()) {
-      const existing = await this.store.readPage(assignment.path);
-      const updated = await this.updatePage(existing, assignment, bucketEvents, model);
-      if (existing) pagesToUpdate.push(updated);
-      else pagesToCreate.push(updated);
+    for (const entity of dirtyByPath.values()) {
+      const frames = await this.storage.getEntityFrames(entity.path, 500);
+      if (frames.length === 0) continue;
+      const existing = await this.store.readPage(`${entity.path}.md`);
+      const page = await this.renderEntityPage(entity, frames, existing, model);
+      if (existing) pagesToUpdate.push(page);
+      else pagesToCreate.push(page);
     }
 
     const newPagesByPath = new Map<string, IndexPage>();
@@ -116,12 +152,30 @@ export class KarpathyStrategy implements IIndexStrategy {
       eventsCovered: currentIndex.eventsCovered + events.length,
     });
 
+    this.logger.info(
+      `karpathy: ${pagesToCreate.length} new + ${pagesToUpdate.length} updated pages` +
+        ` from ${dirtyByPath.size} active entities`,
+    );
+
     return {
       pagesToCreate,
       pagesToUpdate,
       pagesToDelete: [],
       newRootIndex,
       reorganisationNotes: '',
+    };
+  }
+
+  private async renderRootIndexUpdate(
+    currentIndex: IndexState,
+  ): Promise<Pick<IndexUpdate, 'newRootIndex'>> {
+    const onDisk = await this.store.listPages();
+    return {
+      newRootIndex: renderRootIndex(onDisk, {
+        lastIncrementalRun: currentIndex.lastIncrementalRun,
+        lastReorganisationRun: currentIndex.lastReorganisationRun,
+        eventsCovered: currentIndex.eventsCovered,
+      }),
     };
   }
 
@@ -256,42 +310,62 @@ export class KarpathyStrategy implements IIndexStrategy {
   // Internals
   // -------------------------------------------------------------------------
 
-  private async updatePage(
+  /**
+   * Render a single entity's wiki page from its frames + history. Page
+   * structure:
+   *
+   *   1. YAML frontmatter (deterministic — clean, parseable by any tool).
+   *   2. `# Title`
+   *   3. `## What it is` — LLM prose, grounded in evidence; falls back
+   *      to a deterministic summary when the model is unavailable.
+   *   4. `## Recent activity` — deterministic, last 12 sessions.
+   *   5. `## Files & URLs` — deterministic, deduplicated.
+   *   6. `## Top screenshots` — up to 3 keyframes by perceptual hash.
+   */
+  private async renderEntityPage(
+    entity: EntityRecord,
+    frames: Frame[],
     existing: IndexPage | null,
-    assignment: BucketAssignment,
-    events: RawEvent[],
     model: IModelAdapter,
   ): Promise<IndexPage> {
-    let content: string;
-    // Skip the model entirely when only the offline fallback is wired up —
-    // it produces a much nicer page than echoing back our prompt.
-    if (model.getModelInfo().name === 'offline:fallback') {
-      content = renderFallbackPage(existing, assignment, events);
+    const evidence = buildEvidence(entity, frames);
+    const isOfflineModel = model.getModelInfo().name === 'offline:fallback';
+
+    let prose: string;
+    if (isOfflineModel) {
+      prose = renderDeterministicProse(entity, evidence);
     } else {
-      const userPrompt = buildPagePrompt(existing, assignment, events);
+      const prompt = buildEvidencePrompt(existing, entity, evidence);
       try {
-        content = await model.complete(userPrompt, {
+        const raw = await model.complete(prompt, {
           systemPrompt: SYSTEM_PROMPT,
           temperature: 0.2,
-          maxTokens: 800,
+          maxTokens: 350,
         });
+        prose = raw.trim();
+        // Defensive: if the model went off-script and re-rendered the
+        // whole page, keep just the first paragraph.
+        prose = trimToProse(prose);
+        if (!prose) prose = renderDeterministicProse(entity, evidence);
       } catch (err) {
-        this.logger.warn('model.complete failed, falling back to deterministic page', {
+        this.logger.warn('model.complete failed, falling back to deterministic prose', {
           err: String(err),
         });
-        content = renderFallbackPage(existing, assignment, events);
+        prose = renderDeterministicProse(entity, evidence);
       }
     }
 
-    const sourceEventIds = uniqueStrings([
-      ...(existing?.sourceEventIds ?? []),
-      ...events.map((e) => e.id),
-    ]).slice(-200); // cap so the metadata block doesn't grow without bound
+    const content = renderEntityMarkdown(entity, evidence, prose);
 
     return {
-      path: assignment.path,
-      content: content.trim(),
-      sourceEventIds,
+      path: `${entity.path}.md`,
+      content,
+      // We no longer store the full per-event provenance in the page
+      // metadata block — the SQLite `frames`/`entities` tables are the
+      // source of truth. Keep an empty list to satisfy the IndexPage
+      // contract; reorg passes don't actually depend on it for entities
+      // built from frames.
+      sourceEventIds: existing?.sourceEventIds ?? [],
       backlinks: existing?.backlinks ?? [],
       lastUpdated: isoTimestamp(),
     };
@@ -316,97 +390,354 @@ export class KarpathyStrategy implements IIndexStrategy {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildPagePrompt(
-  existing: IndexPage | null,
-  assignment: BucketAssignment,
-  events: RawEvent[],
-): string {
-  const eventLines = events
-    .slice()
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-    .map(formatEventLine)
-    .join('\n');
+// ---------------------------------------------------------------------------
+// Evidence — what we actually feed the LLM (and what we render
+// deterministically into the page sections).
+// ---------------------------------------------------------------------------
 
-  const existingBlock = existing?.content
-    ? `EXISTING PAGE (update in place; preserve useful detail):\n\n${existing.content}\n`
-    : `EXISTING PAGE: (none — this is a brand-new page)`;
-
-  return `PAGE PATH: ${assignment.path}
-PAGE CATEGORY: ${assignment.category}
-PAGE TITLE: ${assignment.title}
-
-${existingBlock}
-
-NEW RAW EVENTS (most recent at the bottom):
-${eventLines}
-
-Produce the updated full page markdown now.`;
+interface ActivityWindow {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  frameCount: number;
+  windowTitles: string[];
+  urls: string[];
 }
 
-function formatEventLine(e: RawEvent): string {
-  const meta = [
-    e.app,
-    e.window_title ? `"${e.window_title}"` : null,
-    e.url ? `<${e.url}>` : null,
-  ].filter(Boolean).join(' · ');
-  const content = e.content ? ` — ${truncate(e.content, 220)}` : '';
-  return `- [${e.timestamp}] (${e.type}) ${meta}${content}`;
+interface Evidence {
+  windows: ActivityWindow[];
+  files: string[];
+  urls: Array<{ url: string; title: string | null; lastSeen: string }>;
+  textSnippets: string[];
+  apps: string[];
+  keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }>;
 }
 
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s;
-  return s.slice(0, n - 1) + '…';
-}
+const SESSION_GAP_MS = 60_000;
+const MAX_WINDOWS = 12;
+const MAX_TEXT_SNIPPETS = 8;
+const MAX_KEYFRAMES = 3;
 
-function renderFallbackPage(
-  existing: IndexPage | null,
-  assignment: BucketAssignment,
-  events: RawEvent[],
-): string {
-  const lines: string[] = [];
-  lines.push(`# ${assignment.title}`);
-  lines.push('');
-  lines.push(`*Category: ${assignment.category} · ${events.length} new event(s) ingested.*`);
-  lines.push('');
+function buildEvidence(_entity: EntityRecord, frames: Frame[]): Evidence {
+  const sorted = frames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  // Carry over any prior "Summary" section so existing context is preserved.
-  const priorSummary = extractSection(existing?.content ?? '', 'Summary');
-  if (priorSummary) {
-    lines.push('## Summary');
-    lines.push(priorSummary);
-    lines.push('');
-  } else if (!existing) {
-    lines.push('## Summary');
-    lines.push(`Activity in ${assignment.category}/${assignment.title}.`);
-    lines.push('');
+  // 1. Activity windows — group adjacent frames within `SESSION_GAP_MS`.
+  const windows: ActivityWindow[] = [];
+  for (const f of sorted) {
+    const last = windows[windows.length - 1];
+    const ts = Date.parse(f.timestamp);
+    const lastEnd = last ? Date.parse(last.endedAt) : -Infinity;
+    if (last && ts - lastEnd <= SESSION_GAP_MS) {
+      last.endedAt = f.timestamp;
+      last.frameCount += 1;
+      last.durationMs += f.duration_ms ?? 0;
+      if (f.window_title && !last.windowTitles.includes(f.window_title)) {
+        last.windowTitles.push(f.window_title);
+      }
+      if (f.url && !last.urls.includes(f.url)) last.urls.push(f.url);
+    } else {
+      windows.push({
+        startedAt: f.timestamp,
+        endedAt: f.timestamp,
+        durationMs: f.duration_ms ?? 0,
+        frameCount: 1,
+        windowTitles: f.window_title ? [f.window_title] : [],
+        urls: f.url ? [f.url] : [],
+      });
+    }
   }
 
-  // Recent activity — newest first, capped to 30 entries to keep the page
-  // readable. Older entries from the existing page are merged in below.
-  lines.push('## Recent activity');
-  const newBullets = events
-    .slice()
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .map(formatEventLine);
-  const oldBullets = extractListSection(existing?.content ?? '', 'Recent activity');
-  const merged = [...newBullets, ...oldBullets].slice(0, 30);
-  for (const b of merged) lines.push(b);
+  // 2. Distinct files (heuristic from window titles).
+  const files = new Set<string>();
+  for (const f of sorted) {
+    const file = extractFilename(f.window_title || '');
+    if (file) files.add(file);
+  }
+
+  // 3. URLs.
+  const urlMap = new Map<string, { title: string | null; lastSeen: string }>();
+  for (const f of sorted) {
+    if (!f.url) continue;
+    const prev = urlMap.get(f.url);
+    if (prev) {
+      prev.lastSeen = f.timestamp;
+      if (!prev.title && f.window_title) prev.title = f.window_title;
+    } else {
+      urlMap.set(f.url, { title: f.window_title || null, lastSeen: f.timestamp });
+    }
+  }
+
+  // 4. OCR text snippets — pick a few non-empty, deduped excerpts.
+  const seenSnippets = new Set<string>();
+  const textSnippets: string[] = [];
+  for (let i = sorted.length - 1; i >= 0 && textSnippets.length < MAX_TEXT_SNIPPETS; i--) {
+    const f = sorted[i];
+    if (!f || !f.text || f.text_source !== 'ocr') continue;
+    const snippet = f.text.replace(/\s+/g, ' ').trim().slice(0, 220);
+    if (snippet.length < 30) continue;
+    const key = snippet.slice(0, 80);
+    if (seenSnippets.has(key)) continue;
+    seenSnippets.add(key);
+    textSnippets.push(snippet);
+  }
+
+  // 5. Apps used.
+  const apps = [...new Set(sorted.map((f) => f.app).filter(Boolean))];
+
+  // 6. Keyframes — visually distinct screenshots (greedy max-min Hamming).
+  const candidates = sorted.filter(
+    (f): f is Frame & { asset_path: string } =>
+      Boolean(f.asset_path) && Boolean(f.perceptual_hash),
+  );
+  const keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }> = [];
+  if (candidates.length > 0) {
+    keyframes.push({
+      assetPath: candidates[0]!.asset_path,
+      timestamp: candidates[0]!.timestamp,
+      phash: candidates[0]!.perceptual_hash,
+    });
+    while (keyframes.length < MAX_KEYFRAMES && keyframes.length < candidates.length) {
+      let bestIdx = -1;
+      let bestMin = -1;
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i]!;
+        if (keyframes.some((k) => k.assetPath === c.asset_path)) continue;
+        const minDist = keyframes.reduce(
+          (acc, k) => Math.min(acc, hammingDistance(k.phash, c.perceptual_hash)),
+          Number.POSITIVE_INFINITY,
+        );
+        if (minDist > bestMin) {
+          bestMin = minDist;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === -1) break;
+      const c = candidates[bestIdx]!;
+      keyframes.push({
+        assetPath: c.asset_path,
+        timestamp: c.timestamp,
+        phash: c.perceptual_hash,
+      });
+    }
+  } else {
+    // Fall back to *any* frame with an asset_path even if no phash.
+    for (const f of sorted) {
+      if (!f.asset_path) continue;
+      keyframes.push({
+        assetPath: f.asset_path,
+        timestamp: f.timestamp,
+        phash: f.perceptual_hash,
+      });
+      if (keyframes.length >= MAX_KEYFRAMES) break;
+    }
+  }
+
+  return {
+    windows: windows.slice(-MAX_WINDOWS).reverse(),
+    files: [...files].slice(0, 20),
+    urls: [...urlMap.entries()]
+      .map(([url, info]) => ({ url, title: info.title, lastSeen: info.lastSeen }))
+      .sort((a, b) => b.lastSeen.localeCompare(a.lastSeen))
+      .slice(0, 10),
+    textSnippets,
+    apps,
+    keyframes,
+  };
+}
+
+function buildEvidencePrompt(
+  existing: IndexPage | null,
+  entity: EntityRecord,
+  evidence: Evidence,
+): string {
+  const lines: string[] = [];
+  lines.push(`ENTITY KIND: ${entity.kind}`);
+  lines.push(`ENTITY PATH: ${entity.path}`);
+  lines.push(`ENTITY TITLE: ${entity.title}`);
+  lines.push(
+    `FIRST SEEN: ${entity.firstSeen.slice(0, 16).replace('T', ' ')} ` +
+      `· LAST SEEN: ${entity.lastSeen.slice(0, 16).replace('T', ' ')}`,
+  );
+  lines.push(
+    `TOTAL FOCUSED MIN: ${Math.round(entity.totalFocusedMs / 60_000)}` +
+      ` · FRAMES: ${entity.frameCount}`,
+  );
+  if (evidence.apps.length) {
+    lines.push(`APPS USED: ${evidence.apps.join(', ')}`);
+  }
+  if (evidence.files.length) {
+    lines.push(`FILES SEEN: ${evidence.files.slice(0, 10).join(', ')}`);
+  }
+  if (evidence.urls.length) {
+    lines.push('URLS VISITED:');
+    for (const u of evidence.urls.slice(0, 6)) {
+      lines.push(`  - ${u.url}${u.title ? ` (${truncate(u.title, 60)})` : ''}`);
+    }
+  }
+  if (evidence.textSnippets.length) {
+    lines.push('OCR EXCERPTS FROM SCREENSHOTS:');
+    for (const t of evidence.textSnippets.slice(0, 4)) {
+      lines.push(`  > ${t}`);
+    }
+  }
+  if (existing?.content) {
+    const oldProse = extractSection(existing.content, 'What it is');
+    if (oldProse) {
+      lines.push('EXISTING PROSE (update only if evidence contradicts or extends it):');
+      lines.push(oldProse);
+    }
+  }
+  lines.push('');
+  lines.push(
+    'Write 1-3 sentences of plain prose summarising this entity, grounded ONLY in the evidence above.',
+  );
+  return lines.join('\n');
+}
+
+function renderDeterministicProse(
+  entity: EntityRecord,
+  evidence: Evidence,
+): string {
+  const minutes = Math.round(entity.totalFocusedMs / 60_000);
+  const firstDay = entity.firstSeen.slice(0, 10);
+  const lastDay = entity.lastSeen.slice(0, 10);
+  const span = firstDay === lastDay ? `on ${firstDay}` : `${firstDay} – ${lastDay}`;
+  const apps = evidence.apps.length
+    ? `via ${evidence.apps.slice(0, 3).join(', ')}`
+    : '';
+  const sample = evidence.files.length
+    ? `Files seen: ${evidence.files.slice(0, 5).join(', ')}.`
+    : evidence.urls.length
+      ? `URLs visited: ${evidence.urls
+          .slice(0, 3)
+          .map((u) => u.url)
+          .join(', ')}.`
+      : '';
+  const headline =
+    minutes > 0
+      ? `Active ${span} (${minutes} min, ${entity.frameCount} frames) ${apps}.`
+      : `Observed ${span} (${entity.frameCount} frames) ${apps}.`;
+  return [headline.trim(), sample].filter(Boolean).join(' ').trim();
+}
+
+function trimToProse(text: string): string {
+  // The model occasionally returns headers / bullet lists despite the
+  // system prompt. Strip them and keep the first 3 sentences.
+  const cleaned = text
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .filter((l) => !/^\s*[-*]\s/.test(l))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentences = cleaned.match(/[^.!?]+[.!?]+/g);
+  if (!sentences) return cleaned;
+  return sentences.slice(0, 3).join(' ').trim();
+}
+
+function renderEntityMarkdown(
+  entity: EntityRecord,
+  evidence: Evidence,
+  prose: string,
+): string {
+  const lines: string[] = [];
+
+  // 1. YAML frontmatter — every field is stable, deterministic, and
+  // round-trippable. No more 50-line JSON blob in HTML comments.
+  lines.push('---');
+  lines.push(`entity: ${entity.path}`);
+  lines.push(`kind: ${entity.kind}`);
+  lines.push(`title: ${yamlString(entity.title)}`);
+  lines.push(`first_seen: ${entity.firstSeen}`);
+  lines.push(`last_seen: ${entity.lastSeen}`);
+  lines.push(`total_focused_minutes: ${Math.round(entity.totalFocusedMs / 60_000)}`);
+  lines.push(`frame_count: ${entity.frameCount}`);
+  lines.push(`last_indexed: ${isoTimestamp()}`);
+  lines.push('---');
   lines.push('');
 
-  // Distinct apps/urls observed — useful "Key context" surface.
-  const apps = [...new Set(events.map((e) => e.app).filter(Boolean))];
-  const urls = [...new Set(events.map((e) => e.url).filter((u): u is string => Boolean(u)))];
-  if (apps.length || urls.length) {
-    lines.push('## Key context');
-    if (apps.length) lines.push(`- Apps: ${apps.join(', ')}`);
-    if (urls.length) {
-      lines.push('- URLs:');
-      for (const u of urls.slice(0, 5)) lines.push(`  - ${u}`);
+  // 2. Title + prose section.
+  lines.push(`# ${entity.title}`);
+  lines.push('');
+  lines.push('## What it is');
+  lines.push(prose);
+  lines.push('');
+
+  // 3. Recent activity — deterministic windows.
+  lines.push('## Recent activity');
+  if (evidence.windows.length === 0) {
+    lines.push('_(no activity recorded)_');
+  } else {
+    for (const w of evidence.windows) {
+      const start = w.startedAt.slice(0, 16).replace('T', ' ');
+      const minutes = Math.round(w.durationMs / 60_000);
+      const ago = minutes > 0 ? `${minutes}m, ` : '';
+      const titles = w.windowTitles.slice(0, 3).map((t) => `"${truncate(t, 70)}"`).join(', ');
+      lines.push(`- **${start}** (${ago}${w.frameCount} frames) — ${titles || '(no title)'}`);
+    }
+  }
+  lines.push('');
+
+  // 4. Files & URLs.
+  if (evidence.files.length || evidence.urls.length) {
+    lines.push('## Files & URLs');
+    if (evidence.files.length) {
+      lines.push(`**Files:** ${evidence.files.map((f) => `\`${f}\``).join(', ')}`);
+    }
+    if (evidence.urls.length) {
+      lines.push('**URLs:**');
+      for (const u of evidence.urls) {
+        const t = u.title ? ` — ${truncate(u.title, 60)}` : '';
+        lines.push(`- <${u.url}>${t}`);
+      }
     }
     lines.push('');
   }
 
-  return lines.join('\n').trim();
+  // 5. Top screenshots.
+  if (evidence.keyframes.length) {
+    lines.push('## Top screenshots');
+    for (const k of evidence.keyframes) {
+      const time = k.timestamp.slice(11, 19);
+      lines.push(`![${entity.title} @ ${time}](${k.assetPath})`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim() + '\n';
+}
+
+function yamlString(s: string): string {
+  // Quote when the string contains characters that confuse a naive YAML
+  // parser; double-quotes need escaping inside.
+  if (/[:\-#&*!{}[\]|>?,'"%@`\\]|^\s|\s$/.test(s)) {
+    return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return s;
+}
+
+function extractFilename(title: string): string | null {
+  // Common editor / finder patterns:
+  //   "README.md — projectname"   → README.md
+  //   "● file.ts (workspace)"     → file.ts
+  //   "Quick Look"                → null (no real file)
+  const match = title.match(/(?:^|[\s●○•])([A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})\b/);
+  if (match && match[1]) {
+    const f = match[1];
+    // Filter out common false positives.
+    if (/^\d+\.\d+/.test(f)) return null; // version numbers
+    return f;
+  }
+  return null;
+}
+
+function hammingDistance(a: string | null, b: string | null): number {
+  if (!a || !b || a.length !== b.length) return Number.POSITIVE_INFINITY;
+  let dist = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) dist += 1;
+  }
+  return dist;
 }
 
 function extractSection(content: string, heading: string): string | null {
@@ -415,16 +746,17 @@ function extractSection(content: string, heading: string): string | null {
   return m && m[1] ? m[1].trim() : null;
 }
 
-function extractListSection(content: string, heading: string): string[] {
-  const sec = extractSection(content, heading);
-  if (!sec) return [];
-  return sec.split('\n').filter((l) => l.trimStart().startsWith('- '));
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
 }
 
-function uniqueStrings(arr: string[]): string[] {
-  return [...new Set(arr)];
-}
-
+/**
+ * Lower bound on how many raw events we've folded into the index.
+ * Entity-driven pages no longer carry per-event provenance in their
+ * frontmatter, so this number drifts lower than reality after a switch
+ * to the new strategy — but remains useful as a "we have done work".
+ */
 function sumEventCoverage(pages: IndexPage[]): number {
   return pages.reduce((acc, p) => acc + p.sourceEventIds.length, 0);
 }
@@ -456,7 +788,16 @@ function renderRootIndex(pages: IndexPage[], meta: RootMeta): string {
   lines.push(`Events covered: ${meta.eventsCovered} | Pages: ${pages.length}`);
   lines.push('');
 
-  const categoryOrder = ['projects', 'meetings', 'contacts', 'topics', 'tools', 'patterns'];
+  const categoryOrder = [
+    'projects',
+    'repos',
+    'meetings',
+    'contacts',
+    'channels',
+    'docs',
+    'web',
+    'apps',
+  ];
   const sortedCategories = [
     ...categoryOrder.filter((c) => byCat.has(c)),
     ...[...byCat.keys()].filter((c) => !categoryOrder.includes(c)),

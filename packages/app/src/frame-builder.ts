@@ -240,6 +240,8 @@ function buildFrame(anchor: RawEvent, related: RawEvent[]): Frame {
     trigger: typeof meta.trigger === 'string' ? (meta.trigger as string) : 'screenshot',
     session_id: anchor.session_id,
     duration_ms: null,
+    entity_path: null,
+    entity_kind: null,
     source_event_ids: sourceEventIds,
   };
 }
@@ -266,6 +268,8 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     trigger: head.type === 'url_change' ? 'url' : 'focus',
     session_id: head.session_id,
     duration_ms: null,
+    entity_path: null,
+    entity_kind: null,
     source_event_ids: group.map((e) => e.id),
   };
 }

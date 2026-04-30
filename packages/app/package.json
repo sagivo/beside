@@ -23,6 +23,7 @@
     "@cofounderos/interfaces": "workspace:*",
     "@cofounderos/model-ollama": "workspace:*",
     "@cofounderos/storage-local": "workspace:*",
+    "sharp": "^0.33.5",
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {

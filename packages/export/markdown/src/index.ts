@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type {
   IExport,
+  IStorage,
   ExportStatus,
   IndexPage,
   IndexState,
@@ -10,11 +11,22 @@ import type {
   PluginFactory,
   Logger,
 } from '@cofounderos/interfaces';
-import { ensureDir, expandPath } from '@cofounderos/core';
+import { renderJournalMarkdown } from '@cofounderos/interfaces';
+import { ensureDir, expandPath, dayKey } from '@cofounderos/core';
 
 interface MarkdownExportConfig {
   path?: string;
   enabled?: boolean;
+}
+
+export interface MarkdownExportServices {
+  storage: IStorage;
+  /**
+   * Absolute path to the data dir (where the `raw/` screenshot tree lives).
+   * Used to compute relative `![](…)` paths in the journal so the markdown
+   * tree is portable when copied to e.g. an Obsidian vault.
+   */
+  dataDir: string;
 }
 
 class MarkdownExport implements IExport {
@@ -26,10 +38,22 @@ class MarkdownExport implements IExport {
   private lastSync: string | null = null;
   private pendingUpdates = 0;
   private errorCount = 0;
+  private services: MarkdownExportServices | null = null;
+  private journalsRendered = new Set<string>();
 
   constructor(outDir: string, logger: Logger) {
     this.outDir = outDir;
     this.logger = logger.child('export-markdown');
+  }
+
+  /**
+   * Called by the orchestrator after instantiation to inject storage so
+   * the export can render the daily journal alongside strategy pages.
+   * Optional — pre-frames installs that don't bind services still get
+   * wiki-page mirroring as before.
+   */
+  bindServices(services: MarkdownExportServices): void {
+    this.services = services;
   }
 
   async start(): Promise<void> {
@@ -50,13 +74,52 @@ class MarkdownExport implements IExport {
       await ensureDir(path.dirname(target));
       // We strip our internal metadata block — the export tree is for
       // humans / external agents, not for our own round-trip.
-      await fs.writeFile(target, `${page.content.trim()}\n`, 'utf8');
+      await fs.writeFile(target, `${stripMetaBlock(page.content)}`, 'utf8');
       this.lastSync = new Date().toISOString();
+      // Refresh today's journal opportunistically so it stays in lockstep
+      // with the wiki. Cheap: a single SQL scan + one write.
+      await this.maybeRenderJournal(dayKey());
     } catch (err) {
       this.errorCount += 1;
       this.logger.error('export write failed', { err: String(err), page: page.path });
     } finally {
       this.pendingUpdates = Math.max(0, this.pendingUpdates - 1);
+    }
+  }
+
+  /**
+   * Render `journal/<day>.md` from the frames table. Idempotent — safe
+   * to call as often as you like; we coalesce by debouncing on the day
+   * key when called from `onPageUpdate`.
+   */
+  async renderJournal(day: string): Promise<void> {
+    if (!this.services) return;
+    const frames = await this.services.storage.getJournal(day);
+    const target = path.join(this.outDir, 'journal', `${day}.md`);
+    await ensureDir(path.dirname(target));
+    // Compute a relative prefix so screenshot links work when this tree
+    // is copied to an Obsidian vault: from <export>/journal/<day>.md back
+    // to <data_dir>/raw/... The data dir hosts `raw/` directly.
+    const relToData = path.relative(
+      path.dirname(target),
+      this.services.dataDir,
+    );
+    const prefix = relToData ? `${relToData.replace(/\\/g, '/')}/` : '';
+    const md = renderJournalMarkdown(day, frames, prefix);
+    await fs.writeFile(target, md, 'utf8');
+    this.journalsRendered.add(day);
+  }
+
+  private async maybeRenderJournal(day: string): Promise<void> {
+    if (!this.services) return;
+    try {
+      await this.renderJournal(day);
+    } catch (err) {
+      this.errorCount += 1;
+      this.logger.warn('journal render failed', {
+        err: String(err),
+        day,
+      });
     }
   }
 
@@ -89,17 +152,20 @@ class MarkdownExport implements IExport {
 
   async fullSync(_state: IndexState, strategy: IIndexStrategy): Promise<void> {
     if (!this.running) await this.start();
-    // Mirror entire tree from the source of truth.
-    // Pages first.
-    // Source pages live under strategy's root; we re-fetch via strategy
-    // because that is the public read interface.
-    // The strategy doesn't expose `listPages` directly — we discover from
-    // the IndexState's rootPath instead.
     const rootIndex = await strategy.readRootIndex();
     await ensureDir(this.outDir);
     await fs.writeFile(path.join(this.outDir, 'index.md'), rootIndex, 'utf8');
 
     await this.copyTree(_state.rootPath, this.outDir);
+
+    // Re-render every day's journal we have data for.
+    if (this.services) {
+      const days = await this.services.storage.listDays();
+      for (const d of days) {
+        await this.maybeRenderJournal(d);
+      }
+    }
+
     this.lastSync = new Date().toISOString();
     this.logger.info('markdown export full sync complete');
   }

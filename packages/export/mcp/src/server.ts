@@ -11,6 +11,7 @@ import type {
   RawEventType,
   Frame,
 } from '@cofounderos/interfaces';
+import { renderJournalMarkdown } from '@cofounderos/interfaces';
 
 export interface McpServices {
   storage: IStorage;
@@ -178,7 +179,7 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
     },
     async ({ day }) => {
       const frames = await services.storage.getJournal(day);
-      const md = renderJournal(day, frames);
+      const md = renderJournalMarkdown(day, frames);
       return {
         content: [{ type: 'text', text: md }],
       };
@@ -356,46 +357,13 @@ function framePreview(frame: Frame): Record<string, unknown> {
     app: frame.app,
     window_title: frame.window_title,
     url: frame.url,
+    entity_path: frame.entity_path,
+    entity_kind: frame.entity_kind,
     asset_path: frame.asset_path,
     text_excerpt: frame.text ? truncate(frame.text, 240) : null,
     text_source: frame.text_source,
     duration_ms: frame.duration_ms,
   };
-}
-
-function renderJournal(day: string, frames: Frame[]): string {
-  if (frames.length === 0) {
-    return `# Journal — ${day}\n\n_No frames captured on this day._\n`;
-  }
-  const lines: string[] = [];
-  lines.push(`# Journal — ${day}`);
-  lines.push('');
-  lines.push(`_${frames.length} frame(s) captured._`);
-  lines.push('');
-  let lastApp: string | null = null;
-  for (const f of frames) {
-    if (f.app !== lastApp) {
-      lines.push(`## ${f.app || '(unknown)'}`);
-      lastApp = f.app;
-    }
-    const time = f.timestamp.slice(11, 19);
-    const dur = f.duration_ms ? ` _(${Math.round(f.duration_ms / 1000)}s)_` : '';
-    const target = [
-      f.window_title ? `"${f.window_title}"` : null,
-      f.url ? `<${f.url}>` : null,
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    lines.push(`- **${time}**${dur} — ${target || '(no title)'}`);
-    if (f.text && f.text_source === 'ocr' && f.text.trim()) {
-      const snippet = truncate(f.text.replace(/\s+/g, ' ').trim(), 220);
-      lines.push(`  > ${snippet}`);
-    }
-    if (f.asset_path) {
-      lines.push(`  ![](${f.asset_path})`);
-    }
-  }
-  return lines.join('\n') + '\n';
 }
 
 function truncate(s: string, n: number): string {

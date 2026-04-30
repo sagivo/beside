@@ -44,6 +44,9 @@ importers:
       '@cofounderos/storage-local':
         specifier: workspace:*
         version: link:../storage/local
+      sharp:
+        specifier: ^0.33.5
+        version: 0.33.5
       tesseract.js:
         specifier: ^7.0.0
         version: 7.0.0(encoding@0.1.13)

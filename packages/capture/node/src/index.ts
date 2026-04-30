@@ -29,6 +29,9 @@ interface CaptureNodeConfig {
   poll_interval_ms?: number;
   screenshot_diff_threshold?: number;
   idle_threshold_sec?: number;
+  screenshot_format?: 'webp' | 'jpeg';
+  screenshot_quality?: number;
+  /** @deprecated kept for backward-compat with old config files. */
   jpeg_quality?: number;
   excluded_apps?: string[];
   excluded_url_patterns?: string[];
@@ -52,6 +55,23 @@ interface ActiveWindowInfo {
 }
 
 const SAFE_APP = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 40);
+
+/**
+ * Encode a raw screenshot buffer to the configured output format. WebP
+ * is the default — at quality 75 it produces files ~40-50% smaller than
+ * JPEG-85 with no perceptible difference for screen content. JPEG is
+ * still available for tools that don't speak WebP.
+ */
+async function encodeScreenshot(
+  buf: Buffer,
+  format: 'webp' | 'jpeg',
+  quality: number,
+): Promise<Buffer> {
+  if (format === 'webp') {
+    return sharp(buf).webp({ quality }).toBuffer();
+  }
+  return sharp(buf).jpeg({ quality }).toBuffer();
+}
 
 /**
  * Browser → AppleScript snippet that extracts the URL of the current tab
@@ -144,11 +164,20 @@ class NodeCapture implements ICapture {
 
   constructor(config: CaptureNodeConfig, logger: Logger) {
     this.logger = logger.child('capture-node');
+    // Resolve format + quality with sensible back-compat. If the user has
+    // an old config with `jpeg_quality` set but no new keys, honor it.
+    const format = config.screenshot_format ?? 'webp';
+    const explicitQuality = config.screenshot_quality;
+    const fallbackQuality = format === 'jpeg' ? config.jpeg_quality : undefined;
+    const quality =
+      explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 75 : 85);
     this.config = {
       poll_interval_ms: config.poll_interval_ms ?? 1500,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.05,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
-      jpeg_quality: config.jpeg_quality ?? 85,
+      screenshot_format: format,
+      screenshot_quality: quality,
+      jpeg_quality: format === 'jpeg' ? quality : 85,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? false,
@@ -183,6 +212,8 @@ class NodeCapture implements ICapture {
       poll_interval_ms: this.config.poll_interval_ms,
       screenshot_diff_threshold: this.config.screenshot_diff_threshold,
       idle_threshold_sec: this.config.idle_threshold_sec,
+      screenshot_format: this.config.screenshot_format,
+      screenshot_quality: this.config.screenshot_quality,
       jpeg_quality: this.config.jpeg_quality,
       excluded_apps: this.config.excluded_apps,
       excluded_url_patterns: this.config.excluded_url_patterns,
@@ -601,7 +632,11 @@ class NodeCapture implements ICapture {
       return;
     }
 
-    const compressed = await sharp(buf).jpeg({ quality: this.config.jpeg_quality }).toBuffer();
+    const compressed = await encodeScreenshot(
+      buf,
+      this.config.screenshot_format,
+      this.config.screenshot_quality,
+    );
     const phash = await dHash(compressed);
     const diff = this.lastScreenshotHash ? hashDiff(this.lastScreenshotHash, phash) : 1;
 
@@ -619,7 +654,8 @@ class NodeCapture implements ICapture {
 
     const day = dayKey();
     const tk = timeKey();
-    const filename = `${tk}_${SAFE_APP(win.app)}.jpg`;
+    const ext = this.config.screenshot_format === 'webp' ? 'webp' : 'jpg';
+    const filename = `${tk}_${SAFE_APP(win.app)}.${ext}`;
     const relPath = path.join('raw', day, 'screenshots', filename);
     const absPath = path.join(this.config.raw_root, relPath);
     await ensureDir(path.dirname(absPath));
@@ -660,6 +696,9 @@ class NodeCapture implements ICapture {
       const ss = (this.screenshotMod as { default?: unknown }).default
         ?? (this.screenshotMod as unknown);
       const buf = (await (ss as (opts?: { format?: string }) => Promise<Buffer>)({ format: 'jpg' })) as Buffer;
+      // Lowered-quality probe — we only want a fast hash, not a usable image.
+      // Always encode as JPEG here to keep this path cheap regardless of
+      // the configured output format.
       const compressed = await sharp(buf).jpeg({ quality: 60 }).toBuffer();
       const phash = await dHash(compressed);
       const diff = hashDiff(this.lastScreenshotHash, phash);

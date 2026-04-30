@@ -67,6 +67,9 @@ export interface CaptureConfig {
   pluginName: string;
   screenshot_diff_threshold: number;
   idle_threshold_sec: number;
+  screenshot_format: 'webp' | 'jpeg';
+  screenshot_quality: number;
+  /** @deprecated kept for back-compat with status panes; mirrors quality when format=jpeg. */
   jpeg_quality: number;
   excluded_apps: string[];
   excluded_url_patterns: string[];
@@ -145,6 +148,9 @@ export interface Frame {
   session_id: string;
   /** Focused duration this frame represents, if known from a paired blur. */
   duration_ms: number | null;
+  /** Resolved entity for this frame — null until the resolver runs. */
+  entity_path: string | null;
+  entity_kind: EntityKind | null;
   /** Raw event ids that contributed to this frame. */
   source_event_ids: string[];
 }
@@ -163,6 +169,64 @@ export interface FrameQuery {
 export interface FrameOcrTask {
   id: string;
   asset_path: string;
+}
+
+/**
+ * Which retention tier a frame's asset has been pushed into. Promotion
+ * is monotonic: original → compressed → thumbnail → deleted. The
+ * frame's metadata + OCR text remain in SQLite forever; only the image
+ * file changes shape.
+ */
+export type FrameAssetTier =
+  | 'original'
+  | 'compressed'
+  | 'thumbnail'
+  | 'deleted';
+
+/** Lightweight projection used by the StorageVacuum worker. */
+export interface FrameAsset {
+  id: string;
+  asset_path: string;
+  timestamp: string;
+  tier: FrameAssetTier;
+}
+
+/**
+ * Kind of thing a frame represents in the user's life. The resolver
+ * tries these in priority order; everything that doesn't match an earlier
+ * kind falls through to `webpage` (if there's a URL) or `app` (last
+ * resort). Adding a new kind is one new resolver function.
+ */
+export type EntityKind =
+  | 'project'
+  | 'repo'
+  | 'meeting'
+  | 'contact'
+  | 'channel'
+  | 'doc'
+  | 'webpage'
+  | 'app';
+
+export interface EntityRef {
+  kind: EntityKind;
+  /** Stable filesystem path & DB primary key, e.g. "projects/cofounderos". */
+  path: string;
+  title: string;
+}
+
+export interface EntityRecord extends EntityRef {
+  firstSeen: string;
+  lastSeen: string;
+  /** Total focused time aggregated from frames whose duration_ms is known. */
+  totalFocusedMs: number;
+  frameCount: number;
+}
+
+export interface ListEntitiesQuery {
+  kind?: EntityKind;
+  limit?: number;
+  /** Only entities last seen on or after this ISO timestamp. */
+  sinceLastSeen?: string;
 }
 
 export interface StorageStats {
@@ -238,6 +302,64 @@ export interface IStorage {
 
   /** Mark raw events as having been folded into a frame. */
   markFramed(eventIds: string[]): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Entities (PR 6) — semantic rollup of frames
+  //
+  // Implementations may throw `not_implemented` if they don't materialise
+  // entities; consumers should treat absence of entities as "every frame
+  // resolves to its app" gracefully.
+  // -------------------------------------------------------------------------
+
+  /** Frames that haven't been resolved to an entity yet. */
+  listFramesNeedingResolution(limit: number): Promise<Frame[]>;
+
+  /** Attach an entity to a frame and (atomically) bump the entity's stats. */
+  resolveFrameToEntity(frameId: string, entity: EntityRef): Promise<void>;
+
+  /** Frames whose entity is known but for which no entity record exists. */
+  rebuildEntityCounts(): Promise<void>;
+
+  /** Look up an entity by its stable path. */
+  getEntity(path: string): Promise<EntityRecord | null>;
+
+  /** List entities, newest activity first. */
+  listEntities(query?: ListEntitiesQuery): Promise<EntityRecord[]>;
+
+  /** Frames belonging to an entity, oldest first. */
+  getEntityFrames(path: string, limit?: number): Promise<Frame[]>;
+
+  // -------------------------------------------------------------------------
+  // Vacuum (asset retention)
+  // -------------------------------------------------------------------------
+
+  /**
+   * List frames whose asset is currently at `currentTier` and whose
+   * timestamp is older than `olderThan`. Used by the vacuum worker to
+   * find candidates for promotion to the next tier.
+   */
+  listFramesForVacuum(
+    currentTier: FrameAssetTier,
+    olderThanIso: string,
+    limit: number,
+  ): Promise<FrameAsset[]>;
+
+  /**
+   * Update a frame's asset metadata after a vacuum operation. `assetPath`
+   * may be set to `null` to mark the asset deleted while preserving the
+   * frame row. `tier` is monotonically advanced.
+   */
+  updateFrameAsset(
+    frameId: string,
+    update: { assetPath?: string | null; tier: FrameAssetTier },
+  ): Promise<void>;
+
+  /**
+   * Aggregate counts of frames by current vacuum tier — feeds the
+   * `cofounderos status` command and the vacuum scheduler's no-op
+   * fast-path.
+   */
+  countFramesByTier(): Promise<Record<FrameAssetTier, number>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -459,4 +581,61 @@ export interface Logger {
   warn(msg: string, ...rest: unknown[]): void;
   error(msg: string, ...rest: unknown[]): void;
   child(scope: string): Logger;
+}
+
+/**
+ * Render a day's worth of frames as a chronological markdown timeline.
+ * Used by both the markdown export (writes to disk) and the MCP server
+ * (returns over the wire). Pure function — no IO, no state.
+ *
+ * `assetUrlPrefix` lets callers point screenshot links at either the raw
+ * data dir (for the on-disk export) or a relative path (for MCP).
+ */
+export function renderJournalMarkdown(
+  day: string,
+  frames: Frame[],
+  assetUrlPrefix = '',
+): string {
+  if (frames.length === 0) {
+    return `# Journal — ${day}\n\n_No frames captured on this day._\n`;
+  }
+  const lines: string[] = [];
+  lines.push(`# Journal — ${day}`);
+  lines.push('');
+  const totalMs = frames.reduce((acc, f) => acc + (f.duration_ms ?? 0), 0);
+  const minutes = Math.round(totalMs / 60_000);
+  lines.push(
+    `_${frames.length} frame(s) captured` +
+      (minutes > 0 ? `, ~${minutes} min focused` : '') +
+      `._`,
+  );
+  lines.push('');
+  let lastApp: string | null = null;
+  for (const f of frames) {
+    if (f.app !== lastApp) {
+      lines.push(`## ${f.app || '(unknown)'}`);
+      lastApp = f.app;
+    }
+    const time = f.timestamp.slice(11, 19);
+    const dur = f.duration_ms ? ` _(${Math.round(f.duration_ms / 1000)}s)_` : '';
+    const target = [
+      f.window_title ? `"${f.window_title}"` : null,
+      f.url ? `<${f.url}>` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
+    lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
+    if (f.text && f.text_source === 'ocr' && f.text.trim()) {
+      const snippet = f.text
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200);
+      lines.push(`  > ${snippet}${snippet.length === 200 ? '…' : ''}`);
+    }
+    if (f.asset_path) {
+      lines.push(`  ![](${assetUrlPrefix}${f.asset_path})`);
+    }
+  }
+  return lines.join('\n') + '\n';
 }

@@ -10,6 +10,11 @@ import type {
   Frame,
   FrameQuery,
   FrameOcrTask,
+  FrameAsset,
+  FrameAssetTier,
+  EntityRef,
+  EntityRecord,
+  ListEntitiesQuery,
   PluginFactory,
   Logger,
 } from '@cofounderos/interfaces';
@@ -410,6 +415,228 @@ class LocalStorage implements IStorage {
   }
 
   // -------------------------------------------------------------------------
+  // Entities
+  // -------------------------------------------------------------------------
+
+  async listFramesNeedingResolution(limit: number): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames WHERE entity_path IS NULL
+         ORDER BY timestamp ASC LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(limit))) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async resolveFrameToEntity(frameId: string, entity: EntityRef): Promise<void> {
+    const tx = this.db.transaction(() => {
+      // 1. Tag the frame.
+      const updated = this.db
+        .prepare(
+          `UPDATE frames SET entity_path = ?, entity_kind = ?
+           WHERE id = ? AND entity_path IS NULL`,
+        )
+        .run(entity.path, entity.kind, frameId).changes;
+      if (updated === 0) return;
+
+      // 2. Pull the frame's contribution to the entity stats.
+      const frameRow = this.db
+        .prepare(
+          'SELECT timestamp, duration_ms FROM frames WHERE id = ?',
+        )
+        .get(frameId) as
+        | { timestamp: string; duration_ms: number | null }
+        | undefined;
+      if (!frameRow) return;
+      const ts = frameRow.timestamp;
+      const dur = frameRow.duration_ms ?? 0;
+
+      // 3. Upsert the entity. ON CONFLICT updates first_seen / last_seen
+      //    monotonically and accumulates the running totals.
+      this.db
+        .prepare(
+          `INSERT INTO entities (
+             path, kind, title, first_seen, last_seen, total_focused_ms, frame_count
+           ) VALUES (?, ?, ?, ?, ?, ?, 1)
+           ON CONFLICT(path) DO UPDATE SET
+             kind = excluded.kind,
+             title = excluded.title,
+             first_seen = MIN(entities.first_seen, excluded.first_seen),
+             last_seen = MAX(entities.last_seen, excluded.last_seen),
+             total_focused_ms = entities.total_focused_ms + excluded.total_focused_ms,
+             frame_count = entities.frame_count + 1`,
+        )
+        .run(entity.path, entity.kind, entity.title, ts, ts, dur);
+    });
+    tx();
+  }
+
+  async rebuildEntityCounts(): Promise<void> {
+    const tx = this.db.transaction(() => {
+      this.db.exec('DELETE FROM entities');
+      const rows = this.db
+        .prepare(
+          `SELECT entity_path, entity_kind,
+                  MIN(timestamp) AS first_seen,
+                  MAX(timestamp) AS last_seen,
+                  COALESCE(SUM(duration_ms), 0) AS total_focused_ms,
+                  COUNT(*) AS frame_count,
+                  COALESCE(MAX(window_title), '') AS title_hint
+           FROM frames
+           WHERE entity_path IS NOT NULL
+           GROUP BY entity_path, entity_kind`,
+        )
+        .all() as Array<{
+        entity_path: string;
+        entity_kind: string;
+        first_seen: string;
+        last_seen: string;
+        total_focused_ms: number;
+        frame_count: number;
+        title_hint: string;
+      }>;
+      const insert = this.db.prepare(
+        `INSERT INTO entities (path, kind, title, first_seen, last_seen, total_focused_ms, frame_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const r of rows) {
+        const title = pathToTitle(r.entity_path) || r.title_hint || r.entity_path;
+        insert.run(
+          r.entity_path,
+          r.entity_kind,
+          title,
+          r.first_seen,
+          r.last_seen,
+          r.total_focused_ms,
+          r.frame_count,
+        );
+      }
+    });
+    tx();
+  }
+
+  async getEntity(path: string): Promise<EntityRecord | null> {
+    const row = this.db
+      .prepare('SELECT * FROM entities WHERE path = ?')
+      .get(path) as RawEntityRow | undefined;
+    return row ? rowToEntity(row) : null;
+  }
+
+  async listEntities(query: ListEntitiesQuery = {}): Promise<EntityRecord[]> {
+    const params: Record<string, unknown> = {};
+    const where: string[] = ['1=1'];
+    if (query.kind) {
+      where.push('kind = @kind');
+      params.kind = query.kind;
+    }
+    if (query.sinceLastSeen) {
+      where.push('last_seen >= @since');
+      params.since = query.sinceLastSeen;
+    }
+    const sql =
+      `SELECT * FROM entities WHERE ${where.join(' AND ')} ` +
+      `ORDER BY last_seen DESC LIMIT ${Math.max(1, Math.floor(query.limit ?? 100))}`;
+    const rows = this.db.prepare(sql).all(params) as RawEntityRow[];
+    return rows.map(rowToEntity);
+  }
+
+  async getEntityFrames(entityPath: string, limit?: number): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames WHERE entity_path = ?
+         ORDER BY timestamp ASC LIMIT ?`,
+      )
+      .all(entityPath, Math.max(1, Math.floor(limit ?? 500))) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  // -------------------------------------------------------------------------
+  // Vacuum
+  // -------------------------------------------------------------------------
+
+  async listFramesForVacuum(
+    currentTier: FrameAssetTier,
+    olderThanIso: string,
+    limit: number,
+  ): Promise<FrameAsset[]> {
+    // `vacuum_tier IS NULL` is treated as 'original' for back-compat.
+    const tierCondition =
+      currentTier === 'original'
+        ? "(vacuum_tier IS NULL OR vacuum_tier = 'original')"
+        : 'vacuum_tier = @tier';
+    const rows = this.db
+      .prepare(
+        `SELECT id, asset_path, timestamp, vacuum_tier
+         FROM frames
+         WHERE asset_path IS NOT NULL
+           AND timestamp < @olderThan
+           AND ${tierCondition}
+         ORDER BY timestamp ASC
+         LIMIT @limit`,
+      )
+      .all({
+        olderThan: olderThanIso,
+        tier: currentTier,
+        limit: Math.max(1, Math.floor(limit)),
+      }) as Array<{
+      id: string;
+      asset_path: string;
+      timestamp: string;
+      vacuum_tier: string | null;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      asset_path: r.asset_path,
+      timestamp: r.timestamp,
+      tier: (r.vacuum_tier as FrameAssetTier) ?? 'original',
+    }));
+  }
+
+  async updateFrameAsset(
+    frameId: string,
+    update: { assetPath?: string | null; tier: FrameAssetTier },
+  ): Promise<void> {
+    if (update.assetPath !== undefined) {
+      this.db
+        .prepare('UPDATE frames SET asset_path = ?, vacuum_tier = ? WHERE id = ?')
+        .run(update.assetPath, update.tier, frameId);
+    } else {
+      this.db
+        .prepare('UPDATE frames SET vacuum_tier = ? WHERE id = ?')
+        .run(update.tier, frameId);
+    }
+  }
+
+  async countFramesByTier(): Promise<Record<FrameAssetTier, number>> {
+    const rows = this.db
+      .prepare(
+        `SELECT COALESCE(vacuum_tier, 'original') AS tier, COUNT(*) AS n
+         FROM frames WHERE asset_path IS NOT NULL
+         GROUP BY tier`,
+      )
+      .all() as Array<{ tier: string; n: number }>;
+    const out: Record<FrameAssetTier, number> = {
+      original: 0,
+      compressed: 0,
+      thumbnail: 0,
+      deleted: 0,
+    };
+    for (const r of rows) {
+      const t = r.tier as FrameAssetTier;
+      if (t in out) out[t] = r.n;
+    }
+    // 'deleted' frames have asset_path IS NULL — count them separately.
+    const deletedRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM frames
+         WHERE asset_path IS NULL AND vacuum_tier = 'deleted'`,
+      )
+      .get() as { n: number };
+    out.deleted = deletedRow.n;
+    return out;
+  }
+
+  // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
@@ -485,6 +712,8 @@ class LocalStorage implements IStorage {
         trigger          TEXT,
         session_id       TEXT,
         duration_ms      INTEGER,
+        entity_path      TEXT,
+        entity_kind      TEXT,
         source_event_ids TEXT NOT NULL,
         created_at       TEXT NOT NULL
       );
@@ -505,13 +734,35 @@ class LocalStorage implements IStorage {
         url,
         tokenize='porter unicode61 remove_diacritics 2'
       );
+
+      CREATE TABLE IF NOT EXISTS entities (
+        path             TEXT PRIMARY KEY,
+        kind             TEXT NOT NULL,
+        title            TEXT NOT NULL,
+        first_seen       TEXT NOT NULL,
+        last_seen        TEXT NOT NULL,
+        total_focused_ms INTEGER NOT NULL DEFAULT 0,
+        frame_count      INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
+      CREATE INDEX IF NOT EXISTS idx_entities_last_seen ON entities(last_seen DESC);
     `);
 
     // Migrate older databases that predate the framed_at column. Must
     // happen *before* we create indexes that reference it.
     this.maybeAddColumn('events', 'framed_at', 'TEXT');
+    this.maybeAddColumn('frames', 'entity_path', 'TEXT');
+    this.maybeAddColumn('frames', 'entity_kind', 'TEXT');
+    // Vacuum retention tier — null means "original" so existing rows
+    // are correctly classified without a backfill UPDATE.
+    this.maybeAddColumn('frames', 'vacuum_tier', 'TEXT');
     this.db.exec(
-      'CREATE INDEX IF NOT EXISTS idx_events_framed ON events(framed_at) WHERE framed_at IS NULL',
+      `CREATE INDEX IF NOT EXISTS idx_events_framed ON events(framed_at) WHERE framed_at IS NULL;
+       CREATE INDEX IF NOT EXISTS idx_frames_entity ON frames(entity_path);
+       CREATE INDEX IF NOT EXISTS idx_frames_pending_entity
+         ON frames(timestamp DESC) WHERE entity_path IS NULL;
+       CREATE INDEX IF NOT EXISTS idx_frames_vacuum
+         ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;`,
     );
   }
 
@@ -603,6 +854,8 @@ interface RawFrameRow {
   trigger: string | null;
   session_id: string | null;
   duration_ms: number | null;
+  entity_path: string | null;
+  entity_kind: string | null;
   source_event_ids: string;
 }
 
@@ -629,8 +882,45 @@ function rowToFrame(r: RawFrameRow): Frame {
     trigger: r.trigger,
     session_id: r.session_id ?? '',
     duration_ms: r.duration_ms,
+    entity_path: r.entity_path,
+    entity_kind: (r.entity_kind as Frame['entity_kind']) ?? null,
     source_event_ids: sourceEventIds,
   };
+}
+
+interface RawEntityRow {
+  path: string;
+  kind: string;
+  title: string;
+  first_seen: string;
+  last_seen: string;
+  total_focused_ms: number;
+  frame_count: number;
+}
+
+function rowToEntity(r: RawEntityRow): EntityRecord {
+  return {
+    path: r.path,
+    kind: r.kind as EntityRecord['kind'],
+    title: r.title,
+    firstSeen: r.first_seen,
+    lastSeen: r.last_seen,
+    totalFocusedMs: r.total_focused_ms ?? 0,
+    frameCount: r.frame_count ?? 0,
+  };
+}
+
+/**
+ * Best-effort title from an entity path. Used by `rebuildEntityCounts`
+ * when the original resolver-supplied title is not available.
+ */
+function pathToTitle(p: string): string {
+  const last = p.split('/').pop() ?? p;
+  return last
+    .replace(/[-_]+/g, ' ')
+    .replace(/\.md$/i, '')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
 }
 
 /**

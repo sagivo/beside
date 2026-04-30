@@ -27,7 +27,15 @@ const CaptureSchema = z.object({
   idle_threshold_sec: z.number().int().positive().default(60),
   capture_audio: z.boolean().default(false),
   whisper_model: z.string().default('tiny'),
-  jpeg_quality: z.number().int().min(1).max(100).default(85),
+  // Output format for screenshots. WebP is ~40% smaller than JPEG at
+  // visually identical quality. JPEG is kept as an option for callers
+  // that need OS-native compatibility (e.g., older Quick Look stacks).
+  screenshot_format: z.enum(['webp', 'jpeg']).default('webp'),
+  // Initial encoding quality (1-100). For WebP, 75 is the sweet spot;
+  // for JPEG, 85.
+  screenshot_quality: z.number().int().min(1).max(100).default(75),
+  /** @deprecated kept for backward-compat; if set, overrides quality when format=jpeg. */
+  jpeg_quality: z.number().int().min(1).max(100).optional(),
   excluded_apps: z.array(z.string()).default([
     '1Password',
     'Bitwarden',
@@ -52,10 +60,47 @@ const StorageSchema = z.object({
     path: z.string().default('~/.cofounderOS'),
     max_size_gb: z.number().positive().default(50),
     retention_days: z.number().int().nonnegative().default(365),
+    // Vacuum policy applied to screenshot assets in raw/. Three sliding
+    // windows: ORIGINAL (full resolution, full quality), COMPRESSED
+    // (full resolution, low quality), THUMBNAIL (downscaled). Past the
+    // delete window, the asset is removed entirely; the frame's text
+    // and metadata stay in SQLite forever.
+    //
+    // 0 disables that stage. Stages compose: a 14-day-old asset is
+    // compressed (because compress_after_days=7) but not yet thumbnailed.
+    vacuum: z.object({
+      compress_after_days: z.number().int().nonnegative().default(7),
+      compress_quality: z.number().int().min(1).max(100).default(45),
+      thumbnail_after_days: z.number().int().nonnegative().default(30),
+      thumbnail_max_dim: z.number().int().min(64).max(2048).default(480),
+      delete_after_days: z.number().int().nonnegative().default(180),
+      // How often the vacuum scheduler ticks. Cheap when there's no work.
+      tick_interval_min: z.number().int().positive().default(60),
+      // Per-tick batch size. Vacuum is IO + CPU-heavy (sharp re-encode);
+      // small batches keep it from starving capture.
+      batch_size: z.number().int().positive().default(50),
+    }).default({
+      compress_after_days: 7,
+      compress_quality: 45,
+      thumbnail_after_days: 30,
+      thumbnail_max_dim: 480,
+      delete_after_days: 180,
+      tick_interval_min: 60,
+      batch_size: 50,
+    }),
   }).default({
     path: '~/.cofounderOS',
     max_size_gb: 50,
     retention_days: 365,
+    vacuum: {
+      compress_after_days: 7,
+      compress_quality: 45,
+      thumbnail_after_days: 30,
+      thumbnail_max_dim: 480,
+      delete_after_days: 180,
+      tick_interval_min: 60,
+      batch_size: 50,
+    },
   }),
 }).passthrough();
 
@@ -142,7 +187,8 @@ capture:
   poll_interval_ms: 1500          # how often to poll for window/url changes
   screenshot_diff_threshold: 0.05 # skip screenshots with < 5% visual change
   idle_threshold_sec: 60
-  jpeg_quality: 85
+  screenshot_format: webp         # 'webp' (smaller) or 'jpeg'
+  screenshot_quality: 75          # 1-100; 75 is a good WebP default
   capture_audio: false            # V2
   whisper_model: tiny             # V2
   excluded_apps:
@@ -165,6 +211,17 @@ storage:
     path: ~/.cofounderOS         # storage root; raw/ + checkpoints/ + .db inside
     max_size_gb: 50
     retention_days: 365            # 0 = keep forever
+    # Sliding-window retention for screenshot assets. SQLite metadata
+    # (frames + OCR text) is kept forever; only the image files are
+    # downsized or deleted.
+    vacuum:
+      compress_after_days: 7       # re-encode older originals at lower quality
+      compress_quality: 45
+      thumbnail_after_days: 30     # downscale once an asset is this old
+      thumbnail_max_dim: 480
+      delete_after_days: 180       # 0 = keep image forever
+      tick_interval_min: 60
+      batch_size: 50
 
 # Layer 3 — Index
 index:
