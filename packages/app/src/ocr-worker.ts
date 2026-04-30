@@ -59,6 +59,65 @@ type TesseractWorker = {
  */
 const OCR_MAX_WIDTH = 1600;
 
+/**
+ * Leptonica (the image library Tesseract bundles) writes diagnostic lines
+ * like `Error in boxClipToRectangle: box outside rectangle` directly to the
+ * process's native stderr via `fprintf`. They are non-fatal — Leptonica
+ * recovers, OCR continues — but they bypass tesseract.js's `logger`
+ * callback and `debug_file` parameter entirely, so the only place we can
+ * suppress them is at the Node stderr boundary.
+ *
+ * We install a one-time, additive filter: any line that exactly matches a
+ * known Leptonica chatter pattern is dropped; everything else (including
+ * unfamiliar Leptonica messages we *do* want to see) passes through
+ * untouched. The patch is idempotent and never replaces a previously
+ * patched write, so multiple OcrWorker instances are safe.
+ */
+const LEPTONICA_NOISE = [
+  /^Error in boxClipToRectangle: box outside rectangle\s*$/,
+  /^Error in pixScanForForeground: invalid box\s*$/,
+  /^Image too small to scale!!\s*\(less than 2x2\)\s*$/,
+  /^Image too small to scale!!\s*$/,
+];
+
+let stderrFilterInstalled = false;
+function installLeptonicaStderrFilter(): void {
+  if (stderrFilterInstalled) return;
+  stderrFilterInstalled = true;
+  const original = process.stderr.write.bind(process.stderr);
+  // We accept the same overloads as `process.stderr.write`. Buffers are
+  // passed through verbatim — Leptonica writes plain ASCII strings, so the
+  // Buffer path is effectively never our message and we don't want to
+  // decode unrelated binary output.
+  const filtered = ((
+    chunk: string | Uint8Array,
+    encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ): boolean => {
+    if (typeof chunk === 'string') {
+      const lines = chunk.split('\n');
+      const kept = lines.filter((line, idx) => {
+        // Preserve a trailing empty string that comes from a terminating
+        // newline so we don't accidentally collapse line boundaries.
+        if (idx === lines.length - 1 && line === '') return true;
+        return !LEPTONICA_NOISE.some((re) => re.test(line));
+      });
+      if (kept.length === 0) {
+        if (typeof encodingOrCb === 'function') encodingOrCb();
+        else if (typeof cb === 'function') cb();
+        return true;
+      }
+      const out = kept.join('\n');
+      if (out === chunk) {
+        return original(chunk, encodingOrCb as BufferEncoding, cb);
+      }
+      return original(out, encodingOrCb as BufferEncoding, cb);
+    }
+    return original(chunk, encodingOrCb as BufferEncoding, cb);
+  }) as typeof process.stderr.write;
+  process.stderr.write = filtered;
+}
+
 export class OcrWorker {
   private readonly logger: Logger;
   private readonly batchSize: number;
@@ -159,6 +218,7 @@ export class OcrWorker {
     if (this.workerPromise) return this.workerPromise;
     this.workerPromise = (async (): Promise<TesseractWorker | null> => {
       try {
+        installLeptonicaStderrFilter();
         if (!this.startupLogged) {
           this.logger.info(
             'starting OCR worker (first run downloads ~12MB of language data; subsequent runs are cached)',

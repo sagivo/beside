@@ -347,67 +347,130 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
       return;
     }
 
-    const diskLines = diskRows
-      .map((r) => `  ${r.label.padEnd(22)} ${formatBytes(r.bytes).padStart(10)}   ${r.path}`)
-      .join('\n');
-
     const indexedPct =
       storageStats.totalEvents > 0
         ? Math.round((indexState.eventsCovered / storageStats.totalEvents) * 100)
         : 0;
 
-    const recentLines = formatLast7Days(byDay);
-
-    const tierLine =
-      Object.keys(frameTiers).length === 0
-        ? '(none)'
-        : (['original', 'compressed', 'thumbnail', 'deleted'] as const)
-            .map((t) => `${t}=${frameTiers[t] ?? 0}`)
-            .join(', ');
-
-    const entityLines =
-      topEntities.length === 0
-        ? '  (no entities resolved yet)'
-        : topEntities
-            .map(
-              (e) =>
-                `  - ${e.title.slice(0, 40).padEnd(40)} [${e.kind.padEnd(7)}] ` +
-                `${String(e.frames).padStart(5)} frames  last ${e.lastSeen.slice(0, 16).replace('T', ' ')}`,
-            )
-            .join('\n');
-
     const lastIncremental = indexState.lastIncrementalRun
-      ? `${indexState.lastIncrementalRun}${formatNextIncremental(indexState.lastIncrementalRun, handles.config.index.incremental_interval_min)}`
-      : 'never';
+      ? `${formatRelativeTime(indexState.lastIncrementalRun)}${formatNextIncremental(indexState.lastIncrementalRun, handles.config.index.incremental_interval_min)}`
+      : color.dim('never');
+    const lastReorg = indexState.lastReorganisationRun
+      ? formatRelativeTime(indexState.lastReorganisationRun)
+      : color.dim('never');
+
+    const out: string[] = [];
+    const W = 64;
+
+    out.push(color.bold(color.cyan('CofounderOS')) + color.dim('  •  stats')); 
+    out.push(color.dim(`data dir: ${dataDir}`));
+    out.push('');
+
+    // ── Capture ────────────────────────────────────────────
+    out.push(sectionHeader('Capture', W));
+    const captureDot = captureStatus.running
+      ? captureStatus.paused
+        ? color.yellow('●') + ' paused'
+        : color.green('●') + ' running'
+      : color.red('●') + ' stopped';
+    out.push(`  status     ${captureDot}`);
+    out.push(
+      `  today      ${color.bold(String(captureStatus.eventsToday))} events  ` +
+        color.dim(`(${formatBytes(captureStatus.storageBytesToday)})`),
+    );
+    out.push('');
+
+    // ── Disk usage ─────────────────────────────────────────
+    out.push(sectionHeader(`Disk usage  ${color.dim('total')} ${color.bold(formatBytes(totalBytes))}`, W));
+    const sortedDisk = [...diskRows].sort((a, b) => b.bytes - a.bytes);
+    const labelW = Math.max(...sortedDisk.map((r) => r.label.length));
+    for (const r of sortedDisk) {
+      const pct = totalBytes > 0 ? r.bytes / totalBytes : 0;
+      out.push(
+        `  ${r.label.padEnd(labelW)}  ${formatBytes(r.bytes).padStart(9)}  ` +
+          `${miniBar(pct, 16, 'cyan')} ${color.dim(formatPct(pct).padStart(4))}`,
+      );
+    }
+    out.push('');
+
+    // ── Events ─────────────────────────────────────────────
+    out.push(sectionHeader('Events', W));
+    out.push(`  total      ${color.bold(storageStats.totalEvents.toLocaleString())}`);
+    out.push(
+      `  range      ${storageStats.oldestEvent ? formatTs(storageStats.oldestEvent) : '-'} ${color.dim('→')} ` +
+        `${storageStats.newestEvent ? formatTs(storageStats.newestEvent) : '-'}`,
+    );
+    if (days.length > 0) {
+      out.push(`  active     ${days.length} days  ${color.dim(`(${days[0]} … ${days[days.length - 1]})`)}`);
+    } else {
+      out.push(`  active     ${days.length} days`);
+    }
+    out.push('');
+    out.push(`  ${color.dim('last 7 days')}`);
+    out.push(formatLast7Days(byDay));
+    out.push('');
+    out.push(`  ${color.dim('by type')}`);
+    out.push(formatBreakdown(storageStats.eventsByType, 'magenta'));
+    out.push('');
+    out.push(`  ${color.dim('top apps')}`);
+    out.push(formatBreakdown(storageStats.eventsByApp, 'blue'));
+    out.push('');
+
+    // ── Frames ─────────────────────────────────────────────
+    out.push(sectionHeader(`Frames  ${color.dim('total')} ${color.bold(totalFrames.toLocaleString())}`, W));
+    if (Object.keys(frameTiers).length === 0) {
+      out.push(color.dim('  (none)'));
+    } else {
+      const tierOrder = ['original', 'compressed', 'thumbnail', 'deleted'] as const;
+      const tierColors: Record<string, ColorName> = {
+        original: 'green',
+        compressed: 'cyan',
+        thumbnail: 'blue',
+        deleted: 'red',
+      };
+      for (const t of tierOrder) {
+        const n = frameTiers[t] ?? 0;
+        const pct = totalFrames > 0 ? n / totalFrames : 0;
+        out.push(
+          `  ${t.padEnd(11)}${String(n).padStart(7)}  ` +
+            `${miniBar(pct, 16, tierColors[t] ?? 'cyan')} ${color.dim(formatPct(pct).padStart(4))}`,
+        );
+      }
+    }
+    out.push('');
+
+    // ── Entities ───────────────────────────────────────────
+    out.push(sectionHeader(`Entities  ${color.dim('total')} ${color.bold(entityCount.toLocaleString())}`, W));
+    if (topEntities.length === 0) {
+      out.push(color.dim('  (no entities resolved yet)'));
+    } else {
+      const titleW = Math.min(40, Math.max(...topEntities.map((e) => e.title.length)));
+      const kindW = Math.max(...topEntities.map((e) => e.kind.length));
+      for (const e of topEntities) {
+        out.push(
+          `  ${e.title.slice(0, titleW).padEnd(titleW)}  ` +
+            `${color.dim(`[${e.kind.padEnd(kindW)}]`)}  ` +
+            `${color.bold(String(e.frames).padStart(5))} ${color.dim('frames')}  ` +
+            `${color.dim(formatRelativeTime(e.lastSeen))}`,
+        );
+      }
+    }
+    out.push('');
+
+    // ── Index ──────────────────────────────────────────────
+    out.push(sectionHeader(`Index  ${color.dim(indexState.strategy)}`, W));
+    const idxBarColor: ColorName = indexedPct >= 95 ? 'green' : indexedPct >= 60 ? 'yellow' : 'red';
+    out.push(
+      `  coverage   ${miniBar(indexedPct / 100, 24, idxBarColor)} ` +
+        `${color.bold(formatPct(indexedPct / 100).padStart(4))}  ` +
+        `${color.dim(`${indexState.eventsCovered.toLocaleString()} / ${storageStats.totalEvents.toLocaleString()}`)}`,
+    );
+    out.push(`  pages      ${color.bold(String(indexState.pageCount))}`);
+    out.push(`  last incr  ${lastIncremental}`);
+    out.push(`  last reorg ${lastReorg}`);
 
     // eslint-disable-next-line no-console
-    console.log(`# CofounderOS — stats
-
-## Disk usage  (total ${formatBytes(totalBytes)})
-${diskLines}
-
-## Events
-total:          ${storageStats.totalEvents}
-date range:     ${storageStats.oldestEvent ?? '-'}  →  ${storageStats.newestEvent ?? '-'}
-active days:    ${days.length}${days.length > 0 ? `  (${days[0]} … ${days[days.length - 1]})` : ''}
-today:          ${captureStatus.eventsToday}  (${formatBytes(captureStatus.storageBytesToday)})
-last 7 days:
-${recentLines}
-by type:        ${formatRecord(storageStats.eventsByType)}
-top apps:       ${formatRecord(storageStats.eventsByApp)}
-
-## Frames  (total ${totalFrames})
-by tier:        ${tierLine}
-
-## Entities  (total ${entityCount})
-${entityLines}
-
-## Index (${indexState.strategy})
-pages:          ${indexState.pageCount}
-events covered: ${indexState.eventsCovered} / ${storageStats.totalEvents}  (${indexedPct}%)
-last incr run:  ${lastIncremental}
-last reorg run: ${indexState.lastReorganisationRun ?? 'never'}
-`);
+    console.log(out.join('\n'));
   } finally {
     await stopAll(handles);
   }
@@ -451,15 +514,127 @@ function formatLast7Days(byDay: Record<string, number>): string {
     d.setUTCDate(d.getUTCDate() - i);
     days.push(d.toISOString().slice(0, 10));
   }
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const max = Math.max(1, ...days.map((d) => byDay[d] ?? 0));
+  const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
   return days
-    .map((d) => {
+    .map((d, idx) => {
       const n = byDay[d] ?? 0;
-      const barLen = Math.round((n / max) * 30);
-      const bar = '█'.repeat(barLen) || (n > 0 ? '▏' : '');
-      return `  ${d}  ${String(n).padStart(5)}  ${bar}`;
+      const isToday = idx === days.length - 1;
+      const wd = weekday[new Date(d + 'T00:00:00Z').getUTCDay()] ?? '???';
+      const barWidth = 28;
+      const filled = n > 0 ? Math.max(1, Math.round((n / max) * barWidth)) : 0;
+      const remainder = n > 0 ? Math.min(7, Math.round(((n / max) * barWidth - Math.floor((n / max) * barWidth)) * 7)) : 0;
+      let bar = '█'.repeat(filled);
+      if (filled < barWidth && remainder > 0) bar += blocks[remainder] ?? '';
+      const colored = color.cyan(bar);
+      const dateLabel = isToday ? color.bold(d) : d;
+      const wdLabel = isToday ? color.bold(wd) : color.dim(wd);
+      const count = isToday ? color.bold(String(n).padStart(5)) : String(n).padStart(5);
+      return `  ${wdLabel} ${dateLabel}  ${count}  ${colored}`;
     })
     .join('\n');
+}
+
+// ── Pretty-print helpers (colors, bars, sections) ────────────────────────────
+
+type ColorName = 'cyan' | 'green' | 'yellow' | 'red' | 'blue' | 'magenta';
+
+const COLORS_ENABLED = !!process.stdout.isTTY && !process.env.NO_COLOR;
+const ANSI: Record<string, string> = {
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+  dim: '\x1b[2m',
+  cyan: '\x1b[36m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+};
+
+function wrap(code: string, s: string): string {
+  if (!COLORS_ENABLED) return s;
+  return `${code}${s}${ANSI.reset}`;
+}
+
+const color = {
+  bold: (s: string) => wrap(ANSI.bold!, s),
+  dim: (s: string) => wrap(ANSI.dim!, s),
+  cyan: (s: string) => wrap(ANSI.cyan!, s),
+  green: (s: string) => wrap(ANSI.green!, s),
+  yellow: (s: string) => wrap(ANSI.yellow!, s),
+  red: (s: string) => wrap(ANSI.red!, s),
+  blue: (s: string) => wrap(ANSI.blue!, s),
+  magenta: (s: string) => wrap(ANSI.magenta!, s),
+  by: (name: ColorName, s: string) => wrap(ANSI[name]!, s),
+};
+
+/** Strip ANSI codes when measuring visible length. */
+function visibleLen(s: string): number {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/\x1b\[[0-9;]*m/g, '').length;
+}
+
+function sectionHeader(title: string, width: number): string {
+  const visible = visibleLen(title);
+  const dashes = Math.max(2, width - visible - 4);
+  return `${color.dim('──')} ${color.bold(title)} ${color.dim('─'.repeat(dashes))}`;
+}
+
+function miniBar(fraction: number, width: number, c: ColorName): string {
+  const f = Math.max(0, Math.min(1, fraction));
+  const filled = Math.round(f * width);
+  const empty = width - filled;
+  return color.by(c, '█'.repeat(filled)) + color.dim('░'.repeat(empty));
+}
+
+function formatPct(fraction: number): string {
+  if (!Number.isFinite(fraction)) return '0%';
+  const p = Math.max(0, Math.min(1, fraction)) * 100;
+  return p >= 10 ? `${Math.round(p)}%` : `${p.toFixed(1)}%`;
+}
+
+function formatBreakdown(record: Record<string, number>, c: ColorName): string {
+  const entries = Object.entries(record)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
+  if (entries.length === 0) return color.dim('    (none)');
+  const total = entries.reduce((acc, [, v]) => acc + v, 0);
+  const max = Math.max(...entries.map(([, v]) => v));
+  const keyW = Math.min(20, Math.max(...entries.map(([k]) => k.length)));
+  return entries
+    .map(([k, v]) => {
+      const pct = total > 0 ? v / total : 0;
+      const barFrac = max > 0 ? v / max : 0;
+      return (
+        `    ${k.slice(0, keyW).padEnd(keyW)}  ${String(v).padStart(7)}  ` +
+        `${miniBar(barFrac, 14, c)} ${color.dim(formatPct(pct).padStart(4))}`
+      );
+    })
+    .join('\n');
+}
+
+function formatTs(iso: string): string {
+  // Trim to "YYYY-MM-DD HH:MM" for readability.
+  const t = iso.slice(0, 16).replace('T', ' ');
+  return t || iso;
+}
+
+function formatRelativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const diffSec = Math.round((Date.now() - t) / 1000);
+  const abs = Math.abs(diffSec);
+  const future = diffSec < 0;
+  let val: string;
+  if (abs < 60) val = `${abs}s`;
+  else if (abs < 3600) val = `${Math.round(abs / 60)}m`;
+  else if (abs < 86400) val = `${Math.round(abs / 3600)}h`;
+  else if (abs < 86400 * 30) val = `${Math.round(abs / 86400)}d`;
+  else if (abs < 86400 * 365) val = `${Math.round(abs / (86400 * 30))}mo`;
+  else val = `${Math.round(abs / (86400 * 365))}y`;
+  return future ? `in ${val}` : `${val} ago`;
 }
 
 /**
