@@ -9,10 +9,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "pnpm -r --filter \"@cofounderos/*\" run build",
-    "clean": "pnpm -r --filter \"@cofounderos/*\" run clean && rm -rf node_modules",
+    "build": "pnpm -r --filter \"@cofounderos/*\" run build && node scripts/build-plugins.mjs",
+    "build:plugins": "node scripts/build-plugins.mjs",
+    "clean": "pnpm -r --filter \"@cofounderos/*\" run clean && rm -rf node_modules packages/*/*/dist packages/*/*/.tsbuildinfo plugins/*/*/dist",
     "typecheck": "pnpm -r --filter \"@cofounderos/*\" run typecheck",
-    "dev": "pnpm --filter @cofounderos/app run dev",
+    "dev": "pnpm build && concurrently -n libs,app -c blue,green \"pnpm -r --parallel --filter \\\"@cofounderos/*\\\" --filter \\\"!@cofounderos/app\\\" run dev\" \"pnpm --filter @cofounderos/app run dev\"",
     "cli": "node packages/app/dist/cli.js",
     "index:run": "pnpm cli index --once",
     "index:reorg": "pnpm cli index --reorganise",
@@ -20,9 +21,21 @@
     "test": "pnpm -r --filter \"@cofounderos/*\" run test"
   },
   "devDependencies": {
+    "@cofounderos/core": "workspace:*",
+    "@cofounderos/interfaces": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.7.4",
+    "@types/screenshot-desktop": "^1.12.3",
+    "active-win": "^9.0.0",
+    "better-sqlite3": "^11.3.0",
+    "concurrently": "^9.2.1",
+    "ollama": "^0.5.9",
+    "screenshot-desktop": "^1.15.4",
+    "sharp": "^0.33.5",
     "tsx": "^4.19.1",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "zod": "^3.23.8"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

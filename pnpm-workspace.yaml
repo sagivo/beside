@@ -1,17 +1,9 @@
 packages:
-  # Core packages — not layer-bound.
+  # Real workspace packages — interfaces, core, app. Everything else is
+  # a drop-in plugin folder (packages/<layer>/<plugin>/ or
+  # plugins/<layer>/<plugin>/) discovered at runtime via plugin.json,
+  # compiled at build time by scripts/build-plugins.mjs. No package.json
+  # needed in plugin folders.
   - "packages/interfaces"
   - "packages/core"
   - "packages/app"
-  # One folder per layer, one folder per plugin underneath.
-  - "packages/capture/*"
-  - "packages/storage/*"
-  - "packages/model/*"
-  - "packages/index/*"
-  - "packages/export/*"
-  # Optional / community plugins follow the same shape.
-  - "plugins/capture/*"
-  - "plugins/storage/*"
-  - "plugins/model/*"
-  - "plugins/index/*"
-  - "plugins/export/*"

@@ -1,6 +1,7 @@
 import type {
   IExport,
   ExportStatus,
+  ExportServices,
   IndexPage,
   IndexState,
   IIndexStrategy,
@@ -54,10 +55,15 @@ class McpExport implements IExport {
   /**
    * Called by the orchestrator after instantiation, before start(), to
    * inject the storage + strategy + reindex hook. Calling start() before
-   * bindServices() throws.
+   * bindServices() throws. Accepts the full host services bag and picks
+   * only what MCP needs.
    */
-  bindServices(services: McpServices): void {
-    this.services = services;
+  bindServices(services: ExportServices | McpServices): void {
+    this.services = {
+      storage: services.storage,
+      strategy: services.strategy,
+      triggerReindex: (services as ExportServices).triggerReindex,
+    };
   }
 
   async start(): Promise<void> {

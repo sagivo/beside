@@ -10,6 +10,7 @@ import type {
   PluginHostContext,
   ModelBootstrapHandler,
 } from '@cofounderos/interfaces';
+import type { ExportServices } from '@cofounderos/interfaces';
 import {
   RawEventBus,
   Scheduler,
@@ -21,13 +22,11 @@ import {
   type CofounderOSConfig,
   type LoadedConfig,
 } from '@cofounderos/core';
-import { McpExport } from '@cofounderos/export-mcp';
-import { MarkdownExport } from '@cofounderos/export-markdown';
-import { OfflineFallbackAdapter } from '@cofounderos/model-ollama';
 import { FrameBuilder } from './frame-builder.js';
 import { OcrWorker } from './ocr-worker.js';
 import { EntityResolverWorker } from './entity-resolver.js';
 import { StorageVacuum } from './storage-vacuum.js';
+import { OfflineFallbackAdapter } from './offline-model.js';
 
 export interface OrchestratorOptions {
   configPath?: string;
@@ -150,29 +149,21 @@ export async function buildOrchestrator(
     await bus.publish(event);
   });
 
-  // Bind storage + strategy into exports that need them. We use
-  // `instanceof` here rather than a generic interface check because the
-  // services each export wants are non-uniform (MCP needs trigger hooks,
-  // markdown needs the data dir for relative paths).
+  // Hand every export plugin the full services bag. Plugins that need
+  // host services declare `bindServices` (see IExport.bindServices); the
+  // rest are no-ops. This keeps the host decoupled from concrete plugin
+  // classes — no `instanceof` checks, no static imports of plugin code.
+  const exportServices: ExportServices = {
+    storage,
+    strategy,
+    dataDir,
+    triggerReindex: async (_full) => {
+      await scheduler.runNow(INCREMENTAL_JOB);
+    },
+  };
   for (const exp of exports) {
-    if (exp instanceof McpExport) {
-      exp.bindServices({
-        storage,
-        strategy,
-        triggerReindex: async (full) => {
-          if (full) {
-            await scheduler.runNow(INCREMENTAL_JOB);
-            return;
-          }
-          await scheduler.runNow(INCREMENTAL_JOB);
-        },
-      });
-    }
-    if (exp instanceof MarkdownExport) {
-      exp.bindServices({
-        storage,
-        dataDir,
-      });
+    if (typeof exp.bindServices === 'function') {
+      exp.bindServices(exportServices);
     }
   }
 

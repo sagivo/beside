@@ -266,56 +266,6 @@ class OllamaAdapter implements IModelAdapter {
   }
 }
 
-/**
- * Deterministic, model-free fallback. Selectable explicitly via the
- * `--offline` CLI flag so the indexing pipeline still produces structured
- * output when the user wants to skip the Ollama install.
- */
-class OfflineFallbackAdapter implements IModelAdapter {
-  private readonly logger: Logger;
-  constructor(logger: Logger) {
-    this.logger = logger.child('model-offline');
-  }
-
-  getModelInfo(): ModelInfo {
-    return {
-      name: 'offline:fallback',
-      contextWindowTokens: 1_000_000,
-      isLocal: true,
-      supportsVision: false,
-      costPerMillionTokens: 0,
-    };
-  }
-
-  async isAvailable(): Promise<boolean> {
-    return true;
-  }
-
-  async ensureReady(onProgress?: ModelBootstrapHandler): Promise<void> {
-    onProgress?.({ kind: 'ready', model: 'offline:fallback' });
-  }
-
-  async complete(prompt: string, options: CompletionOptions = {}): Promise<string> {
-    if (options.responseFormat === 'json') {
-      return JSON.stringify({
-        offline: true,
-        notes: 'Ollama unavailable — no LLM-driven changes were made.',
-      });
-    }
-    const last = prompt.split('\n').slice(-30).join('\n');
-    this.logger.debug('offline complete()');
-    return [
-      '*(Offline fallback summary — install Ollama for richer output.)*',
-      '',
-      last,
-    ].join('\n');
-  }
-
-  async completeWithVision(prompt: string, _images: Buffer[], options: CompletionOptions = {}): Promise<string> {
-    return this.complete(prompt, options);
-  }
-}
-
 const factory: PluginFactory<IModelAdapter> = (ctx) => {
   // No probing here — bootstrap (install + start + pull) happens lazily
   // when the orchestrator calls model.ensureReady(), so that inspection
@@ -325,4 +275,4 @@ const factory: PluginFactory<IModelAdapter> = (ctx) => {
 };
 
 export default factory;
-export { OllamaAdapter, OfflineFallbackAdapter };
+export { OllamaAdapter };

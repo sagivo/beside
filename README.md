@@ -131,6 +131,34 @@ Then run `cofounderos init` again — it will pull just the new weights.
 
 ---
 
+## Development
+
+`pnpm cli ...` runs the **compiled** output at `packages/app/dist/cli.js`, so
+edits aren't picked up until you rebuild. For live development, just run:
+
+```bash
+pnpm dev
+```
+
+This does an initial build, then in parallel:
+
+- Watches every workspace package with `tsc --watch` — any change to a
+  `packages/**/src/**/*.ts` file triggers an incremental recompile of that
+  package's `dist/`.
+- Runs the CLI's `start` command via `tsx watch`, which restarts the process
+  whenever any imported source or rebuilt `dist/` file changes.
+
+So you edit anything in the monorepo, save, and the running pipeline
+restarts automatically. No manual rebuilds.
+
+For one-off CLI commands against live source (e.g. `stats`, `index --once`):
+
+```bash
+pnpm --filter @cofounderos/app exec tsx src/cli.ts stats
+```
+
+---
+
 ## Querying your data with AI agents
 
 Once `cofounderos start` is running, your captured data is queryable by any

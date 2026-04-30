@@ -156,12 +156,23 @@ async function loadEntry(rootDir: string): Promise<PluginRegistryEntry | null> {
   }
 
   const manifest = JSON.parse(manifestText) as PluginManifest;
-  const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8')) as { name: string };
   validateManifest(manifest);
+
+  // package.json is optional — drop-in plugins (folder + plugin.json + an
+  // entrypoint) don't need pnpm metadata. If present we surface the npm
+  // name for diagnostics; otherwise we synthesise one from the layer +
+  // manifest name so logs and `plugin list` still read sensibly.
+  let packageName = `${manifest.layer}/${manifest.name}`;
+  try {
+    const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8')) as { name?: string };
+    if (pkg.name) packageName = pkg.name;
+  } catch {
+    // no package.json — fine
+  }
 
   const entrypointPath = path.resolve(rootDir, manifest.entrypoint);
   return {
-    packageName: pkg.name,
+    packageName,
     manifest,
     rootDir,
     entrypointPath,

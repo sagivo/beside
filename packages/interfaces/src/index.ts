@@ -516,6 +516,25 @@ export interface ExportStatus {
   errorCount: number;
 }
 
+/**
+ * Services the orchestrator can offer to an export plugin via
+ * `bindServices()`. Plugins pick what they need by structural typing —
+ * the orchestrator passes the full bag and the plugin reads only the
+ * fields it cares about. New service slots can be added here without
+ * breaking existing plugins.
+ */
+export interface ExportServices {
+  storage: IStorage;
+  strategy: IIndexStrategy;
+  /** Absolute path to the data dir (raw assets root). */
+  dataDir: string;
+  /**
+   * Trigger an incremental (or full) re-index pass. Used by query-style
+   * exports (e.g. MCP) when a client requests fresh data.
+   */
+  triggerReindex: (full?: boolean) => Promise<void>;
+}
+
 export interface IExport {
   readonly name: string;
 
@@ -530,6 +549,14 @@ export interface IExport {
   fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>;
 
   getStatus(): ExportStatus;
+
+  /**
+   * Optional: receive references to host services after instantiation,
+   * before `start()`. The orchestrator calls this on every export
+   * plugin that defines it. Plugins should treat the services bag as
+   * structurally typed — read what you need, ignore the rest.
+   */
+  bindServices?(services: ExportServices): void;
 }
 
 // ---------------------------------------------------------------------------

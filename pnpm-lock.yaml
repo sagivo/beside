@@ -8,83 +8,97 @@ importers:
 
   .:
     devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      tsx:
-        specifier: ^4.19.1
-        version: 4.21.0
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/app:
-    dependencies:
-      '@cofounderos/capture-node':
-        specifier: workspace:*
-        version: link:../capture/node
       '@cofounderos/core':
         specifier: workspace:*
-        version: link:../core
-      '@cofounderos/export-markdown':
-        specifier: workspace:*
-        version: link:../export/markdown
-      '@cofounderos/export-mcp':
-        specifier: workspace:*
-        version: link:../export/mcp
-      '@cofounderos/index-karpathy':
-        specifier: workspace:*
-        version: link:../index/karpathy
+        version: link:packages/core
       '@cofounderos/interfaces':
         specifier: workspace:*
-        version: link:../interfaces
-      '@cofounderos/model-ollama':
-        specifier: workspace:*
-        version: link:../model/ollama
-      '@cofounderos/storage-local':
-        specifier: workspace:*
-        version: link:../storage/local
-      sharp:
-        specifier: ^0.33.5
-        version: 0.33.5
-      tesseract.js:
-        specifier: ^7.0.0
-        version: 7.0.0(encoding@0.1.13)
-    devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      tsx:
-        specifier: ^4.19.1
-        version: 4.21.0
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/capture/node:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-      active-win:
-        specifier: ^9.0.0
-        version: 9.0.0(encoding@0.1.13)
-      screenshot-desktop:
-        specifier: ^1.15.4
-        version: 1.15.4
-      sharp:
-        specifier: ^0.33.5
-        version: 0.33.5
-    devDependencies:
+        version: link:packages/interfaces
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
+      '@types/better-sqlite3':
+        specifier: ^7.6.11
+        version: 7.6.13
       '@types/node':
         specifier: ^22.7.4
         version: 22.19.17
       '@types/screenshot-desktop':
         specifier: ^1.12.3
         version: 1.15.0
+      active-win:
+        specifier: ^9.0.0
+        version: 9.0.0(encoding@0.1.13)
+      better-sqlite3:
+        specifier: ^11.3.0
+        version: 11.10.0
+      concurrently:
+        specifier: ^9.2.1
+        version: 9.2.1
+      ollama:
+        specifier: ^0.5.9
+        version: 0.5.18
+      screenshot-desktop:
+        specifier: ^1.15.4
+        version: 1.15.4
+      sharp:
+        specifier: ^0.33.5
+        version: 0.33.5
+      tsx:
+        specifier: ^4.19.1
+        version: 4.21.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+
+  packages/app:
+    dependencies:
+      '@cofounderos/core':
+        specifier: workspace:*
+        version: link:../core
+      '@cofounderos/interfaces':
+        specifier: workspace:*
+        version: link:../interfaces
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@3.25.76)
+      active-win:
+        specifier: ^9.0.0
+        version: 9.0.0(encoding@0.1.13)
+      better-sqlite3:
+        specifier: ^11.3.0
+        version: 11.10.0
+      ollama:
+        specifier: ^0.5.9
+        version: 0.5.18
+      screenshot-desktop:
+        specifier: ^1.15.4
+        version: 1.15.4
+      sharp:
+        specifier: ^0.33.5
+        version: 0.33.5
+      tesseract.js:
+        specifier: ^7.0.0
+        version: 7.0.0(encoding@0.1.13)
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.11
+        version: 7.6.13
+      '@types/node':
+        specifier: ^22.7.4
+        version: 22.19.17
+      '@types/screenshot-desktop':
+        specifier: ^1.12.3
+        version: 1.15.0
+      tsx:
+        specifier: ^4.19.1
+        version: 4.21.0
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -117,103 +131,8 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
-  packages/export/markdown:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-    devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/export/mcp:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(zod@3.25.76)
-      zod:
-        specifier: ^3.23.8
-        version: 3.25.76
-    devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/index/karpathy:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-    devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
   packages/interfaces:
     devDependencies:
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/model/ollama:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-      ollama:
-        specifier: ^0.5.9
-        version: 0.5.18
-    devDependencies:
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
-  packages/storage/local:
-    dependencies:
-      '@cofounderos/core':
-        specifier: workspace:*
-        version: link:../../core
-      '@cofounderos/interfaces':
-        specifier: workspace:*
-        version: link:../../interfaces
-      better-sqlite3:
-        specifier: ^11.3.0
-        version: 11.10.0
-    devDependencies:
-      '@types/better-sqlite3':
-        specifier: ^7.6.11
-        version: 7.6.13
-      '@types/node':
-        specifier: ^22.7.4
-        version: 22.19.17
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -654,6 +573,10 @@ packages:
     resolution: {integrity: sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==}
     engines: {node: '>= 0.4'}
 
+  chalk@4.1.2:
+    resolution: {integrity: sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA==}
+    engines: {node: '>=10'}
+
   chownr@1.1.4:
     resolution: {integrity: sha512-jJ0bqzaylmJtVnNgzTeSOs8DPavpbYgEr/b0YL8/2GO3xJEhInFmhKMUnEJQjZumK7KXGFhUy89PrsJWlakBVg==}
 
@@ -664,6 +587,10 @@ packages:
   clean-stack@2.2.0:
     resolution: {integrity: sha512-4diC9HaTE+KRAMWhDhrGOECgWZxoevMc5TlkObMqNSsVU62PYzXZ/SMTjzyGAFF1YusgxGcSWTEXBhp0CPwQ1A==}
     engines: {node: '>=6'}
+
+  cliui@8.0.1:
+    resolution: {integrity: sha512-BSeNnyus75C4//NQ9gQt1/csTXyo/8Sb+afLAkzAptFuMsod9HFokGNudZpi/oQV73hnVK+sR+5PVRMd+Dr7YQ==}
+    engines: {node: '>=12'}
 
   color-convert@2.0.1:
     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
@@ -685,6 +612,11 @@ packages:
 
   concat-map@0.0.1:
     resolution: {integrity: sha512-/Srv4dswyQNBfohGpz9o6Yb3Gz3SrUDqBH5rTuhGR7ahtlbYKnVxw2bCFMRljaA7EXHaXZ8wsHdodFvbkhKmqg==}
+
+  concurrently@9.2.1:
+    resolution: {integrity: sha512-fsfrO0MxV64Znoy8/l1vVIjjHa29SZyyqPgQBwhiDcaW8wJc2W3XWVOGx4M3oJBnv/zdUZIIp1gDeS98GzP8Ng==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   console-control-strings@1.1.0:
     resolution: {integrity: sha512-ty/fTekppD2fIwRvnZAVdeOiGd1c7YXEixbgJTNzqcxJWKQnjJ/V1bNEEE6hygpM3WjwHFUVK6HTjWSzV4a8sQ==}
@@ -795,6 +727,10 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  escalade@3.2.0:
+    resolution: {integrity: sha512-WUj2qlxaQtO4g6Pq5c29GTcWGDyd8itL8zTlipgECz3JesAiiOKotd8JU6otB3PACgG6xkJUyVhboMS+bje/jA==}
+    engines: {node: '>=6'}
+
   escape-html@1.0.3:
     resolution: {integrity: sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow==}
 
@@ -879,6 +815,10 @@ packages:
     engines: {node: '>=10'}
     deprecated: This package is no longer supported.
 
+  get-caller-file@2.0.5:
+    resolution: {integrity: sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==}
+    engines: {node: 6.* || 8.* || >= 10.*}
+
   get-intrinsic@1.3.0:
     resolution: {integrity: sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==}
     engines: {node: '>= 0.4'}
@@ -908,6 +848,10 @@ packages:
 
   graceful-fs@4.2.11:
     resolution: {integrity: sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==}
+
+  has-flag@4.0.0:
+    resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
+    engines: {node: '>=8'}
 
   has-symbols@1.1.0:
     resolution: {integrity: sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==}
@@ -1265,6 +1209,10 @@ packages:
   regenerator-runtime@0.13.11:
     resolution: {integrity: sha512-kY1AZVr2Ra+t+piVaJ4gxaFaReZVH40AKNo7UCX6W+dEwBo/2oZJzqfuN1qLq1oL45o56cPaTXELwrTh8Fpggg==}
 
+  require-directory@2.1.1:
+    resolution: {integrity: sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==}
+    engines: {node: '>=0.10.0'}
+
   require-from-string@2.0.2:
     resolution: {integrity: sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==}
     engines: {node: '>=0.10.0'}
@@ -1289,6 +1237,9 @@ packages:
   router@2.2.0:
     resolution: {integrity: sha512-nLTrUKm2UyiL7rlhapu/Zl45FwNgkZGaCpZbIHajDYgwlJCOzLSk+cIPAnsEqV955GjILJnKbdQC1nVPz+gAYQ==}
     engines: {node: '>= 18'}
+
+  rxjs@7.8.2:
+    resolution: {integrity: sha512-dhKf903U/PQZY6boNNtAGdWbG85WAbjT/1xYoZIC7FAY0yWapOBQVsVrDl58W86//e1VpMNBtRV4MaXfdMySFA==}
 
   safe-buffer@5.2.1:
     resolution: {integrity: sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==}
@@ -1333,6 +1284,10 @@ packages:
   shebang-regex@3.0.0:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
+
+  shell-quote@1.8.3:
+    resolution: {integrity: sha512-ObmnIF4hXNg1BqhnHmgbDETF8dLPCggZWBjkQfhZpbszZnYur5DUljTcCHii5LC3J5E0yeO/1LIMyH+UvHQgyw==}
+    engines: {node: '>= 0.4'}
 
   side-channel-list@1.0.1:
     resolution: {integrity: sha512-mjn/0bi/oUURjc5Xl7IaWi/OJJJumuoJFQJfDDyO46+hBWsfaVM65TBHq2eoZBhzl9EchxOijpkbRC8SVBQU0w==}
@@ -1409,6 +1364,14 @@ packages:
     resolution: {integrity: sha512-4gB8na07fecVVkOI6Rs4e7T6NOTki5EmL7TUduTs6bu3EdnSycntVJ4re8kgZA+wx9IueI2Y11bfbgwtzuE0KQ==}
     engines: {node: '>=0.10.0'}
 
+  supports-color@7.2.0:
+    resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
+    engines: {node: '>=8'}
+
+  supports-color@8.1.1:
+    resolution: {integrity: sha512-MpUEN2OodtUzxvKQl72cUF7RQ5EiHsGvSsVG0ia9c5RbWGL2CI4C7EpPS8UTBIplnlzZiNuV56w+FuNxy3ty2Q==}
+    engines: {node: '>=10'}
+
   tar-fs@2.1.4:
     resolution: {integrity: sha512-mDAjwmZdh7LTT6pNleZ05Yt65HC3E+NiQzl672vQG38jIrehtJk/J3mNwIg+vShQPcLF/LV7CMnDW6vjj6sfYQ==}
 
@@ -1437,6 +1400,10 @@ packages:
 
   tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
+
+  tree-kill@1.2.2:
+    resolution: {integrity: sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A==}
+    hasBin: true
 
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
@@ -1521,6 +1488,10 @@ packages:
   wrappy@1.0.2:
     resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
 
+  y18n@5.0.8:
+    resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
+    engines: {node: '>=10'}
+
   yallist@4.0.0:
     resolution: {integrity: sha512-3wdGidZyq5PB084XLES5TpOSRA3wjXAlIWMhum2kRcv/41Sn2emQ0dycQW4uZXLejwKvg6EsvbdlVL+FYEct7A==}
 
@@ -1528,6 +1499,14 @@ packages:
     resolution: {integrity: sha512-AvbaCLOO2Otw/lW5bmh9d/WEdcDFdQp2Z2ZUH3pX9U2ihyUY0nvLv7J6TrWowklRGPYbB/IuIMfYgxaCPg5Bpg==}
     engines: {node: '>= 14.6'}
     hasBin: true
+
+  yargs-parser@21.1.1:
+    resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
+    engines: {node: '>=12'}
+
+  yargs@17.7.2:
+    resolution: {integrity: sha512-7dSzzRQ++CKnNI/krKnYRV7JKKPUXMEh61soaHKg9mrWEhzFWhFnxPxGl+69cD1Ou63C13NUPCnmIcrvqCuM6w==}
+    engines: {node: '>=12'}
 
   zlibjs@0.3.1:
     resolution: {integrity: sha512-+J9RrgTKOmlxFSDHo0pI1xM6BLVUv+o0ZT9ANtCxGkjIVCCUdx9alUF8Gm+dGLKbkkkidWIHFDZHDMpfITt4+w==}
@@ -1832,8 +1811,7 @@ snapshots:
       json-schema-traverse: 1.0.0
       require-from-string: 2.0.2
 
-  ansi-regex@5.0.1:
-    optional: true
+  ansi-regex@5.0.1: {}
 
   ansi-regex@6.2.2:
     optional: true
@@ -1841,7 +1819,6 @@ snapshots:
   ansi-styles@4.3.0:
     dependencies:
       color-convert: 2.0.1
-    optional: true
 
   ansi-styles@6.2.3:
     optional: true
@@ -1933,6 +1910,11 @@ snapshots:
       call-bind-apply-helpers: 1.0.2
       get-intrinsic: 1.3.0
 
+  chalk@4.1.2:
+    dependencies:
+      ansi-styles: 4.3.0
+      supports-color: 7.2.0
+
   chownr@1.1.4: {}
 
   chownr@2.0.0:
@@ -1940,6 +1922,12 @@ snapshots:
 
   clean-stack@2.2.0:
     optional: true
+
+  cliui@8.0.1:
+    dependencies:
+      string-width: 4.2.3
+      strip-ansi: 6.0.1
+      wrap-ansi: 7.0.0
 
   color-convert@2.0.1:
     dependencies:
@@ -1961,6 +1949,15 @@ snapshots:
       color-string: 1.9.1
 
   concat-map@0.0.1: {}
+
+  concurrently@9.2.1:
+    dependencies:
+      chalk: 4.1.2
+      rxjs: 7.8.2
+      shell-quote: 1.8.3
+      supports-color: 8.1.1
+      tree-kill: 1.2.2
+      yargs: 17.7.2
 
   console-control-strings@1.1.0:
     optional: true
@@ -2016,8 +2013,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  emoji-regex@8.0.0:
-    optional: true
+  emoji-regex@8.0.0: {}
 
   emoji-regex@9.2.2:
     optional: true
@@ -2075,6 +2071,8 @@ snapshots:
       '@esbuild/win32-arm64': 0.27.7
       '@esbuild/win32-ia32': 0.27.7
       '@esbuild/win32-x64': 0.27.7
+
+  escalade@3.2.0: {}
 
   escape-html@1.0.3: {}
 
@@ -2188,6 +2186,8 @@ snapshots:
       wide-align: 1.1.5
     optional: true
 
+  get-caller-file@2.0.5: {}
+
   get-intrinsic@1.3.0:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -2235,6 +2235,8 @@ snapshots:
 
   graceful-fs@4.2.11:
     optional: true
+
+  has-flag@4.0.0: {}
 
   has-symbols@1.1.0: {}
 
@@ -2319,8 +2321,7 @@ snapshots:
 
   is-arrayish@0.3.4: {}
 
-  is-fullwidth-code-point@3.0.0:
-    optional: true
+  is-fullwidth-code-point@3.0.0: {}
 
   is-lambda@1.0.1:
     optional: true
@@ -2615,6 +2616,8 @@ snapshots:
 
   regenerator-runtime@0.13.11: {}
 
+  require-directory@2.1.1: {}
+
   require-from-string@2.0.2: {}
 
   resolve-pkg-maps@1.0.0: {}
@@ -2640,6 +2643,10 @@ snapshots:
       path-to-regexp: 8.4.2
     transitivePeerDependencies:
       - supports-color
+
+  rxjs@7.8.2:
+    dependencies:
+      tslib: 2.8.1
 
   safe-buffer@5.2.1: {}
 
@@ -2715,6 +2722,8 @@ snapshots:
       shebang-regex: 3.0.0
 
   shebang-regex@3.0.0: {}
+
+  shell-quote@1.8.3: {}
 
   side-channel-list@1.0.1:
     dependencies:
@@ -2792,7 +2801,6 @@ snapshots:
       emoji-regex: 8.0.0
       is-fullwidth-code-point: 3.0.0
       strip-ansi: 6.0.1
-    optional: true
 
   string-width@5.1.2:
     dependencies:
@@ -2808,7 +2816,6 @@ snapshots:
   strip-ansi@6.0.1:
     dependencies:
       ansi-regex: 5.0.1
-    optional: true
 
   strip-ansi@7.2.0:
     dependencies:
@@ -2816,6 +2823,14 @@ snapshots:
     optional: true
 
   strip-json-comments@2.0.1: {}
+
+  supports-color@7.2.0:
+    dependencies:
+      has-flag: 4.0.0
+
+  supports-color@8.1.1:
+    dependencies:
+      has-flag: 4.0.0
 
   tar-fs@2.1.4:
     dependencies:
@@ -2867,8 +2882,9 @@ snapshots:
 
   tr46@0.0.3: {}
 
-  tslib@2.8.1:
-    optional: true
+  tree-kill@1.2.2: {}
+
+  tslib@2.8.1: {}
 
   tsx@4.21.0:
     dependencies:
@@ -2939,7 +2955,6 @@ snapshots:
       ansi-styles: 4.3.0
       string-width: 4.2.3
       strip-ansi: 6.0.1
-    optional: true
 
   wrap-ansi@8.1.0:
     dependencies:
@@ -2950,10 +2965,24 @@ snapshots:
 
   wrappy@1.0.2: {}
 
+  y18n@5.0.8: {}
+
   yallist@4.0.0:
     optional: true
 
   yaml@2.8.3: {}
+
+  yargs-parser@21.1.1: {}
+
+  yargs@17.7.2:
+    dependencies:
+      cliui: 8.0.1
+      escalade: 3.2.0
+      get-caller-file: 2.0.5
+      require-directory: 2.1.1
+      string-width: 4.2.3
+      y18n: 5.0.8
+      yargs-parser: 21.1.1
 
   zlibjs@0.3.1: {}
 

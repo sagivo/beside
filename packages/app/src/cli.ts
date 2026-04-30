@@ -569,19 +569,23 @@ async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs)
     return;
   }
   if (stdio) {
-    // Re-create with stdio transport.
-    const McpExportCtor = (await import('@cofounderos/export-mcp')).McpExport;
-    const stdioMcp = new McpExportCtor(
-      { transport: 'stdio' },
-      handles.logger.child('mcp-stdio-cli'),
-    );
-    stdioMcp.bindServices({
-      storage: handles.storage,
-      strategy: handles.strategy,
-      triggerReindex: async () => {
-        await runIncremental(handles);
-      },
+    // Re-instantiate the mcp export via the registry with stdio transport
+    // — no static import of the plugin class, just config override.
+    const stdioMcp = await handles.registry.loadExport('mcp', {
+      dataDir: handles.loaded.dataDir,
+      logger: handles.logger.child('mcp-stdio-cli'),
+      config: { transport: 'stdio' },
     });
+    if (typeof stdioMcp.bindServices === 'function') {
+      stdioMcp.bindServices({
+        storage: handles.storage,
+        strategy: handles.strategy,
+        dataDir: handles.loaded.dataDir,
+        triggerReindex: async () => {
+          await runIncremental(handles);
+        },
+      });
+    }
     await stdioMcp.start();
     await waitForShutdown(handles);
   } else {

@@ -11,23 +11,25 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx src/cli.ts start",
+    "dev": "tsx watch --clear-screen=false src/cli.ts start",
     "test": "echo \"(no tests)\""
   },
   "dependencies": {
-    "@cofounderos/capture-node": "workspace:*",
     "@cofounderos/core": "workspace:*",
-    "@cofounderos/export-markdown": "workspace:*",
-    "@cofounderos/export-mcp": "workspace:*",
-    "@cofounderos/index-karpathy": "workspace:*",
     "@cofounderos/interfaces": "workspace:*",
-    "@cofounderos/model-ollama": "workspace:*",
-    "@cofounderos/storage-local": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "active-win": "^9.0.0",
+    "better-sqlite3": "^11.3.0",
+    "ollama": "^0.5.9",
+    "screenshot-desktop": "^1.15.4",
     "sharp": "^0.33.5",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.7.4",
+    "@types/screenshot-desktop": "^1.12.3",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"
   }

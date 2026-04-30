@@ -4,6 +4,7 @@ import type {
   IExport,
   IStorage,
   ExportStatus,
+  ExportServices,
   IndexPage,
   IndexState,
   IIndexStrategy,
@@ -52,8 +53,11 @@ class MarkdownExport implements IExport {
    * Optional — pre-frames installs that don't bind services still get
    * wiki-page mirroring as before.
    */
-  bindServices(services: MarkdownExportServices): void {
-    this.services = services;
+  bindServices(services: ExportServices | MarkdownExportServices): void {
+    this.services = {
+      storage: services.storage,
+      dataDir: services.dataDir,
+    };
   }
 
   async start(): Promise<void> {
