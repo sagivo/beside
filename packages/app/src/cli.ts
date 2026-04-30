@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import process from 'node:process';
 import path from 'node:path';
-import { createLogger, writeDefaultConfigIfMissing, defaultDataDir } from '@cofounderos/core';
+import fsp from 'node:fs/promises';
+import readline from 'node:readline';
+import {
+  createLogger,
+  writeDefaultConfigIfMissing,
+  defaultDataDir,
+  loadConfig,
+  expandPath,
+} from '@cofounderos/core';
 import {
   buildOrchestrator,
   bootstrapModel,
@@ -63,6 +71,12 @@ Commands:
                              Optional: --strategy <name>  --from <iso>  --to <iso>
   mcp [--stdio]              Run only the MCP server (HTTP by default; stdio for AI clients).
   plugin list                List discovered plugins by layer.
+  reset [--yes] [--keep-config]
+                             Wipe everything and start from scratch: raw capture
+                             (raw/, checkpoints/, cofounderOS.db), the index, and
+                             configured exports (e.g. markdown mirror).
+                             Prompts for confirmation unless --yes is passed.
+                             Pass --keep-config to preserve config.yaml (default).
 
 Options:
   --config <path>            Override config.yaml path.
@@ -116,6 +130,10 @@ async function main(): Promise<void> {
 
     case 'plugin':
       await cmdPlugin(logger, args);
+      return;
+
+    case 'reset':
+      await cmdReset(logger, args);
       return;
 
     default:
@@ -367,6 +385,122 @@ async function cmdPlugin(logger: ReturnType<typeof createLogger>, args: ParsedAr
   } finally {
     await stopAll(handles);
   }
+}
+
+/**
+ * Wipe all derived state — raw capture, SQLite database, the index, and any
+ * configured export mirror — so the next `start` / `index` run begins from a
+ * clean slate. Intentionally avoids the orchestrator: we don't want to open
+ * the database (we'd just have to close it again to delete it) or trigger a
+ * model bootstrap for what is fundamentally a destructive filesystem op.
+ *
+ * Preserves `config.yaml` so the user doesn't have to re-run `init` after
+ * a reset. Pass `--keep-config=false` to wipe that too.
+ */
+async function cmdReset(
+  logger: ReturnType<typeof createLogger>,
+  args: ParsedArgs,
+): Promise<void> {
+  const cfgArgs = configFromArgs(args);
+  const loaded = await loadConfig(cfgArgs.configPath);
+  const { config, dataDir, sourcePath } = loaded;
+
+  const storageRoot = expandPath(config.storage.local.path);
+  const indexPath = expandPath(config.index.index_path);
+
+  const exportPaths: string[] = [];
+  for (const exp of config.export.plugins) {
+    if ((exp as { enabled?: boolean }).enabled === false) continue;
+    const p = (exp as { path?: string }).path;
+    if (typeof p === 'string' && p.length > 0) {
+      exportPaths.push(expandPath(p));
+    } else if (exp.name === 'markdown') {
+      exportPaths.push(path.join(dataDir, 'export', 'markdown'));
+    }
+  }
+
+  const targets: Array<{ label: string; path: string }> = [
+    { label: 'raw events',     path: path.join(storageRoot, 'raw') },
+    { label: 'checkpoints',    path: path.join(storageRoot, 'checkpoints') },
+    { label: 'sqlite database', path: path.join(storageRoot, 'cofounderOS.db') },
+    { label: 'sqlite WAL',     path: path.join(storageRoot, 'cofounderOS.db-wal') },
+    { label: 'sqlite SHM',     path: path.join(storageRoot, 'cofounderOS.db-shm') },
+    { label: 'index',          path: indexPath },
+    ...exportPaths.map((p, i) => ({ label: `export[${i}]`, path: p })),
+  ];
+
+  const keepConfig =
+    args.flags['no-keep-config'] !== true &&
+    args.flags['keep-config'] !== false &&
+    args.flags['keep-config'] !== 'false';
+  if (!keepConfig) {
+    targets.push({ label: 'config.yaml', path: sourcePath });
+  }
+
+  // eslint-disable-next-line no-console
+  console.log('cofounderos reset — the following will be permanently deleted:\n');
+  for (const t of targets) {
+    const exists = await pathExists(t.path);
+    // eslint-disable-next-line no-console
+    console.log(`  ${exists ? '✗' : '·'} ${t.label.padEnd(16)} ${t.path}${exists ? '' : '  (not present)'}`);
+  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `\n${keepConfig ? '✓ Preserving config.yaml' : '✗ Also deleting config.yaml'}` +
+      ` (${sourcePath})\n`,
+  );
+
+  if (!args.flags.yes && !args.flags.y) {
+    const ok = await confirm('Type "wipe" to confirm: ', 'wipe');
+    if (!ok) {
+      // eslint-disable-next-line no-console
+      console.log('Aborted. Nothing was deleted.');
+      return;
+    }
+  }
+
+  let deleted = 0;
+  for (const t of targets) {
+    try {
+      await fsp.rm(t.path, { recursive: true, force: true });
+      deleted++;
+    } catch (err) {
+      logger.warn(`failed to remove ${t.path}`, { err: String(err) });
+    }
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(`\n✓ Reset complete (${deleted}/${targets.length} targets removed).`);
+  // eslint-disable-next-line no-console
+  console.log(
+    keepConfig
+      ? 'Next: `cofounderos start` to begin capturing from scratch.'
+      : 'Next: `cofounderos init` to recreate config.yaml, then `cofounderos start`.',
+  );
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fsp.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function confirm(prompt: string, expected: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    // eslint-disable-next-line no-console
+    console.error('reset requires confirmation but stdin is not a TTY. Pass --yes to skip.');
+    return Promise.resolve(false);
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === expected.toLowerCase());
+    });
+  });
 }
 
 function configFromArgs(args: ParsedArgs): { configPath?: string } {
