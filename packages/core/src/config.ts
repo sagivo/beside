@@ -23,7 +23,11 @@ const AppSchema = z.object({
 const CaptureSchema = z.object({
   plugin: z.string().default('node'),
   poll_interval_ms: z.number().int().positive().default(1500),
-  screenshot_diff_threshold: z.number().min(0).max(1).default(0.05),
+  // Soft-trigger sensitivity. Bumped from 0.05 → 0.10 because at the
+  // old threshold even pixel-level noise (e.g. blinking cursor, clock
+  // ticking) triggered captures. 0.10 is still well below "human
+  // notices a difference".
+  screenshot_diff_threshold: z.number().min(0).max(1).default(0.1),
   idle_threshold_sec: z.number().int().positive().default(60),
   capture_audio: z.boolean().default(false),
   whisper_model: z.string().default('tiny'),
@@ -31,9 +35,20 @@ const CaptureSchema = z.object({
   // visually identical quality. JPEG is kept as an option for callers
   // that need OS-native compatibility (e.g., older Quick Look stacks).
   screenshot_format: z.enum(['webp', 'jpeg']).default('webp'),
-  // Initial encoding quality (1-100). For WebP, 75 is the sweet spot;
-  // for JPEG, 85.
-  screenshot_quality: z.number().int().min(1).max(100).default(75),
+  // Initial encoding quality (1-100). For screen content (UI, text,
+  // flat colors) WebP-55 is visually indistinguishable from 75 and
+  // ~30-40% smaller. Photographs would warrant ~75; we don't shoot
+  // those.
+  screenshot_quality: z.number().int().min(1).max(100).default(55),
+  // Cap the longest edge of every screenshot at capture time. Native
+  // Retina captures are ~3000+ px wide — 4-5× more pixels than any
+  // downstream consumer (OCR, perceptual hash, markdown thumbnails)
+  // actually uses. 0 disables the resize.
+  screenshot_max_dim: z.number().int().nonnegative().max(8192).default(1280),
+  // Floor between two soft-trigger (`content_change`) captures of the
+  // same display, in ms. Hard triggers (window_focus / url_change /
+  // idle_end) bypass this. 0 disables the throttle.
+  content_change_min_interval_ms: z.number().int().nonnegative().default(20_000),
   /** @deprecated kept for backward-compat; if set, overrides quality when format=jpeg. */
   jpeg_quality: z.number().int().min(1).max(100).optional(),
   excluded_apps: z.array(z.string()).default([
@@ -42,6 +57,23 @@ const CaptureSchema = z.object({
     'Keychain Access',
   ]),
   excluded_url_patterns: z.array(z.string()).default([]),
+  // macOS Accessibility-text reader. When enabled, every screenshot also
+  // pulls visible text from the focused app's AX tree via a small native
+  // helper — far better than OCR for any app with real text widgets
+  // (Slack, Mail, Cursor, browser content, Notion, Linear, etc.).
+  accessibility: z.object({
+    enabled: z.boolean().default(true),
+    timeout_ms: z.number().int().positive().default(1500),
+    max_chars: z.number().int().positive().default(8000),
+    max_elements: z.number().int().positive().default(4000),
+    excluded_apps: z.array(z.string()).default([]),
+  }).default({
+    enabled: true,
+    timeout_ms: 1500,
+    max_chars: 8000,
+    max_elements: 4000,
+    excluded_apps: [],
+  }),
   privacy: z.object({
     blur_password_fields: z.boolean().default(true),
     pause_on_screen_lock: z.boolean().default(true),
@@ -69,23 +101,30 @@ const StorageSchema = z.object({
     // 0 disables that stage. Stages compose: a 14-day-old asset is
     // compressed (because compress_after_days=7) but not yet thumbnailed.
     vacuum: z.object({
-      compress_after_days: z.number().int().nonnegative().default(7),
-      compress_quality: z.number().int().min(1).max(100).default(45),
-      thumbnail_after_days: z.number().int().nonnegative().default(30),
+      // Each stage accepts either *_minutes (precise, finer-grained,
+      // wins if both are set) or *_days (coarse, legacy). 0 disables
+      // the stage entirely. The ms-resolved value is what
+      // StorageVacuum actually uses internally.
+      compress_after_days: z.number().int().nonnegative().default(1),
+      compress_after_minutes: z.number().int().nonnegative().optional(),
+      compress_quality: z.number().int().min(1).max(100).default(40),
+      thumbnail_after_days: z.number().int().nonnegative().default(7),
+      thumbnail_after_minutes: z.number().int().nonnegative().optional(),
       thumbnail_max_dim: z.number().int().min(64).max(2048).default(480),
-      delete_after_days: z.number().int().nonnegative().default(180),
+      delete_after_days: z.number().int().nonnegative().default(30),
+      delete_after_minutes: z.number().int().nonnegative().optional(),
       // How often the vacuum scheduler ticks. Cheap when there's no work.
-      tick_interval_min: z.number().int().positive().default(60),
+      tick_interval_min: z.number().int().positive().default(15),
       // Per-tick batch size. Vacuum is IO + CPU-heavy (sharp re-encode);
       // small batches keep it from starving capture.
       batch_size: z.number().int().positive().default(50),
     }).default({
-      compress_after_days: 7,
-      compress_quality: 45,
-      thumbnail_after_days: 30,
+      compress_after_days: 1,
+      compress_quality: 40,
+      thumbnail_after_days: 7,
       thumbnail_max_dim: 480,
-      delete_after_days: 180,
-      tick_interval_min: 60,
+      delete_after_days: 30,
+      tick_interval_min: 15,
       batch_size: 50,
     }),
   }).default({
@@ -93,12 +132,12 @@ const StorageSchema = z.object({
     max_size_gb: 50,
     retention_days: 365,
     vacuum: {
-      compress_after_days: 7,
-      compress_quality: 45,
-      thumbnail_after_days: 30,
+      compress_after_days: 1,
+      compress_quality: 40,
+      thumbnail_after_days: 7,
       thumbnail_max_dim: 480,
-      delete_after_days: 180,
-      tick_interval_min: 60,
+      delete_after_days: 30,
+      tick_interval_min: 15,
       batch_size: 50,
     },
   }),
@@ -228,10 +267,12 @@ app:
 capture:
   plugin: node                    # default Node-based capture; "rust" once available
   poll_interval_ms: 1500          # how often to poll for window/url changes
-  screenshot_diff_threshold: 0.05 # skip screenshots with < 5% visual change
+  screenshot_diff_threshold: 0.10 # skip screenshots with < 10% visual change
   idle_threshold_sec: 60
   screenshot_format: webp         # 'webp' (smaller) or 'jpeg'
-  screenshot_quality: 75          # 1-100; 75 is a good WebP default
+  screenshot_quality: 55          # 1-100; 55 is plenty for screen content
+  screenshot_max_dim: 1280        # cap longest edge at capture (0 = native res)
+  content_change_min_interval_ms: 20000 # min ms between soft-trigger captures
   capture_audio: false            # V2
   whisper_model: tiny             # V2
   excluded_apps:
@@ -246,6 +287,22 @@ capture:
   # zero-based index, e.g. \`screens: [0, 1]\` to skip a third monitor.
   multi_screen: false
   # screens: [0, 1]
+  # How to pick displays per trigger when multi_screen is true:
+  #   active - capture only the display that owns the focused window
+  #            (default). Cuts storage/CPU ~N× without losing acted-on
+  #            signal, since reasoning is keyed off the active window.
+  #   all    - capture every configured display every time. Use when
+  #            secondary monitors carry independent signal you'll
+  #            reference later (dashboards, reference docs).
+  capture_mode: active
+  # macOS Accessibility-text reader (V2). Pulls visible text from the
+  # focused app's AX tree on every screenshot — much better than OCR
+  # for apps with real text widgets (Slack, Mail, Cursor, browsers,
+  # Notion, Linear, etc.). Falls back to OCR cleanly if unavailable.
+  accessibility:
+    enabled: true
+    timeout_ms: 1500
+    max_chars: 8000
   privacy:
     blur_password_fields: true
     pause_on_screen_lock: true
@@ -265,12 +322,16 @@ storage:
     # (frames + OCR text) is kept forever; only the image files are
     # downsized or deleted.
     vacuum:
-      compress_after_days: 7       # re-encode older originals at lower quality
-      compress_quality: 45
-      thumbnail_after_days: 30     # downscale once an asset is this old
+      # Each stage accepts *_days OR *_minutes (minutes wins if set).
+      # 0 disables a stage. Defaults below are tuned for personal use;
+      # for scale testing try compress_after_minutes: 30,
+      # thumbnail_after_minutes: 360, delete_after_days: 14.
+      compress_after_days: 1       # re-encode older originals at lower quality
+      compress_quality: 40
+      thumbnail_after_days: 7      # downscale once an asset is this old
       thumbnail_max_dim: 480
-      delete_after_days: 180       # 0 = keep image forever
-      tick_interval_min: 60
+      delete_after_days: 30        # 0 = keep image forever
+      tick_interval_min: 15
       batch_size: 50
 
 # Layer 3 — Index

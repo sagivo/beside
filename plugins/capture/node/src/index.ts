@@ -24,6 +24,7 @@ import {
   ensureDir,
 } from '@cofounderos/core';
 import { dHash, hashDiff } from './perceptual-hash.js';
+import { AccessibilityTextReader } from './accessibility-text.js';
 
 interface CaptureNodeConfig {
   poll_interval_ms?: number;
@@ -31,12 +32,43 @@ interface CaptureNodeConfig {
   idle_threshold_sec?: number;
   screenshot_format?: 'webp' | 'jpeg';
   screenshot_quality?: number;
+  /**
+   * Cap the longest edge of every screenshot at capture time. Native
+   * Retina captures are ~3000+ px wide; that's ~4-5× more pixels than
+   * any downstream consumer (OCR, perceptual hash, markdown export
+   * thumbnails) actually uses. Resizing here is the single biggest
+   * win for on-disk size — typical reductions are 4-6×. Set to 0 to
+   * keep native resolution.
+   */
+  screenshot_max_dim?: number;
+  /**
+   * Minimum delay between two `content_change`-triggered screenshots
+   * for the same display, in ms. Hard triggers (window_focus,
+   * url_change, idle_end) ignore this floor. Pairs with
+   * `screenshot_diff_threshold` to stop a slowly-mutating but visually
+   * stable screen (clock ticking, blinking cursor) from generating
+   * one frame per poll.
+   */
+  content_change_min_interval_ms?: number;
   /** @deprecated kept for backward-compat with old config files. */
   jpeg_quality?: number;
   excluded_apps?: string[];
   excluded_url_patterns?: string[];
   capture_audio?: boolean;
   whisper_model?: string;
+  /**
+   * macOS Accessibility-text reader. When enabled (default on macOS), every
+   * screenshot trigger also asks the focused app's AX tree for visible
+   * text and attaches it to the event's `metadata.ax_text`. Far better
+   * than OCR for any app with real text widgets.
+   */
+  accessibility?: {
+    enabled?: boolean;
+    timeout_ms?: number;
+    max_chars?: number;
+    max_elements?: number;
+    excluded_apps?: string[];
+  };
   privacy?: {
     blur_password_fields?: boolean;
     pause_on_screen_lock?: boolean;
@@ -55,6 +87,26 @@ interface CaptureNodeConfig {
    */
   multi_screen?: boolean;
   screens?: number[];
+  /**
+   * How to choose which displays to capture on each trigger when
+   * `multi_screen: true`:
+   *
+   *   - `'active'` (default): capture only the display that owns the
+   *                focused window — resolved from `active-win` window
+   *                bounds against `listDisplays()` rectangles. Cuts
+   *                storage and CPU roughly by N (number of displays)
+   *                without losing any signal you can act on, since
+   *                reasoning is keyed off the active window anyway.
+   *   - `'all'`:    capture every configured display every time.
+   *                Best for "record everything I look at" workflows
+   *                where secondary monitors carry independent signal
+   *                (e.g. dashboards you actually reference later).
+   *
+   * Triggers without a meaningful active window (idle_end, pre-probe,
+   * lookup failures) gracefully fall back to capturing all configured
+   * displays so we don't silently miss frames.
+   */
+  capture_mode?: 'all' | 'active';
 }
 
 /**
@@ -68,8 +120,23 @@ interface DisplayInfo {
   /** Underlying id (string on linux, number on macOS/win) — diagnostic only. */
   id: string | number | null;
   name: string | null;
+  /**
+   * Display rectangle in global screen coordinates. Used to hit-test the
+   * active window's bounds so we can attribute it to the right monitor.
+   * `null` when `listDisplays()` didn't return positional info (older
+   * `screenshot-desktop` versions, or platforms where it's unsupported).
+   */
+  rect: { left: number; top: number; width: number; height: number } | null;
   lastHash: string | null;
   lastApp: string | null;
+  /**
+   * Wall-clock ms of the last screenshot we actually wrote to disk for
+   * this display. Used by `content_change_min_interval_ms` to throttle
+   * the soft-trigger path so a slowly mutating but visually stable
+   * screen can't generate one frame per poll. Hard triggers
+   * (window_focus / url_change / idle_end) bypass this floor.
+   */
+  lastShotAt: number | null;
 }
 
 interface ActiveWindowInfo {
@@ -93,11 +160,21 @@ async function encodeScreenshot(
   buf: Buffer,
   format: 'webp' | 'jpeg',
   quality: number,
+  maxDim: number,
 ): Promise<Buffer> {
-  if (format === 'webp') {
-    return sharp(buf).webp({ quality }).toBuffer();
+  let pipeline = sharp(buf);
+  if (maxDim > 0) {
+    pipeline = pipeline.resize({
+      width: maxDim,
+      height: maxDim,
+      fit: 'inside',
+      withoutEnlargement: true,
+    });
   }
-  return sharp(buf).jpeg({ quality }).toBuffer();
+  if (format === 'webp') {
+    return pipeline.webp({ quality }).toBuffer();
+  }
+  return pipeline.jpeg({ quality }).toBuffer();
 }
 
 /**
@@ -151,11 +228,15 @@ const LOOKS_LIKE_BROWSER =
 
 class NodeCapture implements ICapture {
   private readonly logger: Logger;
-  private readonly config: Required<Omit<CaptureNodeConfig, 'privacy' | 'screens'>> & {
+  private readonly config: Required<
+    Omit<CaptureNodeConfig, 'privacy' | 'screens' | 'capture_mode' | 'accessibility'>
+  > & {
     privacy: NonNullable<CaptureNodeConfig['privacy']>;
     raw_root: string;
     /** Optional whitelist of display indexes to capture in multi-screen mode. */
     screens: number[] | undefined;
+    capture_mode: 'all' | 'active';
+    accessibility: Required<NonNullable<CaptureNodeConfig['accessibility']>>;
   };
   private readonly handlers = new Set<RawEventHandler>();
 
@@ -177,9 +258,24 @@ class NodeCapture implements ICapture {
    * `listDisplays()` resolves on first capture.
    */
   private displays: DisplayInfo[] = [
-    { index: 0, id: null, name: null, lastHash: null, lastApp: null },
+    { index: 0, id: null, name: null, rect: null, lastHash: null, lastApp: null, lastShotAt: null },
   ];
   private displaysProbed = false;
+  /**
+   * Single-slot memoization of `resolveScreenIndex`. The active screen
+   * almost never changes between ticks — typing/scrolling/clicking inside
+   * the same window keeps `bounds` identical — so caching the last
+   * `(bounds → index)` pair lets us skip the per-display rect arithmetic
+   * on the common path. The math itself is cheap; the real value is that
+   * downstream `displaysForTrigger()` becomes a pure lookup, which keeps
+   * the hot path tighter and easier to reason about.
+   *
+   * Cache is automatically invalidated when bounds change (window moved
+   * or resized) and when display geometry is re-probed (`probeDisplays`
+   * resets it via `resetScreenCache`).
+   */
+  private lastBoundsKey: string | null = null;
+  private lastResolvedScreen = 0;
   private eventsToday = 0;
   private storageBytesToday = 0;
   private lastDay = dayKey();
@@ -199,6 +295,13 @@ class NodeCapture implements ICapture {
   private readonly unsupportedBrowserNotified = new Set<string>();
   private readonly browserPermissionDeniedNotified = new Set<string>();
 
+  /**
+   * Native AX-text reader. Only present on macOS when the helper binary
+   * built successfully; null otherwise. Treated as best-effort by the
+   * capture path: if it returns null/empty, OCR fills in later.
+   */
+  private readonly axReader: AccessibilityTextReader | null;
+
   constructor(config: CaptureNodeConfig, logger: Logger) {
     this.logger = logger.child('capture-node');
     // Resolve format + quality with sensible back-compat. If the user has
@@ -206,15 +309,22 @@ class NodeCapture implements ICapture {
     const format = config.screenshot_format ?? 'webp';
     const explicitQuality = config.screenshot_quality;
     const fallbackQuality = format === 'jpeg' ? config.jpeg_quality : undefined;
+    // Lower default than the historic 75 — for screen content (UI, text,
+    // flat colors) the quality floor before visible artifacts is much
+    // lower than for photographs. 55 cuts ~30-40% off file size with no
+    // perceptible loss for OCR or human review.
     const quality =
-      explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 75 : 85);
+      explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 55 : 80);
     this.config = {
       poll_interval_ms: config.poll_interval_ms ?? 1500,
-      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.05,
+      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
       screenshot_format: format,
       screenshot_quality: quality,
-      jpeg_quality: format === 'jpeg' ? quality : 85,
+      screenshot_max_dim: config.screenshot_max_dim ?? 1280,
+      content_change_min_interval_ms:
+        config.content_change_min_interval_ms ?? 20_000,
+      jpeg_quality: format === 'jpeg' ? quality : 80,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? false,
@@ -227,7 +337,37 @@ class NodeCapture implements ICapture {
       },
       multi_screen: config.multi_screen ?? false,
       screens: config.screens,
+      capture_mode: config.capture_mode ?? 'active',
+      accessibility: {
+        enabled: config.accessibility?.enabled ?? true,
+        timeout_ms: config.accessibility?.timeout_ms ?? 1500,
+        max_chars: config.accessibility?.max_chars ?? 8000,
+        max_elements: config.accessibility?.max_elements ?? 4000,
+        excluded_apps: config.accessibility?.excluded_apps ?? [],
+      },
     };
+
+    // Set up the AX reader only if the user hasn't disabled it. The
+    // reader does its own platform / binary-presence check internally
+    // and degrades to a no-op when either is missing.
+    if (this.config.accessibility.enabled) {
+      this.axReader = new AccessibilityTextReader({
+        logger: this.logger,
+        timeoutMs: this.config.accessibility.timeout_ms,
+        maxChars: this.config.accessibility.max_chars,
+        maxElements: this.config.accessibility.max_elements,
+        excludedApps: [
+          ...this.config.excluded_apps,
+          ...this.config.accessibility.excluded_apps,
+        ],
+      });
+      const status = this.axReader.getStatus();
+      if (status.enabled) {
+        this.logger.info(`accessibility text reader ready (${status.binary})`);
+      }
+    } else {
+      this.axReader = null;
+    }
   }
 
   onEvent(handler: RawEventHandler): void {
@@ -253,6 +393,8 @@ class NodeCapture implements ICapture {
       idle_threshold_sec: this.config.idle_threshold_sec,
       screenshot_format: this.config.screenshot_format,
       screenshot_quality: this.config.screenshot_quality,
+      screenshot_max_dim: this.config.screenshot_max_dim,
+      content_change_min_interval_ms: this.config.content_change_min_interval_ms,
       jpeg_quality: this.config.jpeg_quality,
       excluded_apps: this.config.excluded_apps,
       excluded_url_patterns: this.config.excluded_url_patterns,
@@ -535,12 +677,46 @@ class NodeCapture implements ICapture {
     if (!Array.isArray(raw) || raw.length === 0) return;
     const all: DisplayInfo[] = raw.map((d, i) => {
       const obj = (d ?? {}) as Record<string, unknown>;
+      // screenshot-desktop reports rect fields with slightly different
+      // names on different platforms / versions. Probe both flat
+      // (`top`/`left`/`width`/`height`) and nested (`bounds.{x,y,width,height}`)
+      // shapes; if neither is present we leave rect=null and fall back
+      // to capturing every display when capture_mode='active'.
+      const flatLeft = obj.left ?? obj.x;
+      const flatTop = obj.top ?? obj.y;
+      const flatW = obj.width;
+      const flatH = obj.height;
+      const bounds = obj.bounds as Record<string, unknown> | undefined;
+      let rect: DisplayInfo['rect'] = null;
+      if (
+        typeof flatLeft === 'number' &&
+        typeof flatTop === 'number' &&
+        typeof flatW === 'number' &&
+        typeof flatH === 'number'
+      ) {
+        rect = { left: flatLeft, top: flatTop, width: flatW, height: flatH };
+      } else if (bounds) {
+        const bx = bounds.x ?? bounds.left;
+        const by = bounds.y ?? bounds.top;
+        const bw = bounds.width;
+        const bh = bounds.height;
+        if (
+          typeof bx === 'number' &&
+          typeof by === 'number' &&
+          typeof bw === 'number' &&
+          typeof bh === 'number'
+        ) {
+          rect = { left: bx, top: by, width: bw, height: bh };
+        }
+      }
       return {
         index: i,
         id: (obj.id as string | number | undefined) ?? null,
         name: (obj.name as string | undefined) ?? null,
+        rect,
         lastHash: null,
         lastApp: null,
+        lastShotAt: null,
       };
     });
 
@@ -559,15 +735,23 @@ class NodeCapture implements ICapture {
         this.displays = selected;
       }
       this.logger.info(
-        `multi_screen capture: ${this.displays.length}/${all.length} display(s)`,
+        `multi_screen capture: ${this.displays.length}/${all.length} display(s) ` +
+          `[mode=${this.config.capture_mode}]`,
         {
           displays: this.displays.map((d) => ({
             index: d.index,
             id: d.id,
             name: d.name,
+            rect: d.rect,
           })),
         },
       );
+      if (this.config.capture_mode === 'active' && this.displays.every((d) => d.rect === null)) {
+        this.logger.warn(
+          'capture_mode=active but no display rectangles were reported by listDisplays(); ' +
+            'cannot map active window to a screen — falling back to capturing all displays.',
+        );
+      }
     } else {
       // Single-screen: keep the default index-0 entry, but record metadata
       // so screenshot events can still report a meaningful screen_index.
@@ -579,6 +763,80 @@ class NodeCapture implements ICapture {
         );
       }
     }
+    // Display geometry just changed; previously cached bounds→screen
+    // mappings are no longer valid.
+    this.lastBoundsKey = null;
+    this.lastResolvedScreen = 0;
+  }
+
+  /**
+   * Map a window rectangle (in global screen coordinates) to one of our
+   * known displays. Uses majority-area overlap so a window straddling
+   * two monitors is attributed to whichever screen contains most of it.
+   * Falls back to center-point hit-test when overlaps are zero (can
+   * happen during Mission Control transitions when bounds briefly land
+   * off-screen). Returns 0 when no display has rect info — the caller
+   * is expected to interpret that as "screen unknown" and bypass the
+   * active-screen filter.
+   */
+  private resolveScreenIndex(win: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+  }): number {
+    if (
+      typeof win.x !== 'number' ||
+      typeof win.y !== 'number' ||
+      typeof win.width !== 'number' ||
+      typeof win.height !== 'number' ||
+      win.width <= 0 ||
+      win.height <= 0
+    ) {
+      return 0;
+    }
+    // Single-slot cache: identical bounds map to the identical screen
+    // (display rects are immutable between probes). The vast majority of
+    // ticks reuse the same focused window, so this skips the per-display
+    // overlap math on the hot path.
+    const key = `${win.x},${win.y},${win.width},${win.height}`;
+    if (key === this.lastBoundsKey) return this.lastResolvedScreen;
+
+    let resolved = 0;
+    let bestArea = 0;
+    for (const d of this.displays) {
+      if (!d.rect) continue;
+      const ix = Math.max(win.x, d.rect.left);
+      const iy = Math.max(win.y, d.rect.top);
+      const ax = Math.min(win.x + win.width, d.rect.left + d.rect.width);
+      const ay = Math.min(win.y + win.height, d.rect.top + d.rect.height);
+      const overlap = Math.max(0, ax - ix) * Math.max(0, ay - iy);
+      if (overlap > bestArea) {
+        bestArea = overlap;
+        resolved = d.index;
+      }
+    }
+    if (bestArea === 0) {
+      // No overlap — try center point against each rect.
+      const cx = win.x + win.width / 2;
+      const cy = win.y + win.height / 2;
+      for (const d of this.displays) {
+        if (!d.rect) continue;
+        if (
+          cx >= d.rect.left &&
+          cx < d.rect.left + d.rect.width &&
+          cy >= d.rect.top &&
+          cy < d.rect.top + d.rect.height
+        ) {
+          resolved = d.index;
+          break;
+        }
+      }
+    }
+
+    this.lastBoundsKey = key;
+    this.lastResolvedScreen = resolved;
+    return resolved;
   }
 
   private async queryActiveWindow(): Promise<ActiveWindowInfo | null> {
@@ -603,12 +861,19 @@ class NodeCapture implements ICapture {
       if (!win) return null;
       const owner = (win.owner as Record<string, unknown> | undefined) ?? {};
       const url = typeof win.url === 'string' ? (win.url as string) : null;
+      const bounds = (win.bounds as Record<string, unknown> | undefined) ?? {};
+      const screenIndex = this.resolveScreenIndex({
+        x: typeof bounds.x === 'number' ? (bounds.x as number) : undefined,
+        y: typeof bounds.y === 'number' ? (bounds.y as number) : undefined,
+        width: typeof bounds.width === 'number' ? (bounds.width as number) : undefined,
+        height: typeof bounds.height === 'number' ? (bounds.height as number) : undefined,
+      });
       return {
         app: (owner.name as string) ?? 'unknown',
         bundleId: (owner.bundleId as string) ?? (owner.path as string) ?? 'unknown',
         title: (win.title as string) ?? '',
         url,
-        screenIndex: 0,
+        screenIndex,
         pid: typeof owner.processId === 'number' ? (owner.processId as number) : null,
       };
     } catch (err) {
@@ -632,6 +897,11 @@ class NodeCapture implements ICapture {
       this.logger.info('using osascript fallback for active window metadata');
       this.osascriptFallbackNotified = true;
     }
+    // Also pulls the front window's position+size when available so the
+    // capture loop can attribute it to a display in `capture_mode='active'`.
+    // Fields are NUL-separated; position/size are space-separated pairs and
+    // may be empty strings if AppleScript can't read them (e.g. fullscreen
+    // Spaces, login window).
     const metaScript = `
       set sep to (ASCII character 0)
       tell application "System Events"
@@ -648,22 +918,46 @@ class NodeCapture implements ICapture {
         on error
           set winTitle to ""
         end try
+        try
+          set winPos to position of front window of frontApp
+          set posStr to ((item 1 of winPos) as text) & " " & ((item 2 of winPos) as text)
+        on error
+          set posStr to ""
+        end try
+        try
+          set winSize to size of front window of frontApp
+          set sizeStr to ((item 1 of winSize) as text) & " " & ((item 2 of winSize) as text)
+        on error
+          set sizeStr to ""
+        end try
       end tell
-      return appName & sep & bid & sep & (appPid as text) & sep & winTitle
+      return appName & sep & bid & sep & (appPid as text) & sep & winTitle & sep & posStr & sep & sizeStr
     `;
     try {
       const { stdout } = await execFileP('osascript', ['-e', metaScript], { timeout: 1500 });
       const parts = stdout.replace(/\n$/, '').split('\u0000');
       if (parts.length < 4) return null;
-      const [app, bundleId, pidStr, title] = parts;
+      const [app, bundleId, pidStr, title, posStr, sizeStr] = parts;
       const pid = Number.parseInt(pidStr ?? '', 10);
       const url = await this.queryBrowserUrlOsascript(app ?? '');
+      let screenIndex = 0;
+      if (posStr && sizeStr) {
+        const [pxStr, pyStr] = posStr.split(' ');
+        const [pwStr, phStr] = sizeStr.split(' ');
+        const px = Number.parseInt(pxStr ?? '', 10);
+        const py = Number.parseInt(pyStr ?? '', 10);
+        const pw = Number.parseInt(pwStr ?? '', 10);
+        const ph = Number.parseInt(phStr ?? '', 10);
+        if ([px, py, pw, ph].every(Number.isFinite)) {
+          screenIndex = this.resolveScreenIndex({ x: px, y: py, width: pw, height: ph });
+        }
+      }
       return {
         app: app || 'unknown',
         bundleId: bundleId || 'unknown',
         title: title ?? '',
         url,
-        screenIndex: 0,
+        screenIndex,
         pid: Number.isFinite(pid) ? pid : null,
       };
     } catch (err) {
@@ -768,9 +1062,32 @@ class NodeCapture implements ICapture {
 
   private async captureScreenshot(win: ActiveWindowInfo, trigger: string): Promise<void> {
     if (!this.screenshotMod) return;
-    for (const display of this.displays) {
+    for (const display of this.displaysForTrigger(win, trigger)) {
       await this.captureForDisplay(win, trigger, display);
     }
+  }
+
+  /**
+   * Pick the displays to capture for a given trigger. In `capture_mode='all'`
+   * (or single-screen setups) this is just every configured display.
+   *
+   * In `capture_mode='active'` we narrow to the display owning the active
+   * window — but only when that's well-defined. Triggers that aren't tied
+   * to a specific window (idle_end, no rect info on any display) fall back
+   * to all displays so we don't silently lose frames. Same for the case
+   * where the window's resolved screenIndex doesn't match any configured
+   * display (e.g. user enabled `screens: [0]` but is working on display 1):
+   * we'd rather record the whitelisted display than nothing.
+   */
+  private displaysForTrigger(win: ActiveWindowInfo, trigger: string): DisplayInfo[] {
+    if (this.config.capture_mode !== 'active') return this.displays;
+    if (this.displays.length <= 1) return this.displays;
+    if (this.displays.every((d) => d.rect === null)) return this.displays;
+    // Idle transitions aren't bound to a focused window; capture all to
+    // match the previous semantics (a wake-up frame per monitor).
+    if (trigger === 'idle_end') return this.displays;
+    const match = this.displays.find((d) => d.index === win.screenIndex);
+    return match ? [match] : this.displays;
   }
 
   private async captureForDisplay(
@@ -781,16 +1098,38 @@ class NodeCapture implements ICapture {
     const buf = await this.grabRawForDisplay(display);
     if (!buf) return;
 
+    // Re-query the focused window *after* the screenshot grab. Several
+    // hundred ms can elapse between the start of `tick()` and this point
+    // (active-window query → optional perceptual probe grab → real grab),
+    // and on a busy machine the user may have switched apps in that
+    // window. We trust whatever was focused at the moment the pixels
+    // were captured, since that's what the image actually reflects —
+    // anything else produces filenames like `..._Finder.webp` for shots
+    // showing Mail (the original bug). Falls back to the original
+    // metadata when the re-query fails so we never drop a frame.
+    const winAtCapture = (await this.queryActiveWindow()) ?? win;
+    const effective: ActiveWindowInfo =
+      winAtCapture.screenIndex === display.index ? winAtCapture : win;
+
+    // Kick the AX-text query off in parallel with screenshot encoding —
+    // both involve enough I/O that overlapping them shaves real wall-clock
+    // time off the capture path. The promise resolves to `null` when the
+    // reader is disabled or the app exposes nothing useful.
+    const axPromise = effective.pid && this.axReader
+      ? this.axReader.query({ pid: effective.pid, app: effective.app }).catch(() => null)
+      : Promise.resolve(null);
+
     const compressed = await encodeScreenshot(
       buf,
       this.config.screenshot_format,
       this.config.screenshot_quality,
+      this.config.screenshot_max_dim,
     );
     const phash = await dHash(compressed);
     const diff = display.lastHash ? hashDiff(display.lastHash, phash) : 1;
 
     if (
-      display.lastApp === win.app &&
+      display.lastApp === effective.app &&
       display.lastHash &&
       diff < this.config.screenshot_diff_threshold &&
       trigger !== 'window_focus' &&
@@ -809,7 +1148,7 @@ class NodeCapture implements ICapture {
     // Suffix with the display index when capturing multiple monitors so two
     // simultaneous shots can't collide on the same `tk_app` filename.
     const screenSuffix = this.displays.length > 1 ? `_s${display.index}` : '';
-    const filename = `${tk}_${SAFE_APP(win.app)}${screenSuffix}.${ext}`;
+    const filename = `${tk}_${SAFE_APP(effective.app)}${screenSuffix}.${ext}`;
     const relPath = path.join('raw', day, 'screenshots', filename);
     const absPath = path.join(this.config.raw_root, relPath);
     await ensureDir(path.dirname(absPath));
@@ -817,28 +1156,45 @@ class NodeCapture implements ICapture {
     this.storageBytesToday += compressed.byteLength;
 
     display.lastHash = phash;
-    display.lastApp = win.app;
+    display.lastApp = effective.app;
+    display.lastShotAt = Date.now();
+
+    // Await the AX query *after* the file write so we don't gate disk
+    // IO on a slow accessibility tree walk.
+    const axResult = await axPromise;
+
+    const metadata: Record<string, unknown> = {
+      session_id: this.sessionId,
+      trigger,
+      perceptual_hash: phash,
+      hash_diff_from_previous: diff,
+      bytes: compressed.byteLength,
+      display_id: display.id,
+      display_name: display.name,
+    };
+    if (effective !== win) {
+      metadata.focus_app_at_trigger = win.app;
+      metadata.focus_app_at_capture = effective.app;
+    }
+    if (axResult && axResult.text) {
+      metadata.ax_text = axResult.text;
+      metadata.ax_text_chars = axResult.text.length;
+      metadata.ax_text_truncated = axResult.truncated;
+      metadata.ax_text_duration_ms = axResult.durationMs;
+    }
 
     await this.emit({
       type: 'screenshot',
-      app: win.app,
-      app_bundle_id: win.bundleId,
-      window_title: win.title,
-      url: win.url,
+      app: effective.app,
+      app_bundle_id: effective.bundleId,
+      window_title: effective.title,
+      url: effective.url,
       content: null,
       asset_path: relPath,
       duration_ms: null,
       idle_before_ms: null,
       screen_index: display.index,
-      metadata: {
-        session_id: this.sessionId,
-        trigger,
-        perceptual_hash: phash,
-        hash_diff_from_previous: diff,
-        bytes: compressed.byteLength,
-        display_id: display.id,
-        display_name: display.name,
-      },
+      metadata,
     });
   }
 
@@ -848,7 +1204,13 @@ class NodeCapture implements ICapture {
     // crucially, a display we haven't shot yet always counts as "changed".
     // We probe each display independently so a static external monitor
     // doesn't suppress capture of an active laptop screen, and vice versa.
-    for (const display of this.displays) {
+    //
+    // In `capture_mode='active'` we only probe the focused display. This
+    // both saves work and avoids spurious 'content_change' triggers fired
+    // by background monitors the user isn't looking at — exactly the noise
+    // active mode is meant to suppress.
+    const probeSet = this.displaysForTrigger(win, 'content_change');
+    for (const display of probeSet) {
       if (await this.displayHasContentChange(display)) return true;
     }
     return false;
@@ -856,14 +1218,27 @@ class NodeCapture implements ICapture {
 
   private async displayHasContentChange(display: DisplayInfo): Promise<boolean> {
     if (!display.lastHash) return true;
+    // Time-floor: if we shot this display very recently, don't even
+    // bother re-screenshotting it for a soft-trigger probe. This is
+    // cheap and bypasses the expensive `screenshot-desktop` round trip
+    // for a static screen between two polls.
+    const floor = this.config.content_change_min_interval_ms;
+    if (
+      floor > 0 &&
+      display.lastShotAt !== null &&
+      Date.now() - display.lastShotAt < floor
+    ) {
+      return false;
+    }
     const buf = await this.grabRawForDisplay(display);
     if (!buf) return false;
     try {
-      // Lowered-quality JPEG probe — we only want a fast hash, not a
-      // usable image. captureForDisplay will redo the encode at full
-      // quality if this returns true.
-      const compressed = await sharp(buf).jpeg({ quality: 60 }).toBuffer();
-      const phash = await dHash(compressed);
+      // Hash directly off raw pixels — no need to JPEG-encode just to
+      // throw the bytes away. dHash works on any sharp-compatible
+      // input, so we hand it the original buffer; captureForDisplay
+      // will redo the (resized + WebP) encode at full quality if this
+      // returns true.
+      const phash = await dHash(buf);
       const diff = hashDiff(display.lastHash, phash);
       return diff >= this.config.screenshot_diff_threshold;
     } catch {
@@ -901,6 +1276,7 @@ class NodeCapture implements ICapture {
       for (const d of this.displays) {
         d.lastHash = null;
         d.lastApp = null;
+        d.lastShotAt = null;
       }
     }
   }

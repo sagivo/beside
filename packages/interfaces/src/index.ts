@@ -69,6 +69,18 @@ export interface CaptureConfig {
   idle_threshold_sec: number;
   screenshot_format: 'webp' | 'jpeg';
   screenshot_quality: number;
+  /**
+   * Longest-edge cap applied at capture time. 0 = native resolution.
+   * Defaults to 1280, which is plenty for OCR/perceptual-hash and
+   * yields ~4-6× smaller files than native Retina.
+   */
+  screenshot_max_dim: number;
+  /**
+   * Soft-trigger throttle: minimum ms between two `content_change`
+   * captures of the same display. Hard triggers (window_focus,
+   * url_change, idle_end) bypass this floor.
+   */
+  content_change_min_interval_ms: number;
   /** @deprecated kept for back-compat with status panes; mirrors quality when format=jpeg. */
   jpeg_quality: number;
   excluded_apps: string[];

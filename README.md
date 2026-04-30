@@ -133,6 +133,46 @@ Then run `cofounderos init` again — it will pull just the new weights.
 
 ---
 
+## Multi-monitor capture
+
+By default CofounderOS captures only the **primary display** — one
+screenshot per trigger — to keep storage, CPU, and the privacy surface
+predictable. To enable multi-monitor capture:
+
+```yaml
+capture:
+  multi_screen: true
+  # screens: [0, 1]      # optional whitelist of zero-based display indexes
+  # capture_mode: active # 'active' (default) | 'all'
+```
+
+`capture_mode` controls **which** displays are shot on each trigger when
+multi-screen is on. The default — `active` — captures only the monitor
+the user is actually working on, which is almost always what you want:
+
+| Mode | Behaviour |
+|------|-----------|
+| `active` (default) | Only the display owning the focused window is captured. The active screen is resolved by hit-testing the focused window's bounds (from `active-win`, with an osascript fallback on macOS) against each display's rectangle, then cached single-slot so subsequent ticks on the same window skip the math. Cuts storage/CPU ~N× without losing acted-on signal. |
+| `all` | Every configured display is captured on every trigger. Use when secondary monitors carry independent signal you'll reference later (dashboards, reference docs). Storage and OCR scale linearly with display count. |
+
+In `active` mode, content-change probes also run only on the focused
+display — so a churning background dashboard won't trigger captures.
+Triggers without a meaningful active window (e.g. `idle_end`) gracefully
+fall back to capturing all configured displays so no frames are lost.
+On startup, the capture log prints the detected displays, their
+rectangles, and the resolved mode so you can confirm geometry was probed
+correctly:
+
+```
+multi_screen capture: 2/2 display(s) [mode=active]
+```
+
+Each emitted event still carries a `screen_index` so downstream consumers
+can tell which monitor a frame came from. If you preferred the previous
+"capture every display every tick" semantics, set `capture_mode: all`.
+
+---
+
 ## Development
 
 `pnpm cli ...` runs the **compiled** output at `packages/app/dist/cli.js`, so
@@ -159,6 +199,33 @@ For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 
 ```bash
 pnpm --filter @cofounderos/app exec tsx src/cli.ts stats
+```
+
+---
+
+## Disk usage & retention
+
+Captured screenshots dominate on-disk size. The defaults aim for a small,
+self-bounded footprint by combining four levers — tweak any of them in
+`config.yaml`:
+
+| Knob | Where | Default | What it controls |
+|------|-------|---------|------------------|
+| `capture.screenshot_max_dim` | capture | `1280` | Longest-edge resize at capture time. Native Retina (~3000 px) is ~4-5× the pixels of the resized version. `0` keeps native resolution. |
+| `capture.screenshot_quality` | capture | `55` | WebP quality. Screen content (UI, text) tolerates much lower quality than photographs — `55` is visually indistinguishable from `75` for OCR and human review. |
+| `capture.screenshot_diff_threshold` | capture | `0.10` | Soft-trigger floor on perceptual-hash distance. Higher = fewer near-duplicate frames. |
+| `capture.content_change_min_interval_ms` | capture | `20000` | Minimum delay between two soft-trigger captures of the same display. Hard triggers (window focus, URL change, idle end) bypass this. |
+| `storage.local.vacuum.*` | storage | tiered | Sliding-window retention: re-encode at lower quality after `compress_after_days`, downscale after `thumbnail_after_days`, delete after `delete_after_days`. Each accepts `*_minutes` for finer-grained tuning (e.g. `compress_after_minutes: 30` for testing). SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
+
+For tight retention while testing scale:
+
+```yaml
+storage:
+  local:
+    vacuum:
+      compress_after_minutes: 30   # re-encode within 30 min
+      thumbnail_after_minutes: 360 # downscale after 6 h
+      delete_after_days: 14
 ```
 
 ---

@@ -5,6 +5,7 @@ import type {
   Logger,
 } from '@cofounderos/interfaces';
 import { dayKey } from '@cofounderos/core';
+import { redactPii } from './pii.js';
 
 /**
  * FrameBuilder — turns raw events into searchable `Frame` rows.
@@ -46,15 +47,26 @@ export interface FrameBuilderResult {
   eventsDropped: number;
 }
 
+export interface FrameBuilderOptions {
+  /** Per-tick batch size. Default 500. */
+  batchSize?: number;
+  /** Sensitive keywords used to redact AX text. Mirror of OCR worker config. */
+  sensitiveKeywords?: string[];
+}
+
 export class FrameBuilder {
   private readonly logger: Logger;
+  private readonly batchSize: number;
+  private readonly sensitiveKeywords: string[];
 
   constructor(
     private readonly storage: IStorage,
     logger: Logger,
-    private readonly batchSize = 500,
+    opts: FrameBuilderOptions = {},
   ) {
     this.logger = logger.child('frame-builder');
+    this.batchSize = opts.batchSize ?? 500;
+    this.sensitiveKeywords = opts.sensitiveKeywords ?? [];
   }
 
   /**
@@ -90,7 +102,7 @@ export class FrameBuilder {
         const dt = Math.abs(Date.parse(e.timestamp) - shotMs);
         return dt <= FRAME_PAIR_WINDOW_MS;
       });
-      const frame = buildFrame(shot, related);
+      const frame = buildFrame(shot, related, this.sensitiveKeywords);
       if (DROP_UNKNOWN_FRAMES && isUnknown(frame)) continue;
       frames.push(frame);
       consumedEventIds.add(shot.id);
@@ -213,7 +225,11 @@ export class FrameBuilder {
   }
 }
 
-function buildFrame(anchor: RawEvent, related: RawEvent[]): Frame {
+function buildFrame(
+  anchor: RawEvent,
+  related: RawEvent[],
+  sensitiveKeywords: string[],
+): Frame {
   // Prefer non-null url / window_title from related events when the
   // screenshot itself was missing them (common: screenshot fires on
   // perceptual content change without a fresh focus event).
@@ -222,6 +238,18 @@ function buildFrame(anchor: RawEvent, related: RawEvent[]): Frame {
     anchor.window_title || firstNonNull(related, (e) => e.window_title) || '';
   const meta = (anchor.metadata ?? {}) as Record<string, unknown>;
   const sourceEventIds = [anchor.id, ...related.map((e) => e.id)];
+
+  // Capture-time AX text wins over later OCR. We redact PII here exactly
+  // like the OCR worker does — same scrub, same keyword list — so the
+  // FTS index is never poisoned by raw secrets regardless of which path
+  // produced the text.
+  let text: string | null = null;
+  let textSource: Frame['text_source'] = null;
+  if (typeof meta.ax_text === 'string' && meta.ax_text.length >= 8) {
+    text = redactPii(meta.ax_text, sensitiveKeywords);
+    textSource = 'accessibility';
+  }
+
   return {
     id: `frm_${anchor.id.slice(4)}`,
     timestamp: anchor.timestamp,
@@ -231,8 +259,8 @@ function buildFrame(anchor: RawEvent, related: RawEvent[]): Frame {
     app_bundle_id: anchor.app_bundle_id ?? '',
     window_title: windowTitle,
     url,
-    text: null,
-    text_source: null,
+    text,
+    text_source: textSource,
     asset_path: anchor.asset_path,
     perceptual_hash: typeof meta.perceptual_hash === 'string'
       ? (meta.perceptual_hash as string)

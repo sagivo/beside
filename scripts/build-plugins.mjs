@@ -92,6 +92,25 @@ async function compilePlugin(pluginDir) {
     JSON.stringify({ type: 'module' }, null, 2) + '\n',
   );
 
+  // Run the plugin's optional native-helper build script. This is the
+  // hook we use for things like `capture/node`'s Swift AX-text helper
+  // — code that can't (or shouldn't) be compiled by tsc. The script is
+  // expected to be best-effort: it must exit 0 if its toolchain is
+  // missing on the host, so cross-platform installs aren't blocked.
+  const nativeScript = path.join(pluginDir, 'scripts/build-native.sh');
+  if (existsSync(nativeScript)) {
+    await new Promise((resolve, reject) => {
+      const sh = spawn('bash', [nativeScript], {
+        cwd: pluginDir,
+        stdio: 'inherit',
+      });
+      sh.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`native build script failed for ${pluginDir} (exit ${code})`));
+      });
+    });
+  }
+
   console.log(`[plugins] built ${manifest.name} (${manifest.layer})`);
 }
 

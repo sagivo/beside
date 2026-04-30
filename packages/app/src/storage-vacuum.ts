@@ -28,12 +28,16 @@ import type {
 
 export interface StorageVacuumConfig {
   storageRoot: string;
-  /** 0 disables that stage. */
-  compressAfterDays: number;
+  /**
+   * Window in **milliseconds** before each stage runs. 0 disables the
+   * stage. Expressed in ms (rather than days) so callers can tune
+   * vacuum at minute-granularity for testing / tight retention.
+   */
+  compressAfterMs: number;
   compressQuality: number;
-  thumbnailAfterDays: number;
+  thumbnailAfterMs: number;
   thumbnailMaxDim: number;
-  deleteAfterDays: number;
+  deleteAfterMs: number;
   batchSize: number;
 }
 
@@ -91,8 +95,8 @@ export class StorageVacuum {
   // ---------------------------------------------------------------------------
 
   private async runCompressPass(nowMs: number): Promise<number> {
-    if (this.config.compressAfterDays <= 0) return 0;
-    const olderThan = isoDaysAgo(nowMs, this.config.compressAfterDays);
+    if (this.config.compressAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.compressAfterMs);
     const candidates = await this.storage.listFramesForVacuum(
       'original',
       olderThan,
@@ -118,8 +122,8 @@ export class StorageVacuum {
   }
 
   private async runThumbnailPass(nowMs: number): Promise<number> {
-    if (this.config.thumbnailAfterDays <= 0) return 0;
-    const olderThan = isoDaysAgo(nowMs, this.config.thumbnailAfterDays);
+    if (this.config.thumbnailAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.thumbnailAfterMs);
     const candidates = await this.storage.listFramesForVacuum(
       'compressed',
       olderThan,
@@ -140,8 +144,8 @@ export class StorageVacuum {
   }
 
   private async runDeletePass(nowMs: number): Promise<number> {
-    if (this.config.deleteAfterDays <= 0) return 0;
-    const olderThan = isoDaysAgo(nowMs, this.config.deleteAfterDays);
+    if (this.config.deleteAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.deleteAfterMs);
     // Both compressed and thumbnail tiers are eligible for deletion once
     // they're old enough — query both in turn.
     let n = 0;
@@ -245,6 +249,6 @@ export class StorageVacuum {
   }
 }
 
-function isoDaysAgo(nowMs: number, days: number): string {
-  return new Date(nowMs - days * 24 * 60 * 60 * 1000).toISOString();
+function isoMsAgo(nowMs: number, ms: number): string {
+  return new Date(nowMs - ms).toISOString();
 }

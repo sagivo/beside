@@ -121,6 +121,7 @@ export async function buildOrchestrator(
     screenshot_format: config.capture.screenshot_format,
     screenshot_quality: config.capture.screenshot_quality,
     jpeg_quality: config.capture.jpeg_quality,
+    accessibility: config.capture.accessibility,
     excluded_apps: config.capture.excluded_apps,
     excluded_url_patterns: config.capture.excluded_url_patterns,
     capture_audio: config.capture.capture_audio,
@@ -167,20 +168,30 @@ export async function buildOrchestrator(
     }
   }
 
-  const frameBuilder = new FrameBuilder(storage, logger);
+  const sensitiveKeywords = config.capture.privacy.sensitive_keywords ?? [];
+  const frameBuilder = new FrameBuilder(storage, logger, {
+    sensitiveKeywords,
+  });
   const ocrWorker = new OcrWorker(storage, logger, {
     storageRoot: storage.getRoot(),
-    sensitiveKeywords: config.capture.privacy.sensitive_keywords ?? [],
+    sensitiveKeywords,
   });
   const entityResolver = new EntityResolverWorker(storage, logger);
   const vacuumCfg = config.storage.local.vacuum;
+  // Resolve the effective window in ms. `*_minutes` (when set) wins
+  // over `*_days` so users can dial in tight retention for testing or
+  // small machines without losing the legacy day-granularity defaults.
+  const stageMs = (days: number, minutes: number | undefined): number => {
+    if (typeof minutes === 'number') return minutes * 60_000;
+    return days * 24 * 60 * 60 * 1000;
+  };
   const vacuum = new StorageVacuum(storage, logger, {
     storageRoot: storage.getRoot(),
-    compressAfterDays: vacuumCfg.compress_after_days,
+    compressAfterMs: stageMs(vacuumCfg.compress_after_days, vacuumCfg.compress_after_minutes),
     compressQuality: vacuumCfg.compress_quality,
-    thumbnailAfterDays: vacuumCfg.thumbnail_after_days,
+    thumbnailAfterMs: stageMs(vacuumCfg.thumbnail_after_days, vacuumCfg.thumbnail_after_minutes),
     thumbnailMaxDim: vacuumCfg.thumbnail_max_dim,
-    deleteAfterDays: vacuumCfg.delete_after_days,
+    deleteAfterMs: stageMs(vacuumCfg.delete_after_days, vacuumCfg.delete_after_minutes),
     batchSize: vacuumCfg.batch_size,
   });
 

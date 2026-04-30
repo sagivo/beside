@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { IStorage, Logger } from '@cofounderos/interfaces';
+import { redactPii } from './pii.js';
 
 /**
  * OCR worker — runs in the background, picks frames whose `text` is
@@ -299,39 +300,6 @@ async function prepareForOcr(absPath: string): Promise<string | Buffer> {
   }
 }
 
-/**
- * Light-touch PII redaction applied to OCR text before it lands in the
- * frame_text FTS table. We err on the side of preserving meaning:
- *  - Email addresses → [REDACTED_EMAIL]
- *  - 13–19 digit sequences (cards) → [REDACTED_CARD]
- *  - Lines containing any configured sensitive keyword → [REDACTED_LINE]
- *
- * Bigger / smarter PII detection (NER, spaCy) is V2.
- */
-export function redactPii(text: string, sensitiveKeywords: string[]): string {
-  if (!text) return text;
-  let out = text;
-  // Emails.
-  out = out.replace(
-    /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
-    '[REDACTED_EMAIL]',
-  );
-  // Credit-card-like sequences (13–19 digits with optional separators).
-  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (m) => {
-    // Reject if it has too many separators or non-digit-heavy content.
-    const digits = m.replace(/[^\d]/g, '');
-    if (digits.length < 13 || digits.length > 19) return m;
-    return '[REDACTED_CARD]';
-  });
-  // Sensitive-keyword line scrub. Case-insensitive, whole line replaced.
-  if (sensitiveKeywords.length > 0) {
-    const escaped = sensitiveKeywords
-      .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .filter((k) => k.length > 0);
-    if (escaped.length > 0) {
-      const pattern = new RegExp(`^.*(?:${escaped.join('|')}).*$`, 'gim');
-      out = out.replace(pattern, '[REDACTED_LINE]');
-    }
-  }
-  return out;
-}
+// Re-export so existing callers of `import { redactPii } from './ocr-worker.js'`
+// continue to work — the canonical home is now `./pii.ts`.
+export { redactPii } from './pii.js';
