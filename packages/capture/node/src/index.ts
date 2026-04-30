@@ -43,6 +43,33 @@ interface CaptureNodeConfig {
     sensitive_keywords?: string[];
   };
   raw_root?: string;
+  /**
+   * Multi-screen capture. When `false` (default) only the primary display
+   * is screenshotted. When `true`, every display returned by
+   * `screenshot.listDisplays()` is captured on each trigger, producing one
+   * `screenshot` event per display with a distinct `screen_index`.
+   *
+   * Optionally constrain to a subset by zero-based index:
+   *   `screens: [0, 1]`  -> capture only displays at index 0 and 1.
+   * If omitted while `multi_screen: true`, all detected displays are used.
+   */
+  multi_screen?: boolean;
+  screens?: number[];
+}
+
+/**
+ * Per-display state used to dedupe screenshots independently for each
+ * monitor. A change on the laptop screen shouldn't suppress a capture on
+ * the external monitor, and vice versa.
+ */
+interface DisplayInfo {
+  /** Stable index in the listDisplays() result (cross-platform). */
+  index: number;
+  /** Underlying id (string on linux, number on macOS/win) — diagnostic only. */
+  id: string | number | null;
+  name: string | null;
+  lastHash: string | null;
+  lastApp: string | null;
 }
 
 interface ActiveWindowInfo {
@@ -124,9 +151,11 @@ const LOOKS_LIKE_BROWSER =
 
 class NodeCapture implements ICapture {
   private readonly logger: Logger;
-  private readonly config: Required<Omit<CaptureNodeConfig, 'privacy'>> & {
+  private readonly config: Required<Omit<CaptureNodeConfig, 'privacy' | 'screens'>> & {
     privacy: NonNullable<CaptureNodeConfig['privacy']>;
     raw_root: string;
+    /** Optional whitelist of display indexes to capture in multi-screen mode. */
+    screens: number[] | undefined;
   };
   private readonly handlers = new Set<RawEventHandler>();
 
@@ -141,8 +170,16 @@ class NodeCapture implements ICapture {
   private lastWindowEnteredAt = Date.now();
   private lastInteractionAt = Date.now();
   private idleNotified = false;
-  private lastScreenshotHash: string | null = null;
-  private lastScreenshotApp: string | null = null;
+  /**
+   * Per-display dedupe state. Always contains at least one entry (the
+   * primary display, index 0) so the single-screen path stays a drop-in
+   * for the previous flat fields. Populated for real after
+   * `listDisplays()` resolves on first capture.
+   */
+  private displays: DisplayInfo[] = [
+    { index: 0, id: null, name: null, lastHash: null, lastApp: null },
+  ];
+  private displaysProbed = false;
   private eventsToday = 0;
   private storageBytesToday = 0;
   private lastDay = dayKey();
@@ -188,6 +225,8 @@ class NodeCapture implements ICapture {
         pause_on_screen_lock: true,
         sensitive_keywords: ['password', 'api_key', 'secret'],
       },
+      multi_screen: config.multi_screen ?? false,
+      screens: config.screens,
     };
   }
 
@@ -463,6 +502,83 @@ class NodeCapture implements ICapture {
         });
       }
     }
+    await this.probeDisplays();
+  }
+
+  /**
+   * Probe attached displays via `screenshot.listDisplays()` and populate
+   * `this.displays`. In single-screen mode we still call this once so the
+   * log line confirms how many monitors the user has — useful when
+   * debugging "I enabled multi_screen but only see one image".
+   *
+   * Failure to enumerate is non-fatal: we keep the default single-display
+   * entry and continue. macOS' `system_profiler`-based enumeration can be
+   * slow (~500ms) but only runs once.
+   */
+  private async probeDisplays(): Promise<void> {
+    if (this.displaysProbed) return;
+    this.displaysProbed = true;
+    if (!this.screenshotMod) return;
+    const ss = (this.screenshotMod as { default?: unknown }).default
+      ?? (this.screenshotMod as unknown);
+    const listFn = (ss as { listDisplays?: () => Promise<unknown[]> }).listDisplays;
+    if (typeof listFn !== 'function') return;
+    let raw: unknown[];
+    try {
+      raw = await listFn();
+    } catch (err) {
+      this.logger.warn('listDisplays() failed; falling back to single-display capture', {
+        err: String(err),
+      });
+      return;
+    }
+    if (!Array.isArray(raw) || raw.length === 0) return;
+    const all: DisplayInfo[] = raw.map((d, i) => {
+      const obj = (d ?? {}) as Record<string, unknown>;
+      return {
+        index: i,
+        id: (obj.id as string | number | undefined) ?? null,
+        name: (obj.name as string | undefined) ?? null,
+        lastHash: null,
+        lastApp: null,
+      };
+    });
+
+    if (this.config.multi_screen) {
+      const wanted = this.config.screens;
+      const selected = wanted
+        ? all.filter((d) => wanted.includes(d.index))
+        : all;
+      if (selected.length === 0) {
+        this.logger.warn(
+          `multi_screen enabled but screens=${JSON.stringify(wanted)} matched no displays; ` +
+            `falling back to display 0`,
+        );
+        this.displays = [all[0]!];
+      } else {
+        this.displays = selected;
+      }
+      this.logger.info(
+        `multi_screen capture: ${this.displays.length}/${all.length} display(s)`,
+        {
+          displays: this.displays.map((d) => ({
+            index: d.index,
+            id: d.id,
+            name: d.name,
+          })),
+        },
+      );
+    } else {
+      // Single-screen: keep the default index-0 entry, but record metadata
+      // so screenshot events can still report a meaningful screen_index.
+      this.displays = [all[0]!];
+      if (all.length > 1) {
+        this.logger.info(
+          `${all.length} displays detected; capturing only display 0. ` +
+            `Set capture.multi_screen: true to record all of them.`,
+        );
+      }
+    }
   }
 
   private async queryActiveWindow(): Promise<ActiveWindowInfo | null> {
@@ -620,17 +736,50 @@ class NodeCapture implements ICapture {
     }
   }
 
+  /**
+   * Capture a raw screenshot of a single display. Returns null on
+   * failure. We intentionally keep this thin — every higher-level concern
+   * (encoding, hashing, dedupe, emit) lives in the caller so it is shared
+   * by both the trigger path and the perceptual-probe path.
+   */
+  private async grabRawForDisplay(display: DisplayInfo): Promise<Buffer | null> {
+    if (!this.screenshotMod) return null;
+    const ss = (this.screenshotMod as { default?: unknown }).default
+      ?? (this.screenshotMod as unknown);
+    type ShotOpts = { format?: string; screen?: string | number };
+    try {
+      // Pass `screen` only when we actually have multiple displays
+      // configured; this preserves the legacy "default display" behaviour
+      // on single-screen setups where the index-0 entry may have a null id.
+      const opts: ShotOpts = { format: 'jpg' };
+      if (this.displays.length > 1 && display.id !== null) {
+        opts.screen = display.id;
+      }
+      return (await (ss as (o?: ShotOpts) => Promise<Buffer>)(opts)) as Buffer;
+    } catch (err) {
+      this.logger.warn(
+        `screenshot failed for display ${display.index}` +
+          (display.name ? ` (${display.name})` : ''),
+        { err: String(err) },
+      );
+      return null;
+    }
+  }
+
   private async captureScreenshot(win: ActiveWindowInfo, trigger: string): Promise<void> {
     if (!this.screenshotMod) return;
-    let buf: Buffer;
-    try {
-      const ss = (this.screenshotMod as { default?: unknown }).default
-        ?? (this.screenshotMod as unknown);
-      buf = (await (ss as (opts?: { format?: string }) => Promise<Buffer>)({ format: 'jpg' })) as Buffer;
-    } catch (err) {
-      this.logger.warn('screenshot failed', { err: String(err) });
-      return;
+    for (const display of this.displays) {
+      await this.captureForDisplay(win, trigger, display);
     }
+  }
+
+  private async captureForDisplay(
+    win: ActiveWindowInfo,
+    trigger: string,
+    display: DisplayInfo,
+  ): Promise<void> {
+    const buf = await this.grabRawForDisplay(display);
+    if (!buf) return;
 
     const compressed = await encodeScreenshot(
       buf,
@@ -638,32 +787,37 @@ class NodeCapture implements ICapture {
       this.config.screenshot_quality,
     );
     const phash = await dHash(compressed);
-    const diff = this.lastScreenshotHash ? hashDiff(this.lastScreenshotHash, phash) : 1;
+    const diff = display.lastHash ? hashDiff(display.lastHash, phash) : 1;
 
     if (
-      this.lastScreenshotApp === win.app &&
-      this.lastScreenshotHash &&
+      display.lastApp === win.app &&
+      display.lastHash &&
       diff < this.config.screenshot_diff_threshold &&
       trigger !== 'window_focus' &&
       trigger !== 'url_change'
     ) {
       // Below the visual change threshold and not a hard trigger — skip.
-      this.logger.debug(`skip screenshot (diff ${diff.toFixed(3)} < threshold)`);
+      this.logger.debug(
+        `skip screenshot (display ${display.index}, diff ${diff.toFixed(3)} < threshold)`,
+      );
       return;
     }
 
     const day = dayKey();
     const tk = timeKey();
     const ext = this.config.screenshot_format === 'webp' ? 'webp' : 'jpg';
-    const filename = `${tk}_${SAFE_APP(win.app)}.${ext}`;
+    // Suffix with the display index when capturing multiple monitors so two
+    // simultaneous shots can't collide on the same `tk_app` filename.
+    const screenSuffix = this.displays.length > 1 ? `_s${display.index}` : '';
+    const filename = `${tk}_${SAFE_APP(win.app)}${screenSuffix}.${ext}`;
     const relPath = path.join('raw', day, 'screenshots', filename);
     const absPath = path.join(this.config.raw_root, relPath);
     await ensureDir(path.dirname(absPath));
     await fs.writeFile(absPath, compressed);
     this.storageBytesToday += compressed.byteLength;
 
-    this.lastScreenshotHash = phash;
-    this.lastScreenshotApp = win.app;
+    display.lastHash = phash;
+    display.lastApp = win.app;
 
     await this.emit({
       type: 'screenshot',
@@ -675,33 +829,42 @@ class NodeCapture implements ICapture {
       asset_path: relPath,
       duration_ms: null,
       idle_before_ms: null,
-      screen_index: win.screenIndex,
+      screen_index: display.index,
       metadata: {
         session_id: this.sessionId,
         trigger,
         perceptual_hash: phash,
         hash_diff_from_previous: diff,
         bytes: compressed.byteLength,
+        display_id: display.id,
+        display_name: display.name,
       },
     });
   }
 
   private async shouldShootForContentChange(win: ActiveWindowInfo): Promise<boolean> {
     if (!this.screenshotMod) return false;
-    if (!this.lastScreenshotHash) return true;
-    // Cheap-ish: take a screenshot at lowered priority and only commit it if
-    // the hash diff exceeds threshold. captureScreenshot will redo the work
-    // — fine, this is the rare path.
+    // Any display whose content has changed enough is reason to fire — and
+    // crucially, a display we haven't shot yet always counts as "changed".
+    // We probe each display independently so a static external monitor
+    // doesn't suppress capture of an active laptop screen, and vice versa.
+    for (const display of this.displays) {
+      if (await this.displayHasContentChange(display)) return true;
+    }
+    return false;
+  }
+
+  private async displayHasContentChange(display: DisplayInfo): Promise<boolean> {
+    if (!display.lastHash) return true;
+    const buf = await this.grabRawForDisplay(display);
+    if (!buf) return false;
     try {
-      const ss = (this.screenshotMod as { default?: unknown }).default
-        ?? (this.screenshotMod as unknown);
-      const buf = (await (ss as (opts?: { format?: string }) => Promise<Buffer>)({ format: 'jpg' })) as Buffer;
-      // Lowered-quality probe — we only want a fast hash, not a usable image.
-      // Always encode as JPEG here to keep this path cheap regardless of
-      // the configured output format.
+      // Lowered-quality JPEG probe — we only want a fast hash, not a
+      // usable image. captureForDisplay will redo the encode at full
+      // quality if this returns true.
       const compressed = await sharp(buf).jpeg({ quality: 60 }).toBuffer();
       const phash = await dHash(compressed);
-      const diff = hashDiff(this.lastScreenshotHash, phash);
+      const diff = hashDiff(display.lastHash, phash);
       return diff >= this.config.screenshot_diff_threshold;
     } catch {
       return false;
@@ -735,8 +898,10 @@ class NodeCapture implements ICapture {
       this.eventsToday = 0;
       this.storageBytesToday = 0;
       this.lastDay = today;
-      this.lastScreenshotHash = null;
-      this.lastScreenshotApp = null;
+      for (const d of this.displays) {
+        d.lastHash = null;
+        d.lastApp = null;
+      }
     }
   }
 

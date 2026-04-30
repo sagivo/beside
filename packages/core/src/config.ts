@@ -107,7 +107,12 @@ const StorageSchema = z.object({
 const IndexSchema = z.object({
   strategy: z.string().default('karpathy'),
   index_path: z.string().default('~/.cofounderOS/index'),
-  incremental_interval_min: z.number().int().positive().default(30),
+  // Ceiling on how stale the index can be during idle. The scheduler's
+  // single-flight guard prevents overlap, and `runIncremental` is a
+  // near-no-op (~20ms) when there are no new events, so a tight default
+  // is safe. Active capture also nudges this job out-of-band via the
+  // event bus, so this is effectively the *idle* upper bound.
+  incremental_interval_min: z.number().int().positive().default(5),
   reorganise_schedule: z.string().default('0 2 * * *'),
   reorganise_on_idle: z.boolean().default(true),
   idle_trigger_min: z.number().int().positive().default(10),
@@ -141,6 +146,43 @@ const IndexSchema = z.object({
   }),
 }).passthrough();
 
+/**
+ * System-level guards that apply across layers. The `load_guard` skips
+ * heavy scheduled work (incremental index, reorganise, vacuum) when the
+ * machine is already under load, so CofounderOS never competes with the
+ * user's foreground tasks.
+ *
+ * The signal is the 1-minute load average normalised by CPU count. A
+ * threshold of `0.7` means: skip when the box has been running at >=70%
+ * of its cores for the last minute. Cheap jobs (frame builder, OCR,
+ * entity resolver) are *not* gated — they're small and keep search
+ * results fresh.
+ *
+ * Note: `os.loadavg()` is not implemented on Windows (returns zeros);
+ * the guard auto-disables there so we never block forever.
+ */
+const SystemSchema = z.object({
+  load_guard: z.object({
+    enabled: z.boolean().default(true),
+    // Normalised 1-min load average (loadavg[0] / cpuCount). 0.7 = 70%.
+    threshold: z.number().positive().max(8).default(0.7),
+    // Hard cap on how long we'll keep deferring a single job. After this
+    // many consecutive skips, we run it anyway so the index can never
+    // fall arbitrarily far behind on a chronically busy machine.
+    max_consecutive_skips: z.number().int().nonnegative().default(6),
+  }).default({
+    enabled: true,
+    threshold: 0.7,
+    max_consecutive_skips: 6,
+  }),
+}).default({
+  load_guard: {
+    enabled: true,
+    threshold: 0.7,
+    max_consecutive_skips: 6,
+  },
+});
+
 const ExportPluginSchema = z.object({
   name: z.string(),
   enabled: z.boolean().optional().default(true),
@@ -159,6 +201,7 @@ export const ConfigSchema = z.object({
   storage: StorageSchema.default({}),
   index: IndexSchema.default({}),
   export: ExportSchema.default({}),
+  system: SystemSchema,
 });
 
 export type CofounderOSConfig = z.infer<typeof ConfigSchema>;
@@ -196,6 +239,13 @@ capture:
     - Bitwarden
     - Keychain Access
   excluded_url_patterns: []
+  # Multi-monitor capture. Off by default — one screenshot per trigger
+  # from the primary display. When enabled, every detected display is
+  # captured on each trigger and emitted as its own screenshot event
+  # with a distinct screen_index. Optionally constrain to a subset by
+  # zero-based index, e.g. \`screens: [0, 1]\` to skip a third monitor.
+  multi_screen: false
+  # screens: [0, 1]
   privacy:
     blur_password_fields: true
     pause_on_screen_lock: true
@@ -227,7 +277,7 @@ storage:
 index:
   strategy: karpathy
   index_path: ~/.cofounderOS/index
-  incremental_interval_min: 30
+  incremental_interval_min: 5      # idle ceiling; active capture triggers indexing out-of-band
   reorganise_schedule: "0 2 * * *"
   reorganise_on_idle: true
   idle_trigger_min: 10
@@ -238,6 +288,16 @@ index:
       model: gemma2:2b           # swap for gemma4:e4b once your Ollama has it
       host: http://localhost:11434
       auto_install: true         # auto-install Ollama + pull model on first run
+
+# Cross-cutting system guards
+system:
+  # Skip heavy scheduled work (indexing, reorganise, vacuum) when the
+  # machine is already busy, so CofounderOS never competes with your
+  # foreground apps. Disable to always run on schedule.
+  load_guard:
+    enabled: true
+    threshold: 0.7              # normalised 1-min load (loadavg / cpu_count)
+    max_consecutive_skips: 6    # safety valve — run anyway after this many skips
 
 # Layer 4 — Export
 export:

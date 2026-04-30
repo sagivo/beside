@@ -62,6 +62,9 @@ Commands:
                              model (Gemma) so the agent is ready to index.
   status                     Show capture state, storage stats, and index state.
                              (Read-only — never triggers an install or download.)
+  stats (alias: info)        Detailed snapshot of your data: disk usage breakdown,
+                             event/frame counts, recent activity, last operations.
+                             Optional: --json (machine-readable output)
   start                      Start everything: capture + scheduled indexing + MCP server.
                              Bootstraps the model on first run.
   capture --once             Run a single capture cycle (sanity check, no scheduling).
@@ -109,6 +112,11 @@ async function main(): Promise<void> {
 
     case 'status':
       await cmdStatus(logger, args);
+      return;
+
+    case 'stats':
+    case 'info':
+      await cmdStats(logger, args);
       return;
 
     case 'start':
@@ -187,6 +195,8 @@ async function cmdStatus(logger: ReturnType<typeof createLogger>, args: ParsedAr
     const modelInfo = handles.model.getModelInfo();
     // Probe but never bootstrap — `status` should be a snapshot.
     const modelReady = await handles.model.isAvailable();
+    const loadSnap = handles.loadGuard.snapshot();
+    const loadCfg = handles.config.system.load_guard;
 
     // eslint-disable-next-line no-console
     console.log(`# CofounderOS — status
@@ -211,12 +221,18 @@ top apps:       ${formatRecord(storageStats.eventsByApp)}
 root:           ${indexState.rootPath}
 pages:          ${indexState.pageCount}
 events covered: ${indexState.eventsCovered}
-last incr run:  ${indexState.lastIncrementalRun ?? 'never'}
+last incr run:  ${indexState.lastIncrementalRun ?? 'never'}${formatNextIncremental(indexState.lastIncrementalRun, handles.config.index.incremental_interval_min)}
 last reorg run: ${indexState.lastReorganisationRun ?? 'never'}
+incr cadence:   every ${handles.config.index.incremental_interval_min} min (idle ceiling)
+reorg cadence:  ${handles.config.index.reorganise_schedule}
 
 ## Model
 ready:          ${modelReady ? 'yes' : 'no — run `cofounderos init` to install/pull'}
 ${JSON.stringify(modelInfo, null, 2)}
+
+## System
+load (1m):      ${formatLoad(loadSnap.normalised)} (${loadSnap.loadavg1?.toFixed(2) ?? 'n/a'} / ${loadSnap.cpuCount} CPUs)
+load_guard:     ${loadCfg.enabled ? `enabled (skip heavy jobs at ≥ ${loadCfg.threshold})` : 'disabled'}
 
 ## Exports
 ${handles.exports.map((e) => `- ${e.name}: ${JSON.stringify(e.getStatus())}`).join('\n')}
@@ -224,6 +240,226 @@ ${handles.exports.map((e) => `- ${e.name}: ${JSON.stringify(e.getStatus())}`).jo
   } finally {
     await stopAll(handles);
   }
+}
+
+async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {
+  const handles = await buildOrchestrator(logger, configFromArgs(args));
+  try {
+    const storageRoot = handles.storage.getRoot();
+    const dataDir = handles.loaded.dataDir;
+    const indexState = await handles.strategy.getState();
+    const storageStats = await handles.storage.getStats();
+    const captureStatus = handles.capture.getStatus();
+    const days = await handles.storage.listDays();
+
+    // Disk usage broken down by component.
+    const diskTargets: Array<{ label: string; path: string }> = [
+      { label: 'raw events + assets', path: path.join(storageRoot, 'raw') },
+      { label: 'checkpoints',         path: path.join(storageRoot, 'checkpoints') },
+      { label: 'sqlite database',     path: path.join(storageRoot, 'cofounderOS.db') },
+      { label: 'sqlite WAL',          path: path.join(storageRoot, 'cofounderOS.db-wal') },
+      { label: 'sqlite SHM',          path: path.join(storageRoot, 'cofounderOS.db-shm') },
+      { label: 'index',               path: indexState.rootPath },
+      { label: 'exports',             path: path.join(dataDir, 'export') },
+    ];
+    const diskRows = await Promise.all(
+      diskTargets.map(async (t) => ({ ...t, bytes: await measurePath(t.path) })),
+    );
+    const totalBytes = diskRows.reduce((acc, r) => acc + r.bytes, 0);
+
+    // Frame stats.
+    let frameTiers: Record<string, number> = {};
+    try {
+      frameTiers = (await handles.storage.countFramesByTier()) as Record<string, number>;
+    } catch {
+      // Storage backend may not implement frames; fall through.
+    }
+    const totalFrames = Object.values(frameTiers).reduce((a, b) => a + b, 0);
+
+    // Entities — total count + top 5 by recent activity.
+    let entityCount = 0;
+    let topEntities: Array<{ title: string; kind: string; frames: number; lastSeen: string }> = [];
+    try {
+      const all = await handles.storage.listEntities({});
+      entityCount = all.length;
+      topEntities = all.slice(0, 5).map((e) => ({
+        title: e.title,
+        kind: e.kind,
+        frames: e.frameCount,
+        lastSeen: e.lastSeen,
+      }));
+    } catch {
+      // ignore — backend may not implement entities
+    }
+
+    // Recent activity: events in the last 7 days, grouped by day.
+    const now = Date.now();
+    const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recent = await handles.storage.readEvents({ from: sevenDaysAgo, limit: 50_000 });
+    const byDay: Record<string, number> = {};
+    for (const e of recent) {
+      const d = e.timestamp.slice(0, 10);
+      byDay[d] = (byDay[d] ?? 0) + 1;
+    }
+
+    if (args.flags.json) {
+      // eslint-disable-next-line no-console
+      console.log(
+        JSON.stringify(
+          {
+            dataDir,
+            storageRoot,
+            disk: {
+              total: totalBytes,
+              breakdown: diskRows.map((r) => ({ label: r.label, path: r.path, bytes: r.bytes })),
+            },
+            events: {
+              total: storageStats.totalEvents,
+              oldest: storageStats.oldestEvent,
+              newest: storageStats.newestEvent,
+              byType: storageStats.eventsByType,
+              topApps: storageStats.eventsByApp,
+              activeDays: days.length,
+              last7Days: byDay,
+              today: captureStatus.eventsToday,
+            },
+            frames: { total: totalFrames, byTier: frameTiers },
+            entities: { total: entityCount, recent: topEntities },
+            index: {
+              strategy: indexState.strategy,
+              rootPath: indexState.rootPath,
+              pageCount: indexState.pageCount,
+              eventsCovered: indexState.eventsCovered,
+              lastIncrementalRun: indexState.lastIncrementalRun,
+              lastReorganisationRun: indexState.lastReorganisationRun,
+            },
+            capture: {
+              running: captureStatus.running,
+              paused: captureStatus.paused,
+              eventsToday: captureStatus.eventsToday,
+              storageBytesToday: captureStatus.storageBytesToday,
+            },
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    const diskLines = diskRows
+      .map((r) => `  ${r.label.padEnd(22)} ${formatBytes(r.bytes).padStart(10)}   ${r.path}`)
+      .join('\n');
+
+    const indexedPct =
+      storageStats.totalEvents > 0
+        ? Math.round((indexState.eventsCovered / storageStats.totalEvents) * 100)
+        : 0;
+
+    const recentLines = formatLast7Days(byDay);
+
+    const tierLine =
+      Object.keys(frameTiers).length === 0
+        ? '(none)'
+        : (['original', 'compressed', 'thumbnail', 'deleted'] as const)
+            .map((t) => `${t}=${frameTiers[t] ?? 0}`)
+            .join(', ');
+
+    const entityLines =
+      topEntities.length === 0
+        ? '  (no entities resolved yet)'
+        : topEntities
+            .map(
+              (e) =>
+                `  - ${e.title.slice(0, 40).padEnd(40)} [${e.kind.padEnd(7)}] ` +
+                `${String(e.frames).padStart(5)} frames  last ${e.lastSeen.slice(0, 16).replace('T', ' ')}`,
+            )
+            .join('\n');
+
+    const lastIncremental = indexState.lastIncrementalRun
+      ? `${indexState.lastIncrementalRun}${formatNextIncremental(indexState.lastIncrementalRun, handles.config.index.incremental_interval_min)}`
+      : 'never';
+
+    // eslint-disable-next-line no-console
+    console.log(`# CofounderOS — stats
+
+## Disk usage  (total ${formatBytes(totalBytes)})
+${diskLines}
+
+## Events
+total:          ${storageStats.totalEvents}
+date range:     ${storageStats.oldestEvent ?? '-'}  →  ${storageStats.newestEvent ?? '-'}
+active days:    ${days.length}${days.length > 0 ? `  (${days[0]} … ${days[days.length - 1]})` : ''}
+today:          ${captureStatus.eventsToday}  (${formatBytes(captureStatus.storageBytesToday)})
+last 7 days:
+${recentLines}
+by type:        ${formatRecord(storageStats.eventsByType)}
+top apps:       ${formatRecord(storageStats.eventsByApp)}
+
+## Frames  (total ${totalFrames})
+by tier:        ${tierLine}
+
+## Entities  (total ${entityCount})
+${entityLines}
+
+## Index (${indexState.strategy})
+pages:          ${indexState.pageCount}
+events covered: ${indexState.eventsCovered} / ${storageStats.totalEvents}  (${indexedPct}%)
+last incr run:  ${lastIncremental}
+last reorg run: ${indexState.lastReorganisationRun ?? 'never'}
+`);
+  } finally {
+    await stopAll(handles);
+  }
+}
+
+/**
+ * Best-effort recursive disk usage. Returns 0 for missing paths.
+ * Used only by `stats` — small enough not to need streaming.
+ */
+async function measurePath(p: string): Promise<number> {
+  let stat: import('node:fs').Stats;
+  try {
+    stat = await fsp.stat(p);
+  } catch {
+    return 0;
+  }
+  if (stat.isFile()) return stat.size;
+  if (!stat.isDirectory()) return 0;
+  let total = 0;
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fsp.readdir(p, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    total += await measurePath(path.join(p, e.name));
+  }
+  return total;
+}
+
+/**
+ * Render an ASCII bar chart of the last 7 calendar days, oldest first.
+ * Days with zero events are still shown so the user can see gaps.
+ */
+function formatLast7Days(byDay: Record<string, number>): string {
+  const days: string[] = [];
+  const today = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const max = Math.max(1, ...days.map((d) => byDay[d] ?? 0));
+  return days
+    .map((d) => {
+      const n = byDay[d] ?? 0;
+      const barLen = Math.round((n / max) * 30);
+      const bar = '█'.repeat(barLen) || (n > 0 ? '▏' : '');
+      return `  ${d}  ${String(n).padStart(5)}  ${bar}`;
+    })
+    .join('\n');
 }
 
 /**
@@ -518,6 +754,29 @@ function formatBytes(n: number): string {
     i++;
   }
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+/**
+ * Render "  (next in 2m43s)" appended to the last-run line when we can
+ * compute it. Returns empty string if the index has never run (no anchor)
+ * or if the next run is already overdue (the scheduler will pick it up
+ * on its next tick anyway, so the noise isn't useful).
+ */
+function formatNextIncremental(lastRunIso: string | null | undefined, intervalMin: number): string {
+  if (!lastRunIso) return '';
+  const last = Date.parse(lastRunIso);
+  if (!Number.isFinite(last)) return '';
+  const nextMs = last + intervalMin * 60_000 - Date.now();
+  if (nextMs <= 0) return '  (due now)';
+  const totalSec = Math.round(nextMs / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `  (next in ${m}m${s.toString().padStart(2, '0')}s)`;
+}
+
+function formatLoad(normalised: number | null): string {
+  if (normalised == null) return 'n/a (unsupported on this platform)';
+  return `${(normalised * 100).toFixed(0)}%`;
 }
 
 function formatRecord(r: Record<string, number>): string {

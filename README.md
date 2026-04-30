@@ -35,6 +35,10 @@ pnpm cli init
 # Show status (read-only — never triggers an install or download)
 pnpm cli status
 
+# Detailed stats: disk usage breakdown, events, frames, recent activity
+pnpm cli stats         # or: pnpm cli info  (alias)
+pnpm cli stats --json  # machine-readable
+
 # Start the full pipeline: capture + scheduled indexing + MCP server.
 # If `init` wasn't run, this will bootstrap the model on first launch.
 pnpm cli start
@@ -124,6 +128,114 @@ index:
 ```
 
 Then run `cofounderos init` again — it will pull just the new weights.
+
+---
+
+## Querying your data with AI agents
+
+Once `cofounderos start` is running, your captured data is queryable by any
+MCP-compatible AI agent (Claude Desktop, Claude Code, Cursor, etc.). The
+built-in MCP server exposes the index, the raw event log, and frame-level
+search as first-class tools — agents don't need to read files directly.
+
+### Available MCP tools
+
+| Tool | What it does |
+|------|--------------|
+| `search_memory` | Default entrypoint. Blended search across frames + wiki pages. |
+| `search_frames` | FTS5 search over OCR text, window titles, and URLs. |
+| `get_frame_context` | Chronological neighbourhood around a specific frame. |
+| `get_journal` | All frames captured on a given day, as a markdown timeline. |
+| `get_page` | Read a wiki page by relative path. |
+| `get_index` | Read the wiki root `index.md`. |
+| `query_raw_events` | Raw event log query (bypasses the index). |
+| `get_session` | Reconstruct events + screenshot paths over a time range. |
+| `trigger_reindex` | Queue an incremental or full re-index. |
+
+### Two transports
+
+The MCP server runs over **HTTP by default** (alongside `cofounderos start`),
+and can also be invoked over **stdio** for clients that spawn the server as
+a subprocess.
+
+```bash
+# HTTP — already running as part of `cofounderos start` on http://localhost:3456
+curl http://localhost:3456/health
+
+# stdio — for clients that prefer to manage the process lifecycle
+pnpm cli mcp --stdio
+```
+
+### Claude Code / Claude Desktop
+
+Add CofounderOS to your Claude config (`~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, or via `claude mcp add` for Claude Code):
+
+**HTTP (recommended — uses the already-running daemon):**
+
+```json
+{
+  "mcpServers": {
+    "cofounderos": {
+      "url": "http://localhost:3456"
+    }
+  }
+}
+```
+
+Or with the Claude Code CLI:
+
+```bash
+claude mcp add --transport http cofounderos http://localhost:3456
+```
+
+**stdio (Claude spawns the server itself):**
+
+```json
+{
+  "mcpServers": {
+    "cofounderos": {
+      "command": "pnpm",
+      "args": ["--dir", "/absolute/path/to/cofounderos", "cli", "mcp", "--stdio"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Add to `~/.cursor/mcp.json` (or the workspace `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "cofounderos": {
+      "url": "http://localhost:3456"
+    }
+  }
+}
+```
+
+### Verifying the connection
+
+Once configured, ask the agent something like:
+
+> What was I working on yesterday afternoon? Use the `cofounderos` tools.
+
+The agent should call `get_journal` or `search_memory` and stream back a
+synthesised answer grounded in your captured frames. If a tool call fails,
+check `pnpm cli status` — the MCP `url` row should show `http://localhost:3456`.
+
+### Changing the port / host
+
+```yaml
+export:
+  plugins:
+    - name: mcp
+      config:
+        host: 127.0.0.1
+        port: 3456
+```
 
 ---
 

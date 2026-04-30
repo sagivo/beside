@@ -13,7 +13,9 @@
       "idle_threshold_sec": { "type": "integer" },
       "jpeg_quality": { "type": "integer" },
       "excluded_apps": { "type": "array", "items": { "type": "string" } },
-      "excluded_url_patterns": { "type": "array", "items": { "type": "string" } }
+      "excluded_url_patterns": { "type": "array", "items": { "type": "string" } },
+      "multi_screen": { "type": "boolean", "default": false },
+      "screens": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
     }
   }
 }

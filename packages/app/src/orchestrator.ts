@@ -17,6 +17,7 @@ import {
   discoverPlugins,
   findWorkspaceRoot,
   loadConfig,
+  LoadGuard,
   type CofounderOSConfig,
   type LoadedConfig,
 } from '@cofounderos/core';
@@ -54,6 +55,7 @@ export interface OrchestratorHandles {
   ocrWorker: OcrWorker;
   entityResolver: EntityResolverWorker;
   vacuum: StorageVacuum;
+  loadGuard: LoadGuard;
 }
 
 const INCREMENTAL_JOB = 'index-incremental';
@@ -139,6 +141,7 @@ export async function buildOrchestrator(
 
   const bus = new RawEventBus(logger);
   const scheduler = new Scheduler(logger);
+  const loadGuard = new LoadGuard(config.system.load_guard, logger);
 
   // Wire capture → bus → storage. The storage write is awaited so we
   // never lose events on a hang.
@@ -206,6 +209,7 @@ export async function buildOrchestrator(
     ocrWorker,
     entityResolver,
     vacuum,
+    loadGuard,
   };
 }
 
@@ -376,7 +380,28 @@ export async function runFullReindex(
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, entityResolver, vacuum, logger } = handles;
+  const { scheduler, config, frameBuilder, ocrWorker, entityResolver, vacuum, logger, loadGuard } =
+    handles;
+
+  // Wrap a heavy job so it skips when the machine is busy. Cheap jobs
+  // (frame builder, OCR, entity resolver) are intentionally not gated —
+  // they're small and keep search results fresh on the order of seconds.
+  const guarded = (jobName: string, run: () => Promise<unknown>) => async () => {
+    const decision = loadGuard.check(jobName);
+    if (!decision.proceed) {
+      const load = decision.snapshot.normalised?.toFixed(2) ?? '?';
+      logger.child(jobName).debug(
+        `skipped — system load ${load} >= threshold ${config.system.load_guard.threshold}`,
+      );
+      return;
+    }
+    if (decision.reason === 'forced-after-skips') {
+      logger.child(jobName).info(
+        `running despite high load — hit max_consecutive_skips (${config.system.load_guard.max_consecutive_skips})`,
+      );
+    }
+    await run();
+  };
   // Frame builder runs frequently and cheaply so search results stay
   // close to real-time even when a full index pass hasn't fired yet.
   scheduler.every(FRAME_BUILDER_JOB, FRAME_BUILDER_INTERVAL_MS, async () => {
@@ -407,22 +432,26 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   // Vacuum runs on a slow tick (default hourly). Each tick processes a
   // small batch so it never starves capture.
   const vacuumIntervalMs = Math.max(60_000, config.storage.local.vacuum.tick_interval_min * 60_000);
-  scheduler.every(VACUUM_JOB, vacuumIntervalMs, async () => {
-    try {
-      await vacuum.tick();
-    } catch (err) {
-      logger.child('storage-vacuum').warn('tick failed', { err: String(err) });
-    }
-  });
+  scheduler.every(
+    VACUUM_JOB,
+    vacuumIntervalMs,
+    guarded(VACUUM_JOB, async () => {
+      try {
+        await vacuum.tick();
+      } catch (err) {
+        logger.child('storage-vacuum').warn('tick failed', { err: String(err) });
+      }
+    }),
+  );
   scheduler.every(
     INCREMENTAL_JOB,
     config.index.incremental_interval_min * 60 * 1000,
-    () => runIncremental(handles).then(() => undefined),
+    guarded(INCREMENTAL_JOB, () => runIncremental(handles).then(() => undefined)),
   );
   scheduler.cron(
     REORG_JOB,
     config.index.reorganise_schedule,
-    () => runReorganisation(handles),
+    guarded(REORG_JOB, () => runReorganisation(handles)),
   );
 }
 
