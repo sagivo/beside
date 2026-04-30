@@ -1061,6 +1061,12 @@ async function waitForShutdown(handles: OrchestratorHandles): Promise<void> {
     };
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
+    // Windows: Ctrl+Break produces SIGBREAK and closing the console
+    // window produces SIGHUP. Both should drain cleanly the same way
+    // SIGINT does on POSIX so the MCP port is released and any flushes
+    // run before the daemon goes away.
+    process.once('SIGBREAK', () => onSignal('SIGBREAK'));
+    process.once('SIGHUP', () => onSignal('SIGHUP'));
   });
   // Ensure the process actually exits even if some plugin left a timer
   // or socket dangling — `cofounderos start` is a foreground command and

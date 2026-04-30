@@ -69,12 +69,12 @@ jobs:
           NO_COLOR: '1'
         run: node packages/app/dist/cli.js plugin list
 
-      # Status exercises every plugin's getStatus / getStats. Skipped on
-      # Windows runners until we add a fixture mode for the capture
-      # plugin (active-win + screenshot-desktop probe in ways that don't
-      # always cope with hosted runners).
-      - name: Smoke - cli status (POSIX only)
-        if: runner.os != 'Windows'
+      # Status exercises every plugin's getStatus / getStats. The
+      # capture plugin's getStatus is pure (memory + counters; no
+      # display probing — that's deferred to start()), so this is safe
+      # on all three runners. If a regression makes the orchestrator
+      # touch displays at construction time, this smoke will catch it.
+      - name: Smoke - cli status
         env:
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
           NO_COLOR: '1'

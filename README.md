@@ -353,6 +353,20 @@ claude mcp add --transport http cofounderos http://127.0.0.1:3456
 }
 ```
 
+On **Windows**, use a backslash path and the `pnpm.cmd` shim
+(JSON requires every backslash to be escaped):
+
+```json
+{
+  "mcpServers": {
+    "cofounderos": {
+      "command": "pnpm.cmd",
+      "args": ["--dir", "C:\\path\\to\\cofounderos", "cli", "mcp", "--stdio"]
+    }
+  }
+}
+```
+
 ### Cursor
 
 Add to `~/.cursor/mcp.json` (or the workspace `.cursor/mcp.json`).

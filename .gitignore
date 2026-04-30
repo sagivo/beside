@@ -1,10 +1,23 @@
+# Build artifacts
 node_modules/
 dist/
 *.tsbuildinfo
-.DS_Store
+coverage/
+
+# Env / secrets
 .env
 .env.local
+
+# Logs
 *.log
+
+# Local data dirs (devs may set COFOUNDEROS_DATA_DIR somewhere inside the repo)
 .cofounderOS/
 data/
-coverage/
+
+# OS-specific cruft
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

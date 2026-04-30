@@ -20,7 +20,9 @@ const OLLAMA_DOWNLOAD_PAGE = 'https://ollama.com/download';
 export async function commandExists(cmd: string): Promise<boolean> {
   const tool = process.platform === 'win32' ? 'where' : 'which';
   return await new Promise<boolean>((resolve) => {
-    const child = spawn(tool, [cmd], { stdio: 'ignore' });
+    // windowsHide suppresses the brief console window flash on Windows.
+    // Harmless no-op on POSIX.
+    const child = spawn(tool, [cmd], { stdio: 'ignore', windowsHide: true });
     child.on('exit', (code) => resolve(code === 0));
     child.on('error', () => resolve(false));
   });
@@ -173,6 +175,10 @@ export async function installOllamaWindows(
         // Windows.
         shell: true,
         stdio: ['inherit', 'pipe', 'pipe'],
+        // Hide the cmd.exe wrapper window. UAC + winget's own UI still
+        // surface to the user; we just don't want an extra empty
+        // console flashing for the duration of the install.
+        windowsHide: true,
       },
     );
 
@@ -237,6 +243,10 @@ export async function startOllamaDaemon(): Promise<void> {
         // wrappers may be `.cmd`. shell:true keeps PATHEXT resolution
         // identical to the user's shell. Harmless on POSIX.
         shell: process.platform === 'win32',
+        // Critical on Windows: without windowsHide, a detached `ollama
+        // serve` would leave a permanent console window on the user's
+        // desktop until the daemon exits.
+        windowsHide: true,
       });
       child.on('error', (err) => reject(err));
       child.unref();
