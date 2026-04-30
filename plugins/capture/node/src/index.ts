@@ -127,6 +127,17 @@ interface DisplayInfo {
    * `screenshot-desktop` versions, or platforms where it's unsupported).
    */
   rect: { left: number; top: number; width: number; height: number } | null;
+  /**
+   * macOS-only: 1-based ordinal accepted by `screencapture -D`. Set by
+   * the JXA-based enumerator so we can grab pixels from the *correct*
+   * physical display directly via `screencapture`, sidestepping the
+   * `screenshot-desktop` darwin path's broken display selection (which
+   * ignores `-D` entirely and mis-orders displays whenever the OS'
+   * `screencapture` ordering disagrees with `system_profiler`'s — the
+   * common case on multi-monitor setups). `null` on Linux/Windows or
+   * when JXA enumeration fails and we fall back to `screenshot-desktop`.
+   */
+  macOrdinal: number | null;
   lastHash: string | null;
   lastApp: string | null;
   /**
@@ -258,7 +269,7 @@ class NodeCapture implements ICapture {
    * `listDisplays()` resolves on first capture.
    */
   private displays: DisplayInfo[] = [
-    { index: 0, id: null, name: null, rect: null, lastHash: null, lastApp: null, lastShotAt: null },
+    { index: 0, id: null, name: null, rect: null, macOrdinal: null, lastHash: null, lastApp: null, lastShotAt: null },
   ];
   private displaysProbed = false;
   /**
@@ -660,6 +671,28 @@ class NodeCapture implements ICapture {
   private async probeDisplays(): Promise<void> {
     if (this.displaysProbed) return;
     this.displaysProbed = true;
+
+    // macOS: prefer the JXA-based enumerator. It returns real rectangles
+    // (`screenshot-desktop`'s `system_profiler` parser exposes none) AND
+    // an ordinal that matches `screencapture -D`, which we use directly
+    // for the actual pixel grab. This sidesteps two long-standing bugs
+    // in `screenshot-desktop`'s darwin path: it never passes -D, and its
+    // multi-shot-then-pick-by-index trick mis-attributes shots whenever
+    // `screencapture`'s display order disagrees with `system_profiler`'s
+    // (the typical case on multi-monitor setups, which is *exactly* the
+    // bug users hit: filename right, pixels from the wrong display).
+    if (process.platform === 'darwin') {
+      const macDisplays = await this.enumerateMacDisplays();
+      if (macDisplays && macDisplays.length > 0) {
+        this.applyDisplaySelection(macDisplays);
+        return;
+      }
+      this.logger.warn(
+        'JXA display enumeration failed on macOS; falling back to system_profiler. ' +
+          'Multi-monitor capture may attribute shots to the wrong display.',
+      );
+    }
+
     if (!this.screenshotMod) return;
     const ss = (this.screenshotMod as { default?: unknown }).default
       ?? (this.screenshotMod as unknown);
@@ -714,12 +747,23 @@ class NodeCapture implements ICapture {
         id: (obj.id as string | number | undefined) ?? null,
         name: (obj.name as string | undefined) ?? null,
         rect,
+        macOrdinal: null,
         lastHash: null,
         lastApp: null,
         lastShotAt: null,
       };
     });
 
+    this.applyDisplaySelection(all);
+  }
+
+  /**
+   * Apply `multi_screen` / `screens` config against an enumerated set of
+   * displays. Shared between the JXA-based macOS path and the
+   * `screenshot-desktop` cross-platform fallback so both end up with the
+   * same selection / logging / cache-invalidation behavior.
+   */
+  private applyDisplaySelection(all: DisplayInfo[]): void {
     if (this.config.multi_screen) {
       const wanted = this.config.screens;
       const selected = wanted
@@ -743,12 +787,13 @@ class NodeCapture implements ICapture {
             id: d.id,
             name: d.name,
             rect: d.rect,
+            macOrdinal: d.macOrdinal,
           })),
         },
       );
       if (this.config.capture_mode === 'active' && this.displays.every((d) => d.rect === null)) {
         this.logger.warn(
-          'capture_mode=active but no display rectangles were reported by listDisplays(); ' +
+          'capture_mode=active but no display rectangles were reported; ' +
             'cannot map active window to a screen — falling back to capturing all displays.',
         );
       }
@@ -767,6 +812,63 @@ class NodeCapture implements ICapture {
     // mappings are no longer valid.
     this.lastBoundsKey = null;
     this.lastResolvedScreen = 0;
+  }
+
+  /**
+   * macOS-only: enumerate displays via JXA reading `NSScreen.screens`.
+   * Returns one entry per display with proper rectangles (in the global
+   * virtual coordinate space — same space `active-win`'s `bounds`
+   * report) and a 1-based `macOrdinal` that maps directly to
+   * `screencapture -D`. The first entry is always the main display, so
+   * `macOrdinal: 1` is the primary screen, matching macOS conventions.
+   *
+   * Returns null if osascript or AppKit aren't available, or the script
+   * fails for any reason — caller falls back to the cross-platform path.
+   */
+  private async enumerateMacDisplays(): Promise<DisplayInfo[] | null> {
+    const script = `
+      ObjC.import("AppKit");
+      const screens = $.NSScreen.screens;
+      const out = [];
+      for (let i = 0; i < screens.count; i++) {
+        const s = screens.objectAtIndex(i);
+        const f = s.frame;
+        out.push({
+          x: f.origin.x,
+          y: f.origin.y,
+          w: f.size.width,
+          h: f.size.height,
+          name: (s.localizedName ? ObjC.unwrap(s.localizedName) : null)
+        });
+      }
+      JSON.stringify(out)
+    `;
+    try {
+      const { stdout } = await execFileP('osascript', ['-l', 'JavaScript', '-e', script], {
+        timeout: 2000,
+      });
+      const parsed = JSON.parse(stdout.trim()) as Array<{
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        name: string | null;
+      }>;
+      if (!Array.isArray(parsed) || parsed.length === 0) return null;
+      return parsed.map((s, i) => ({
+        index: i,
+        id: i, // diagnostic only — the real selector is macOrdinal
+        name: s.name ?? null,
+        rect: { left: s.x, top: s.y, width: s.w, height: s.h },
+        macOrdinal: i + 1, // `screencapture -D` is 1-based; -D 1 = main
+        lastHash: null,
+        lastApp: null,
+        lastShotAt: null,
+      }));
+    } catch (err) {
+      this.logger.debug('NSScreen JXA enumeration failed', { err: String(err) });
+      return null;
+    }
   }
 
   /**
@@ -1037,6 +1139,16 @@ class NodeCapture implements ICapture {
    * by both the trigger path and the perceptual-probe path.
    */
   private async grabRawForDisplay(display: DisplayInfo): Promise<Buffer | null> {
+    // macOS: bypass `screenshot-desktop` whenever we have a real ordinal.
+    // The library's darwin path doesn't pass `-D` to `screencapture` and
+    // instead grabs every display then picks the Nth file by index, which
+    // mis-attributes pixels whenever `screencapture`'s ordering disagrees
+    // with `system_profiler`'s (the typical multi-monitor case).
+    // Calling `screencapture -D <ordinal>` directly fixes the attribution.
+    if (process.platform === 'darwin' && display.macOrdinal !== null) {
+      return this.grabRawDarwin(display);
+    }
+
     if (!this.screenshotMod) return null;
     const ss = (this.screenshotMod as { default?: unknown }).default
       ?? (this.screenshotMod as unknown);
@@ -1057,6 +1169,49 @@ class NodeCapture implements ICapture {
         { err: String(err) },
       );
       return null;
+    }
+  }
+
+  /**
+   * macOS-only: capture a single display via `screencapture -D <ordinal>`.
+   * This is the *correct* way to address a specific display on macOS —
+   * `-D 1` is the main display, `-D 2` the next, and so on. We write to
+   * a tempfile (the `-x` flag suppresses the shutter sound) and read it
+   * back as a Buffer to match the cross-platform contract.
+   *
+   * The 1.5s execFile timeout is generous: on a quiet machine
+   * `screencapture` returns in <100ms, but Mission Control transitions
+   * can briefly stall it. We never want to hold up the capture loop on
+   * a wedged grab — the next tick will retry.
+   */
+  private async grabRawDarwin(display: DisplayInfo): Promise<Buffer | null> {
+    const ord = display.macOrdinal;
+    if (ord === null) return null;
+    // Lazy import — `node:os` is cheap but keeping the imports section tidy
+    // matters more than micro-optimizing the cold path.
+    const { tmpdir } = await import('node:os');
+    const tmpFile = path.join(
+      tmpdir(),
+      `cofounderos-shot-${process.pid}-${ord}-${Date.now()}.jpg`,
+    );
+    try {
+      await execFileP(
+        'screencapture',
+        ['-x', '-t', 'jpg', `-D${ord}`, tmpFile],
+        { timeout: 1500 },
+      );
+      const buf = await fs.readFile(tmpFile);
+      return buf;
+    } catch (err) {
+      this.logger.warn(
+        `screencapture -D${ord} failed for display ${display.index}` +
+          (display.name ? ` (${display.name})` : ''),
+        { err: String(err) },
+      );
+      return null;
+    } finally {
+      // Best-effort cleanup; tempdir gets purged regardless.
+      fs.unlink(tmpFile).catch(() => undefined);
     }
   }
 

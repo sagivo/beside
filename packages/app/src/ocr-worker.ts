@@ -74,11 +74,15 @@ const OCR_MAX_WIDTH = 1600;
  * untouched. The patch is idempotent and never replaces a previously
  * patched write, so multiple OcrWorker instances are safe.
  */
+// Loosened to `startsWith`-style anchored prefixes. Leptonica occasionally
+// appends coordinate hints ("box outside rectangle: x = 12, y = …") or
+// trailing whitespace that broke the previous strict `^…\s*$` form, so
+// users would still see noise leak through. We match the function-and-error
+// preamble and let anything after slide.
 const LEPTONICA_NOISE = [
-  /^Error in boxClipToRectangle: box outside rectangle\s*$/,
-  /^Error in pixScanForForeground: invalid box\s*$/,
-  /^Image too small to scale!!\s*\(less than 2x2\)\s*$/,
-  /^Image too small to scale!!\s*$/,
+  /^Error in boxClipToRectangle:/,
+  /^Error in pixScanForForeground:/,
+  /^Image too small to scale!!/,
 ];
 
 let stderrFilterInstalled = false;
@@ -140,6 +144,12 @@ export class OcrWorker {
     this.enabled = opts.enabled ?? true;
     this.storageRoot = opts.storageRoot;
     this.sensitiveKeywords = opts.sensitiveKeywords ?? [];
+    // Install the stderr filter eagerly so Leptonica chatter is suppressed
+    // from the very first OCR tick. Previously the filter was set up
+    // lazily inside `getWorker()`, which left a small race where the
+    // initial Tesseract worker boot could flush a backlog of messages
+    // before the patch landed.
+    if (this.enabled) installLeptonicaStderrFilter();
   }
 
   /** One pass: process up to `batchSize` pending frames. */
@@ -176,6 +186,14 @@ export class OcrWorker {
           continue;
         }
         const input = await prepareForOcr(abs);
+        if (input === null) {
+          // Image too small / unreadable to OCR — record empty text so
+          // it won't be re-queued, and skip the recognize() call (which
+          // is what was producing the Leptonica box-clip noise).
+          await this.storage.setFrameText(task.id, '', 'ocr');
+          processed += 1;
+          continue;
+        }
         const result = await worker.recognize(input);
         const raw = (result.data.text ?? '').trim();
         const cleaned = redactPii(raw, this.sensitiveKeywords);
@@ -219,6 +237,8 @@ export class OcrWorker {
     if (this.workerPromise) return this.workerPromise;
     this.workerPromise = (async (): Promise<TesseractWorker | null> => {
       try {
+        // Defensive: idempotent re-install in case OcrWorker was
+        // constructed with `enabled: false` and toggled on later.
         installLeptonicaStderrFilter();
         if (!this.startupLogged) {
           this.logger.info(
@@ -281,14 +301,36 @@ export class OcrWorker {
  * roughly halves recognition time. Falls back to the raw file path on
  * failure so a sharp glitch never blocks OCR.
  */
-async function prepareForOcr(absPath: string): Promise<string | Buffer> {
+/**
+ * Minimum image dimension (px) we'll send to Tesseract. Below this,
+ * Leptonica's page segmentation produces degenerate boxes that overflow
+ * the image rectangle, triggering the
+ *   `Error in boxClipToRectangle: box outside rectangle`
+ *   `Error in pixScanForForeground: invalid box`
+ * native-stderr noise. The threshold is intentionally conservative: real
+ * UI screenshots are always orders of magnitude larger; anything smaller
+ * is almost certainly a corrupt capture (failed permission, screen lock
+ * race, off-screen window) where there's nothing to OCR anyway.
+ */
+const OCR_MIN_DIM = 64;
+
+async function prepareForOcr(absPath: string): Promise<string | Buffer | null> {
   try {
     // Lazy import to keep `sharp` out of the cold-start path. The encode
     // happens once per frame and is dwarfed by tesseract's recognize().
     const sharp = (await import('sharp')).default;
     const img = sharp(absPath, { failOn: 'none' });
     const meta = await img.metadata();
-    if (!meta.width || meta.width <= OCR_MAX_WIDTH) {
+    if (
+      !meta.width ||
+      !meta.height ||
+      meta.width < OCR_MIN_DIM ||
+      meta.height < OCR_MIN_DIM
+    ) {
+      // Skip — caller treats `null` as "no text, don't bother Tesseract".
+      return null;
+    }
+    if (meta.width <= OCR_MAX_WIDTH) {
       return absPath;
     }
     return await img
