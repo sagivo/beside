@@ -163,6 +163,14 @@ export interface Frame {
   /** Resolved entity for this frame — null until the resolver runs. */
   entity_path: string | null;
   entity_kind: EntityKind | null;
+  /**
+   * Activity session this frame belongs to. Null until the
+   * SessionBuilder worker has assigned it. Distinct from `session_id`,
+   * which is the *capture* session (one per `cofounderos start` run);
+   * activity sessions are user-visible focus runs bounded by idle gaps
+   * and can span capture sessions cleanly.
+   */
+  activity_session_id: string | null;
   /** Raw event ids that contributed to this frame. */
   source_event_ids: string[];
 }
@@ -239,6 +247,55 @@ export interface ListEntitiesQuery {
   limit?: number;
   /** Only entities last seen on or after this ISO timestamp. */
   sinceLastSeen?: string;
+}
+
+/**
+ * A continuous run of focused user activity, bounded by idle gaps. The
+ * SessionBuilder groups frames into sessions whenever the gap between
+ * adjacent frames stays below `idle_threshold_sec` (default 5 minutes).
+ *
+ * Sessions are the unit of "what was I doing for the last hour?" — they
+ * surface in journal headers, drive the `list_sessions` MCP tool, and
+ * give entities accurate `total_focused_ms` numbers (since a session
+ * can attribute its time to exactly one primary entity).
+ */
+export interface ActivitySession {
+  id: string;
+  started_at: string;
+  ended_at: string;
+  /** YYYY-MM-DD of `started_at`. Sessions never span midnight. */
+  day: string;
+  /** ended_at - started_at, in milliseconds. */
+  duration_ms: number;
+  /**
+   * Sum of inter-frame gaps that fell *under* the idle threshold —
+   * roughly the user's continuous focus time inside this session.
+   * Differs from duration_ms when there were brief idle stretches.
+   */
+  active_ms: number;
+  frame_count: number;
+  /** Entity that received the most attention in this session. Null if no frame had an entity. */
+  primary_entity_path: string | null;
+  primary_entity_kind: EntityKind | null;
+  /** App with the most attention. Useful when no entity resolved. */
+  primary_app: string | null;
+  /**
+   * All entities touched in this session, sorted by attention
+   * descending. Each entry is the entity's stable path.
+   */
+  entities: string[];
+}
+
+export interface ListSessionsQuery {
+  /** Restrict to a single day (YYYY-MM-DD). */
+  day?: string;
+  /** Sessions starting on or after this ISO timestamp. */
+  from?: string;
+  /** Sessions starting on or before this ISO timestamp. */
+  to?: string;
+  limit?: number;
+  /** Order: 'recent' (started_at DESC, default) or 'chronological' (ASC). */
+  order?: 'recent' | 'chronological';
 }
 
 export interface StorageStats {
@@ -372,6 +429,48 @@ export interface IStorage {
    * fast-path.
    */
   countFramesByTier(): Promise<Record<FrameAssetTier, number>>;
+
+  // -------------------------------------------------------------------------
+  // Activity sessions — continuous user-focus runs, bounded by idle gaps.
+  //
+  // Sessions are derived from frames; full reindex clears them with
+  // `clearAllSessions()` and the SessionBuilder rebuilds from scratch.
+  // -------------------------------------------------------------------------
+
+  /** Insert or replace a session row. */
+  upsertSession(session: ActivitySession): Promise<void>;
+
+  /** Read one session by id. */
+  getSession(id: string): Promise<ActivitySession | null>;
+
+  /** List sessions matching `query`, newest first by default. */
+  listSessions(query?: ListSessionsQuery): Promise<ActivitySession[]>;
+
+  /**
+   * Frames that haven't been assigned to a session yet, ordered by
+   * timestamp ASC. The SessionBuilder drains this queue.
+   */
+  listFramesNeedingSessionAssignment(limit: number): Promise<Frame[]>;
+
+  /**
+   * Bulk-attach frames to a session id. The session row must already
+   * exist (the SessionBuilder always upserts the session before calling
+   * this).
+   */
+  assignFramesToSession(frameIds: string[], sessionId: string): Promise<void>;
+
+  /**
+   * Frames that belong to a given session, oldest first. Used by
+   * `get_session` MCP tool and to render session-grouped journals.
+   */
+  getSessionFrames(sessionId: string): Promise<Frame[]>;
+
+  /**
+   * Clear every session row + null out `frames.activity_session_id`.
+   * Called from `--full-reindex` so a changed idle threshold can
+   * regroup history cleanly.
+   */
+  clearAllSessions(): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -630,51 +729,196 @@ export interface Logger {
  * `assetUrlPrefix` lets callers point screenshot links at either the raw
  * data dir (for the on-disk export) or a relative path (for MCP).
  */
+export interface JournalRenderOptions {
+  /** Prepend to every screenshot link. Defaults to ''. */
+  assetUrlPrefix?: string;
+  /**
+   * Activity sessions overlapping this day. When provided, the journal
+   * is grouped under per-session headers and AFK gaps are inserted
+   * between adjacent sessions. Frames whose `activity_session_id` does
+   * not appear in this list still render — they're grouped under a
+   * trailing "Loose frames" section.
+   */
+  sessions?: ActivitySession[];
+  /** Threshold (ms) above which inter-session gaps render as AFK markers. Default 2 min. */
+  afkThresholdMs?: number;
+}
+
 export function renderJournalMarkdown(
   day: string,
   frames: Frame[],
-  assetUrlPrefix = '',
+  optionsOrPrefix: JournalRenderOptions | string = {},
 ): string {
+  const options: JournalRenderOptions =
+    typeof optionsOrPrefix === 'string'
+      ? { assetUrlPrefix: optionsOrPrefix }
+      : optionsOrPrefix;
+  const assetUrlPrefix = options.assetUrlPrefix ?? '';
+  const sessions = options.sessions ?? [];
+  const afkThresholdMs = options.afkThresholdMs ?? 2 * 60_000;
+
   if (frames.length === 0) {
     return `# Journal — ${day}\n\n_No frames captured on this day._\n`;
   }
+
   const lines: string[] = [];
   lines.push(`# Journal — ${day}`);
   lines.push('');
+
   const totalMs = frames.reduce((acc, f) => acc + (f.duration_ms ?? 0), 0);
   const minutes = Math.round(totalMs / 60_000);
-  lines.push(
-    `_${frames.length} frame(s) captured` +
-      (minutes > 0 ? `, ~${minutes} min focused` : '') +
-      `._`,
-  );
+  const summaryParts: string[] = [`${frames.length} frame(s) captured`];
+  if (minutes > 0) summaryParts.push(`~${minutes} min focused`);
+  if (sessions.length > 0) {
+    const activeMin = Math.round(
+      sessions.reduce((s, x) => s + x.active_ms, 0) / 60_000,
+    );
+    summaryParts.push(`${sessions.length} session(s), ${activeMin} active min`);
+  }
+  lines.push(`_${summaryParts.join(', ')}._`);
   lines.push('');
+
+  // -------------------------------------------------------------------------
+  // Session-grouped path. We preserve the legacy app-grouped output for
+  // back-compat when no sessions are supplied.
+  // -------------------------------------------------------------------------
+  if (sessions.length > 0) {
+    const framesBySession = new Map<string, Frame[]>();
+    for (const f of frames) {
+      const sid = f.activity_session_id ?? '__loose__';
+      const arr = framesBySession.get(sid);
+      if (arr) arr.push(f);
+      else framesBySession.set(sid, [f]);
+    }
+
+    const ordered = [...sessions].sort((a, b) =>
+      a.started_at.localeCompare(b.started_at),
+    );
+
+    let prevEnded: string | null = null;
+    for (const session of ordered) {
+      if (prevEnded) {
+        const gapMs = Date.parse(session.started_at) - Date.parse(prevEnded);
+        if (gapMs >= afkThresholdMs) {
+          lines.push(`---`);
+          lines.push(`_…idle for ${humaniseDuration(gapMs)}…_`);
+          lines.push('');
+        }
+      }
+      const sessionFrames = framesBySession.get(session.id) ?? [];
+      renderSession(session, sessionFrames, lines, assetUrlPrefix);
+      prevEnded = session.ended_at;
+    }
+
+    // Frames not in any provided session — render at the end so they're
+    // not silently dropped (e.g. SessionBuilder hasn't caught up yet).
+    const loose = framesBySession.get('__loose__') ?? [];
+    if (loose.length > 0) {
+      lines.push(`---`);
+      lines.push(`## Loose frames`);
+      lines.push(`_${loose.length} frame(s) not yet assigned to a session._`);
+      lines.push('');
+      renderFrameList(loose, lines, assetUrlPrefix);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  // -------------------------------------------------------------------------
+  // Legacy app-grouped path.
+  // -------------------------------------------------------------------------
   let lastApp: string | null = null;
   for (const f of frames) {
     if (f.app !== lastApp) {
       lines.push(`## ${f.app || '(unknown)'}`);
       lastApp = f.app;
     }
-    const time = f.timestamp.slice(11, 19);
-    const dur = f.duration_ms ? ` _(${Math.round(f.duration_ms / 1000)}s)_` : '';
-    const target = [
-      f.window_title ? `"${f.window_title}"` : null,
-      f.url ? `<${f.url}>` : null,
-    ]
-      .filter(Boolean)
-      .join(' · ');
-    const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
-    lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
-    if (f.text && f.text_source === 'ocr' && f.text.trim()) {
-      const snippet = f.text
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 200);
-      lines.push(`  > ${snippet}${snippet.length === 200 ? '…' : ''}`);
-    }
-    if (f.asset_path) {
-      lines.push(`  ![](${assetUrlPrefix}${f.asset_path})`);
-    }
+    renderFrame(f, lines, assetUrlPrefix);
   }
   return lines.join('\n') + '\n';
+}
+
+function renderSession(
+  session: ActivitySession,
+  frames: Frame[],
+  lines: string[],
+  assetUrlPrefix: string,
+): void {
+  const startTime = session.started_at.slice(11, 16);
+  const endTime = session.ended_at.slice(11, 16);
+  const activeMin = Math.max(1, Math.round(session.active_ms / 60_000));
+  const headerBits: string[] = [];
+  if (session.primary_entity_path) {
+    headerBits.push(`[[${session.primary_entity_path}]]`);
+  } else if (session.primary_app) {
+    headerBits.push(session.primary_app);
+  }
+  headerBits.push(`${activeMin} min active`);
+  if (frames.length > 0) {
+    headerBits.push(`${frames.length} frame${frames.length === 1 ? '' : 's'}`);
+  }
+  lines.push(`## ${startTime} – ${endTime} · ${headerBits.join(' · ')}`);
+  if (session.entities.length > 1) {
+    const tail = session.entities
+      .slice(1, 4)
+      .map((p) => `[[${p}]]`)
+      .join(', ');
+    if (tail) lines.push(`_also touched: ${tail}_`);
+  }
+  lines.push('');
+  if (frames.length === 0) {
+    lines.push(`_(session has no frames in this journal slice)_`);
+    lines.push('');
+    return;
+  }
+  renderFrameList(frames, lines, assetUrlPrefix);
+}
+
+function renderFrameList(
+  frames: Frame[],
+  lines: string[],
+  assetUrlPrefix: string,
+): void {
+  let lastApp: string | null = null;
+  for (const f of frames) {
+    if (f.app !== lastApp) {
+      lines.push(`### ${f.app || '(unknown)'}`);
+      lastApp = f.app;
+    }
+    renderFrame(f, lines, assetUrlPrefix);
+  }
+}
+
+function renderFrame(f: Frame, lines: string[], assetUrlPrefix: string): void {
+  const time = f.timestamp.slice(11, 19);
+  const dur = f.duration_ms ? ` _(${Math.round(f.duration_ms / 1000)}s)_` : '';
+  const target = [
+    f.window_title ? `"${f.window_title}"` : null,
+    f.url ? `<${f.url}>` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
+  lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
+  // OCR and accessibility are equally valid sources of human-readable
+  // text — both already pass through the same PII redactor before
+  // landing in storage, so neither needs special treatment here.
+  if (
+    f.text &&
+    (f.text_source === 'ocr' || f.text_source === 'accessibility') &&
+    f.text.trim()
+  ) {
+    const snippet = f.text.replace(/\s+/g, ' ').trim().slice(0, 200);
+    lines.push(`  > ${snippet}${snippet.length === 200 ? '…' : ''}`);
+  }
+  if (f.asset_path) {
+    lines.push(`  ![](${assetUrlPrefix}${f.asset_path})`);
+  }
+}
+
+function humaniseDuration(ms: number): string {
+  const totalMin = Math.round(ms / 60_000);
+  if (totalMin < 60) return `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }

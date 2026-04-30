@@ -23,6 +23,7 @@ import {
   type LoadedConfig,
 } from '@cofounderos/core';
 import { FrameBuilder } from './frame-builder.js';
+import { SessionBuilder } from './session-builder.js';
 import { OcrWorker } from './ocr-worker.js';
 import { EntityResolverWorker } from './entity-resolver.js';
 import { StorageVacuum } from './storage-vacuum.js';
@@ -53,6 +54,7 @@ export interface OrchestratorHandles {
   frameBuilder: FrameBuilder;
   ocrWorker: OcrWorker;
   entityResolver: EntityResolverWorker;
+  sessionBuilder: SessionBuilder;
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
 }
@@ -65,6 +67,8 @@ const OCR_WORKER_JOB = 'ocr-worker';
 const OCR_WORKER_INTERVAL_MS = 30_000;
 const ENTITY_RESOLVER_JOB = 'entity-resolver';
 const ENTITY_RESOLVER_INTERVAL_MS = 90_000;
+const SESSION_BUILDER_JOB = 'session-builder';
+const SESSION_BUILDER_INTERVAL_MS = 120_000;
 const VACUUM_JOB = 'storage-vacuum';
 
 export async function buildOrchestrator(
@@ -177,6 +181,12 @@ export async function buildOrchestrator(
     sensitiveKeywords,
   });
   const entityResolver = new EntityResolverWorker(storage, logger);
+  const sessionsCfg = config.index.sessions;
+  const sessionBuilder = new SessionBuilder(storage, logger, {
+    idleThresholdMs: sessionsCfg.idle_threshold_sec * 1000,
+    minActiveMs: sessionsCfg.min_active_ms,
+    fallbackFrameAttentionMs: sessionsCfg.fallback_frame_attention_ms,
+  });
   const vacuumCfg = config.storage.local.vacuum;
   // Resolve the effective window in ms. `*_minutes` (when set) wins
   // over `*_days` so users can dial in tight retention for testing or
@@ -210,6 +220,7 @@ export async function buildOrchestrator(
     frameBuilder,
     ocrWorker,
     entityResolver,
+    sessionBuilder,
     vacuum,
     loadGuard,
   };
@@ -226,12 +237,13 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   pagesCreated: number;
   pagesUpdated: number;
 }> {
-  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver } = handles;
+  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver, sessionBuilder } = handles;
   const log = logger.child('index-runner');
 
-  // Materialise frames + resolve entities before indexing so the strategy
-  // can read from a fully-prepared substrate. Both passes are cheap and
-  // incremental — together they cost ~20ms when there's no work.
+  // Materialise frames + resolve entities + group into sessions before
+  // indexing so the strategy can read from a fully-prepared substrate.
+  // All passes are cheap and incremental — together they cost ~20ms
+  // when there's no work.
   try {
     const fbResult = await frameBuilder.drain();
     if (fbResult.framesCreated > 0) {
@@ -241,8 +253,14 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
     if (erResult.resolved > 0) {
       log.info(`resolved ${erResult.resolved} frames to entities`);
     }
+    const sbResult = await sessionBuilder.drain();
+    if (sbResult.framesProcessed > 0) {
+      log.info(
+        `grouped ${sbResult.framesProcessed} frames into ${sbResult.sessionsCreated} new + ${sbResult.sessionsExtended} extended session(s)`,
+      );
+    }
   } catch (err) {
-    log.warn('frame/entity preparation failed (continuing)', { err: String(err) });
+    log.warn('frame/entity/session preparation failed (continuing)', { err: String(err) });
   }
 
   // Lazy-start passive exports (file mirrors, etc.) so one-off `index --once`
@@ -329,7 +347,7 @@ export async function runFullReindex(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver } = handles;
+  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver, sessionBuilder } = handles;
   const log = logger.child('full-reindex');
   log.info(`full re-index starting (strategy=${strategy.name})`);
 
@@ -349,6 +367,17 @@ export async function runFullReindex(
   // Recompute entity counts from the freshly resolved frames so any
   // resolver-rule changes take effect for all of history, not just new data.
   await storage.rebuildEntityCounts();
+  // Sessions are derived from frames + entities, so they need to be
+  // rebuilt last and from scratch. A change to idle_threshold_sec or to
+  // entity rules can change session boundaries; clearing first means
+  // the new config takes effect on every frame, not just future ones.
+  await storage.clearAllSessions();
+  const sb = await sessionBuilder.drain();
+  if (sb.framesProcessed > 0) {
+    log.info(
+      `rebuilt ${sb.sessionsCreated} session(s) from ${sb.framesProcessed} frames`,
+    );
+  }
 
   // Walk all events in chronological order, batched.
   const batchSize = config.index.batch_size;
@@ -382,7 +411,7 @@ export async function runFullReindex(
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, entityResolver, vacuum, logger, loadGuard } =
+  const { scheduler, config, frameBuilder, ocrWorker, entityResolver, sessionBuilder, vacuum, logger, loadGuard } =
     handles;
 
   // Wrap a heavy job so it skips when the machine is busy. Cheap jobs
@@ -429,6 +458,18 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       await entityResolver.tick();
     } catch (err) {
       logger.child('entity-resolver').warn('tick failed', { err: String(err) });
+    }
+  });
+  // Session builder runs slightly slower than the resolver — sessions
+  // benefit from frames that already have entity assignments, so we
+  // don't want to assign frames to sessions before entity resolution
+  // catches up. A 2-minute cadence keeps journals current to roughly
+  // the last activity-session boundary at any moment.
+  scheduler.every(SESSION_BUILDER_JOB, SESSION_BUILDER_INTERVAL_MS, async () => {
+    try {
+      await sessionBuilder.tick();
+    } catch (err) {
+      logger.child('session-builder').warn('tick failed', { err: String(err) });
     }
   });
   // Vacuum runs on a slow tick (default hourly). Each tick processes a

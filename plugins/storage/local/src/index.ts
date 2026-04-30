@@ -14,7 +14,10 @@ import type {
   FrameAssetTier,
   EntityRef,
   EntityRecord,
+  EntityKind,
   ListEntitiesQuery,
+  ActivitySession,
+  ListSessionsQuery,
   PluginFactory,
   Logger,
 } from '@cofounderos/interfaces';
@@ -637,6 +640,123 @@ class LocalStorage implements IStorage {
   }
 
   // -------------------------------------------------------------------------
+  // Activity sessions
+  // -------------------------------------------------------------------------
+
+  async upsertSession(session: ActivitySession): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO sessions
+          (id, started_at, ended_at, day, duration_ms, active_ms,
+           frame_count, primary_entity_path, primary_entity_kind,
+           primary_app, entities_json)
+         VALUES
+          (@id, @started_at, @ended_at, @day, @duration_ms, @active_ms,
+           @frame_count, @primary_entity_path, @primary_entity_kind,
+           @primary_app, @entities_json)
+         ON CONFLICT(id) DO UPDATE SET
+           ended_at = excluded.ended_at,
+           duration_ms = excluded.duration_ms,
+           active_ms = excluded.active_ms,
+           frame_count = excluded.frame_count,
+           primary_entity_path = excluded.primary_entity_path,
+           primary_entity_kind = excluded.primary_entity_kind,
+           primary_app = excluded.primary_app,
+           entities_json = excluded.entities_json`,
+      )
+      .run({
+        id: session.id,
+        started_at: session.started_at,
+        ended_at: session.ended_at,
+        day: session.day,
+        duration_ms: session.duration_ms,
+        active_ms: session.active_ms,
+        frame_count: session.frame_count,
+        primary_entity_path: session.primary_entity_path,
+        primary_entity_kind: session.primary_entity_kind,
+        primary_app: session.primary_app,
+        entities_json: JSON.stringify(session.entities),
+      });
+  }
+
+  async getSession(id: string): Promise<ActivitySession | null> {
+    const row = this.db
+      .prepare(`SELECT * FROM sessions WHERE id = ?`)
+      .get(id) as RawSessionRow | undefined;
+    return row ? rowToSession(row) : null;
+  }
+
+  async listSessions(query: ListSessionsQuery = {}): Promise<ActivitySession[]> {
+    const where: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.day) {
+      where.push('day = @day');
+      params.day = query.day;
+    }
+    if (query.from) {
+      where.push('started_at >= @from');
+      params.from = query.from;
+    }
+    if (query.to) {
+      where.push('started_at <= @to');
+      params.to = query.to;
+    }
+    const order = query.order === 'chronological' ? 'ASC' : 'DESC';
+    const limit = query.limit ?? 200;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE ${where.join(' AND ')}
+         ORDER BY started_at ${order}
+         LIMIT @limit`,
+      )
+      .all({ ...params, limit }) as RawSessionRow[];
+    return rows.map(rowToSession);
+  }
+
+  async listFramesNeedingSessionAssignment(limit: number): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames
+         WHERE activity_session_id IS NULL
+         ORDER BY timestamp ASC
+         LIMIT ?`,
+      )
+      .all(limit) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async assignFramesToSession(frameIds: string[], sessionId: string): Promise<void> {
+    if (frameIds.length === 0) return;
+    const stmt = this.db.prepare(
+      `UPDATE frames SET activity_session_id = ? WHERE id = ?`,
+    );
+    const tx = this.db.transaction((ids: string[]) => {
+      for (const id of ids) stmt.run(sessionId, id);
+    });
+    tx(frameIds);
+  }
+
+  async getSessionFrames(sessionId: string): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames
+         WHERE activity_session_id = ?
+         ORDER BY timestamp ASC`,
+      )
+      .all(sessionId) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async clearAllSessions(): Promise<void> {
+    const tx = this.db.transaction(() => {
+      this.db.exec(`UPDATE frames SET activity_session_id = NULL`);
+      this.db.exec(`DELETE FROM sessions`);
+    });
+    tx();
+  }
+
+  // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
@@ -746,6 +866,26 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
       CREATE INDEX IF NOT EXISTS idx_entities_last_seen ON entities(last_seen DESC);
+
+      -- Activity sessions: continuous user-focus runs derived from frames,
+      -- bounded by idle gaps. Distinct from frames.session_id (capture
+      -- session) — that field tracks process lifetime; this one tracks
+      -- user attention. Rebuilt from scratch on --full-reindex.
+      CREATE TABLE IF NOT EXISTS sessions (
+        id                  TEXT PRIMARY KEY,
+        started_at          TEXT NOT NULL,
+        ended_at            TEXT NOT NULL,
+        day                 TEXT NOT NULL,
+        duration_ms         INTEGER NOT NULL,
+        active_ms           INTEGER NOT NULL,
+        frame_count         INTEGER NOT NULL,
+        primary_entity_path TEXT,
+        primary_entity_kind TEXT,
+        primary_app         TEXT,
+        entities_json       TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE INDEX IF NOT EXISTS idx_sessions_day ON sessions(day);
+      CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
     `);
 
     // Migrate older databases that predate the framed_at column. Must
@@ -756,13 +896,20 @@ class LocalStorage implements IStorage {
     // Vacuum retention tier — null means "original" so existing rows
     // are correctly classified without a backfill UPDATE.
     this.maybeAddColumn('frames', 'vacuum_tier', 'TEXT');
+    // Activity-session FK on frames. Null on existing rows; the
+    // SessionBuilder backfills incrementally on its next tick.
+    this.maybeAddColumn('frames', 'activity_session_id', 'TEXT');
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_events_framed ON events(framed_at) WHERE framed_at IS NULL;
        CREATE INDEX IF NOT EXISTS idx_frames_entity ON frames(entity_path);
        CREATE INDEX IF NOT EXISTS idx_frames_pending_entity
          ON frames(timestamp DESC) WHERE entity_path IS NULL;
        CREATE INDEX IF NOT EXISTS idx_frames_vacuum
-         ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;`,
+         ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;
+       CREATE INDEX IF NOT EXISTS idx_frames_activity_session
+         ON frames(activity_session_id);
+       CREATE INDEX IF NOT EXISTS idx_frames_pending_session
+         ON frames(timestamp ASC) WHERE activity_session_id IS NULL;`,
     );
   }
 
@@ -856,6 +1003,7 @@ interface RawFrameRow {
   duration_ms: number | null;
   entity_path: string | null;
   entity_kind: string | null;
+  activity_session_id: string | null;
   source_event_ids: string;
 }
 
@@ -884,6 +1032,7 @@ function rowToFrame(r: RawFrameRow): Frame {
     duration_ms: r.duration_ms,
     entity_path: r.entity_path,
     entity_kind: (r.entity_kind as Frame['entity_kind']) ?? null,
+    activity_session_id: r.activity_session_id,
     source_event_ids: sourceEventIds,
   };
 }
@@ -907,6 +1056,45 @@ function rowToEntity(r: RawEntityRow): EntityRecord {
     lastSeen: r.last_seen,
     totalFocusedMs: r.total_focused_ms ?? 0,
     frameCount: r.frame_count ?? 0,
+  };
+}
+
+interface RawSessionRow {
+  id: string;
+  started_at: string;
+  ended_at: string;
+  day: string;
+  duration_ms: number;
+  active_ms: number;
+  frame_count: number;
+  primary_entity_path: string | null;
+  primary_entity_kind: string | null;
+  primary_app: string | null;
+  entities_json: string;
+}
+
+function rowToSession(r: RawSessionRow): ActivitySession {
+  let entities: string[] = [];
+  try {
+    const parsed = JSON.parse(r.entities_json) as unknown;
+    if (Array.isArray(parsed)) {
+      entities = parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    // Tolerate corrupt rows — better an empty list than a crash on read.
+  }
+  return {
+    id: r.id,
+    started_at: r.started_at,
+    ended_at: r.ended_at,
+    day: r.day,
+    duration_ms: r.duration_ms,
+    active_ms: r.active_ms,
+    frame_count: r.frame_count,
+    primary_entity_path: r.primary_entity_path,
+    primary_entity_kind: r.primary_entity_kind as EntityKind | null,
+    primary_app: r.primary_app,
+    entities,
   };
 }
 

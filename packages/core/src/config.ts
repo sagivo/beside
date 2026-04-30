@@ -156,6 +156,23 @@ const IndexSchema = z.object({
   reorganise_on_idle: z.boolean().default(true),
   idle_trigger_min: z.number().int().positive().default(10),
   batch_size: z.number().int().positive().default(50),
+  // Activity sessions (V2). The SessionBuilder groups frames into
+  // continuous focus runs separated by idle gaps. Tightening
+  // `idle_threshold_sec` produces more, shorter sessions; loosening it
+  // merges nearby work into longer ones. `afk_threshold_sec` only
+  // affects journal rendering — gaps below it stay implicit, gaps
+  // above it surface as visible "idle" markers between sessions.
+  sessions: z.object({
+    idle_threshold_sec: z.number().int().positive().default(300),
+    afk_threshold_sec: z.number().int().positive().default(120),
+    min_active_ms: z.number().int().nonnegative().default(30_000),
+    fallback_frame_attention_ms: z.number().int().positive().default(5_000),
+  }).default({
+    idle_threshold_sec: 300,
+    afk_threshold_sec: 120,
+    min_active_ms: 30_000,
+    fallback_frame_attention_ms: 5_000,
+  }),
   model: z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({
@@ -343,6 +360,15 @@ index:
   reorganise_on_idle: true
   idle_trigger_min: 10
   batch_size: 50
+  # Activity sessions (V2). Frames separated by a gap larger than
+  # idle_threshold_sec start a new session. afk_threshold_sec is the
+  # journal-only cosmetic threshold for showing "idle for N min"
+  # markers between sessions. min_active_ms drops trivially short
+  # sessions from the primary list.
+  sessions:
+    idle_threshold_sec: 300
+    afk_threshold_sec: 120
+    min_active_ms: 30000
   model:
     plugin: ollama
     ollama:

@@ -109,7 +109,25 @@ class MarkdownExport implements IExport {
       this.services.dataDir,
     );
     const prefix = relToData ? `${relToData.replace(/\\/g, '/')}/` : '';
-    const md = renderJournalMarkdown(day, frames, prefix);
+    // Sessions overlapping this day enrich the journal with proper
+    // headers and AFK gap markers. We tolerate the storage method being
+    // unavailable (e.g. for adapters that don't materialise sessions yet)
+    // — without it the renderer falls back to the legacy app-grouped
+    // output cleanly.
+    let sessions: Awaited<ReturnType<typeof this.services.storage.listSessions>> = [];
+    try {
+      sessions = await this.services.storage.listSessions({
+        day,
+        order: 'chronological',
+        limit: 500,
+      });
+    } catch {
+      sessions = [];
+    }
+    const md = renderJournalMarkdown(day, frames, {
+      assetUrlPrefix: prefix,
+      sessions,
+    });
     await fs.writeFile(target, md, 'utf8');
     this.journalsRendered.add(day);
   }

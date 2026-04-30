@@ -270,6 +270,7 @@ function buildFrame(
     duration_ms: null,
     entity_path: null,
     entity_kind: null,
+    activity_session_id: null,
     source_event_ids: sourceEventIds,
   };
 }
@@ -298,6 +299,7 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     duration_ms: null,
     entity_path: null,
     entity_kind: null,
+    activity_session_id: null,
     source_event_ids: group.map((e) => e.id),
   };
 }

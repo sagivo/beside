@@ -18,3 +18,13 @@ export function newSessionId(now: Date = new Date()): string {
   const uuid = uuidv4().slice(0, 8);
   return `sess_${ts}_${uuid}`;
 }
+
+/**
+ * Activity session id (V2). Distinct prefix from `sess_` (capture
+ * session) so the two are visually unambiguous in DB rows + logs.
+ */
+export function newActivitySessionId(now: Date = new Date()): string {
+  const ts = now.getTime().toString(36).padStart(9, '0');
+  const uuid = uuidv4().slice(0, 8);
+  return `act_${ts}_${uuid}`;
+}

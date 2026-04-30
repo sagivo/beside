@@ -190,6 +190,13 @@ This does an initial build, then in parallel:
 - Runs the CLI's `start` command via `tsx watch`, which restarts the process
   whenever any imported source or rebuilt `dist/` file changes.
 
+It also schedules a **full re-index 60 seconds after the dev process becomes
+stable** — i.e. once you stop editing files for a minute. Each file edit
+restarts `tsx` and cancels the pending timer, so the re-index only fires
+when you've stopped iterating. A marker file in the data dir suppresses
+re-runs for 24 h after a successful dev re-index, so an idle `pnpm dev`
+doesn't re-index repeatedly.
+
 For plugin sources under `plugins/<layer>/<name>/src/`, rerun
 `pnpm build:plugins` after edits. (Plugins are loaded from their `dist/`
 output at runtime, not the workspace's TS watcher graph, so they need an
@@ -242,13 +249,15 @@ search as first-class tools — agents don't need to read files directly.
 | Tool | What it does |
 |------|--------------|
 | `search_memory` | Default entrypoint. Blended search across frames + wiki pages. |
-| `search_frames` | FTS5 search over OCR text, window titles, and URLs. |
+| `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
-| `get_journal` | All frames captured on a given day, as a markdown timeline. |
+| `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
+| `list_sessions` | Recent activity sessions (continuous focus runs) with primary entity, app, and active time. |
+| `get_activity_session` | Drill into one activity session by id; returns metadata + frame timeline. |
 | `get_page` | Read a wiki page by relative path. |
 | `get_index` | Read the wiki root `index.md`. |
 | `query_raw_events` | Raw event log query (bypasses the index). |
-| `get_session` | Reconstruct events + screenshot paths over a time range. |
+| `get_session` | Reconstruct events + screenshot paths over a time range (raw-event time slice). |
 | `trigger_reindex` | Queue an incremental or full re-index. |
 
 ### Two transports

@@ -684,7 +684,65 @@ async function cmdStart(logger: ReturnType<typeof createLogger>, args: ParsedArg
     { mcp: url },
   );
 
+  scheduleDevFullReindex(handles, logger);
+
   await waitForShutdown(handles);
+}
+
+/**
+ * In dev mode (`pnpm dev`, which sets COFOUNDEROS_DEV=1 and runs under
+ * `tsx watch`), kick off a full re-index ~1 minute after start so the
+ * index reflects the latest code/strategy changes. The 1-minute delay is
+ * a debounce: tsx restarts the process on every file edit, which cancels
+ * the pending timer, so the re-index only fires after the dev session
+ * has been stable for a minute.
+ *
+ * A marker file (last successful dev re-index timestamp) prevents this
+ * from running on every restart once it has succeeded recently — without
+ * it, simply leaving `pnpm dev` running and idle would trigger a heavy
+ * full re-index every minute.
+ */
+function scheduleDevFullReindex(
+  handles: OrchestratorHandles,
+  logger: ReturnType<typeof createLogger>,
+): void {
+  if (process.env.COFOUNDEROS_DEV !== '1') return;
+
+  const log = logger.child('dev-reindex');
+  const markerPath = path.join(handles.loaded.dataDir, '.dev-reindex-marker');
+  const cooldownMs = 24 * 60 * 60 * 1000;
+  const delayMs = 60_000;
+
+  void (async () => {
+    try {
+      const stat = await fsp.stat(markerPath);
+      const age = Date.now() - stat.mtimeMs;
+      if (age < cooldownMs) {
+        log.debug(
+          `skipping — last dev re-index was ${Math.round(age / 60_000)}m ago (cooldown ${Math.round(cooldownMs / 60_000)}m)`,
+        );
+        return;
+      }
+    } catch {
+      // No marker yet — fall through and schedule.
+    }
+
+    log.info(`dev mode detected — scheduling full re-index in ${delayMs / 1000}s (debounced across file edits)`);
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await runFullReindex(handles);
+          await fsp.writeFile(markerPath, new Date().toISOString());
+          log.info('dev full re-index complete');
+        } catch (err) {
+          log.warn('dev full re-index failed', { err: String(err) });
+        }
+      })();
+    }, delayMs);
+    // Don't keep the event loop alive just for this — Ctrl+C should still
+    // shut down promptly even before the delay elapses.
+    timer.unref();
+  })();
 }
 
 async function cmdCaptureOnce(

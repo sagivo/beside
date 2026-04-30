@@ -179,7 +179,17 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
     },
     async ({ day }) => {
       const frames = await services.storage.getJournal(day);
-      const md = renderJournalMarkdown(day, frames);
+      let sessions: Awaited<ReturnType<typeof services.storage.listSessions>> = [];
+      try {
+        sessions = await services.storage.listSessions({
+          day,
+          order: 'chronological',
+          limit: 500,
+        });
+      } catch {
+        sessions = [];
+      }
+      const md = renderJournalMarkdown(day, frames, { sessions });
       return {
         content: [{ type: 'text', text: md }],
       };
@@ -252,9 +262,101 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
   );
 
   server.registerTool(
+    'list_sessions',
+    {
+      description:
+        'List recent activity sessions — continuous focus runs separated by idle gaps. Each session reports its time range, primary entity, primary app, frame count, and active duration. Best entrypoint for "what was I working on this morning / this week" queries.',
+      inputSchema: {
+        day: z
+          .string()
+          .optional()
+          .describe('Restrict to a single YYYY-MM-DD. Omit for cross-day results.'),
+        from: z
+          .string()
+          .optional()
+          .describe('Sessions starting on or after this ISO timestamp.'),
+        to: z
+          .string()
+          .optional()
+          .describe('Sessions starting on or before this ISO timestamp.'),
+        limit: z.number().int().positive().optional().describe('Max sessions to return. Default 50.'),
+        order: z
+          .enum(['recent', 'chronological'])
+          .optional()
+          .describe('"recent" (default) returns newest first; "chronological" oldest first.'),
+      },
+    },
+    async ({ day, from, to, limit, order }) => {
+      try {
+        const sessions = await services.storage.listSessions({
+          day,
+          from,
+          to,
+          limit: limit ?? 50,
+          order,
+        });
+        const summaries = sessions.map((s) => ({
+          id: s.id,
+          started_at: s.started_at,
+          ended_at: s.ended_at,
+          day: s.day,
+          duration_min: Math.round(s.duration_ms / 60_000),
+          active_min: Math.round(s.active_ms / 60_000),
+          frames: s.frame_count,
+          primary_entity: s.primary_entity_path,
+          primary_entity_kind: s.primary_entity_kind,
+          primary_app: s.primary_app,
+          entities: s.entities,
+        }));
+        return {
+          content: [{ type: 'text', text: JSON.stringify(summaries, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Activity sessions not yet available (${String(err)}). Try trigger_reindex first.`,
+            },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_activity_session',
+    {
+      description:
+        'Fetch a single activity session by id, including every frame it contains as a markdown timeline. Pair with `list_sessions` to drill into a specific focus block.',
+      inputSchema: {
+        id: z.string().describe('Activity session id (starts with "act_").'),
+      },
+    },
+    async ({ id }) => {
+      const session = await services.storage.getSession(id);
+      if (!session) {
+        return {
+          content: [{ type: 'text', text: `Session ${id} not found.` }],
+        };
+      }
+      const frames = await services.storage.getSessionFrames(id);
+      const md = renderJournalMarkdown(session.day, frames, {
+        sessions: [session],
+      });
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(session, null, 2) },
+          { type: 'text', text: md },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     'get_session',
     {
-      description: 'Reconstruct a contiguous session as the ordered list of raw events plus screenshot asset paths. Prefer `get_frame_context` for moment-anchored timeline queries; this tool is kept for time-range queries against raw events.',
+      description: 'Reconstruct a contiguous time range as the ordered list of raw events plus screenshot asset paths. For *activity sessions* (what the user was focused on, with primary entity etc.) use `list_sessions` / `get_activity_session` instead. This tool is kept for time-range queries against raw events.',
       inputSchema: {
         from: z.string().describe('ISO timestamp start.'),
         to: z.string().describe('ISO timestamp end.'),
