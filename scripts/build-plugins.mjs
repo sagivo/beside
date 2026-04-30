@@ -23,6 +23,11 @@ const root = path.resolve(here, '..');
 const LAYERS = ['capture', 'storage', 'model', 'index', 'export'];
 const ROOTS = ['plugins'];
 
+// On Windows, executables installed by package managers are usually
+// `.cmd` shims (e.g. `pnpm.cmd`). Node's `spawn` without `shell: true`
+// won't resolve those, so we have to invoke them through the OS shell.
+const NEEDS_SHELL = process.platform === 'win32';
+
 async function findPlugins() {
   const out = [];
   for (const r of ROOTS) {
@@ -76,6 +81,7 @@ async function compilePlugin(pluginDir) {
     const tsc = spawn('pnpm', ['exec', 'tsc', '-p', tmpConfig], {
       cwd: root,
       stdio: 'inherit',
+      shell: NEEDS_SHELL,
     });
     tsc.on('exit', (code) => {
       if (code === 0) resolve();
@@ -97,8 +103,13 @@ async function compilePlugin(pluginDir) {
   // — code that can't (or shouldn't) be compiled by tsc. The script is
   // expected to be best-effort: it must exit 0 if its toolchain is
   // missing on the host, so cross-platform installs aren't blocked.
+  //
+  // We only invoke it on POSIX hosts (`bash` is not on PATH in vanilla
+  // Windows shells). All current native helpers are macOS-only and the
+  // script body itself short-circuits on non-Darwin, so skipping the
+  // spawn entirely on Windows costs us nothing.
   const nativeScript = path.join(pluginDir, 'scripts/build-native.sh');
-  if (existsSync(nativeScript)) {
+  if (existsSync(nativeScript) && process.platform !== 'win32') {
     await new Promise((resolve, reject) => {
       const sh = spawn('bash', [nativeScript], {
         cwd: pluginDir,
@@ -107,6 +118,12 @@ async function compilePlugin(pluginDir) {
       sh.on('exit', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`native build script failed for ${pluginDir} (exit ${code})`));
+      });
+      sh.on('error', (err) => {
+        // `bash` may be missing on minimal Linux environments too.
+        // Treat that as "no native helper to build" rather than fatal.
+        if (err && err.code === 'ENOENT') resolve();
+        else reject(err);
       });
     });
   }

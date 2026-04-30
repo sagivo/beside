@@ -21,6 +21,25 @@ packages — see [Repository layout](#repository-layout) below.
 
 ---
 
+## Platform support
+
+CofounderOS targets all three desktop OSes from the same TypeScript codebase.
+The host (config, plugin loader, scheduler, MCP server, indexer) is
+platform-neutral; only the **capture layer** has OS-specific affordances.
+
+| Platform | Status | Capture coverage | Notes |
+|---|---|---|---|
+| **macOS** (12+) | ✅ Fully supported | Per-display `screencapture -D`, `active-win`, AX text via the Swift helper, browser URLs via osascript. | Reference platform. Grant **Screen Recording** + **Accessibility** + **Automation** to your terminal/editor on first run. |
+| **Linux (X11)** | ✅ Supported | `screenshot-desktop` + `active-win`. No AX text — OCR fills in. No per-display ordinal addressing. | Install `libxss-dev libx11-dev libxext-dev libxtst-dev` for the native deps to build cleanly. |
+| **Linux (Wayland)** | ⚠️ Partial | `active-win` and `screenshot-desktop` are limited or non-functional under Wayland. | Run an X11 session for now, or use `--offline` and the MCP server only. PipeWire portal capture is on the roadmap. |
+| **Windows** (10 1809+ / 11) | ✅ Supported | `screenshot-desktop` (Desktop Duplication) + `active-win`. No AX text. Ollama auto-install via `winget`. | If a native module lacks a prebuild on your Node version, install **Visual Studio Build Tools (Desktop development with C++)** and Python 3 so `node-gyp` can compile. |
+
+Anything not in the matrix above (e.g. arbitrary Linux DEs on Wayland)
+should still install and run — capture will just degrade and log warnings
+rather than crash.
+
+---
+
 ## Quickstart
 
 ```bash
@@ -112,10 +131,17 @@ index:
 ```
 
 If bootstrap fails for any reason (no network, install script failure,
-unsupported platform like Windows where there's no shell installer),
-CofounderOS falls back to the offline deterministic indexer **automatically**
-and prints clear next-step instructions — the rest of the pipeline keeps
-running.
+no `winget`/`bash` available), CofounderOS falls back to the offline
+deterministic indexer **automatically** and prints clear next-step
+instructions — the rest of the pipeline keeps running.
+
+### Per-OS bootstrap behaviour
+
+| Platform | How `init` installs Ollama |
+|----------|----------------------------|
+| **macOS** | `curl -fsSL https://ollama.com/install.sh \| sh` (drops the .app + CLI). |
+| **Linux** | Same as macOS. The installer registers a systemd unit on distros that have it. |
+| **Windows** | `winget install --id Ollama.Ollama` (built into Windows 10 1809+ / Windows 11). A UAC prompt appears in a separate dialog. If `winget` is missing, you'll see a manual hint pointing at https://ollama.com/download. |
 
 ### Swapping the model later
 

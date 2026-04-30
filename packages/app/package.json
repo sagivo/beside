@@ -8,8 +8,8 @@
     "cofounderos": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
-    "clean": "rm -rf dist *.tsbuildinfo",
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "COFOUNDEROS_DEV=1 tsx watch --clear-screen=false --exclude '**/dist/**' --conditions=development src/cli.ts start",
     "test": "echo \"(no tests)\""

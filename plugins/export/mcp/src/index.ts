@@ -47,7 +47,11 @@ class McpExport implements IExport {
 
   constructor(config: McpExportConfig, logger: Logger) {
     this.logger = logger.child('export-mcp');
-    this.host = config.host ?? 'localhost';
+    // Use 127.0.0.1 rather than 'localhost'. On modern Windows and some
+    // Linux distros 'localhost' resolves to ::1 first while many MCP
+    // clients dial 127.0.0.1, producing spurious "connection refused".
+    // Pinning to v4 keeps the loopback story identical across platforms.
+    this.host = config.host ?? '127.0.0.1';
     this.port = config.port ?? 3456;
     this.transport = config.transport ?? 'http';
   }

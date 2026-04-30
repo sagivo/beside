@@ -10,6 +10,7 @@ import { Ollama } from 'ollama';
 import {
   commandExists,
   installOllamaUnixLike,
+  installOllamaWindows,
   isOllamaReachable,
   manualInstallHint,
   startOllamaDaemon,
@@ -24,7 +25,10 @@ interface OllamaModelConfig {
   auto_install?: boolean;
 }
 
-const DEFAULT_HOST = 'http://localhost:11434';
+// Ollama itself binds to 127.0.0.1 by default. Using the same literal
+// (rather than 'localhost') avoids surprises on hosts where 'localhost'
+// resolves to ::1 first while Ollama is only listening on v4.
+const DEFAULT_HOST = 'http://127.0.0.1:11434';
 const DEFAULT_MODEL = 'gemma2:2b';
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const PULL_FAMILIES_VISION_OK = ['gemma2', 'gemma3', 'gemma4', 'llava', 'llama4', 'qwen2-vl'];
@@ -162,18 +166,17 @@ class OllamaAdapter implements IModelAdapter {
 
   private async installOllama(emit: ModelBootstrapHandler): Promise<void> {
     const tool = 'ollama';
-    if (process.platform === 'win32') {
-      const reason = manualInstallHint();
-      emit({ kind: 'install_failed', tool, reason });
-      throw new Error(reason);
-    }
+    const isWindows = process.platform === 'win32';
     emit({
       kind: 'install_started',
       tool,
-      message: `Installing Ollama for the first time. You may be prompted for your password.`,
+      message: isWindows
+        ? `Installing Ollama via winget. A UAC prompt may appear in a separate window.`
+        : `Installing Ollama for the first time. You may be prompted for your password.`,
     });
     try {
-      await installOllamaUnixLike(emit);
+      if (isWindows) await installOllamaWindows(emit);
+      else await installOllamaUnixLike(emit);
     } catch (err) {
       const reason = (err as Error).message;
       emit({ kind: 'install_failed', tool, reason });

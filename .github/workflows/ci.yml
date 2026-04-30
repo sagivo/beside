@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A single in-flight run per ref keeps the cross-OS matrix from
+# stacking up on rapid pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # Linux runners need a few X11 dev headers for `active-win` and
+      # `screenshot-desktop` to compile their native bits cleanly when
+      # no prebuilt is available. Cheap to install; no-op on macOS/Win.
+      - name: Install X11 deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxss-dev libx11-dev libxext-dev libxtst-dev
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build (workspace + plugins)
+        run: pnpm build
+
+      # Cheap smoke: confirms the compiled CLI loads on this OS — i.e.
+      # all workspace packages + their `dist/` exports resolve, native
+      # addons opened by side-effect imports don't crash the process,
+      # and the shebang/entry works under `node`. Heavier orchestrator
+      # commands (`status`, `plugin list`) instantiate the capture
+      # plugin which expects a display server; they're better exercised
+      # in a follow-up integration job.
+      - name: Smoke - cli help
+        run: node packages/app/dist/cli.js help

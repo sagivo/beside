@@ -177,14 +177,14 @@ const IndexSchema = z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({
       model: z.string().default('gemma2:2b'),
-      host: z.string().default('http://localhost:11434'),
+      host: z.string().default('http://127.0.0.1:11434'),
       vision_model: z.string().optional(),
       // First-run UX: auto-install Ollama and auto-pull the model the
       // first time the agent loads. Set to false to require manual setup.
       auto_install: z.boolean().default(true),
     }).default({
       model: 'gemma2:2b',
-      host: 'http://localhost:11434',
+      host: 'http://127.0.0.1:11434',
       auto_install: true,
     }),
     claude: z.object({
@@ -198,7 +198,7 @@ const IndexSchema = z.object({
     }).optional(),
   }).default({
     plugin: 'ollama',
-    ollama: { model: 'gemma2:2b', host: 'http://localhost:11434' },
+    ollama: { model: 'gemma2:2b', host: 'http://127.0.0.1:11434' },
   }),
 }).passthrough();
 
@@ -373,7 +373,7 @@ index:
     plugin: ollama
     ollama:
       model: gemma2:2b           # swap for gemma4:e4b once your Ollama has it
-      host: http://localhost:11434
+      host: http://127.0.0.1:11434
       auto_install: true         # auto-install Ollama + pull model on first run
 
 # Cross-cutting system guards
@@ -393,7 +393,7 @@ export:
       path: ~/.cofounderOS/export/markdown
     - name: mcp
       port: 3456
-      host: localhost
+      host: 127.0.0.1
 `;
 
 export interface LoadedConfig {

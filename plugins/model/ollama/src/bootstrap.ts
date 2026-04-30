@@ -61,8 +61,8 @@ export async function installOllamaUnixLike(
 ): Promise<void> {
   if (process.platform !== 'darwin' && process.platform !== 'linux') {
     throw new Error(
-      `Auto-install of Ollama isn't supported on ${process.platform}. ` +
-        `Please install manually from ${OLLAMA_DOWNLOAD_PAGE}.`,
+      `installOllamaUnixLike called on ${process.platform}. ` +
+        `Use installOllamaWindows for win32 hosts.`,
     );
   }
 
@@ -125,9 +125,103 @@ export async function installOllamaUnixLike(
 }
 
 /**
+ * Install Ollama on Windows via winget. winget ships with Windows 10
+ * 1809+ and Windows 11 by default, so the vast majority of users have
+ * it. We invoke it via the Windows shell so the `winget.exe` /
+ * `winget.cmd` resolution Just Works regardless of how it was put on
+ * PATH.
+ *
+ * Note: this asks winget to also accept the source + package agreements
+ * non-interactively. We still inherit stdio so any UAC prompt — which
+ * winget displays in a separate dialog — surfaces to the user, and the
+ * progress lines stream through to `install_log` events.
+ *
+ * Throws if winget isn't installed or the install fails. Callers should
+ * surface `manualInstallHint()` so the user has a documented fallback.
+ */
+export async function installOllamaWindows(
+  onProgress: ModelBootstrapHandler,
+): Promise<void> {
+  if (process.platform !== 'win32') {
+    throw new Error(
+      `installOllamaWindows called on ${process.platform}. ` +
+        `Use installOllamaUnixLike on darwin/linux.`,
+    );
+  }
+
+  if (!(await commandExists('winget'))) {
+    throw new Error(
+      `winget not found on PATH. Install Ollama manually from ${OLLAMA_DOWNLOAD_PAGE}.`,
+    );
+  }
+
+  return await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      'winget',
+      [
+        'install',
+        '--id',
+        'Ollama.Ollama',
+        '--silent',
+        '--accept-source-agreements',
+        '--accept-package-agreements',
+      ],
+      {
+        // `shell: true` so Node resolves winget.cmd / winget.exe via
+        // %PATHEXT% the way the user's interactive shell would. Without
+        // it, spawning a `.cmd` shim throws ENOENT on stock Node for
+        // Windows.
+        shell: true,
+        stdio: ['inherit', 'pipe', 'pipe'],
+      },
+    );
+
+    let buf = '';
+    const flush = (segment: string, progress: boolean): void => {
+      const trimmed = segment.replace(/\s+$/u, '');
+      if (trimmed.length === 0) return;
+      onProgress({ kind: 'install_log', line: trimmed, progress });
+    };
+    const stream = (chunk: Buffer | string): void => {
+      buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      let start = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const ch = buf[i];
+        if (ch === '\n') {
+          flush(buf.slice(start, i), false);
+          start = i + 1;
+        } else if (ch === '\r') {
+          if (buf[i + 1] === '\n') continue;
+          flush(buf.slice(start, i), true);
+          start = i + 1;
+        }
+      }
+      buf = buf.slice(start);
+    };
+    child.stdout?.on('data', stream);
+    child.stderr?.on('data', stream);
+    const flushTail = (): void => {
+      if (buf.length > 0) {
+        flush(buf, false);
+        buf = '';
+      }
+    };
+    child.stdout?.on('end', flushTail);
+    child.stderr?.on('end', flushTail);
+
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`winget install exited with code ${code}`));
+    });
+  });
+}
+
+/**
  * Spawn `ollama serve` in the background, detached from this process. On
- * macOS the .app already auto-starts the daemon via launchd, so this is
- * mostly a Linux fallback for when no system service exists.
+ * macOS the .app already auto-starts the daemon via launchd, on Windows
+ * the installer registers a service, so this is mostly a Linux fallback
+ * for when no system service exists.
  *
  * The child is unrefed so this process can exit cleanly without leaving
  * the daemon hanging — but the daemon itself keeps running because its
@@ -139,6 +233,10 @@ export async function startOllamaDaemon(): Promise<void> {
       const child = spawn('ollama', ['serve'], {
         detached: true,
         stdio: 'ignore',
+        // On Windows `ollama` is `ollama.exe`, but other potential
+        // wrappers may be `.cmd`. shell:true keeps PATHEXT resolution
+        // identical to the user's shell. Harmless on POSIX.
+        shell: process.platform === 'win32',
       });
       child.on('error', (err) => reject(err));
       child.unref();
@@ -152,7 +250,10 @@ export async function startOllamaDaemon(): Promise<void> {
 /** Friendly hint about how to install when auto-install isn't available. */
 export function manualInstallHint(): string {
   if (process.platform === 'win32') {
-    return `Download Ollama for Windows from ${OLLAMA_DOWNLOAD_PAGE} and re-run.`;
+    return (
+      `Install Ollama for Windows from ${OLLAMA_DOWNLOAD_PAGE} ` +
+      `(or run: winget install --id Ollama.Ollama) and then re-run.`
+    );
   }
   return `If auto-install fails, install manually from ${OLLAMA_DOWNLOAD_PAGE}.`;
 }
