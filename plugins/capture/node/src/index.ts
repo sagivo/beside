@@ -855,16 +855,30 @@ class NodeCapture implements ICapture {
         name: string | null;
       }>;
       if (!Array.isArray(parsed) || parsed.length === 0) return null;
-      return parsed.map((s, i) => ({
-        index: i,
-        id: i, // diagnostic only — the real selector is macOrdinal
-        name: s.name ?? null,
-        rect: { left: s.x, top: s.y, width: s.w, height: s.h },
-        macOrdinal: i + 1, // `screencapture -D` is 1-based; -D 1 = main
-        lastHash: null,
-        lastApp: null,
-        lastShotAt: null,
-      }));
+      // Coordinate-space conversion. NSScreen.frame uses AppKit's
+      // bottom-left-origin, Y-up convention with the primary display's
+      // bottom-left at (0, 0). But every consumer of `rect` (active-win
+      // bounds, AppleScript `position of front window`) reports window
+      // positions in the OS' top-left-origin, Y-down convention with
+      // the primary display's top-left at (0, 0). Mixing them silently
+      // breaks hit-testing for any secondary display positioned *above*
+      // the primary (the secondary's NSScreen y is positive, but in
+      // window-coord space it's negative). Convert here once so all
+      // downstream rect math is in the same space windows live in.
+      const primaryHeight = parsed[0]?.h ?? 0;
+      return parsed.map((s, i) => {
+        const topYDown = primaryHeight - (s.y + s.h);
+        return {
+          index: i,
+          id: i, // diagnostic only — the real selector is macOrdinal
+          name: s.name ?? null,
+          rect: { left: s.x, top: topYDown, width: s.w, height: s.h },
+          macOrdinal: i + 1, // `screencapture -D` is 1-based; -D 1 = main
+          lastHash: null,
+          lastApp: null,
+          lastShotAt: null,
+        };
+      });
     } catch (err) {
       this.logger.debug('NSScreen JXA enumeration failed', { err: String(err) });
       return null;

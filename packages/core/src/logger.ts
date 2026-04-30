@@ -24,10 +24,27 @@ export interface LoggerOptions {
   plain?: boolean;
 }
 
+/**
+ * Decide whether ANSI colour codes should be emitted, honouring the
+ * `NO_COLOR` / `FORCE_COLOR` conventions. Order of precedence:
+ *   1. Explicit `opts.plain` always wins.
+ *   2. `NO_COLOR` (any non-empty value) → strip colour, regardless of TTY.
+ *   3. `FORCE_COLOR` (any non-empty value) → keep colour, regardless of TTY.
+ *      Useful for CI logs that get rendered with ANSI support.
+ *   4. Fall back to TTY detection (the historical default).
+ */
+function resolvePlain(explicit: boolean | undefined): boolean {
+  if (typeof explicit === 'boolean') return explicit;
+  const env = process.env;
+  if (env.NO_COLOR && env.NO_COLOR.length > 0) return true;
+  if (env.FORCE_COLOR && env.FORCE_COLOR.length > 0) return false;
+  return !process.stdout.isTTY;
+}
+
 export function createLogger(opts: LoggerOptions = {}): Logger {
   const level: LogLevel = opts.level ?? 'info';
   const scope = opts.scope ?? 'cofounderos';
-  const plain = opts.plain ?? !process.stdout.isTTY;
+  const plain = resolvePlain(opts.plain);
 
   const emit = (lvl: LogLevel, msg: string, rest: unknown[]): void => {
     if (LEVEL_RANK[lvl] < LEVEL_RANK[level]) return;

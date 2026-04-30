@@ -13,7 +13,16 @@ export function createBootstrapRenderer(): {
   handler: ModelBootstrapHandler;
   finalize: () => void;
 } {
-  const tty = !!process.stderr.isTTY;
+  // Honour NO_COLOR / FORCE_COLOR alongside TTY detection. NO_COLOR
+  // also implies "no in-place rewriting" — fall back to a line-per-tick
+  // log so non-interactive sinks (CI, files, Windows classic console)
+  // get a clean, ANSI-free transcript.
+  const env = process.env;
+  const tty = (() => {
+    if (env.NO_COLOR && env.NO_COLOR.length > 0) return false;
+    if (env.FORCE_COLOR && env.FORCE_COLOR.length > 0) return true;
+    return !!process.stderr.isTTY;
+  })();
   let lastWasBar = false;
   let lastWasInstallProgress = false;
 

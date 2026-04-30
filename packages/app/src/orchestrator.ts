@@ -118,20 +118,20 @@ export async function buildOrchestrator(
   }));
 
   // Capture.
-  const capture = await registry.loadCapture(config.capture.plugin, baseCtx({
-    poll_interval_ms: config.capture.poll_interval_ms,
-    screenshot_diff_threshold: config.capture.screenshot_diff_threshold,
-    idle_threshold_sec: config.capture.idle_threshold_sec,
-    screenshot_format: config.capture.screenshot_format,
-    screenshot_quality: config.capture.screenshot_quality,
-    jpeg_quality: config.capture.jpeg_quality,
-    accessibility: config.capture.accessibility,
-    excluded_apps: config.capture.excluded_apps,
-    excluded_url_patterns: config.capture.excluded_url_patterns,
-    capture_audio: config.capture.capture_audio,
-    privacy: config.capture.privacy,
-    raw_root: dataDir,
-  }));
+  // `config.capture` is a Zod `passthrough()` schema, so plugin-specific
+  // fields like `multi_screen`, `screens`, and `capture_mode` ride
+  // through on the parsed object even though they aren't part of
+  // `CaptureSchema`. We forward the *whole* capture block (minus the
+  // `plugin` selector itself) to the plugin so any current or future
+  // plugin-specific keys reach the plugin without requiring a host edit.
+  // The previous explicit allowlist silently dropped exactly these
+  // fields — symptom: users set `multi_screen: true` in config.yaml,
+  // restarted, and saw the plugin still log "capturing only display 0".
+  const captureConfig = (() => {
+    const { plugin: _ignored, ...rest } = config.capture as Record<string, unknown>;
+    return { ...rest, raw_root: dataDir };
+  })();
+  const capture = await registry.loadCapture(config.capture.plugin, baseCtx(captureConfig));
 
   // Exports — multiple may be active simultaneously.
   const exports: IExport[] = [];

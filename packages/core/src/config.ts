@@ -406,8 +406,17 @@ export interface LoadedConfig {
 
 /**
  * Load and validate config.yaml. If `path` is omitted, looks at
- * $COFOUNDEROS_CONFIG, then ~/.cofounderOS/config.yaml. If no file exists,
+ * $COFOUNDEROS_CONFIG, then ~/.cofounderOS/config.yaml (or
+ * $COFOUNDEROS_DATA_DIR/config.yaml when set). If no file exists,
  * returns the schema defaults.
+ *
+ * When $COFOUNDEROS_DATA_DIR is set and the loaded config still uses
+ * the stock '~/.cofounderOS' tree (i.e. user hasn't customised paths),
+ * we re-root every default-shaped path under the env value. That makes
+ * the env var a real "redirect everything" knob — useful for sandboxed
+ * tests, multi-tenant setups, and per-OS install conventions
+ * (e.g. pointing at $XDG_DATA_HOME/cofounderos on Linux or
+ * %APPDATA%/cofounderos on Windows).
  */
 export async function loadConfig(configPath?: string): Promise<LoadedConfig> {
   const resolved = await resolveConfigPath(configPath);
@@ -428,8 +437,46 @@ export async function loadConfig(configPath?: string): Promise<LoadedConfig> {
   }
 
   const config = ConfigSchema.parse(raw);
+  rerootStockPaths(config);
   const dataDir = expandPath(config.app.data_dir);
   return { config, dataDir, sourcePath };
+}
+
+/**
+ * If $COFOUNDEROS_DATA_DIR is set, rewrite any path on the parsed
+ * config that still equals the stock `~/.cofounderOS` default to the
+ * env value. Touches only paths the user hasn't customised — anything
+ * the YAML explicitly overrides is left alone.
+ */
+function rerootStockPaths(config: CofounderOSConfig): void {
+  const envRoot = process.env.COFOUNDEROS_DATA_DIR;
+  if (!envRoot || envRoot.trim().length === 0) return;
+  const STOCK = '~/.cofounderOS';
+
+  const swap = (val: string): string => {
+    if (val === STOCK) return envRoot;
+    if (val.startsWith(`${STOCK}/`)) return `${envRoot}/${val.slice(STOCK.length + 1)}`;
+    return val;
+  };
+
+  config.app.data_dir = swap(config.app.data_dir);
+  // Storage / index defaults follow the same convention.
+  const storageBlock = (config.storage as unknown as Record<string, Record<string, unknown>>)[
+    config.storage.plugin
+  ];
+  if (storageBlock && typeof storageBlock.path === 'string') {
+    storageBlock.path = swap(storageBlock.path);
+  }
+  if (typeof config.index.index_path === 'string') {
+    config.index.index_path = swap(config.index.index_path);
+  }
+  // Export plugins each get their own free-form config; rewrite any
+  // string field that looks like a stock-rooted path.
+  for (const plugin of config.export.plugins) {
+    for (const [k, v] of Object.entries(plugin)) {
+      if (typeof v === 'string') (plugin as Record<string, unknown>)[k] = swap(v);
+    }
+  }
 }
 
 async function resolveConfigPath(explicit?: string): Promise<string> {

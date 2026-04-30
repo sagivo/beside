@@ -53,9 +53,29 @@ jobs:
       # Cheap smoke: confirms the compiled CLI loads on this OS — i.e.
       # all workspace packages + their `dist/` exports resolve, native
       # addons opened by side-effect imports don't crash the process,
-      # and the shebang/entry works under `node`. Heavier orchestrator
-      # commands (`status`, `plugin list`) instantiate the capture
-      # plugin which expects a display server; they're better exercised
-      # in a follow-up integration job.
+      # and the shebang/entry works under `node`.
       - name: Smoke - cli help
         run: node packages/app/dist/cli.js help
+
+      # Plugin discovery + per-layer instantiation. Constructors only —
+      # nothing is started, so capture doesn't actually probe displays.
+      # We point COFOUNDEROS_DATA_DIR at the runner workspace so the
+      # SQLite db / index / export paths land in a sandbox we can blow
+      # away with the runner, and we set NO_COLOR so the captured logs
+      # don't include ANSI escapes.
+      - name: Smoke - cli plugin list
+        env:
+          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          NO_COLOR: '1'
+        run: node packages/app/dist/cli.js plugin list
+
+      # Status exercises every plugin's getStatus / getStats. Skipped on
+      # Windows runners until we add a fixture mode for the capture
+      # plugin (active-win + screenshot-desktop probe in ways that don't
+      # always cope with hosted runners).
+      - name: Smoke - cli status (POSIX only)
+        if: runner.os != 'Windows'
+        env:
+          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          NO_COLOR: '1'
+        run: node packages/app/dist/cli.js status

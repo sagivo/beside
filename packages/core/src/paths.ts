@@ -10,8 +10,15 @@ export function expandPath(p: string): string {
   return path.resolve(p);
 }
 
-/** Default data directory. */
+/**
+ * Default data directory. Honours $COFOUNDEROS_DATA_DIR so users (and
+ * CI / tests / power-users on every OS) can redirect persistent state
+ * without editing config.yaml. Falls back to $HOME/.cofounderOS, which
+ * resolves correctly on macOS, Linux, and Windows via os.homedir().
+ */
 export function defaultDataDir(): string {
+  const fromEnv = process.env.COFOUNDEROS_DATA_DIR;
+  if (fromEnv && fromEnv.trim().length > 0) return expandPath(fromEnv);
   return path.join(os.homedir(), '.cofounderOS');
 }
 

@@ -38,6 +38,16 @@ Anything not in the matrix above (e.g. arbitrary Linux DEs on Wayland)
 should still install and run — capture will just degrade and log warnings
 rather than crash.
 
+### Environment variables
+
+| Variable | What it does |
+|----------|--------------|
+| `COFOUNDEROS_CONFIG` | Path to the YAML config file. Overrides the `~/.cofounderOS/config.yaml` lookup. |
+| `COFOUNDEROS_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/cofounderos` on Linux or `%APPDATA%\cofounderos` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
+| `COFOUNDEROS_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
+| `NO_COLOR` | Disable ANSI colour output (logs + status). |
+| `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY (CI logs that render ANSI). |
+
 ---
 
 ## Quickstart
@@ -293,8 +303,8 @@ and can also be invoked over **stdio** for clients that spawn the server as
 a subprocess.
 
 ```bash
-# HTTP — already running as part of `cofounderos start` on http://localhost:3456
-curl http://localhost:3456/health
+# HTTP — already running as part of `cofounderos start` on http://127.0.0.1:3456
+curl http://127.0.0.1:3456/health
 
 # stdio — for clients that prefer to manage the process lifecycle
 pnpm cli mcp --stdio
@@ -302,8 +312,15 @@ pnpm cli mcp --stdio
 
 ### Claude Code / Claude Desktop
 
-Add CofounderOS to your Claude config (`~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, or via `claude mcp add` for Claude Code):
+Edit your Claude Desktop config — the file lives at:
+
+| OS | Path |
+|----|------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+Or, for Claude Code, run `claude mcp add` from any shell.
 
 **HTTP (recommended — uses the already-running daemon):**
 
@@ -311,7 +328,7 @@ on macOS, or via `claude mcp add` for Claude Code):
 {
   "mcpServers": {
     "cofounderos": {
-      "url": "http://localhost:3456"
+      "url": "http://127.0.0.1:3456"
     }
   }
 }
@@ -320,7 +337,7 @@ on macOS, or via `claude mcp add` for Claude Code):
 Or with the Claude Code CLI:
 
 ```bash
-claude mcp add --transport http cofounderos http://localhost:3456
+claude mcp add --transport http cofounderos http://127.0.0.1:3456
 ```
 
 **stdio (Claude spawns the server itself):**
@@ -338,13 +355,14 @@ claude mcp add --transport http cofounderos http://localhost:3456
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json` (or the workspace `.cursor/mcp.json`):
+Add to `~/.cursor/mcp.json` (or the workspace `.cursor/mcp.json`).
+On Windows, the equivalent path is `%USERPROFILE%\.cursor\mcp.json`.
 
 ```json
 {
   "mcpServers": {
     "cofounderos": {
-      "url": "http://localhost:3456"
+      "url": "http://127.0.0.1:3456"
     }
   }
 }
@@ -358,7 +376,7 @@ Once configured, ask the agent something like:
 
 The agent should call `get_journal` or `search_memory` and stream back a
 synthesised answer grounded in your captured frames. If a tool call fails,
-check `pnpm cli status` — the MCP `url` row should show `http://localhost:3456`.
+check `pnpm cli status` — the MCP `url` row should show `http://127.0.0.1:3456`.
 
 ### Changing the port / host
 
@@ -397,7 +415,7 @@ cofounderos/
     │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
     └── export/
         ├── markdown/           Default export — mirror to ~/.cofounderOS/export/markdown.
-        └── mcp/                Built-in MCP server on localhost:3456.
+        └── mcp/                Built-in MCP server on 127.0.0.1:3456.
 ```
 
 ### Adding a plugin

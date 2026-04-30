@@ -540,7 +540,14 @@ function formatLast7Days(byDay: Record<string, number>): string {
 
 type ColorName = 'cyan' | 'green' | 'yellow' | 'red' | 'blue' | 'magenta';
 
-const COLORS_ENABLED = !!process.stdout.isTTY && !process.env.NO_COLOR;
+// NO_COLOR (https://no-color.org) wins outright. Otherwise FORCE_COLOR
+// can opt back in for non-TTY contexts (CI logs that render ANSI). Last
+// resort: standard TTY detection. Matches the rules in core/logger.ts.
+const COLORS_ENABLED = ((): boolean => {
+  if (process.env.NO_COLOR && process.env.NO_COLOR.length > 0) return false;
+  if (process.env.FORCE_COLOR && process.env.FORCE_COLOR.length > 0) return true;
+  return !!process.stdout.isTTY;
+})();
 const ANSI: Record<string, string> = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
