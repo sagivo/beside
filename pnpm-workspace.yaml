@@ -1,9 +1,8 @@
 packages:
-  # Real workspace packages — interfaces, core, app. Everything else is
-  # a drop-in plugin folder (packages/<layer>/<plugin>/ or
-  # plugins/<layer>/<plugin>/) discovered at runtime via plugin.json,
-  # compiled at build time by scripts/build-plugins.mjs. No package.json
-  # needed in plugin folders.
+  # The 3 npm workspace packages. Plugins are NOT listed here — they live
+  # under `plugins/<layer>/<name>/`, are discovered at runtime via
+  # plugin.json, and are compiled at build time by
+  # scripts/build-plugins.mjs. No package.json needed in plugin folders.
   - "packages/interfaces"
   - "packages/core"
   - "packages/app"

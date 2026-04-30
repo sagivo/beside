@@ -59,11 +59,14 @@ export async function discoverPlugins(workspaceRoot: string, logger: Logger): Pr
 }
 
 /**
- * Two-level walk over `packages/` and `plugins/`. The convention:
- *   packages/<plugin>/                       — core packages (interfaces, core, app)
- *   packages/<layer>/<plugin>/               — built-in layer plugins
- *   plugins/<layer>/<plugin>/                — community / third-party plugins
+ * Walk the `plugins/` tree (built-in + third-party plugins live here):
+ *   plugins/<layer>/<plugin>/                — drop-in plugin folder
  *   plugins/<plugin>/                        — flat layout still supported
+ *
+ * Workspace packages under `packages/` (interfaces, core, app) are NOT
+ * plugins and are intentionally excluded — they're the host. We also
+ * still scan `node_modules/@cofounderos/*` so npm-installed plugins
+ * shipped as packages keep working.
  *
  * A directory is treated as a candidate if it contains either a
  * `plugin.json` (real plugin) OR a `package.json` (might be a layer
@@ -79,7 +82,7 @@ async function collectCandidatePackageDirs(root: string): Promise<string[]> {
     dirs.push(full);
   };
 
-  for (const sub of ['packages', 'plugins']) {
+  for (const sub of ['plugins']) {
     const d = path.join(root, sub);
     let entries: import('node:fs').Dirent[];
     try {

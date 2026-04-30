@@ -7,15 +7,17 @@ computer, and continuously organises that data into a living, self-reorganising
 knowledge base. It is the persistent memory layer your AI agents have been
 missing.
 
-The system has four pluggable layers:
+The system has five pluggable layers:
 
 1. **Capture** — records raw inputs (screenshots, window focus, URL changes, idle).
 2. **Storage** — persists raw data locally as JSONL + SQLite (immutable).
-3. **Index** — an LLM parses raw data into a structured, self-reorganising wiki.
-4. **Export** — surfaces indexed knowledge to humans and AI agents (Markdown, MCP).
+3. **Model** — the LLM adapter used by the index layer (Ollama, OpenAI, …).
+4. **Index** — turns raw data into a structured, self-reorganising wiki.
+5. **Export** — surfaces indexed knowledge to humans and AI agents (Markdown, MCP).
 
 Every layer is a defined interface; defaults ship out of the box; everything is
-swappable via `config.yaml`.
+swappable via `config.yaml`. Plugins are **drop-in folders**, not workspace
+packages — see [Repository layout](#repository-layout) below.
 
 ---
 
@@ -142,14 +144,16 @@ pnpm dev
 
 This does an initial build, then in parallel:
 
-- Watches every workspace package with `tsc --watch` — any change to a
-  `packages/**/src/**/*.ts` file triggers an incremental recompile of that
-  package's `dist/`.
+- Watches the 3 workspace packages (`interfaces`, `core`, `app`) with
+  `tsc --watch` — any change to a `packages/**/src/**/*.ts` file triggers
+  an incremental recompile of that package's `dist/`.
 - Runs the CLI's `start` command via `tsx watch`, which restarts the process
   whenever any imported source or rebuilt `dist/` file changes.
 
-So you edit anything in the monorepo, save, and the running pipeline
-restarts automatically. No manual rebuilds.
+For plugin sources under `plugins/<layer>/<name>/src/`, rerun
+`pnpm build:plugins` after edits. (Plugins are loaded from their `dist/`
+output at runtime, not the workspace's TS watcher graph, so they need an
+explicit rebuild.)
 
 For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 
@@ -269,39 +273,59 @@ export:
 
 ## Repository layout
 
-One folder per layer. Inside each layer folder, one folder per plugin.
+`packages/` holds the **host** (3 npm workspace packages). `plugins/` holds
+the **drop-in plugin folders** — both built-in and third-party — one folder
+per layer, one folder per plugin underneath.
 
 ```
 cofounderos/
-├── packages/
+├── packages/                   The host. 3 npm workspace packages.
 │   ├── interfaces/             Shared types: ICapture, IStorage, IModelAdapter,
 │   │                           IIndexStrategy, IExport, RawEvent schema.
 │   ├── core/                   Config loader, plugin loader, event bus, scheduler.
-│   ├── app/                    CLI orchestrator (cofounderos ...).
-│   ├── capture/
-│   │   └── node/               Default capture: event-driven Node recorder.
-│   ├── storage/
-│   │   └── local/              Default storage: ~/.cofounderOS/raw + SQLite.
-│   ├── model/
-│   │   └── ollama/             Default model adapter (Ollama / Gemma).
-│   ├── index/
-│   │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
-│   └── export/
-│       ├── markdown/           Default export — mirror to ~/.cofounderOS/export/markdown.
-│       └── mcp/                Built-in MCP server on localhost:3456.
-└── plugins/                    Optional / community plugins (same layered shape).
+│   └── app/                    CLI orchestrator (cofounderos ...).
+└── plugins/                    Drop-in plugins. No package.json needed.
     ├── capture/
+    │   └── node/               Default capture: event-driven Node recorder.
     ├── storage/
+    │   └── local/              Default storage: ~/.cofounderOS/raw + SQLite.
     ├── model/
+    │   └── ollama/             Default model adapter (Ollama / Gemma).
     ├── index/
+    │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
     └── export/
+        ├── markdown/           Default export — mirror to ~/.cofounderOS/export/markdown.
+        └── mcp/                Built-in MCP server on localhost:3456.
 ```
 
-Each plugin folder contains `plugin.json`, `package.json`, `src/`, and is
-loaded at runtime by the core plugin loader. The core never imports any
-plugin directly — discovery happens via `pnpm-workspace.yaml` globs and
-`plugin.json` manifests, so adding a new plugin is just dropping a new
-folder under the right layer.
+### Adding a plugin
+
+A plugin is a folder with two things:
+
+```
+plugins/<layer>/<name>/
+├── plugin.json     manifest (layer, interface, entrypoint, name, version, config_schema)
+└── src/
+    └── index.ts    exports `default` a PluginFactory<T> for the layer's interface
+```
+
+That's it — no `package.json`, no `tsconfig.json`, no `pnpm-workspace.yaml`
+edit, no `pnpm install`. Then:
+
+```bash
+pnpm build:plugins      # compiles every plugins/<layer>/<name>/src to its dist/
+pnpm cli plugin list    # confirms discovery
+```
+
+The host never imports any plugin by name. Discovery walks `plugins/` at
+runtime, validates `plugin.json` against `@cofounderos/interfaces`, and
+dynamically imports the entrypoint. To activate a plugin, reference it by
+manifest `name` from `config.yaml` (e.g. `storage.plugin: local`).
+
+Runtime dependencies common to plugins (`sharp`, `better-sqlite3`,
+`active-win`, `ollama`, `@modelcontextprotocol/sdk`, `zod`, …) are hoisted
+into the workspace root, so plugin source files resolve them via Node's
+upward `node_modules` walk without each plugin declaring its own deps.
 
 ---
 
@@ -312,7 +336,7 @@ explicit substitutions for tractability:
 
 | Spec component        | Status in this repo |
 |-----------------------|---------------------|
-| Rust capture agent    | Replaced by `packages/capture-node` (TypeScript). Same `ICapture` interface, so the Rust agent is a drop-in replacement once built. |
+| Rust capture agent    | Replaced by `plugins/capture/node/` (TypeScript). Same `ICapture` interface, so the Rust agent is a drop-in replacement once built. |
 | Electron tray + UI    | Deferred. CLI exposes the full surface (`cofounderos start/stop/status/...`). Electron is a thin wrapper to be added later. |
 | Audio transcription   | Capture layer surfaces the event types and config knobs; transcription itself is V2. |
 | Cloud storage / models| `IStorage` and `IModelAdapter` are stable; concrete cloud plugins live under `plugins/` and are not part of MVP. |

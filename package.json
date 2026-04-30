@@ -11,9 +11,9 @@
   "scripts": {
     "build": "pnpm -r --filter \"@cofounderos/*\" run build && node scripts/build-plugins.mjs",
     "build:plugins": "node scripts/build-plugins.mjs",
-    "clean": "pnpm -r --filter \"@cofounderos/*\" run clean && rm -rf node_modules packages/*/*/dist packages/*/*/.tsbuildinfo plugins/*/*/dist",
+    "clean": "pnpm -r --filter \"@cofounderos/*\" run clean && rm -rf node_modules plugins/*/*/dist plugins/*/*/.tsbuildinfo",
     "typecheck": "pnpm -r --filter \"@cofounderos/*\" run typecheck",
-    "dev": "pnpm build && concurrently -n libs,app -c blue,green \"pnpm -r --parallel --filter \\\"@cofounderos/*\\\" --filter \\\"!@cofounderos/app\\\" run dev\" \"pnpm --filter @cofounderos/app run dev\"",
+    "dev": "pnpm build && pnpm --filter @cofounderos/app run dev",
     "cli": "node packages/app/dist/cli.js",
     "index:run": "pnpm cli index --once",
     "index:reorg": "pnpm cli index --reorganise",

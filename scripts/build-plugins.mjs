@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Compile every drop-in plugin folder under `packages/<layer>/<plugin>/`
- * and `plugins/<layer>/<plugin>/`. A plugin folder needs only:
+ * Compile every drop-in plugin folder under `plugins/<layer>/<plugin>/`.
+ * A plugin folder needs only:
  *
  *   plugin.json           manifest (layer, interface, entrypoint, ...)
  *   src/<entry>.ts        source files
@@ -21,7 +21,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 
 const LAYERS = ['capture', 'storage', 'model', 'index', 'export'];
-const ROOTS = ['packages', 'plugins'];
+const ROOTS = ['plugins'];
 
 async function findPlugins() {
   const out = [];

@@ -791,13 +791,41 @@ function formatRecord(r: Record<string, number>): string {
 
 async function waitForShutdown(handles: OrchestratorHandles): Promise<void> {
   await new Promise<void>((resolve) => {
+    let shuttingDown = false;
     const onSignal = (sig: string) => {
+      if (shuttingDown) {
+        // Second signal: bail out immediately so a stuck shutdown can't
+        // leave the process holding onto sockets (e.g. port 3456 under
+        // tsx watch).
+        handles.logger.warn(`received ${sig} during shutdown, forcing exit`);
+        process.exit(1);
+      }
+      shuttingDown = true;
       handles.logger.info(`received ${sig}, shutting down…`);
-      void stopAll(handles).then(() => resolve());
+      // Hard ceiling: if stopAll hangs (open keep-alive sockets, slow
+      // plugin teardown), don't let the process hold listening sockets
+      // forever. tsx watch in particular sends SIGTERM and immediately
+      // respawns — any leak here turns into EADDRINUSE on restart.
+      const forceExitMs = 3000;
+      const forceTimer = setTimeout(() => {
+        handles.logger.warn(`shutdown still pending after ${forceExitMs}ms, forcing exit`);
+        process.exit(1);
+      }, forceExitMs);
+      forceTimer.unref();
+      void stopAll(handles)
+        .catch((err) => handles.logger.error('stopAll failed', { err: String(err) }))
+        .finally(() => {
+          clearTimeout(forceTimer);
+          resolve();
+        });
     };
     process.once('SIGINT', () => onSignal('SIGINT'));
     process.once('SIGTERM', () => onSignal('SIGTERM'));
   });
+  // Ensure the process actually exits even if some plugin left a timer
+  // or socket dangling — `cofounderos start` is a foreground command and
+  // returning from main() is the explicit signal that we're done.
+  process.exit(0);
 }
 
 main().catch((err) => {

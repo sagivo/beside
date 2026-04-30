@@ -44,8 +44,20 @@ export interface OcrWorkerResult {
 // satisfies it without forcing us to import tesseract.js at type-check time.
 type TesseractWorker = {
   recognize(image: string | Buffer): Promise<{ data: { text: string } }>;
+  setParameters(params: Record<string, string>): Promise<unknown>;
   terminate(): Promise<unknown>;
 };
+
+/**
+ * Maximum width (in px) we feed to Tesseract. Retina captures come in at
+ * 3024px wide on a 14" MBP — way more pixels than Tesseract needs to read
+ * UI text, and the extra resolution actively hurts: hairline dividers and
+ * 1-2px UI artifacts survive page segmentation as degenerate "line"
+ * candidates and trigger Leptonica's `Image too small to scale!!` warnings.
+ * Downscaling to ~logical resolution (1512px) eliminates those artifacts
+ * and roughly halves OCR runtime with negligible recall loss.
+ */
+const OCR_MAX_WIDTH = 1600;
 
 export class OcrWorker {
   private readonly logger: Logger;
@@ -103,7 +115,8 @@ export class OcrWorker {
           await this.storage.setFrameText(task.id, '', 'ocr');
           continue;
         }
-        const result = await worker.recognize(abs);
+        const input = await prepareForOcr(abs);
+        const result = await worker.recognize(input);
         const raw = (result.data.text ?? '').trim();
         const cleaned = redactPii(raw, this.sensitiveKeywords);
         await this.storage.setFrameText(task.id, cleaned, 'ocr');
@@ -166,6 +179,24 @@ export class OcrWorker {
           // Quiet down tesseract.js — its default logger spams every page.
           logger: () => undefined,
         });
+        // PSM 11 = sparse text. Screenshots of UIs aren't paragraphs, they
+        // are scattered labels, buttons, menus. PSM 11 produces far fewer
+        // degenerate single-column "line" candidates than the default PSM 3,
+        // which both improves recall on UI text and silences most of
+        // Leptonica's "Image too small to scale!!" warnings.
+        //
+        // `debug_file` redirects Tesseract/Leptonica's native stderr chatter
+        // (which the JS `logger` callback above cannot intercept) to /dev/null.
+        try {
+          await worker.setParameters({
+            tessedit_pageseg_mode: '11',
+            debug_file: '/dev/null',
+          });
+        } catch (err) {
+          this.logger.debug('setParameters failed (continuing with defaults)', {
+            err: String(err),
+          });
+        }
         return worker;
       } catch (err) {
         this.logger.warn('failed to initialise tesseract.js', { err: String(err) });
@@ -173,6 +204,38 @@ export class OcrWorker {
       }
     })();
     return this.workerPromise;
+  }
+}
+
+/**
+ * Downscale Retina-resolution screenshots before feeding them to Tesseract.
+ *
+ * macOS captures come in at native pixel density (e.g. 3024×1964 on a 14"
+ * MBP) — that's 2× the logical resolution the UI was designed at. The
+ * extra detail doesn't help OCR (text is heavily oversampled) but it
+ * *does* hurt: hairline dividers, 1-2px window borders, scrollbars, and
+ * focus rings survive page segmentation as 2-pixel-wide "line" candidates
+ * and produce a flood of `Image too small to scale!!` warnings from
+ * Leptonica. Downscaling collapses those artifacts to sub-pixel and
+ * roughly halves recognition time. Falls back to the raw file path on
+ * failure so a sharp glitch never blocks OCR.
+ */
+async function prepareForOcr(absPath: string): Promise<string | Buffer> {
+  try {
+    // Lazy import to keep `sharp` out of the cold-start path. The encode
+    // happens once per frame and is dwarfed by tesseract's recognize().
+    const sharp = (await import('sharp')).default;
+    const img = sharp(absPath, { failOn: 'none' });
+    const meta = await img.metadata();
+    if (!meta.width || meta.width <= OCR_MAX_WIDTH) {
+      return absPath;
+    }
+    return await img
+      .resize({ width: OCR_MAX_WIDTH, withoutEnlargement: true })
+      .png({ compressionLevel: 1 })
+      .toBuffer();
+  } catch {
+    return absPath;
   }
 }
 

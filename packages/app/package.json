@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx watch --clear-screen=false src/cli.ts start",
+    "dev": "tsx watch --clear-screen=false --exclude '**/dist/**' --conditions=development src/cli.ts start",
     "test": "echo \"(no tests)\""
   },
   "dependencies": {
