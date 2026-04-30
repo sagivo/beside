@@ -1,0 +1,32 @@
+{
+  "name": "@cofounderos/app",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "cofounderos": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/cli.ts start",
+    "test": "echo \"(no tests)\""
+  },
+  "dependencies": {
+    "@cofounderos/interfaces": "workspace:*",
+    "@cofounderos/core": "workspace:*",
+    "@cofounderos/storage-local": "workspace:*",
+    "@cofounderos/capture-node": "workspace:*",
+    "@cofounderos/model-ollama": "workspace:*",
+    "@cofounderos/index-karpathy": "workspace:*",
+    "@cofounderos/export-markdown": "workspace:*",
+    "@cofounderos/export-mcp": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,17 @@
+packages:
+  # Core packages — not layer-bound.
+  - "packages/interfaces"
+  - "packages/core"
+  - "packages/app"
+  # One folder per layer, one folder per plugin underneath.
+  - "packages/capture/*"
+  - "packages/storage/*"
+  - "packages/model/*"
+  - "packages/index/*"
+  - "packages/export/*"
+  # Optional / community plugins follow the same shape.
+  - "plugins/capture/*"
+  - "plugins/storage/*"
+  - "plugins/model/*"
+  - "plugins/index/*"
+  - "plugins/export/*"

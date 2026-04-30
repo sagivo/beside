@@ -1,0 +1,19 @@
+{
+  "name": "node",
+  "version": "0.2.0",
+  "layer": "capture",
+  "interface": "ICapture",
+  "entrypoint": "dist/index.js",
+  "description": "Default Node-based capture: event-driven screenshots, window focus/blur, URL change, idle detection. Drop-in replaceable by the future Rust capture agent — same ICapture interface.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "poll_interval_ms": { "type": "integer" },
+      "screenshot_diff_threshold": { "type": "number" },
+      "idle_threshold_sec": { "type": "integer" },
+      "jpeg_quality": { "type": "integer" },
+      "excluded_apps": { "type": "array", "items": { "type": "string" } },
+      "excluded_url_patterns": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}

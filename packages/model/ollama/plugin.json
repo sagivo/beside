@@ -1,0 +1,16 @@
+{
+  "name": "ollama",
+  "version": "0.2.0",
+  "layer": "model",
+  "interface": "IModelAdapter",
+  "entrypoint": "dist/index.js",
+  "description": "Default LLM adapter via Ollama (gemma2:2b / gemma4:e4b). Falls back to a deterministic offline indexer if Ollama is unreachable so the pipeline still produces output.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "model": { "type": "string" },
+      "host": { "type": "string" },
+      "vision_model": { "type": "string" }
+    }
+  }
+}

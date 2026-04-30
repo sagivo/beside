@@ -1,0 +1,14 @@
+{
+  "name": "markdown",
+  "version": "0.2.0",
+  "layer": "export",
+  "interface": "IExport",
+  "entrypoint": "dist/index.js",
+  "description": "Default export — mirrors indexed wiki pages to a stable, human/agent-readable .md tree (default ~/.cofounderOS/export/markdown). Always on.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" }
+    }
+  }
+}

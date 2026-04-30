@@ -1,0 +1,16 @@
+{
+  "name": "local",
+  "version": "0.2.0",
+  "layer": "storage",
+  "interface": "IStorage",
+  "entrypoint": "dist/index.js",
+  "description": "Default storage: append-only JSONL + SQLite metadata index under ~/.cofounderOS/raw.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string" },
+      "max_size_gb": { "type": "number" },
+      "retention_days": { "type": "integer" }
+    }
+  }
+}

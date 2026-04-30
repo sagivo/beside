@@ -1,0 +1,32 @@
+{
+  "name": "@cofounderos/capture-node",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"(no tests)\""
+  },
+  "dependencies": {
+    "@cofounderos/interfaces": "workspace:*",
+    "@cofounderos/core": "workspace:*",
+    "active-win": "^9.0.0",
+    "screenshot-desktop": "^1.15.4",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "@types/screenshot-desktop": "^1.12.3",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,125 @@
+import type {
+  IExport,
+  ExportStatus,
+  IndexPage,
+  IndexState,
+  IIndexStrategy,
+  ReorganisationSummary,
+  PluginFactory,
+  Logger,
+} from '@cofounderos/interfaces';
+import {
+  createMcpServer,
+  startHttpServer,
+  startStdioServer,
+  type McpServices,
+  type RunningHttpServer,
+} from './server.js';
+
+interface McpExportConfig {
+  host?: string;
+  port?: number;
+  transport?: 'http' | 'stdio';
+}
+
+/**
+ * MCP server exposed as a CofounderOS export plugin. The plugin is
+ * lifecycle-only: page updates do NOT push anything (MCP clients pull
+ * on demand). What we expose here is a stable HTTP endpoint plus the
+ * `bindServices` setter used by the app orchestrator to connect storage
+ * + index strategy.
+ */
+class McpExport implements IExport {
+  readonly name = 'mcp';
+
+  private readonly logger: Logger;
+  private readonly host: string;
+  private readonly port: number;
+  private readonly transport: 'http' | 'stdio';
+
+  private services: McpServices | null = null;
+  private httpServer: RunningHttpServer | null = null;
+  private stdioHandle: { close(): Promise<void> } | null = null;
+
+  private running = false;
+  private lastSync: string | null = null;
+
+  constructor(config: McpExportConfig, logger: Logger) {
+    this.logger = logger.child('export-mcp');
+    this.host = config.host ?? 'localhost';
+    this.port = config.port ?? 3456;
+    this.transport = config.transport ?? 'http';
+  }
+
+  /**
+   * Called by the orchestrator after instantiation, before start(), to
+   * inject the storage + strategy + reindex hook. Calling start() before
+   * bindServices() throws.
+   */
+  bindServices(services: McpServices): void {
+    this.services = services;
+  }
+
+  async start(): Promise<void> {
+    if (this.running) return;
+    if (!this.services) {
+      throw new Error(
+        'export-mcp: services not bound. Call bindServices() before start().',
+      );
+    }
+    const server = createMcpServer(this.services, this.logger);
+    if (this.transport === 'stdio') {
+      this.stdioHandle = await startStdioServer(server, this.logger);
+    } else {
+      this.httpServer = await startHttpServer(server, this.host, this.port, this.logger);
+    }
+    this.running = true;
+  }
+
+  async stop(): Promise<void> {
+    if (this.httpServer) {
+      await this.httpServer.close();
+      this.httpServer = null;
+    }
+    if (this.stdioHandle) {
+      await this.stdioHandle.close();
+      this.stdioHandle = null;
+    }
+    this.running = false;
+  }
+
+  async onPageUpdate(_page: IndexPage): Promise<void> {
+    this.lastSync = new Date().toISOString();
+  }
+
+  async onPageDelete(_pagePath: string): Promise<void> {
+    this.lastSync = new Date().toISOString();
+  }
+
+  async onReorganisation(_summary: ReorganisationSummary): Promise<void> {
+    this.lastSync = new Date().toISOString();
+  }
+
+  async fullSync(_state: IndexState, _strategy: IIndexStrategy): Promise<void> {
+    // No-op — MCP serves the live index on every read.
+    this.lastSync = new Date().toISOString();
+  }
+
+  getStatus(): ExportStatus {
+    return {
+      name: this.name,
+      running: this.running,
+      lastSync: this.lastSync,
+      pendingUpdates: 0,
+      errorCount: 0,
+    };
+  }
+}
+
+const factory: PluginFactory<IExport> = (ctx) => {
+  return new McpExport((ctx.config as McpExportConfig) ?? {}, ctx.logger);
+};
+
+export default factory;
+export { McpExport };
+export type { McpServices } from './server.js';

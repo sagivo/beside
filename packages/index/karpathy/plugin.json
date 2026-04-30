@@ -1,0 +1,15 @@
+{
+  "name": "karpathy",
+  "version": "0.2.0",
+  "layer": "index",
+  "interface": "IIndexStrategy",
+  "entrypoint": "dist/index.js",
+  "description": "Default index strategy: hierarchical markdown wiki (Karpathy LLM-wiki pattern). Self-reorganising — merges thin pages, splits broad ones, builds summary-of-summaries, archives stale.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "index_path": { "type": "string" },
+      "batch_size": { "type": "integer" }
+    }
+  }
+}

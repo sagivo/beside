@@ -1,0 +1,16 @@
+{
+  "name": "mcp",
+  "version": "0.2.0",
+  "layer": "export",
+  "interface": "IExport",
+  "entrypoint": "dist/index.js",
+  "description": "Built-in MCP server. Exposes the indexed wiki to Claude / Cursor / Windsurf and any MCP-compatible AI agent. HTTP on localhost:3456 by default; supports stdio when launched standalone.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "host": { "type": "string" },
+      "port": { "type": "integer" },
+      "transport": { "type": "string", "enum": ["http", "stdio"] }
+    }
+  }
+}
