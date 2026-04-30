@@ -22,6 +22,8 @@ import {
 } from '@cofounderos/core';
 import { McpExport } from '@cofounderos/export-mcp';
 import { OfflineFallbackAdapter } from '@cofounderos/model-ollama';
+import { FrameBuilder } from './frame-builder.js';
+import { OcrWorker } from './ocr-worker.js';
 
 export interface OrchestratorOptions {
   configPath?: string;
@@ -45,10 +47,16 @@ export interface OrchestratorHandles {
   logger: Logger;
   loaded: LoadedConfig;
   registry: PluginRegistry;
+  frameBuilder: FrameBuilder;
+  ocrWorker: OcrWorker;
 }
 
 const INCREMENTAL_JOB = 'index-incremental';
 const REORG_JOB = 'index-reorganise';
+const FRAME_BUILDER_JOB = 'frame-builder';
+const FRAME_BUILDER_INTERVAL_MS = 60_000;
+const OCR_WORKER_JOB = 'ocr-worker';
+const OCR_WORKER_INTERVAL_MS = 30_000;
 
 export async function buildOrchestrator(
   logger: Logger,
@@ -146,6 +154,12 @@ export async function buildOrchestrator(
     }
   }
 
+  const frameBuilder = new FrameBuilder(storage, logger);
+  const ocrWorker = new OcrWorker(storage, logger, {
+    storageRoot: storage.getRoot(),
+    sensitiveKeywords: config.capture.privacy.sensitive_keywords ?? [],
+  });
+
   return {
     capture,
     storage,
@@ -158,6 +172,8 @@ export async function buildOrchestrator(
     logger,
     loaded,
     registry,
+    frameBuilder,
+    ocrWorker,
   };
 }
 
@@ -172,8 +188,19 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   pagesCreated: number;
   pagesUpdated: number;
 }> {
-  const { storage, strategy, model, exports, logger, config } = handles;
+  const { storage, strategy, model, exports, logger, config, frameBuilder } = handles;
   const log = logger.child('index-runner');
+
+  // Materialise frames before indexing so the strategy can read from them.
+  // The builder is cheap and incremental — costs ~10ms when there's no work.
+  try {
+    const fbResult = await frameBuilder.drain();
+    if (fbResult.framesCreated > 0) {
+      log.info(`built ${fbResult.framesCreated} new frames before indexing`);
+    }
+  } catch (err) {
+    log.warn('frame-builder failed (continuing with index pass)', { err: String(err) });
+  }
 
   // Lazy-start passive exports (file mirrors, etc.) so one-off `index --once`
   // / `--full-reindex` runs still propagate. Network-server exports like MCP
@@ -259,12 +286,19 @@ export async function runFullReindex(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { storage, strategy, model, exports, logger, config } = handles;
+  const { storage, strategy, model, exports, logger, config, frameBuilder } = handles;
   const log = logger.child('full-reindex');
   log.info(`full re-index starting (strategy=${strategy.name})`);
 
   await strategy.reset();
   await storage.clearIndexCheckpoint(strategy.name);
+
+  // Rebuild frames from scratch too — they're a derived table and the
+  // builder may have improved between runs (e.g. better entity rules).
+  const fb = await frameBuilder.drain();
+  if (fb.framesCreated > 0) {
+    log.info(`rebuilt ${fb.framesCreated} frames from raw events`);
+  }
 
   // Walk all events in chronological order, batched.
   const batchSize = config.index.batch_size;
@@ -298,7 +332,25 @@ export async function runFullReindex(
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config } = handles;
+  const { scheduler, config, frameBuilder, ocrWorker, logger } = handles;
+  // Frame builder runs frequently and cheaply so search results stay
+  // close to real-time even when a full index pass hasn't fired yet.
+  scheduler.every(FRAME_BUILDER_JOB, FRAME_BUILDER_INTERVAL_MS, async () => {
+    try {
+      await frameBuilder.tick();
+    } catch (err) {
+      logger.child('frame-builder').warn('tick failed', { err: String(err) });
+    }
+  });
+  // OCR worker runs slightly faster than the frame builder so a frame
+  // built at second 0 typically has searchable text by second 60-90.
+  scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, async () => {
+    try {
+      await ocrWorker.tick();
+    } catch (err) {
+      logger.child('ocr-worker').warn('tick failed', { err: String(err) });
+    }
+  });
   scheduler.every(
     INCREMENTAL_JOB,
     config.index.incremental_interval_min * 60 * 1000,
@@ -325,6 +377,7 @@ export async function stopAll(handles: OrchestratorHandles): Promise<void> {
     await exp.stop();
   }
   await handles.capture.stop();
+  await handles.ocrWorker.stop();
 }
 
 export function exportRoot(dataDir: string): string {

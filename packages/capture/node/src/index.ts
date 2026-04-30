@@ -53,6 +53,55 @@ interface ActiveWindowInfo {
 
 const SAFE_APP = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 40);
 
+/**
+ * Browser → AppleScript snippet that extracts the URL of the current tab
+ * or front document. Each snippet is hard-coded with a literal `tell
+ * application "X"` so AppleScript can resolve `URL` against that app's
+ * dictionary at parse time (otherwise `URL` is treated as a reserved
+ * word and the script fails with -2741).
+ *
+ * Firefox and its forks (LibreWolf, Floorp, Zen, Tor, Waterfox, Mullvad)
+ * are intentionally absent: the Mozilla AppleScript dictionary does not
+ * expose tab URLs. They are detected by name in `queryBrowserUrlOsascript`
+ * to emit a one-time explanatory log.
+ */
+const BROWSER_URL_SCRIPTS: Record<string, string> = {
+  // Chromium family
+  'Google Chrome':
+    'tell application "Google Chrome" to return URL of active tab of front window',
+  'Google Chrome Canary':
+    'tell application "Google Chrome Canary" to return URL of active tab of front window',
+  'Google Chrome Beta':
+    'tell application "Google Chrome Beta" to return URL of active tab of front window',
+  'Brave Browser':
+    'tell application "Brave Browser" to return URL of active tab of front window',
+  'Brave Browser Beta':
+    'tell application "Brave Browser Beta" to return URL of active tab of front window',
+  'Brave Browser Nightly':
+    'tell application "Brave Browser Nightly" to return URL of active tab of front window',
+  'Microsoft Edge':
+    'tell application "Microsoft Edge" to return URL of active tab of front window',
+  'Microsoft Edge Beta':
+    'tell application "Microsoft Edge Beta" to return URL of active tab of front window',
+  'Microsoft Edge Dev':
+    'tell application "Microsoft Edge Dev" to return URL of active tab of front window',
+  Arc: 'tell application "Arc" to return URL of active tab of front window',
+  Vivaldi: 'tell application "Vivaldi" to return URL of active tab of front window',
+  Chromium: 'tell application "Chromium" to return URL of active tab of front window',
+  Opera: 'tell application "Opera" to return URL of active tab of front window',
+  'Opera GX': 'tell application "Opera GX" to return URL of active tab of front window',
+  Sidekick: 'tell application "Sidekick" to return URL of active tab of front window',
+  // WebKit family
+  Safari: 'tell application "Safari" to return URL of front document',
+  'Safari Technology Preview':
+    'tell application "Safari Technology Preview" to return URL of front document',
+  Orion: 'tell application "Orion" to return URL of front document',
+  'Orion RC': 'tell application "Orion RC" to return URL of front document',
+};
+
+const LOOKS_LIKE_BROWSER =
+  /\b(?:browser|chrome|chromium|safari|edge|brave|firefox|mozilla|tor|opera|vivaldi|arc|orion|librewolf|floorp|zen|waterfox|mullvad)\b/i;
+
 class NodeCapture implements ICapture {
   private readonly logger: Logger;
   private readonly config: Required<Omit<CaptureNodeConfig, 'privacy'>> & {
@@ -87,6 +136,11 @@ class NodeCapture implements ICapture {
   private activeWinFailed = false;
   private osascriptFallbackNotified = false;
   private osascriptErrorNotified = false;
+  // One-time diagnostics for browser URL extraction. We don't want to spam
+  // the log on every poll, but we also don't want users wondering why
+  // `frame.url` is permanently null.
+  private readonly unsupportedBrowserNotified = new Set<string>();
+  private readonly browserPermissionDeniedNotified = new Set<string>();
 
   constructor(config: CaptureNodeConfig, logger: Logger) {
     this.logger = logger.child('capture-node');
@@ -477,32 +531,60 @@ class NodeCapture implements ICapture {
   }
 
   private async queryBrowserUrlOsascript(appName: string): Promise<string | null> {
-    // Map known browser names to the AppleScript snippet that extracts the
-    // current URL. Each snippet is hard-coded with a literal `tell
-    // application "X"` so AppleScript can resolve `URL` against that app's
-    // dictionary at parse time (otherwise `URL` is treated as a reserved
-    // word and the script fails with -2741).
-    const scripts: Record<string, string> = {
-      'Google Chrome':
-        'tell application "Google Chrome" to return URL of active tab of front window',
-      'Brave Browser':
-        'tell application "Brave Browser" to return URL of active tab of front window',
-      'Microsoft Edge':
-        'tell application "Microsoft Edge" to return URL of active tab of front window',
-      Arc: 'tell application "Arc" to return URL of active tab of front window',
-      Vivaldi: 'tell application "Vivaldi" to return URL of active tab of front window',
-      Chromium: 'tell application "Chromium" to return URL of active tab of front window',
-      Safari: 'tell application "Safari" to return URL of front document',
-      'Safari Technology Preview':
-        'tell application "Safari Technology Preview" to return URL of front document',
-    };
-    const script = scripts[appName];
-    if (!script) return null;
+    const script = BROWSER_URL_SCRIPTS[appName];
+    if (!script) {
+      // Unknown app — only warn if the name *looks* like a browser so we
+      // don't emit noise for every focused window in a normal day. Firefox
+      // and its forks land here because the Mozilla AppleScript dictionary
+      // does not expose tab URLs; users on Firefox should expect null URLs
+      // until the native capture agent ships.
+      if (
+        LOOKS_LIKE_BROWSER.test(appName) &&
+        !this.unsupportedBrowserNotified.has(appName)
+      ) {
+        this.unsupportedBrowserNotified.add(appName);
+        const isFirefoxFamily = /firefox|mozilla|tor browser|librewolf|waterfox|zen|floorp|mullvad/i.test(appName);
+        this.logger.info(
+          `URL extraction not supported for "${appName}"` +
+            (isFirefoxFamily
+              ? ' — Firefox and its forks do not expose tab URLs via AppleScript. ' +
+                'URLs for these browsers will appear once the native capture agent (V2) ships.'
+              : ' — add an entry to BROWSER_URL_SCRIPTS in capture-node to enable.'),
+        );
+      }
+      return null;
+    }
     try {
       const { stdout } = await execFileP('osascript', ['-e', script], { timeout: 1500 });
       const url = stdout.replace(/\n$/, '').trim();
       return url || null;
-    } catch {
+    } catch (err) {
+      const stderr = (err as { stderr?: string }).stderr ?? '';
+      // -1743 = "Not authorized to send Apple events to <app>". This is the
+      // most common silent failure: the user has never granted Automation
+      // permission to the terminal / Cursor / electron host running us.
+      // Surface it once with actionable instructions.
+      if (
+        stderr.includes('-1743') ||
+        stderr.includes('not allowed assistive access') ||
+        stderr.includes('Not authorized')
+      ) {
+        if (!this.browserPermissionDeniedNotified.has(appName)) {
+          this.browserPermissionDeniedNotified.add(appName);
+          this.logger.warn(
+            `Automation permission denied for "${appName}". ` +
+              `URL capture will return null until you grant access in ` +
+              `System Settings → Privacy & Security → Automation → ` +
+              `<host app> → enable "${appName}". Restart afterwards.`,
+          );
+        }
+        return null;
+      }
+      // Other errors (app not running, no front window, etc.) are noisy
+      // and self-resolving — debug-level only.
+      this.logger.debug(`URL extraction for "${appName}" failed`, {
+        err: stderr || String(err),
+      });
       return null;
     }
   }

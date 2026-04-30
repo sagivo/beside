@@ -1,0 +1,295 @@
+import type {
+  IStorage,
+  RawEvent,
+  Frame,
+  Logger,
+} from '@cofounderos/interfaces';
+import { dayKey } from '@cofounderos/core';
+
+/**
+ * FrameBuilder — turns raw events into searchable `Frame` rows.
+ *
+ * A frame is the atomic retrieval unit: one moment in time joining a
+ * screenshot (when present) with the surrounding window/url metadata.
+ * Two construction rules:
+ *
+ *   1. Every `screenshot` event becomes a frame, augmented with any
+ *      `window_focus` / `window_blur` / `url_change` from the same session
+ *      within ±400ms.
+ *
+ *   2. `window_focus` / `url_change` events that have no nearby screenshot
+ *      become a "text-only" frame — important when capture is excluded
+ *      from a window (no screenshot) but we still want to know it was
+ *      visited.
+ *
+ * Raw events are immutable; the builder marks them via `storage.markFramed`
+ * so subsequent passes are incremental. A `--full-reindex` clears those
+ * marks (handled by the orchestrator) so frames can be rebuilt at will.
+ */
+
+const FRAME_PAIR_WINDOW_MS = 400;
+/** Drop frames whose only signal is an unknown app — they're capture failures. */
+const DROP_UNKNOWN_FRAMES = true;
+/** Drop pure focus flickers shorter than this when no screenshot accompanies. */
+const MIN_TEXT_ONLY_GAP_MS = 1500;
+
+const FRAMABLE_TYPES = new Set([
+  'screenshot',
+  'window_focus',
+  'window_blur',
+  'url_change',
+]);
+
+export interface FrameBuilderResult {
+  framesCreated: number;
+  eventsProcessed: number;
+  eventsDropped: number;
+}
+
+export class FrameBuilder {
+  private readonly logger: Logger;
+
+  constructor(
+    private readonly storage: IStorage,
+    logger: Logger,
+    private readonly batchSize = 500,
+  ) {
+    this.logger = logger.child('frame-builder');
+  }
+
+  /**
+   * Run a single pass: fetch unframed events, materialise frames, mark
+   * the raw events as framed. Returns counters for observability.
+   */
+  async tick(): Promise<FrameBuilderResult> {
+    const events = await this.storage.readEvents({
+      unframed_only: true,
+      limit: this.batchSize,
+    });
+    if (events.length === 0) {
+      return { framesCreated: 0, eventsProcessed: 0, eventsDropped: 0 };
+    }
+
+    const candidates = events.filter((e) => FRAMABLE_TYPES.has(e.type));
+    const nonFramable = events.length - candidates.length;
+
+    candidates.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    const consumedEventIds = new Set<string>();
+    const frames: Frame[] = [];
+
+    // Pass 1 — anchor on screenshots, attach proximate metadata events.
+    const screenshots = candidates.filter((e) => e.type === 'screenshot');
+    for (const shot of screenshots) {
+      const shotMs = Date.parse(shot.timestamp);
+      const related = candidates.filter((e) => {
+        if (consumedEventIds.has(e.id)) return false;
+        if (e.id === shot.id) return false;
+        if (e.session_id !== shot.session_id) return false;
+        if (e.type === 'screenshot') return false;
+        const dt = Math.abs(Date.parse(e.timestamp) - shotMs);
+        return dt <= FRAME_PAIR_WINDOW_MS;
+      });
+      const frame = buildFrame(shot, related);
+      if (DROP_UNKNOWN_FRAMES && isUnknown(frame)) continue;
+      frames.push(frame);
+      consumedEventIds.add(shot.id);
+      for (const r of related) consumedEventIds.add(r.id);
+    }
+
+    // Pass 2 — orphan focus/url events become text-only frames. Group
+    // consecutive same-(app,url,title) events so a tab switch + immediate
+    // focus event don't produce two adjacent identical frames.
+    const orphans = candidates
+      .filter((e) => !consumedEventIds.has(e.id))
+      .filter((e) => e.type === 'window_focus' || e.type === 'url_change');
+
+    let group: RawEvent[] = [];
+    const flushGroup = (): void => {
+      if (group.length === 0) return;
+      const head = group[0]!;
+      const tail = group[group.length - 1]!;
+      const gap = Date.parse(tail.timestamp) - Date.parse(head.timestamp);
+      // Ignore brief, contentless flickers from rapid window switching.
+      if (group.length === 1 && gap === 0 && isUnknownEvent(head)) {
+        for (const e of group) consumedEventIds.add(e.id);
+        group = [];
+        return;
+      }
+      const frame = buildTextOnlyFrame(group);
+      if (!(DROP_UNKNOWN_FRAMES && isUnknown(frame))) {
+        // Suppress text-only frames that vanished within a flicker window.
+        if (gap >= MIN_TEXT_ONLY_GAP_MS || group.length > 1 || frame.url) {
+          frames.push(frame);
+        }
+      }
+      for (const e of group) consumedEventIds.add(e.id);
+      group = [];
+    };
+
+    for (const ev of orphans) {
+      const last = group[group.length - 1];
+      const sameTarget =
+        last &&
+        last.app === ev.app &&
+        last.window_title === ev.window_title &&
+        last.url === ev.url;
+      if (sameTarget) {
+        group.push(ev);
+      } else {
+        flushGroup();
+        group.push(ev);
+      }
+    }
+    flushGroup();
+
+    // Window_blur events provide duration; attach to the most recent frame
+    // in the same session if it doesn't already have one.
+    const blurs = candidates.filter((e) => e.type === 'window_blur');
+    for (const blur of blurs) {
+      if (consumedEventIds.has(blur.id)) continue;
+      const blurMs = Date.parse(blur.timestamp);
+      // Find the most recent frame from the same app/session before this blur.
+      let best: Frame | null = null;
+      let bestDt = Infinity;
+      for (const f of frames) {
+        if (f.session_id !== blur.session_id) continue;
+        if (f.app !== blur.app) continue;
+        const dt = blurMs - Date.parse(f.timestamp);
+        if (dt < 0 || dt > 60_000) continue;
+        if (dt < bestDt) {
+          best = f;
+          bestDt = dt;
+        }
+      }
+      if (best && best.duration_ms == null && blur.duration_ms != null) {
+        best.duration_ms = blur.duration_ms;
+        best.source_event_ids.push(blur.id);
+      }
+      consumedEventIds.add(blur.id);
+    }
+
+    // Persist.
+    for (const frame of frames) {
+      await this.storage.upsertFrame(frame);
+    }
+    // Mark every framable event we examined — including dropped ones —
+    // so we don't reconsider them on the next pass. Non-framable types
+    // (idle/app_launch/etc.) are also marked so they fall out of the
+    // unframed queue forever.
+    const allMarked = events.map((e) => e.id);
+    await this.storage.markFramed(allMarked);
+
+    const dropped = candidates.length - consumedEventIds.size;
+    if (frames.length > 0 || dropped > 0) {
+      this.logger.debug(
+        `built ${frames.length} frames from ${candidates.length} events ` +
+          `(${dropped} dropped, ${nonFramable} non-framable bypassed)`,
+      );
+    }
+    return {
+      framesCreated: frames.length,
+      eventsProcessed: events.length,
+      eventsDropped: dropped + nonFramable,
+    };
+  }
+
+  /** Drain the unframed queue. Used by `--full-reindex`. */
+  async drain(): Promise<FrameBuilderResult> {
+    const totals: FrameBuilderResult = {
+      framesCreated: 0,
+      eventsProcessed: 0,
+      eventsDropped: 0,
+    };
+    for (let i = 0; i < 10_000; i++) {
+      const r = await this.tick();
+      totals.framesCreated += r.framesCreated;
+      totals.eventsProcessed += r.eventsProcessed;
+      totals.eventsDropped += r.eventsDropped;
+      if (r.eventsProcessed === 0) break;
+      if (r.eventsProcessed < this.batchSize) break;
+    }
+    return totals;
+  }
+}
+
+function buildFrame(anchor: RawEvent, related: RawEvent[]): Frame {
+  // Prefer non-null url / window_title from related events when the
+  // screenshot itself was missing them (common: screenshot fires on
+  // perceptual content change without a fresh focus event).
+  const url = anchor.url ?? firstNonNull(related, (e) => e.url);
+  const windowTitle =
+    anchor.window_title || firstNonNull(related, (e) => e.window_title) || '';
+  const meta = (anchor.metadata ?? {}) as Record<string, unknown>;
+  const sourceEventIds = [anchor.id, ...related.map((e) => e.id)];
+  return {
+    id: `frm_${anchor.id.slice(4)}`,
+    timestamp: anchor.timestamp,
+    day: dayKey(new Date(anchor.timestamp)),
+    monitor: anchor.screen_index ?? 0,
+    app: anchor.app ?? '',
+    app_bundle_id: anchor.app_bundle_id ?? '',
+    window_title: windowTitle,
+    url,
+    text: null,
+    text_source: null,
+    asset_path: anchor.asset_path,
+    perceptual_hash: typeof meta.perceptual_hash === 'string'
+      ? (meta.perceptual_hash as string)
+      : null,
+    trigger: typeof meta.trigger === 'string' ? (meta.trigger as string) : 'screenshot',
+    session_id: anchor.session_id,
+    duration_ms: null,
+    source_event_ids: sourceEventIds,
+  };
+}
+
+function buildTextOnlyFrame(group: RawEvent[]): Frame {
+  // The first event sets the timestamp; later events fill in late-arriving
+  // url / window_title metadata.
+  const head = group[0]!;
+  const url = firstNonNull(group, (e) => e.url);
+  const windowTitle = firstNonNull(group, (e) => e.window_title) ?? '';
+  return {
+    id: `frm_${head.id.slice(4)}`,
+    timestamp: head.timestamp,
+    day: dayKey(new Date(head.timestamp)),
+    monitor: head.screen_index ?? 0,
+    app: head.app ?? '',
+    app_bundle_id: head.app_bundle_id ?? '',
+    window_title: windowTitle,
+    url,
+    text: null,
+    text_source: 'none',
+    asset_path: null,
+    perceptual_hash: null,
+    trigger: head.type === 'url_change' ? 'url' : 'focus',
+    session_id: head.session_id,
+    duration_ms: null,
+    source_event_ids: group.map((e) => e.id),
+  };
+}
+
+function firstNonNull<T, R>(arr: T[], pick: (t: T) => R | null | undefined): R | null {
+  for (const item of arr) {
+    const v = pick(item);
+    if (v != null) return v;
+  }
+  return null;
+}
+
+function isUnknown(frame: Frame): boolean {
+  return (
+    (frame.app === 'unknown' || !frame.app) &&
+    (frame.window_title === 'unknown' || !frame.window_title) &&
+    !frame.url
+  );
+}
+
+function isUnknownEvent(e: RawEvent): boolean {
+  return (
+    (e.app === 'unknown' || !e.app) &&
+    (e.window_title === 'unknown' || !e.window_title) &&
+    !e.url
+  );
+}

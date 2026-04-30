@@ -113,6 +113,56 @@ export interface StorageQuery {
   text?: string;
   /** Filter to events not yet indexed by the named strategy. */
   unindexed_for_strategy?: string;
+  /** Filter to events not yet materialised into a frame. */
+  unframed_only?: boolean;
+}
+
+/**
+ * A `Frame` is the materialised retrieval unit of CofounderOS — a single
+ * "moment" you were looking at, joining a screenshot with its window /
+ * URL metadata and (eventually) its OCR'd or accessibility-extracted text.
+ *
+ * Frames are derived from raw events by the FrameBuilder; they are the
+ * primary substrate for search, the daily journal, and the wiki indexer.
+ * Raw events remain the immutable source of truth — frames can always be
+ * rebuilt by replaying events.
+ */
+export interface Frame {
+  id: string;
+  timestamp: string;
+  day: string;
+  monitor: number;
+  app: string;
+  app_bundle_id: string;
+  window_title: string;
+  url: string | null;
+  /** OCR'd or accessibility-extracted text. Null until a worker fills it. */
+  text: string | null;
+  text_source: 'ocr' | 'accessibility' | 'none' | null;
+  asset_path: string | null;
+  perceptual_hash: string | null;
+  trigger: string | null;
+  session_id: string;
+  /** Focused duration this frame represents, if known from a paired blur. */
+  duration_ms: number | null;
+  /** Raw event ids that contributed to this frame. */
+  source_event_ids: string[];
+}
+
+export interface FrameQuery {
+  /** FTS5 query against `text`, `app`, `window_title`, `url`. */
+  text?: string;
+  from?: string;
+  to?: string;
+  apps?: string[];
+  limit?: number;
+  offset?: number;
+}
+
+/** Lightweight projection used by the OCR worker. */
+export interface FrameOcrTask {
+  id: string;
+  asset_path: string;
 }
 
 export interface StorageStats {
@@ -148,6 +198,46 @@ export interface IStorage {
 
   /** Storage root on disk (when applicable). */
   getRoot(): string;
+
+  // -------------------------------------------------------------------------
+  // Frames — derived retrieval substrate (PR 2 / PR 3 / PR 4)
+  //
+  // Implementations that don't materialise frames may throw `not_implemented`
+  // from these methods; the orchestrator gracefully degrades to event-only
+  // search in that case.
+  // -------------------------------------------------------------------------
+
+  /** Insert or replace a frame row + its FTS entry. */
+  upsertFrame(frame: Frame): Promise<void>;
+
+  /**
+   * Search frames. When `query.text` is set, ranks via FTS5 BM25.
+   * Otherwise returns frames in reverse chronological order, newest first.
+   */
+  searchFrames(query: FrameQuery): Promise<Frame[]>;
+
+  /** Get the chronological neighbourhood around a single frame. */
+  getFrameContext(
+    frameId: string,
+    before: number,
+    after: number,
+  ): Promise<{ anchor: Frame; before: Frame[]; after: Frame[] } | null>;
+
+  /** All frames captured on a given day (YYYY-MM-DD), oldest first. */
+  getJournal(day: string): Promise<Frame[]>;
+
+  /** Raw events that haven't been turned into a frame yet. */
+  listFramesNeedingOcr(limit: number): Promise<FrameOcrTask[]>;
+
+  /** Update a frame's text after OCR / a11y extraction. */
+  setFrameText(
+    frameId: string,
+    text: string,
+    source: 'ocr' | 'accessibility',
+  ): Promise<void>;
+
+  /** Mark raw events as having been folded into a frame. */
+  markFramed(eventIds: string[]): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

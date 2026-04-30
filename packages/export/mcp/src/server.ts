@@ -9,6 +9,7 @@ import type {
   IIndexStrategy,
   Logger,
   RawEventType,
+  Frame,
 } from '@cofounderos/interfaces';
 
 export interface McpServices {
@@ -43,23 +44,26 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
     'search_memory',
     {
       description:
-        'Free-text search across the indexed wiki + raw event content. Returns matching wiki pages.',
+        'Blended search: returns the best matching frames (specific moments) and wiki pages (synthesised summaries). Use this as the default entrypoint.',
       inputSchema: {
         query: z.string().describe('Natural-language search query.'),
-        limit: z.number().int().min(1).max(50).optional().describe('Max results, default 5.'),
+        limit: z.number().int().min(1).max(50).optional().describe('Max results per category, default 5.'),
       },
     },
     async ({ query, limit }) => {
       const cap = limit ?? 5;
-      // 1. Search raw events for context.
-      const events = await services.storage.readEvents({
-        text: query,
-        limit: cap * 4,
-      });
-      // 2. Pull associated pages (via bucketer-derived path is heavy — instead we
-      //    snapshot the strategy's page list and rank by content match).
-      const pages = await listAllStrategyPages(services.strategy);
       const queryLower = query.toLowerCase();
+
+      // 1. Frame-level retrieval — the "specific moment" answers.
+      let frames: Frame[] = [];
+      try {
+        frames = await services.storage.searchFrames({ text: query, limit: cap });
+      } catch (err) {
+        log.debug('searchFrames unavailable', { err: String(err) });
+      }
+
+      // 2. Wiki page retrieval — the "synthesised summary" answers.
+      const pages = await listAllStrategyPages(services.strategy);
       const ranked = pages
         .map((p) => ({ page: p, score: scorePage(p.content, queryLower) }))
         .filter((r) => r.score > 0)
@@ -68,24 +72,115 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
 
       const result = {
         query,
+        frame_matches: frames.map(framePreview),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
           excerpt: extractExcerpt(r.page.content, queryLower),
           last_updated: r.page.lastUpdated,
           source_event_count: r.page.sourceEventIds.length,
         })),
-        raw_event_matches: events.slice(0, cap).map((e) => ({
-          id: e.id,
-          timestamp: e.timestamp,
-          app: e.app,
-          window_title: e.window_title,
-          url: e.url,
-          content_excerpt: e.content ? e.content.slice(0, 200) : null,
-        })),
       };
-      log.debug(`search_memory "${query}" → ${ranked.length} pages, ${events.length} events`);
+      log.debug(
+        `search_memory "${query}" → ${frames.length} frames, ${ranked.length} pages`,
+      );
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'search_frames',
+    {
+      description:
+        'Search captured screen frames directly via FTS5 against OCR text + window title + URL. Returns specific moments with screenshot paths. Use when you need a precise "when did I see X" answer.',
+      inputSchema: {
+        query: z.string().describe('Free-text query.'),
+        from: z.string().optional().describe('ISO timestamp lower bound.'),
+        to: z.string().optional().describe('ISO timestamp upper bound.'),
+        app: z.string().optional().describe('Restrict to a single app name.'),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+    },
+    async ({ query, from, to, app, limit }) => {
+      const frames = await services.storage.searchFrames({
+        text: query,
+        from,
+        to,
+        apps: app ? [app] : undefined,
+        limit: limit ?? 25,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              { query, count: frames.length, frames: frames.map(framePreview) },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_frame_context',
+    {
+      description:
+        'Return the chronological neighbourhood around a specific frame — a "scrub the timeline" view. Use after `search_frames` to reconstruct what was happening just before / after a moment.',
+      inputSchema: {
+        frame_id: z.string().describe('Frame id from a previous search result.'),
+        before: z.number().int().min(0).max(50).optional().describe('Frames before, default 5.'),
+        after: z.number().int().min(0).max(50).optional().describe('Frames after, default 5.'),
+      },
+    },
+    async ({ frame_id, before, after }) => {
+      const ctx = await services.storage.getFrameContext(
+        frame_id,
+        before ?? 5,
+        after ?? 5,
+      );
+      if (!ctx) {
+        return {
+          content: [{ type: 'text', text: `No frame found with id "${frame_id}".` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                anchor: framePreview(ctx.anchor),
+                before: ctx.before.map(framePreview),
+                after: ctx.after.map(framePreview),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_journal',
+    {
+      description:
+        'All frames captured on a given day, oldest first, rendered as a chronological markdown timeline. Use to answer "what did I work on on date X".',
+      inputSchema: {
+        day: z.string().describe('Day in YYYY-MM-DD format.'),
+      },
+    },
+    async ({ day }) => {
+      const frames = await services.storage.getJournal(day);
+      const md = renderJournal(day, frames);
+      return {
+        content: [{ type: 'text', text: md }],
       };
     },
   );
@@ -158,7 +253,7 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
   server.registerTool(
     'get_session',
     {
-      description: 'Reconstruct a contiguous session as the ordered list of raw events plus screenshot asset paths.',
+      description: 'Reconstruct a contiguous session as the ordered list of raw events plus screenshot asset paths. Prefer `get_frame_context` for moment-anchored timeline queries; this tool is kept for time-range queries against raw events.',
       inputSchema: {
         from: z.string().describe('ISO timestamp start.'),
         to: z.string().describe('ISO timestamp end.'),
@@ -252,6 +347,60 @@ async function listAllStrategyPages(strategy: IIndexStrategy) {
   };
   await walk('.');
   return out;
+}
+
+function framePreview(frame: Frame): Record<string, unknown> {
+  return {
+    id: frame.id,
+    timestamp: frame.timestamp,
+    app: frame.app,
+    window_title: frame.window_title,
+    url: frame.url,
+    asset_path: frame.asset_path,
+    text_excerpt: frame.text ? truncate(frame.text, 240) : null,
+    text_source: frame.text_source,
+    duration_ms: frame.duration_ms,
+  };
+}
+
+function renderJournal(day: string, frames: Frame[]): string {
+  if (frames.length === 0) {
+    return `# Journal — ${day}\n\n_No frames captured on this day._\n`;
+  }
+  const lines: string[] = [];
+  lines.push(`# Journal — ${day}`);
+  lines.push('');
+  lines.push(`_${frames.length} frame(s) captured._`);
+  lines.push('');
+  let lastApp: string | null = null;
+  for (const f of frames) {
+    if (f.app !== lastApp) {
+      lines.push(`## ${f.app || '(unknown)'}`);
+      lastApp = f.app;
+    }
+    const time = f.timestamp.slice(11, 19);
+    const dur = f.duration_ms ? ` _(${Math.round(f.duration_ms / 1000)}s)_` : '';
+    const target = [
+      f.window_title ? `"${f.window_title}"` : null,
+      f.url ? `<${f.url}>` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    lines.push(`- **${time}**${dur} — ${target || '(no title)'}`);
+    if (f.text && f.text_source === 'ocr' && f.text.trim()) {
+      const snippet = truncate(f.text.replace(/\s+/g, ' ').trim(), 220);
+      lines.push(`  > ${snippet}`);
+    }
+    if (f.asset_path) {
+      lines.push(`  ![](${f.asset_path})`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
 }
 
 function scorePage(content: string, queryLower: string): number {

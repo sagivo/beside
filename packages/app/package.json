@@ -15,14 +15,15 @@
     "test": "echo \"(no tests)\""
   },
   "dependencies": {
-    "@cofounderos/interfaces": "workspace:*",
-    "@cofounderos/core": "workspace:*",
-    "@cofounderos/storage-local": "workspace:*",
     "@cofounderos/capture-node": "workspace:*",
-    "@cofounderos/model-ollama": "workspace:*",
-    "@cofounderos/index-karpathy": "workspace:*",
+    "@cofounderos/core": "workspace:*",
     "@cofounderos/export-markdown": "workspace:*",
-    "@cofounderos/export-mcp": "workspace:*"
+    "@cofounderos/export-mcp": "workspace:*",
+    "@cofounderos/index-karpathy": "workspace:*",
+    "@cofounderos/interfaces": "workspace:*",
+    "@cofounderos/model-ollama": "workspace:*",
+    "@cofounderos/storage-local": "workspace:*",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
