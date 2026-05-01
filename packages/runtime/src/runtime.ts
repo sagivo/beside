@@ -49,6 +49,7 @@ export interface RuntimeOverview {
   capture: CaptureStatus;
   storage: StorageStats;
   index: IndexState;
+  indexing: RuntimeIndexingStatus;
   model: {
     name: string;
     isLocal: boolean;
@@ -59,6 +60,13 @@ export interface RuntimeOverview {
     load: number | null;
     loadGuardEnabled: boolean;
   };
+}
+
+export interface RuntimeIndexingStatus {
+  running: boolean;
+  currentJob: string | null;
+  startedAt: string | null;
+  lastCompletedAt: string | null;
 }
 
 export interface RuntimeStats {
@@ -160,6 +168,7 @@ export class CofounderRuntime {
       const capture = handles.capture.getStatus();
       const storage = await handles.storage.getStats();
       const index = await handles.strategy.getState();
+      const indexing = getIndexingStatus(handles);
       const modelInfo = handles.model.getModelInfo();
       const ready = await handles.model.isAvailable().catch(() => false);
       const load = handles.loadGuard.snapshot().normalised;
@@ -171,6 +180,7 @@ export class CofounderRuntime {
         capture,
         storage,
         index,
+        indexing,
         model: {
           name: modelInfo.name,
           isLocal: modelInfo.isLocal,
@@ -363,6 +373,27 @@ export class CofounderRuntime {
 
 export function createRuntime(opts: RuntimeOptions = {}): CofounderRuntime {
   return new CofounderRuntime(opts);
+}
+
+function getIndexingStatus(handles: OrchestratorHandles): RuntimeIndexingStatus {
+  const jobs = handles.scheduler
+    .getJobs()
+    .filter((job) => job.name === 'index-incremental' || job.name === 'index-reorganise');
+  const runningJob = jobs.find((job) => job.running) ?? null;
+  return {
+    running: runningJob != null,
+    currentJob: runningJob?.name ?? null,
+    startedAt: runningJob?.lastStartedAt ?? null,
+    lastCompletedAt: latestIso(jobs.map((job) => job.lastCompletedAt)),
+  };
+}
+
+function latestIso(values: Array<string | null>): string | null {
+  let latest: string | null = null;
+  for (const value of values) {
+    if (value && (!latest || value > latest)) latest = value;
+  }
+  return latest;
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

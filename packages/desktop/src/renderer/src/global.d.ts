@@ -46,6 +46,7 @@ export interface RuntimeOverview {
     pageCount: number;
     eventsCovered: number;
   };
+  indexing: RuntimeIndexingStatus;
   model: {
     name: string;
     ready: boolean;
@@ -54,6 +55,13 @@ export interface RuntimeOverview {
     name: string;
     running: boolean;
   }>;
+}
+
+export interface RuntimeIndexingStatus {
+  running: boolean;
+  currentJob: string | null;
+  startedAt: string | null;
+  lastCompletedAt: string | null;
 }
 
 export interface DoctorCheck {

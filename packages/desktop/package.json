@@ -2,10 +2,15 @@
   "name": "@cofounderos/desktop",
   "version": "0.2.0",
   "private": true,
+  "description": "Desktop interface for CofounderOS local memory capture and journals.",
+  "author": "CofounderOS",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "build": "pnpm --filter @cofounderos/runtime run build && tsc -p tsconfig.json && node scripts/copy-preload.mjs && vite build && bash scripts/build-native.sh",
+    "prepare:package": "node scripts/build-icons.mjs && pnpm --dir ../.. build:plugins && node scripts/prepare-package-resources.mjs",
+    "package": "pnpm run build && pnpm run prepare:package && electron-builder --dir",
+    "dist": "pnpm run build && pnpm run prepare:package && electron-builder",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "pnpm run build && electron dist/main.js",
@@ -23,6 +28,39 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "electron": "^41.4.0",
+    "electron-builder": "^26.8.1",
     "vite": "^8.0.10"
+  },
+  "build": {
+    "appId": "com.cofounderos.desktop",
+    "productName": "CofounderOS",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/resources/cofounderos",
+        "to": "cofounderos"
+      }
+    ],
+    "mac": {
+      "target": ["dir"],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": ["dir"],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": ["dir"],
+      "icon": "build/icon.png",
+      "category": "Utility"
+    }
   }
 }

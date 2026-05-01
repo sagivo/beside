@@ -16,6 +16,8 @@
     "start": "pnpm desktop",
     "dev": "pnpm build && pnpm --filter @cofounderos/cli run dev",
     "desktop": "pnpm --filter @cofounderos/desktop run start",
+    "desktop:package": "pnpm --filter @cofounderos/desktop run package",
+    "desktop:dist": "pnpm --filter @cofounderos/desktop run dist",
     "daemon": "pnpm cli start",
     "cli": "node packages/cli/dist/cli.js",
     "index:run": "pnpm cli index --once",

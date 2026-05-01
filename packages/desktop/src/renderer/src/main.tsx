@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
-import type { ActivitySession, DoctorCheck, Frame, JournalDay, LoadedConfig, ModelBootstrapProgress, RuntimeOverview } from './global';
+import type { ActivitySession, DoctorCheck, Frame, JournalDay, LoadedConfig, ModelBootstrapProgress, RuntimeIndexingStatus, RuntimeOverview } from './global';
 
-type Screen = 'home' | 'setup' | 'journals' | 'search' | 'connections' | 'settings' | 'help';
+type Screen = 'home' | 'memories' | 'connect' | 'settings' | 'help';
+
 const THUMBNAIL_CACHE_LIMIT = 80;
 const thumbnailCache = new Map<string, string>();
 
@@ -26,43 +27,43 @@ window.addEventListener('beforeunload', () => {
 });
 
 function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n < 0) return '-';
+  if (!Number.isFinite(n) || n < 0) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let value = n;
   let i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i++;
-  }
+  while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
   return `${value >= 10 || i === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[i]}`;
 }
 
-function Pill({ children, tone }: { children: React.ReactNode; tone?: string }) {
-  return <span className={`pill ${tone ?? ''}`}>{children}</span>;
+function formatNumber(n: number): string {
+  if (!Number.isFinite(n)) return '—';
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return n.toLocaleString();
 }
 
-const NavIcons: Record<Screen, React.ReactNode> = {
-  home: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
-  setup: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
-  journals: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>,
-  search: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>,
-  connections: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
-  settings: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
-  help: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>,
+/* ===================== ICONS ===================== */
+const Icon = {
+  home: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12 12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h3v-6h6v6h3a1 1 0 0 0 1-1V10"/></svg>,
+  memories: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.5-3.5L9 20"/></svg>,
+  connect: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 7H6a4 4 0 0 0 0 8h3"/><path d="M15 7h3a4 4 0 0 1 0 8h-3"/><line x1="8" y1="11" x2="16" y2="11"/></svg>,
+  settings: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  help: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+  search: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>,
+  brain: <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>,
+  check: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>,
+  alert: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  info: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>,
+  cross: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  emptyBox: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" width="100%" height="100%"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>,
+  copy: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
+  folder: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>,
+  refresh: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>,
+  play: <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
+  pause: <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>,
+  stop: <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>,
 };
 
-function Header({ title, subtitle, children }: { title: string; subtitle: string; children?: React.ReactNode }) {
-  return (
-    <header>
-      <div>
-        <h1>{title}</h1>
-        <p>{subtitle}</p>
-      </div>
-      <div className="actions">{children}</div>
-    </header>
-  );
-}
-
+/* ===================== APP ===================== */
 function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [overview, setOverview] = useState<RuntimeOverview | null>(null);
@@ -82,28 +83,34 @@ function App() {
     });
   }, []);
 
+  useEffect(() => { void loadScreen(screen); }, [screen]);
+
   useEffect(() => {
-    void loadScreen(screen);
-  }, [screen]);
+    const intervalMs = overview?.indexing.running ? 2000 : 5000;
+    const timer = window.setInterval(() => {
+      if (!window.cofounderos) return;
+      void window.cofounderos.getOverview()
+        .then(setOverview)
+        .catch(() => undefined);
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [overview?.indexing.running]);
 
   async function loadScreen(next: Screen) {
     try {
-      if (!window.cofounderos) {
-        throw new Error('Desktop preload bridge is unavailable.');
+      if (!window.cofounderos) throw new Error('Desktop preload bridge is unavailable.');
+      if (next === 'home') {
+        setOverview(await window.cofounderos.getOverview());
+        setDoctor(await window.cofounderos.runDoctor());
       }
-      if (next === 'home') setOverview(await window.cofounderos.getOverview());
-      if (next === 'setup') setDoctor(await window.cofounderos.runDoctor());
-      if (next === 'journals') {
+      if (next === 'memories') {
         const nextDays = await window.cofounderos.listJournalDays();
         setDays(nextDays);
         const day = selectedDay ?? nextDays[nextDays.length - 1] ?? null;
         setSelectedDay(day);
         setJournal(day ? await window.cofounderos.getJournalDay(day) : null);
       }
-      if (next === 'search') {
-        setDays(await window.cofounderos.listJournalDays());
-      }
-      if (next === 'connections') {
+      if (next === 'connect') {
         setOverview(await window.cofounderos.getOverview());
         setConfig(await window.cofounderos.readConfig());
       }
@@ -120,75 +127,64 @@ function App() {
     setJournal(await window.cofounderos.getJournalDay(day));
   }
 
-  async function startRuntime() {
-    setOverview(await window.cofounderos.startRuntime());
-  }
+  const captureLive = overview?.capture.running && !overview.capture.paused;
+  const capturePaused = overview?.capture.running && overview.capture.paused;
+  const footerText = overview?.indexing.running
+    ? indexingStatusText(overview.indexing)
+    : captureLive ? 'Capturing now' : capturePaused ? 'Capture paused' : 'Not capturing';
 
-  async function stopRuntime() {
-    await window.cofounderos.stopRuntime();
-    setOverview(await window.cofounderos.getOverview().catch(() => null));
-  }
-
-  async function pauseCapture() {
-    setOverview(await window.cofounderos.pauseCapture());
-  }
-
-  async function resumeCapture() {
-    setOverview(await window.cofounderos.resumeCapture());
-  }
-
-  const nav: Array<[Screen, string]> = [
-    ['home', 'Home'],
-    ['setup', 'Setup'],
-    ['journals', 'Journals'],
-    ['search', 'Search'],
-    ['connections', 'Connections'],
-    ['settings', 'Settings'],
-    ['help', 'Help'],
+  const nav: Array<[Screen, string, React.ReactNode]> = [
+    ['home', 'Home', Icon.home],
+    ['memories', 'Memories', Icon.memories],
+    ['connect', 'Connect AI', Icon.connect],
+    ['settings', 'Settings', Icon.settings],
+    ['help', 'Help', Icon.help],
   ];
 
   return (
-    <div className="shell">
-      <nav>
+    <div className="app">
+      <aside className="sidebar">
         <div className="brand">
-          <div className="brand-logo">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <div className="brand-mark">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
           </div>
-          CofounderOS
+          <div>
+            <div className="brand-name">CofounderOS</div>
+            <div className="brand-sub">Your memory, on this device</div>
+          </div>
         </div>
-        <div className="nav-links">
-          {nav.map(([id, label]) => (
-            <button key={id} className={`nav-btn ${screen === id ? 'active' : ''}`} onClick={() => setScreen(id)}>
-              {NavIcons[id]}
-              {label}
-            </button>
-          ))}
+        {nav.map(([id, label, icon]) => (
+          <button key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => setScreen(id)}>
+            {icon}
+            <span>{label}</span>
+          </button>
+        ))}
+        <div className="sidebar-footer">
+          <span className={`dot ${overview?.indexing.running ? 'indexing' : captureLive ? 'live' : capturePaused ? 'paused' : ''}`} />
+          <span>{footerText}</span>
         </div>
-      </nav>
-      <main>
+      </aside>
+
+      <main className="main">
         {error ? (
-          <NeedsAttention error={error} />
+          <ErrorView error={error} onRetry={() => loadScreen(screen)} />
         ) : screen === 'home' ? (
           <Home
             overview={overview}
+            doctor={doctor}
+            bootstrapEvents={bootstrapEvents}
             onRefresh={() => loadScreen('home')}
-            onStart={startRuntime}
-            onStop={stopRuntime}
-            onPauseCapture={pauseCapture}
-            onResumeCapture={resumeCapture}
+            onStart={async () => setOverview(await window.cofounderos.startRuntime())}
+            onStop={async () => { await window.cofounderos.stopRuntime(); setOverview(await window.cofounderos.getOverview().catch(() => null)); }}
+            onPause={async () => setOverview(await window.cofounderos.pauseCapture())}
+            onResume={async () => setOverview(await window.cofounderos.resumeCapture())}
+            onBootstrap={async () => { setBootstrapEvents([]); await window.cofounderos.bootstrapModel(); setDoctor(await window.cofounderos.runDoctor()); }}
+            onGoMemories={() => setScreen('memories')}
           />
-        ) : screen === 'setup' ? (
-          <Setup checks={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('setup')} onBootstrap={async () => {
-            setBootstrapEvents([]);
-            await window.cofounderos.bootstrapModel();
-            setDoctor(await window.cofounderos.runDoctor());
-          }} />
-        ) : screen === 'journals' ? (
-          <Journals days={days} selectedDay={selectedDay} journal={journal} onRefresh={() => loadScreen('journals')} onChooseDay={chooseDay} />
-        ) : screen === 'search' ? (
-          <Search days={days} />
-        ) : screen === 'connections' ? (
-          <Connections overview={overview} config={config} onRefresh={() => loadScreen('connections')} />
+        ) : screen === 'memories' ? (
+          <Memories days={days} selectedDay={selectedDay} journal={journal} onChooseDay={chooseDay} onRefresh={() => loadScreen('memories')} />
+        ) : screen === 'connect' ? (
+          <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
         ) : screen === 'settings' ? (
           <Settings config={config} onSaved={setConfig} />
         ) : (
@@ -199,155 +195,165 @@ function App() {
   );
 }
 
-function NeedsAttention({ error }: { error: string }) {
+/* ===================== ERROR ===================== */
+function ErrorView({ error, onRetry }: { error: string; onRetry: () => void }) {
   return (
     <>
-      <Header title="Needs Attention" subtitle="Something went wrong." />
+      <div className="page-header">
+        <h1 className="page-title">Something went wrong</h1>
+        <p className="page-sub">Don't worry, your memory is safe. Try again or open Help.</p>
+      </div>
       <div className="card">
-        <Pill tone="fail">error</Pill>
-        <pre>{error}</pre>
+        <div className="toast error">{Icon.alert}<span>{error}</span></div>
+        <button className="btn primary" onClick={onRetry}>{Icon.refresh}Try again</button>
       </div>
     </>
   );
 }
 
+/* ===================== HOME ===================== */
 function Home({
-  overview,
-  onRefresh,
-  onStart,
-  onStop,
-  onPauseCapture,
-  onResumeCapture,
+  overview, doctor, bootstrapEvents, onRefresh, onStart, onStop, onPause, onResume, onBootstrap, onGoMemories,
 }: {
   overview: RuntimeOverview | null;
+  doctor: DoctorCheck[] | null;
+  bootstrapEvents: ModelBootstrapProgress[];
   onRefresh: () => void;
-  onStart: () => void;
-  onStop: () => void;
-  onPauseCapture: () => void;
-  onResumeCapture: () => void;
+  onStart: () => Promise<void>;
+  onStop: () => Promise<void>;
+  onPause: () => Promise<void>;
+  onResume: () => Promise<void>;
+  onBootstrap: () => Promise<void>;
+  onGoMemories: () => void;
 }) {
+  const [bootstrapping, setBootstrapping] = useState(false);
+
   if (!overview) {
     return (
       <>
-        <Header title="Home" subtitle="Checking runtime status..." />
-        <div className="empty">Loading status...</div>
+        <div className="page-header">
+          <h1 className="page-title">Hello 👋</h1>
+          <p className="page-sub">Getting things ready…</p>
+        </div>
       </>
     );
   }
+
   const running = overview.status === 'running';
+  const captureLive = overview.capture.running && !overview.capture.paused;
+  const capturePaused = overview.capture.running && overview.capture.paused;
+  const failures = doctor?.filter((c) => c.status === 'fail') ?? [];
+  const warnings = doctor?.filter((c) => c.status === 'warn') ?? [];
+  const needsModelSetup = !overview.model.ready;
+
+  let heroTitle = 'Welcome back';
+  let heroText = 'Your local memory is ready. Start capturing whenever you like.';
+  let heroIconClass = 'off';
+
+  if (captureLive) {
+    heroTitle = "I'm remembering for you";
+    heroText = `${formatNumber(overview.capture.eventsToday)} moments captured today. Everything stays on this device.`;
+    heroIconClass = '';
+  } else if (capturePaused) {
+    heroTitle = 'Capture is paused';
+    heroText = 'Resume whenever you want to start remembering again.';
+  } else if (running) {
+    heroTitle = 'Almost ready';
+    heroText = 'Press Start to begin capturing your work.';
+  }
+
   return (
     <>
-      <Header title="Home" subtitle="Your local memory system at a glance.">
-        <button className="btn primary" onClick={onStart}>{running ? 'Restart runtime' : 'Start runtime'}</button>
-        {running ? <button className="btn" onClick={onStop}>Stop runtime</button> : null}
-        {running && overview.capture.running ? (
-          overview.capture.paused
-            ? <button className="btn" onClick={onResumeCapture}>Resume capture</button>
-            : <button className="btn" onClick={onPauseCapture}>Pause capture</button>
-        ) : null}
-        <button className="btn" onClick={onRefresh}>Refresh</button>
-      </Header>
-      <div className="grid">
-        <Stat title="Memory Capture" value={overview.capture.running ? overview.capture.paused ? 'Paused' : 'Running' : 'Stopped'} detail={`${overview.capture.eventsToday} events today`} />
-        <Stat title="Local AI Model" value={overview.model.ready ? 'Ready' : 'Needs setup'} detail={overview.model.name} />
-        <Stat title="Storage" value={formatBytes(overview.storage.totalAssetBytes)} detail={`${overview.storage.totalEvents.toLocaleString()} events saved`} />
+      <div className="page-header">
+        <h1 className="page-title">Home</h1>
+        <p className="page-sub">A simple view of your second brain.</p>
       </div>
-      <h2>Memory Organization</h2>
-      <div className="grid two">
-        <Stat title="Index Pages" value={overview.index.pageCount.toLocaleString()} detail={`${overview.index.eventsCovered.toLocaleString()} events covered`} />
-        <div className="card">
-          <h3>Exports</h3>
-          <div className="list">
-            {overview.exports.map((exp) => (
-              <div className="row" key={exp.name}>
-                <div>{exp.name}</div>
-                <Pill tone={exp.running ? 'ok' : undefined}>{exp.running ? 'running' : 'stopped'}</Pill>
+
+      <div className="hero">
+        <div className={`hero-icon ${heroIconClass}`}>{Icon.brain}</div>
+        <div>
+          <h2 className="hero-title">{heroTitle}</h2>
+          <p className="hero-text">{heroText}</p>
+        </div>
+        <div className="hero-actions">
+          {!running && <button className="btn accent lg" onClick={() => void onStart()}>{Icon.play}Start</button>}
+          {running && captureLive && <button className="btn lg" onClick={() => void onPause()}>{Icon.pause}Pause</button>}
+          {running && capturePaused && <button className="btn accent lg" onClick={() => void onResume()}>{Icon.play}Resume</button>}
+          {running && <button className="btn ghost" onClick={() => void onStop()}>{Icon.stop}Stop</button>}
+        </div>
+      </div>
+
+      {overview.indexing.running && (
+        <div className="toast indexing">
+          <span className="spinner" />
+          <span>{indexingStatusText(overview.indexing)}</span>
+        </div>
+      )}
+
+      {needsModelSetup && (
+        <div className="card" style={{ borderColor: 'var(--warn)', background: 'var(--warn-soft)', marginBottom: 32 }}>
+          <div className="card-row">
+            <div className="card-row-content">
+              <h4 style={{ color: 'var(--warn)' }}>Set up your local AI helper</h4>
+              <p>One quick step. We'll download a small model so search and summaries work — fully offline.</p>
+            </div>
+            <button className="btn primary" disabled={bootstrapping} onClick={async () => { setBootstrapping(true); try { await onBootstrap(); } finally { setBootstrapping(false); } }}>
+              {bootstrapping ? 'Setting up…' : 'Set up now'}
+            </button>
+          </div>
+          {bootstrapEvents.length > 0 && (
+            <div className="progress-list" style={{ marginTop: 16 }}>
+              {bootstrapEvents.slice(-5).map((event, i) => (
+                <div className="progress-item" key={i}>
+                  <span>{bootstrapMessage(event)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="tiles">
+        <button className="tile" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={onGoMemories}>
+          <div className="tile-label">Captured today</div>
+          <div className="tile-value">{formatNumber(overview.capture.eventsToday)}</div>
+          <div className="tile-detail">moments saved</div>
+        </button>
+        <div className="tile">
+          <div className="tile-label">Total memories</div>
+          <div className="tile-value">{formatNumber(overview.storage.totalEvents)}</div>
+          <div className="tile-detail">{formatBytes(overview.storage.totalAssetBytes)} stored locally</div>
+        </div>
+        <div className="tile">
+          <div className="tile-label">
+            Organized pages
+            {overview.indexing.running ? <span className="status indexing">Indexing</span> : null}
+          </div>
+          <div className="tile-value">{formatNumber(overview.index.pageCount)}</div>
+          <div className="tile-detail">{formatNumber(overview.index.eventsCovered)} memories grouped</div>
+        </div>
+      </div>
+
+      {(failures.length > 0 || warnings.length > 0) && (
+        <div className="section">
+          <h3 className="section-title">Things to look at</h3>
+          <div className="card">
+            {[...failures, ...warnings].slice(0, 5).map((check, i) => (
+              <div className="check-item" key={i}>
+                <div className={`check-icon ${check.status === 'fail' ? 'bad' : 'warn'}`}>{check.status === 'fail' ? Icon.cross : Icon.alert}</div>
+                <div className="check-body">
+                  <h4>{check.area}</h4>
+                  <p>{check.message}</p>
+                  {check.action ? <p className="next">→ {check.action}</p> : null}
+                </div>
               </div>
             ))}
           </div>
         </div>
-      </div>
-    </>
-  );
-}
+      )}
 
-function Stat({ title, value, detail }: { title: string; value: string; detail: string }) {
-  return (
-    <div className="card">
-      <h3>{title}</h3>
-      <div className="value">{value}</div>
-      <p>{detail}</p>
-    </div>
-  );
-}
-
-function Setup({
-  checks,
-  bootstrapEvents,
-  onRefresh,
-  onBootstrap,
-}: {
-  checks: DoctorCheck[] | null;
-  bootstrapEvents: ModelBootstrapProgress[];
-  onRefresh: () => void;
-  onBootstrap: () => Promise<void>;
-}) {
-  const [bootstrapping, setBootstrapping] = useState(false);
-  async function runBootstrap() {
-    setBootstrapping(true);
-    try {
-      await onBootstrap();
-    } finally {
-      setBootstrapping(false);
-    }
-  }
-
-  if (!checks) {
-    return (
-      <>
-        <Header title="Setup" subtitle="Checking your machine..." />
-        <div className="empty">Running setup checks...</div>
-      </>
-    );
-  }
-  const failures = checks.filter((check) => check.status === 'fail').length;
-  const warnings = checks.filter((check) => check.status === 'warn').length;
-  return (
-    <>
-      <Header
-        title="Setup"
-        subtitle={failures ? 'Some setup steps need attention.' : warnings ? 'CofounderOS can run, with a few warnings.' : 'Everything looks ready.'}
-      >
-        <button className="btn primary" onClick={() => void runBootstrap()} disabled={bootstrapping}>{bootstrapping ? 'Preparing...' : 'Prepare local AI model'}</button>
-        <button className="btn" onClick={onRefresh}>Run checks again</button>
-      </Header>
-      {bootstrapEvents.length ? (
-        <>
-          <h2>Model Setup Progress</h2>
-          <div className="card progress-card">
-            {bootstrapEvents.slice(-10).map((event, index) => (
-              <div className="progress-row" key={`${event.kind}-${index}`}>
-                <Pill tone={event.kind.includes('failed') ? 'fail' : event.kind === 'ready' || event.kind.includes('done') ? 'ok' : undefined}>{event.kind}</Pill>
-                <span>{bootstrapMessage(event)}</span>
-              </div>
-            ))}
-          </div>
-        </>
-      ) : null}
-      <div className="list">
-        {checks.map((check, index) => (
-          <div className="card" key={`${check.area}-${index}`}>
-            <div className="row">
-              <div>
-                <strong>{check.area}</strong>
-                <p>{check.message}</p>
-                {check.detail ? <p className="muted">{check.detail}</p> : null}
-                {check.action ? <p>Next: {check.action}</p> : null}
-              </div>
-              <Pill tone={check.status === 'ok' ? 'ok' : check.status === 'fail' ? 'fail' : check.status === 'warn' ? 'warn' : undefined}>{check.status}</Pill>
-            </div>
-          </div>
-        ))}
+      <div className="row-actions">
+        <button className="btn ghost" onClick={onRefresh}>{Icon.refresh}Refresh</button>
       </div>
     </>
   );
@@ -360,488 +366,266 @@ function bootstrapMessage(event: ModelBootstrapProgress): string {
   if (event.status && typeof event.completed === 'number' && typeof event.total === 'number' && event.total > 0) {
     return `${event.model ?? 'model'} ${event.status} ${Math.round((event.completed / event.total) * 100)}%`;
   }
-  return event.model ?? event.tool ?? event.host ?? '';
+  return event.model ?? event.tool ?? event.host ?? event.kind;
 }
 
-function Journals({
-  days,
-  selectedDay,
-  journal,
-  onRefresh,
-  onChooseDay,
+function indexingStatusText(indexing: RuntimeIndexingStatus): string {
+  if (indexing.currentJob === 'index-reorganise') return 'Reorganizing memory index';
+  return 'Indexing new memories';
+}
+
+/* ===================== MEMORIES ===================== */
+function Memories({
+  days, selectedDay, journal, onChooseDay, onRefresh,
 }: {
   days: string[];
   selectedDay: string | null;
   journal: JournalDay | null;
-  onRefresh: () => void;
   onChooseDay: (day: string) => void;
+  onRefresh: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [selectedApp, setSelectedApp] = useState('');
   const [searchResults, setSearchResults] = useState<Frame[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+
   const sessions = journal?.sessions ?? [];
   const frames = journal?.frames ?? [];
-  const appOptions = Array.from(new Set(frames.map((frame) => frame.app).filter(Boolean) as string[])).sort();
-  const sessionFrames = selectedSessionId
-    ? frames.filter((frame) => frame.activity_session_id === selectedSessionId)
-    : [];
-  const filteredFrames = frames.filter((frame) => {
-    if (selectedApp && frame.app !== selectedApp) return false;
-    return true;
-  });
-  const visibleFrames = searchResults ?? filteredFrames;
+  const appOptions = useMemo(() => Array.from(new Set(frames.map((f) => f.app).filter(Boolean) as string[])).sort(), [frames]);
+  const sessionFrames = selectedSessionId ? frames.filter((f) => f.activity_session_id === selectedSessionId) : [];
+  const filteredFrames = frames.filter((f) => !selectedApp || f.app === selectedApp);
+  const visibleFrames = searchResults ?? (selectedSessionId ? sessionFrames : filteredFrames);
 
   async function runSearch() {
-    if (!query.trim()) {
-      setSearchResults(null);
-      return;
-    }
+    if (!query.trim()) { setSearchResults(null); return; }
     setSearching(true);
     try {
       setSearchResults(await window.cofounderos.searchFrames({
         text: query.trim(),
         day: selectedDay ?? undefined,
         apps: selectedApp ? [selectedApp] : undefined,
-        limit: 50,
+        limit: 100,
       }));
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  function clearSearch() {
-    setQuery('');
-    setSearchResults(null);
+    } finally { setSearching(false); }
   }
 
   return (
     <>
-      <Header title="Journals" subtitle="Explore saved work sessions and captured moments.">
-        <button className="btn" onClick={() => void window.cofounderos.openPath('markdown')}>Open Markdown Export</button>
-        <button className="btn" onClick={onRefresh}>Refresh</button>
-      </Header>
-      <div className="card toolbar">
-        <input placeholder="Search captured moments..." value={query} onChange={(e) => setQuery(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === 'Enter') void runSearch(); }} />
-        <select value={selectedApp} onChange={(e) => { setSelectedApp(e.currentTarget.value); setSearchResults(null); }}>
-          <option value="">All apps</option>
-          {appOptions.map((app) => <option key={app} value={app}>{app}</option>)}
-        </select>
-        <button className="btn primary" onClick={() => void runSearch()} disabled={searching}>{searching ? 'Searching...' : 'Search'}</button>
-        <button className="btn" onClick={clearSearch}>Clear</button>
+      <div className="page-header">
+        <h1 className="page-title">Memories</h1>
+        <p className="page-sub">Browse and search what you've worked on.</p>
       </div>
-      {days.length ? (
-        <div className="days">
-          {days.map((day) => (
-            <button key={day} className={`day ${day === selectedDay ? 'active' : ''}`} onClick={() => onChooseDay(day)}>{day}</button>
-          ))}
+
+      <div className="search-bar">
+        <span className="search-icon">{Icon.search}</span>
+        <input
+          placeholder="Search anything you've seen…"
+          value={query}
+          onChange={(e) => setQuery(e.currentTarget.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') void runSearch(); }}
+        />
+        {appOptions.length > 0 && (
+          <select value={selectedApp} onChange={(e) => { setSelectedApp(e.currentTarget.value); setSearchResults(null); }}>
+            <option value="">All apps</option>
+            {appOptions.map((app) => <option key={app} value={app}>{app}</option>)}
+          </select>
+        )}
+        <button className="btn primary" onClick={() => void runSearch()} disabled={searching}>{searching ? 'Searching…' : 'Search'}</button>
+        {(searchResults || query) && (
+          <button className="btn ghost" onClick={() => { setQuery(''); setSearchResults(null); }}>Clear</button>
+        )}
+      </div>
+
+      {days.length === 0 ? (
+        <div className="empty">
+          <div className="empty-icon">{Icon.emptyBox}</div>
+          <h3>No memories yet</h3>
+          <p>Start capturing on the Home screen and they'll show up here.</p>
         </div>
       ) : (
-        <div className="empty">No journal days found yet.</div>
-      )}
-      {journal ? (
         <>
-          <div className="grid two">
-            <Stat title="Selected Day" value={journal.day} detail={`${frames.length} moments captured`} />
-            <Stat title="Work Sessions" value={sessions.length.toString()} detail="Grouped by focus and idle gaps" />
+          <div className="day-chips">
+            {days.slice(-14).reverse().map((day) => (
+              <button key={day} className={`chip ${day === selectedDay ? 'active' : ''}`} onClick={() => { setSelectedSessionId(null); setSearchResults(null); onChooseDay(day); }}>
+                {prettyDay(day)}
+              </button>
+            ))}
           </div>
-          <h2>Sessions</h2>
-          <SessionList sessions={sessions} selectedSessionId={selectedSessionId} onSelect={setSelectedSessionId} />
-          {selectedSessionId ? (
-            <>
-              <h2>Selected Session</h2>
-              <FrameList frames={sessionFrames} />
-            </>
-          ) : null}
-          <h2>{searchResults ? 'Search Results' : selectedApp ? `${selectedApp} Moments` : 'Recent Moments'}</h2>
-          <FrameList frames={visibleFrames} />
+
+          {!searchResults && sessions.length > 0 && (
+            <div className="section">
+              <h3 className="section-title">Work sessions</h3>
+              <div className="sessions">
+                {sessions.slice(0, 10).map((s, i) => (
+                  <SessionCard key={i} session={s} selected={selectedSessionId === s.id} onClick={() => setSelectedSessionId(selectedSessionId === s.id ? null : s.id ?? null)} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="section">
+            <h3 className="section-title">{searchResults ? `${searchResults.length} results` : selectedSessionId ? 'In this session' : 'Moments'}</h3>
+            {visibleFrames.length === 0 ? (
+              <div className="empty">
+                <div className="empty-icon">{Icon.search}</div>
+                <h3>{searchResults ? 'No matches' : 'Nothing here yet'}</h3>
+                <p>{searchResults ? 'Try a different word or pick another day.' : 'Pick a day above to see what you worked on.'}</p>
+              </div>
+            ) : (
+              <div className="moments-grid">
+                {visibleFrames.slice(0, 60).map((frame, i) => <MomentCard key={i} frame={frame} />)}
+              </div>
+            )}
+          </div>
         </>
-      ) : null}
+      )}
+
+      <div className="row-actions">
+        <button className="btn ghost" onClick={onRefresh}>{Icon.refresh}Refresh</button>
+        <button className="btn ghost" onClick={() => void window.cofounderos.openPath('markdown')}>{Icon.folder}Open folder</button>
+      </div>
     </>
   );
 }
 
-function SessionList({
-  sessions,
-  selectedSessionId,
-  onSelect,
-}: {
-  sessions: ActivitySession[];
-  selectedSessionId: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  if (!sessions.length) return <div className="empty">No sessions for this day yet.</div>;
+function prettyDay(day: string): string {
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  if (day === today) return 'Today';
+  if (day === yesterday) return 'Yesterday';
+  try {
+    const d = new Date(day + 'T12:00:00');
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  } catch {
+    return day;
+  }
+}
+
+function SessionCard({ session, selected, onClick }: { session: ActivitySession; selected: boolean; onClick: () => void }) {
+  const start = (session.started_at || '').slice(11, 16);
+  const end = (session.ended_at || '').slice(11, 16);
   return (
-    <div className="list">
-      {sessions.slice(0, 20).map((session, index) => (
-        <button
-          className={`card session-card ${selectedSessionId === session.id ? 'selected' : ''}`}
-          key={`${session.started_at}-${index}`}
-          onClick={() => onSelect(selectedSessionId === session.id ? null : session.id ?? null)}
-        >
-          <strong>{(session.started_at || '').slice(11, 16)} - {(session.ended_at || '').slice(11, 16)}</strong>
-          <p>{session.primary_entity_path || session.primary_app || 'Unresolved activity'}</p>
-          <p className="muted">{Math.round((session.active_ms || 0) / 60000)} active min · {session.frame_count} moments</p>
-        </button>
-      ))}
-    </div>
+    <button className={`session ${selected ? 'selected' : ''}`} onClick={onClick}>
+      <div className="session-time">{start}–{end}</div>
+      <div className="session-info">
+        <h4>{session.primary_entity_path || session.primary_app || 'Mixed work'}</h4>
+        <p>{Math.round((session.active_ms || 0) / 60000)} active min · {session.frame_count} moments</p>
+      </div>
+    </button>
   );
 }
 
-function FrameList({ frames }: { frames: Frame[] }) {
-  if (!frames.length) return <div className="empty">No moments for this day.</div>;
-  return (
-    <div className="list">
-      {frames.slice(0, 30).map((frame, index) => (
-        <FrameCard frame={frame} key={`${frame.id ?? frame.timestamp}-${index}`} />
-      ))}
-    </div>
-  );
-}
-
-function FrameCard({ frame }: { frame: Frame }) {
+function MomentCard({ frame }: { frame: Frame }) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
-
   useEffect(() => {
     let cancelled = false;
-    async function loadThumb() {
-      if (!frame.asset_path) {
-        setThumbUrl(null);
-        return;
-      }
+    async function load() {
+      if (!frame.asset_path) { setThumbUrl(null); return; }
       const cached = thumbnailCache.get(frame.asset_path);
-      if (cached) {
-        setThumbUrl(cached);
-        return;
-      }
+      if (cached) { setThumbUrl(cached); return; }
       try {
         const bytes = await window.cofounderos.readAsset(frame.asset_path);
         if (cancelled) return;
-        const type = frame.asset_path.endsWith('.jpg') || frame.asset_path.endsWith('.jpeg')
-          ? 'image/jpeg'
-          : frame.asset_path.endsWith('.png')
-            ? 'image/png'
-            : 'image/webp';
+        const type = frame.asset_path.endsWith('.png') ? 'image/png' : frame.asset_path.match(/\.jpe?g$/) ? 'image/jpeg' : 'image/webp';
         const url = URL.createObjectURL(new Blob([bytes], { type }));
         cacheThumbnail(frame.asset_path, url);
         setThumbUrl(url);
-      } catch {
-        setThumbUrl(null);
-      }
+      } catch { setThumbUrl(null); }
     }
-    void loadThumb();
-    return () => {
-      cancelled = true;
-    };
+    void load();
+    return () => { cancelled = true; };
   }, [frame.asset_path]);
 
   return (
-    <div className="card frame-card">
-      {thumbUrl ? <img src={thumbUrl} alt="" /> : <div className="thumb-placeholder">No screenshot</div>}
-      <div>
-        <strong>{(frame.timestamp || '').slice(11, 19)} · {frame.app || 'Unknown app'}</strong>
-        <p>{frame.window_title || '(no title)'}</p>
-        {frame.entity_path ? <p className="muted">{frame.entity_path}</p> : null}
-        {frame.url ? <p className="muted">{frame.url}</p> : null}
-        {frame.text ? <p className="muted">{String(frame.text).replace(/\s+/g, ' ').slice(0, 220)}</p> : null}
+    <div className="moment">
+      {thumbUrl ? <img className="moment-thumb" src={thumbUrl} alt="" /> : <div className="moment-thumb moment-thumb-empty">No screenshot</div>}
+      <div className="moment-body">
+        <div className="moment-time">{(frame.timestamp || '').slice(11, 16)}</div>
+        <div className="moment-app">{frame.app || 'Unknown app'}</div>
+        <div className="moment-text">{frame.window_title || frame.entity_path || frame.url || (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 120) : 'No details')}</div>
       </div>
     </div>
   );
 }
 
-function Search({ days }: { days: string[] }) {
-  const [query, setQuery] = useState('');
-  const [day, setDay] = useState('');
-  const [appFilter, setAppFilter] = useState('');
-  const [results, setResults] = useState<Frame[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const appOptions = Array.from(new Set((results ?? []).map((frame) => frame.app).filter(Boolean) as string[])).sort();
-  const visibleResults = (results ?? []).filter((frame) => !appFilter || frame.app === appFilter);
+/* ===================== CONNECT ===================== */
+function Connect({ overview, config, onRefresh }: { overview: RuntimeOverview | null; config: LoadedConfig | null; onRefresh: () => void }) {
+  const [copied, setCopied] = useState(false);
 
-  async function runSearch() {
-    if (!query.trim()) {
-      setResults([]);
-      return;
-    }
-    setSearching(true);
-    try {
-      setResults(await window.cofounderos.searchFrames({
-        text: query.trim(),
-        day: day || undefined,
-        limit: 100,
-      }));
-      setAppFilter('');
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  return (
-    <>
-      <Header title="Search" subtitle="Find something you saw across captured moments.">
-        <button className="btn primary" disabled={searching} onClick={() => void runSearch()}>{searching ? 'Searching...' : 'Search'}</button>
-      </Header>
-      <div className="card toolbar">
-        <input placeholder="Search text, app names, window titles..." value={query} onChange={(event) => setQuery(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') void runSearch(); }} />
-        <select value={day} onChange={(event) => setDay(event.currentTarget.value)}>
-          <option value="">All days</option>
-          {days.map((d) => <option key={d} value={d}>{d}</option>)}
-        </select>
-        <select value={appFilter} onChange={(event) => setAppFilter(event.currentTarget.value)} disabled={!results?.length}>
-          <option value="">All result apps</option>
-          {appOptions.map((app) => <option key={app} value={app}>{app}</option>)}
-        </select>
-        <button className="btn" onClick={() => { setQuery(''); setResults(null); setAppFilter(''); }}>Clear</button>
-      </div>
-      {results == null ? (
-        <div className="empty">Enter a query to search captured moments.</div>
-      ) : visibleResults.length ? (
-        <>
-          <h2>{visibleResults.length} Result{visibleResults.length === 1 ? '' : 's'}</h2>
-          <FrameList frames={visibleResults} />
-        </>
-      ) : (
-        <div className="empty">No matching moments found.</div>
-      )}
-    </>
-  );
-}
-
-function Connections({
-  overview,
-  config,
-  onRefresh,
-}: {
-  overview: RuntimeOverview | null;
-  config: LoadedConfig | null;
-  onRefresh: () => void;
-}) {
-  const [copied, setCopied] = useState<string | null>(null);
   if (!overview || !config) {
     return (
       <>
-        <Header title="Connections" subtitle="Loading connection status..." />
-        <div className="empty">Checking exports and AI app connection...</div>
+        <div className="page-header">
+          <h1 className="page-title">Connect AI</h1>
+          <p className="page-sub">Loading…</p>
+        </div>
       </>
     );
   }
-  const mcpConfig = config.config.export.plugins.find((plugin) => plugin.name === 'mcp');
-  const markdownConfig = config.config.export.plugins.find((plugin) => plugin.name === 'markdown');
-  const mcpStatus = overview.exports.find((exp) => exp.name === 'mcp');
-  const markdownStatus = overview.exports.find((exp) => exp.name === 'markdown');
+
+  const mcpConfig = config.config.export.plugins.find((p) => p.name === 'mcp');
+  const markdownConfig = config.config.export.plugins.find((p) => p.name === 'markdown');
+  const mcpStatus = overview.exports.find((e) => e.name === 'mcp');
+  const markdownStatus = overview.exports.find((e) => e.name === 'markdown');
   const host = typeof mcpConfig?.host === 'string' ? mcpConfig.host : '127.0.0.1';
   const port = typeof mcpConfig?.port === 'number' ? mcpConfig.port : 3456;
   const url = `http://${host}:${port}`;
-  const snippet = JSON.stringify({
-    mcpServers: {
-      cofounderos: { url },
-    },
-  }, null, 2);
+  const snippet = JSON.stringify({ mcpServers: { cofounderos: { url } } }, null, 2);
 
   async function copySnippet() {
     await window.cofounderos.copyText(snippet);
-    setCopied('Copied MCP config snippet.');
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   return (
     <>
-      <Header title="Connections" subtitle="Connect CofounderOS memory to AI apps and local exports.">
-        <button className="btn" onClick={onRefresh}>Refresh</button>
-      </Header>
-      {copied ? <div className="card"><p>{copied}</p></div> : null}
-      <div className="grid two">
-        <div className="card">
-          <div className="row">
-            <div>
-              <h3>AI App Connection</h3>
-              <p>{url}</p>
-            </div>
-            <Pill tone={mcpStatus?.running ? 'ok' : undefined}>{mcpStatus?.running ? 'running' : 'configured'}</Pill>
+      <div className="page-header">
+        <h1 className="page-title">Connect AI</h1>
+        <p className="page-sub">Let your favorite AI app use your memory.</p>
+      </div>
+
+      {copied && <div className="toast">{Icon.check}Copied! Now paste it into your AI app's settings.</div>}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-row">
+          <div className="card-row-content">
+            <h4>For Cursor, Claude & other AI apps</h4>
+            <p>Copy this little snippet and paste it into the app's MCP settings. Your AI can then ask about anything you've worked on.</p>
           </div>
-          <p className="muted">Use this local URL from Cursor, Claude, or any MCP-compatible app.</p>
-          <div className="actions inline-action">
-            <button className="btn primary" onClick={() => void copySnippet()}>Copy config snippet</button>
-            <button className="btn" onClick={() => void window.cofounderos.startRuntime()}>Start connection</button>
-          </div>
-          <pre>{snippet}</pre>
+          <span className={`status ${mcpStatus?.running ? 'ok' : ''}`}>{mcpStatus?.running ? 'Running' : 'Ready'}</span>
         </div>
-        <div className="card">
-          <div className="row">
-            <div>
-              <h3>Markdown Export</h3>
-              <p>{typeof markdownConfig?.path === 'string' ? markdownConfig.path : '~/.cofounderOS/export/markdown'}</p>
-            </div>
-            <Pill tone={markdownStatus?.running ? 'ok' : undefined}>{markdownStatus?.running ? 'running' : 'configured'}</Pill>
-          </div>
-          <p className="muted">A readable folder of exported pages and daily journals.</p>
-          <button className="btn inline-action" onClick={() => void window.cofounderos.openPath('markdown')}>Open Markdown export</button>
+        <div className="code">{snippet}</div>
+        <div className="row-actions">
+          <button className="btn accent" onClick={() => void copySnippet()}>{Icon.copy}Copy snippet</button>
         </div>
       </div>
-    </>
-  );
-}
 
-function Settings({ config, onSaved }: { config: LoadedConfig | null; onSaved: (config: LoadedConfig) => void }) {
-  const [draft, setDraft] = useState<SettingsDraft | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [startAtLogin, setStartAtLogin] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (config) setDraft(settingsDraftFromConfig(config));
-  }, [config]);
-
-  useEffect(() => {
-    void window.cofounderos.getStartAtLogin()
-      .then(setStartAtLogin)
-      .catch(() => setStartAtLogin(false));
-  }, []);
-
-  if (!config) {
-    return (
-      <>
-        <Header title="Settings" subtitle="Loading configuration..." />
-        <div className="empty">Reading config...</div>
-      </>
-    );
-  }
-  if (!draft) {
-    return (
-      <>
-        <Header title="Settings" subtitle="Preparing settings..." />
-        <div className="empty">Loading controls...</div>
-      </>
-    );
-  }
-
-  const set = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => {
-    setDraft({ ...draft, [key]: value });
-    setMessage(null);
-  };
-
-  async function save() {
-    if (!draft) return;
-    setSaving(true);
-    setMessage(null);
-    try {
-      const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(draft));
-      onSaved(next);
-      setMessage('Saved. Runtime was stopped so changes apply on next start.');
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function toggleStartAtLogin(enabled: boolean) {
-    setStartAtLogin(enabled);
-    const actual = await window.cofounderos.setStartAtLogin(enabled);
-    setStartAtLogin(actual);
-  }
-
-  return (
-    <>
-      <Header title="Settings" subtitle="Update common configuration without editing YAML.">
-        <button className="btn primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save settings'}</button>
-      </Header>
-      {message ? <div className="card"><p>{message}</p></div> : null}
-      <div className="grid two">
-        <div className="card">
-          <h3>Config File</h3>
-          <p>{config.sourcePath}</p>
-          <button className="btn inline-action" onClick={() => void window.cofounderos.openPath('config')}>Open config</button>
-        </div>
-        <div className="card">
-          <h3>Data Folder</h3>
-          <p>{config.dataDir}</p>
-          <button className="btn inline-action" onClick={() => void window.cofounderos.openPath('data')}>Open data folder</button>
-        </div>
-      </div>
-      <h2>Desktop App</h2>
       <div className="card">
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={Boolean(startAtLogin)}
-            onChange={(e) => void toggleStartAtLogin(e.currentTarget.checked)}
-          />
-          Start CofounderOS when I sign in
-        </label>
-        <p className="muted">The app opens in the background and keeps memory capture available from the tray.</p>
-      </div>
-      <h2>Privacy</h2>
-      <div className="grid two">
-        <div className="card">
-          <label className="check"><input type="checkbox" checked={draft.blurPasswordFields} onChange={(e) => set('blurPasswordFields', e.currentTarget.checked)} /> Blur password fields</label>
-          <label className="check"><input type="checkbox" checked={draft.pauseOnScreenLock} onChange={(e) => set('pauseOnScreenLock', e.currentTarget.checked)} /> Pause when screen locks</label>
+        <div className="card-row">
+          <div className="card-row-content">
+            <h4>Read your memory as files</h4>
+            <p>A friendly folder of daily journals you can open in Notion, Obsidian, or just Finder.</p>
+          </div>
+          <span className={`status ${markdownStatus?.running ? 'ok' : ''}`}>{markdownStatus?.running ? 'Running' : 'Ready'}</span>
         </div>
-        <div className="card">
-          <Field label="Sensitive keywords" hint="One per line. Lines containing these words are redacted.">
-            <textarea value={draft.sensitiveKeywords} onChange={(e) => set('sensitiveKeywords', e.currentTarget.value)} />
-          </Field>
+        <p style={{ fontSize: 13, marginTop: 10, color: 'var(--ink-muted)' }}>
+          {typeof markdownConfig?.path === 'string' ? markdownConfig.path : '~/.cofounderOS/export/markdown'}
+        </p>
+        <div className="row-actions">
+          <button className="btn" onClick={() => void window.cofounderos.openPath('markdown')}>{Icon.folder}Open folder</button>
         </div>
       </div>
-      <h2>Capture Filters</h2>
-      <div className="grid two">
-        <Field label="Excluded apps" hint="One app name per line.">
-          <textarea value={draft.excludedApps} onChange={(e) => set('excludedApps', e.currentTarget.value)} />
-        </Field>
-        <Field label="Excluded URL patterns" hint="One pattern per line.">
-          <textarea value={draft.excludedUrlPatterns} onChange={(e) => set('excludedUrlPatterns', e.currentTarget.value)} />
-        </Field>
-      </div>
-      <h2>Storage</h2>
-      <div className="grid two">
-        <Field label="Max storage size (GB)">
-          <input type="number" min="1" value={draft.maxSizeGb} onChange={(e) => set('maxSizeGb', Number(e.currentTarget.value))} />
-        </Field>
-        <Field label="Retention days">
-          <input type="number" min="0" value={draft.retentionDays} onChange={(e) => set('retentionDays', Number(e.currentTarget.value))} />
-        </Field>
-        <Field label="Compress screenshots after days">
-          <input type="number" min="0" value={draft.compressAfterDays} onChange={(e) => set('compressAfterDays', Number(e.currentTarget.value))} />
-        </Field>
-        <Field label="Delete screenshot assets after days" hint="Metadata and extracted text remain searchable. 0 disables deletion.">
-          <input type="number" min="0" value={draft.deleteAfterDays} onChange={(e) => set('deleteAfterDays', Number(e.currentTarget.value))} />
-        </Field>
-      </div>
-      <h2>Local AI Model</h2>
-      <div className="grid two">
-        <Field label="Ollama model">
-          <input value={draft.ollamaModel} onChange={(e) => set('ollamaModel', e.currentTarget.value)} />
-        </Field>
-        <Field label="Ollama host">
-          <input value={draft.ollamaHost} onChange={(e) => set('ollamaHost', e.currentTarget.value)} />
-        </Field>
-        <div className="card">
-          <label className="check"><input type="checkbox" checked={draft.ollamaAutoInstall} onChange={(e) => set('ollamaAutoInstall', e.currentTarget.checked)} /> Auto-install local model tools when needed</label>
-        </div>
-      </div>
-      <h2>Exports And AI Connection</h2>
-      <div className="grid two">
-        <Field label="Markdown export path">
-          <input value={draft.markdownPath} onChange={(e) => set('markdownPath', e.currentTarget.value)} />
-        </Field>
-        <Field label="AI connection port">
-          <input type="number" min="1" value={draft.mcpPort} onChange={(e) => set('mcpPort', Number(e.currentTarget.value))} />
-        </Field>
+
+      <div className="row-actions" style={{ marginTop: 24 }}>
+        <button className="btn ghost" onClick={onRefresh}>{Icon.refresh}Refresh</button>
       </div>
     </>
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <label className="field card">
-      <span>{label}</span>
-      {children}
-      {hint ? <small>{hint}</small> : null}
-    </label>
-  );
-}
-
+/* ===================== SETTINGS ===================== */
 interface SettingsDraft {
   blurPasswordFields: boolean;
   pauseOnScreenLock: boolean;
@@ -859,10 +643,209 @@ interface SettingsDraft {
   mcpPort: number;
 }
 
+function Settings({ config, onSaved }: { config: LoadedConfig | null; onSaved: (config: LoadedConfig) => void }) {
+  const [draft, setDraft] = useState<SettingsDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const [startAtLogin, setStartAtLogin] = useState<boolean | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  useEffect(() => { if (config) setDraft(settingsDraftFromConfig(config)); }, [config]);
+  useEffect(() => { void window.cofounderos.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
+
+  if (!config || !draft) {
+    return (
+      <>
+        <div className="page-header">
+          <h1 className="page-title">Settings</h1>
+          <p className="page-sub">Loading…</p>
+        </div>
+      </>
+    );
+  }
+
+  const set = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => {
+    setDraft({ ...draft, [key]: value });
+    setMessage(null);
+  };
+
+  async function save() {
+    if (!draft) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(draft));
+      onSaved(next);
+      setMessage({ kind: 'ok', text: 'Saved! Changes apply next time you start.' });
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) });
+    } finally { setSaving(false); }
+  }
+
+  async function toggleStartAtLogin(enabled: boolean) {
+    setStartAtLogin(enabled);
+    const actual = await window.cofounderos.setStartAtLogin(enabled);
+    setStartAtLogin(actual);
+  }
+
+  return (
+    <>
+      <div className="page-header">
+        <h1 className="page-title">Settings</h1>
+        <p className="page-sub">Make CofounderOS work the way you like.</p>
+      </div>
+
+      {message && <div className={`toast ${message.kind === 'error' ? 'error' : ''}`}>{message.kind === 'ok' ? Icon.check : Icon.alert}{message.text}</div>}
+
+      <div className="section">
+        <h3 className="section-title">General</h3>
+        <div className="card">
+          <ToggleRow
+            title="Open at startup"
+            description="CofounderOS opens quietly in the background when you sign in."
+            checked={Boolean(startAtLogin)}
+            onChange={(v) => void toggleStartAtLogin(v)}
+          />
+        </div>
+      </div>
+
+      <div className="section">
+        <h3 className="section-title">Privacy</h3>
+        <div className="card">
+          <ToggleRow
+            title="Blur password fields"
+            description="Skip password boxes so they're never captured."
+            checked={draft.blurPasswordFields}
+            onChange={(v) => set('blurPasswordFields', v)}
+          />
+          <ToggleRow
+            title="Pause when screen is locked"
+            description="Stop capturing when you step away from your computer."
+            checked={draft.pauseOnScreenLock}
+            onChange={(v) => set('pauseOnScreenLock', v)}
+          />
+          <div style={{ paddingTop: 18, borderTop: '1px solid var(--line)' }}>
+            <div className="field-label">Words to skip</div>
+            <textarea className="textarea" value={draft.sensitiveKeywords} onChange={(e) => set('sensitiveKeywords', e.currentTarget.value)} placeholder="One per line — e.g. salary, passport" />
+            <div className="field-hint">Anything containing these words won't be saved.</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="section">
+        <h3 className="section-title">Storage</h3>
+        <div className="card">
+          <div className="grid-2">
+            <div className="field">
+              <div className="field-label">Maximum space (GB)</div>
+              <input className="input" type="number" min="1" value={draft.maxSizeGb} onChange={(e) => set('maxSizeGb', Number(e.currentTarget.value))} />
+            </div>
+            <div className="field">
+              <div className="field-label">Keep memories for (days)</div>
+              <input className="input" type="number" min="0" value={draft.retentionDays} onChange={(e) => set('retentionDays', Number(e.currentTarget.value))} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button className="btn ghost" onClick={() => setShowAdvanced((s) => !s)} style={{ marginBottom: 16 }}>
+        {showAdvanced ? '↑ Hide advanced' : '↓ Show advanced settings'}
+      </button>
+
+      {showAdvanced && (
+        <>
+          <div className="section">
+            <h3 className="section-title">Apps & URLs to skip</h3>
+            <div className="card">
+              <div className="grid-2">
+                <div className="field">
+                  <div className="field-label">Apps to ignore</div>
+                  <textarea className="textarea" value={draft.excludedApps} onChange={(e) => set('excludedApps', e.currentTarget.value)} placeholder="One app name per line" />
+                </div>
+                <div className="field">
+                  <div className="field-label">URLs to ignore</div>
+                  <textarea className="textarea" value={draft.excludedUrlPatterns} onChange={(e) => set('excludedUrlPatterns', e.currentTarget.value)} placeholder="One pattern per line" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="section">
+            <h3 className="section-title">AI model</h3>
+            <div className="card">
+              <ToggleRow
+                title="Auto-install AI tools when needed"
+                description="Lets us set up the local model for you."
+                checked={draft.ollamaAutoInstall}
+                onChange={(v) => set('ollamaAutoInstall', v)}
+              />
+              <div className="grid-2" style={{ paddingTop: 18, borderTop: '1px solid var(--line)' }}>
+                <div className="field">
+                  <div className="field-label">Model</div>
+                  <input className="input" value={draft.ollamaModel} onChange={(e) => set('ollamaModel', e.currentTarget.value)} />
+                </div>
+                <div className="field">
+                  <div className="field-label">Host</div>
+                  <input className="input" value={draft.ollamaHost} onChange={(e) => set('ollamaHost', e.currentTarget.value)} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="section">
+            <h3 className="section-title">Files & connections</h3>
+            <div className="card">
+              <div className="grid-2">
+                <div className="field">
+                  <div className="field-label">Folder for daily journals</div>
+                  <input className="input" value={draft.markdownPath} onChange={(e) => set('markdownPath', e.currentTarget.value)} />
+                </div>
+                <div className="field">
+                  <div className="field-label">AI connection port</div>
+                  <input className="input" type="number" min="1" value={draft.mcpPort} onChange={(e) => set('mcpPort', Number(e.currentTarget.value))} />
+                </div>
+              </div>
+              <div className="grid-2" style={{ paddingTop: 18, borderTop: '1px solid var(--line)' }}>
+                <div className="field">
+                  <div className="field-label">Compress old screenshots after (days)</div>
+                  <input className="input" type="number" min="0" value={draft.compressAfterDays} onChange={(e) => set('compressAfterDays', Number(e.currentTarget.value))} />
+                </div>
+                <div className="field">
+                  <div className="field-label">Delete old screenshots after (days)</div>
+                  <input className="input" type="number" min="0" value={draft.deleteAfterDays} onChange={(e) => set('deleteAfterDays', Number(e.currentTarget.value))} />
+                  <div className="field-hint">0 means never delete. Text stays searchable.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="row-actions">
+        <button className="btn accent lg" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save settings'}</button>
+        <button className="btn ghost" onClick={() => void window.cofounderos.openPath('config')}>{Icon.folder}Open config file</button>
+        <button className="btn ghost" onClick={() => void window.cofounderos.openPath('data')}>{Icon.folder}Open data folder</button>
+      </div>
+    </>
+  );
+}
+
+function ToggleRow({ title, description, checked, onChange }: { title: string; description: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="toggle-row">
+      <div className="toggle-row-label">
+        <h4>{title}</h4>
+        <p>{description}</p>
+      </div>
+      <button type="button" className={`toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)} aria-pressed={checked} />
+    </div>
+  );
+}
+
 function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
   const cfg = loaded.config;
-  const markdown = cfg.export.plugins.find((plugin) => plugin.name === 'markdown');
-  const mcp = cfg.export.plugins.find((plugin) => plugin.name === 'mcp');
+  const markdown = cfg.export.plugins.find((p) => p.name === 'markdown');
+  const mcp = cfg.export.plugins.find((p) => p.name === 'mcp');
   return {
     blurPasswordFields: cfg.capture.privacy.blur_password_fields,
     pauseOnScreenLock: cfg.capture.privacy.pause_on_screen_lock,
@@ -882,6 +865,7 @@ function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
 }
 
 function configPatchFromDraft(draft: SettingsDraft) {
+  const lines = (s: string) => s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   return {
     capture: {
       excluded_apps: lines(draft.excludedApps),
@@ -921,12 +905,9 @@ function configPatchFromDraft(draft: SettingsDraft) {
   };
 }
 
-function lines(value: string): string[] {
-  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-}
-
+/* ===================== HELP ===================== */
 function Help({ logs }: { logs: string }) {
-  const [message, setMessage] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   async function copyDiagnostics() {
     const [overview, checks, config] = await Promise.all([
@@ -936,57 +917,64 @@ function Help({ logs }: { logs: string }) {
     ]);
     const text = [
       '# CofounderOS Diagnostics',
-      '',
       `Generated: ${new Date().toISOString()}`,
       '',
-      '## Runtime',
-      `status: ${overview.status}`,
-      `config: ${overview.configPath}`,
-      `data: ${overview.dataDir}`,
-      `storage: ${overview.storageRoot}`,
+      `Status: ${overview.status}`,
+      `Capture: ${overview.capture.running ? (overview.capture.paused ? 'paused' : 'running') : 'stopped'}`,
+      `Today: ${overview.capture.eventsToday} events`,
+      `Model: ${overview.model.name} (${overview.model.ready ? 'ready' : 'not ready'})`,
       '',
-      '## Capture',
-      `running: ${overview.capture.running}`,
-      `paused: ${overview.capture.paused}`,
-      `eventsToday: ${overview.capture.eventsToday}`,
+      '## Checks',
+      ...checks.map((c) => `- [${c.status}] ${c.area}: ${c.message}`),
       '',
-      '## Model',
-      `name: ${overview.model.name}`,
-      `ready: ${overview.model.ready}`,
-      '',
-      '## Exports',
-      ...overview.exports.map((exp) => `- ${exp.name}: ${exp.running ? 'running' : 'stopped'}`),
-      '',
-      '## Doctor Checks',
-      ...checks.map((check) => `- [${check.status}] ${check.area}: ${check.message}${check.detail ? ` (${check.detail})` : ''}`),
-      '',
-      '## Config Paths',
-      `sourcePath: ${config.sourcePath}`,
-      `dataDir: ${config.dataDir}`,
-      '',
-      '## Desktop Logs',
-      logs || '(no desktop logs)',
-      '',
+      '## Logs',
+      logs || '(none)',
     ].join('\n');
     await window.cofounderos.copyText(text);
-    setMessage('Diagnostics copied to clipboard.');
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   return (
     <>
-      <Header title="Help" subtitle="Diagnostics and local paths." />
-      {message ? <div className="card"><p>{message}</p></div> : null}
-      <div className="grid two">
-        <div className="card"><h3>Runtime Logs</h3><pre>{logs || '(no desktop logs yet)'}</pre></div>
+      <div className="page-header">
+        <h1 className="page-title">Help</h1>
+        <p className="page-sub">Need a hand? You're in the right place.</p>
+      </div>
+
+      {copied && <div className="toast">{Icon.check}Diagnostics copied to clipboard.</div>}
+
+      <div className="section">
+        <h3 className="section-title">Quick actions</h3>
         <div className="card">
-          <h3>Quick Actions</h3>
-          <div className="actions vertical">
-            <button className="btn primary" onClick={() => void copyDiagnostics()}>Copy diagnostics</button>
-            <button className="btn" onClick={() => void window.cofounderos.openPath('config')}>Open config</button>
-            <button className="btn" onClick={() => void window.cofounderos.openPath('data')}>Open data folder</button>
-            <button className="btn" onClick={() => void window.cofounderos.openPath('markdown')}>Open Markdown export</button>
+          <div className="card-row">
+            <div className="card-row-content">
+              <h4>Copy diagnostics</h4>
+              <p>Send this to support and we'll figure things out together.</p>
+            </div>
+            <button className="btn primary" onClick={() => void copyDiagnostics()}>{Icon.copy}Copy</button>
           </div>
-          <p>Use Setup when something needs attention. Use Journals to browse captured work sessions.</p>
+          <div className="card-row">
+            <div className="card-row-content">
+              <h4>Open data folder</h4>
+              <p>See all your memories on disk.</p>
+            </div>
+            <button className="btn" onClick={() => void window.cofounderos.openPath('data')}>{Icon.folder}Open</button>
+          </div>
+          <div className="card-row">
+            <div className="card-row-content">
+              <h4>Open config file</h4>
+              <p>For advanced tweaking.</p>
+            </div>
+            <button className="btn" onClick={() => void window.cofounderos.openPath('config')}>{Icon.folder}Open</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="section">
+        <h3 className="section-title">Recent activity</h3>
+        <div className="card">
+          <pre className="code" style={{ marginTop: 0, maxHeight: 320, overflow: 'auto' }}>{logs || '(no recent activity)'}</pre>
         </div>
       </div>
     </>

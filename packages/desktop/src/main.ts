@@ -31,6 +31,9 @@ let managedRuntime: RuntimeServiceClient | null = null;
 let statusItemHelper: ChildProcess | null = null;
 let lastLogs: string[] = [];
 
+const useMacAccessoryMode =
+  process.platform === 'darwin' && process.env.COFOUNDEROS_DESKTOP_SHOW_DOCK !== '1';
+
 type RuntimeOverview = {
   status: string;
   configPath: string;
@@ -48,6 +51,12 @@ type RuntimeOverview = {
   index: {
     pageCount: number;
     eventsCovered: number;
+  };
+  indexing: {
+    running: boolean;
+    currentJob: string | null;
+    startedAt: string | null;
+    lastCompletedAt: string | null;
   };
   model: {
     name: string;
@@ -184,15 +193,12 @@ app.setName('CofounderOS');
 
 app.whenReady().then(async () => {
   registerRuntimeIpc();
-  if (process.platform === 'darwin') {
+  if (useMacAccessoryMode) {
     // Run as a proper menu-bar/accessory app. In regular foreground
     // mode Electron gets normal app menus ("Electron", "File", "Edit"...)
     // and the status item can fail to present visibly when launched from
     // the unbundled dev binary on Sequoia.
-    app.setActivationPolicy('accessory');
-    if (process.env.COFOUNDEROS_DESKTOP_SHOW_DOCK !== '1') {
-      app.dock?.hide();
-    }
+    enterMacAccessoryMode();
   }
   if (process.platform === 'darwin') {
     if (!startNativeStatusItem()) {
@@ -335,6 +341,7 @@ async function refreshTray(): Promise<void> {
 }
 
 async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void> {
+  enterMacStatusWindowMode();
   if (!statusWindow) {
     statusWindow = new BrowserWindow({
       width: 860,
@@ -349,8 +356,9 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
     });
     statusWindow.on('closed', () => {
       statusWindow = null;
+      enterMacAccessoryMode();
     });
-    statusWindow.webContents.on('console-message', (_event, level, message) => {
+    statusWindow.webContents.on('console-message', ({ level, message }) => {
       appendLog(`[renderer:${level}] ${message}`);
     });
     statusWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
@@ -362,7 +370,22 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
   }
   await renderStatusWindow();
   statusWindow.show();
+  if (process.platform === 'darwin') {
+    app.focus({ steal: true });
+  }
   statusWindow.focus();
+}
+
+function enterMacAccessoryMode(): void {
+  if (!useMacAccessoryMode) return;
+  app.setActivationPolicy('accessory');
+  app.dock?.hide();
+}
+
+function enterMacStatusWindowMode(): void {
+  if (!useMacAccessoryMode) return;
+  app.setActivationPolicy('regular');
+  void app.dock?.show();
 }
 
 async function renderStatusWindow(): Promise<void> {
@@ -461,6 +484,7 @@ async function getRuntimeStatusText(): Promise<string> {
     `assets: ${formatBytes(overview.storage.totalAssetBytes)}`,
     '',
     '## Memory organization',
+    `indexing: ${overview.indexing.running ? formatIndexingJob(overview.indexing.currentJob) : 'idle'}`,
     `pages: ${overview.index.pageCount}`,
     `events covered: ${overview.index.eventsCovered}`,
     '',
@@ -470,6 +494,12 @@ async function getRuntimeStatusText(): Promise<string> {
     '## Exports',
     ...overview.exports.map((exp) => `${exp.name}: ${exp.running ? 'running' : 'stopped'}`),
   ].join('\n');
+}
+
+function formatIndexingJob(job: string | null): string {
+  if (job === 'index-reorganise') return 'reorganising';
+  if (job === 'index-incremental') return 'indexing new memories';
+  return 'indexing';
 }
 
 async function getRuntimeDoctorText(): Promise<string> {

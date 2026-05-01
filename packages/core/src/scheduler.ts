@@ -10,6 +10,8 @@ interface IntervalJob {
   task: Task;
   timer: NodeJS.Timeout | null;
   running: boolean;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
 }
 
 interface CronJob {
@@ -19,9 +21,19 @@ interface CronJob {
   task: Task;
   timer: NodeJS.Timeout | null;
   running: boolean;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
 }
 
 type Job = IntervalJob | CronJob;
+
+export interface SchedulerJobSnapshot {
+  kind: Job['kind'];
+  name: string;
+  running: boolean;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+}
 
 /**
  * Tiny scheduler. Two job kinds: fixed interval and cron expression. Each
@@ -48,6 +60,8 @@ export class Scheduler {
       task,
       timer: null,
       running: false,
+      lastStartedAt: null,
+      lastCompletedAt: null,
     };
     this.jobs.set(name, job);
     job.timer = setInterval(() => void this.run(job), intervalMs);
@@ -67,6 +81,8 @@ export class Scheduler {
       task,
       timer: null,
       running: false,
+      lastStartedAt: null,
+      lastCompletedAt: null,
     };
     this.jobs.set(name, job);
     this.scheduleNextCron(job);
@@ -82,6 +98,16 @@ export class Scheduler {
 
   has(name: string): boolean {
     return this.jobs.has(name);
+  }
+
+  getJobs(): SchedulerJobSnapshot[] {
+    return Array.from(this.jobs.values()).map((job) => ({
+      kind: job.kind,
+      name: job.name,
+      running: job.running,
+      lastStartedAt: job.lastStartedAt,
+      lastCompletedAt: job.lastCompletedAt,
+    }));
   }
 
   stop(): void {
@@ -113,6 +139,7 @@ export class Scheduler {
       return;
     }
     job.running = true;
+    job.lastStartedAt = new Date().toISOString();
     const start = Date.now();
     try {
       await job.task();
@@ -121,6 +148,7 @@ export class Scheduler {
       this.logger.error(`"${job.name}" failed`, { err: String(err) });
     } finally {
       job.running = false;
+      job.lastCompletedAt = new Date().toISOString();
     }
   }
 }
