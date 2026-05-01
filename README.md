@@ -29,7 +29,7 @@ platform-neutral; only the **capture layer** has OS-specific affordances.
 
 | Platform | Status | Capture coverage | Notes |
 |---|---|---|---|
-| **macOS** (12+) | ✅ Fully supported | Per-display `screencapture -D`, `active-win`, AX text via the Swift helper, browser URLs via osascript. | Reference platform. Grant **Screen Recording** + **Accessibility** + **Automation** to your terminal/editor on first run. |
+| **macOS** (12+) | ✅ Fully supported | Node capture by default; experimental native sidecar supports metadata, screenshots, direct AX text, content-change hashing, and mic/input audio chunks. | Reference platform. Grant **Screen Recording** + **Accessibility** + **Automation** to your terminal/editor; native live audio also needs **Microphone** permission. |
 | **Linux (X11)** | ✅ Supported | `screenshot-desktop` + `active-win`. No AX text — OCR fills in. No per-display ordinal addressing. | Install `libxss-dev libx11-dev libxext-dev libxtst-dev` for the native deps to build cleanly. |
 | **Linux (Wayland)** | ⚠️ Partial | `active-win` and `screenshot-desktop` are limited or non-functional under Wayland. | Run an X11 session for now, or use `--offline` and the MCP server only. PipeWire portal capture is on the roadmap. |
 | **Windows** (10 1809+ / 11) | ✅ Supported | `screenshot-desktop` (Desktop Duplication) + `active-win`. No AX text. Ollama auto-install via `winget`. | If a native module lacks a prebuild on your Node version, install **Visual Studio Build Tools (Desktop development with C++)** and Python 3 so `node-gyp` can compile. |
@@ -57,11 +57,25 @@ capture:
 
 Both implement the same `ICapture` interface and emit the same `RawEvent`
 shape, so storage, frames, sessions, embeddings, index, Markdown export,
-and MCP do not care which one is active. The native plugin currently
-installs the JS shim, NDJSON child-process protocol, and a platform helper
-binary with fixture-mode support. Real macOS/Windows/Linux capture APIs
-will land behind that same protocol incrementally. If native capture is
-unavailable, switch back to `capture.plugin: node`.
+and MCP do not care which one is active. On macOS, the native plugin now
+captures foreground-window metadata, URL changes for supported browsers,
+idle, screenshots, direct AX text, content-change screenshots with dHash
+suppression, and optional microphone/input audio chunks. Windows/Linux
+native helpers will land behind the same sidecar protocol incrementally.
+If native capture is unavailable, switch back to `capture.plugin: node`.
+
+Run `pnpm cli doctor` before switching to native capture. It probes the
+native helper binary and reports the macOS permissions it needs:
+
+- **Screen Recording** for screenshots.
+- **Accessibility** for foreground-window metadata and AX text.
+- **Automation** prompts may appear when browser URL extraction talks to
+  Chrome/Safari/Arc/etc. via Apple Events.
+- **Microphone** only when `capture.audio.live_recording.enabled: true`.
+
+If any native check warns, grant the permission in **System Settings →
+Privacy & Security**, then restart the terminal/editor running
+CofounderOS.
 
 ### Environment variables
 
@@ -382,12 +396,26 @@ capture:
     tick_interval_sec: 60
     batch_size: 5
     whisper_command: whisper
+    live_recording:
+      enabled: false      # native capture plugin only; records mic/input chunks
+      chunk_seconds: 300
+      format: m4a
+      sample_rate: 16000
+      channels: 1
 ```
 
 To use transcript import only, no Whisper install is needed. To transcribe
 audio files, install a compatible `whisper` command first, for example
 OpenAI Whisper's CLI. Files that fail transcription are moved to
 `failed_path` with a `.error.txt` sidecar explaining why.
+
+When using `capture.plugin: native` on macOS, set
+`capture.audio.live_recording.enabled: true` to record microphone/input
+audio chunks directly into the inbox. The transcript worker will pick up
+those `.m4a` chunks on its next tick. This captures the selected input
+device; for remote meeting audio while wearing headphones, route system
+audio into an input/aggregate device (for example BlackHole) before
+enabling live recording.
 
 ### Two transports
 

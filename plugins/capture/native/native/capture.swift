@@ -1,24 +1,54 @@
 import Foundation
 import AppKit
 import ApplicationServices
+import AVFoundation
 
 struct HelperConfig: Decodable {
   var raw_root: String?
+  var capture_audio: Bool?
+  var audio: AudioConfig?
   var poll_interval_ms: Int?
   var idle_threshold_sec: Int?
   var screenshot_format: String?
   var screenshot_quality: Int?
   var screenshot_max_dim: Int?
+  var content_change_min_interval_ms: Int?
   var multi_screen: Bool?
   var screens: [Int]?
   var capture_mode: String?
+  var accessibility: AccessibilityConfig?
   var fixture: Bool?
+}
+
+struct AudioConfig: Decodable {
+  var inbox_path: String?
+  var live_recording: LiveRecordingConfig?
+}
+
+struct LiveRecordingConfig: Decodable {
+  var enabled: Bool?
+  var chunk_seconds: Int?
+  var format: String?
+  var sample_rate: Int?
+  var channels: Int?
+}
+
+struct AccessibilityConfig: Decodable {
+  var enabled: Bool?
+  var max_chars: Int?
+  var max_elements: Int?
+  var excluded_apps: [String]?
 }
 
 let args = CommandLine.arguments
 let configJson = valueAfter("--config-json", in: args) ?? "{}"
 let fixtureMode = args.contains("--fixture")
 let config = (try? JSONDecoder().decode(HelperConfig.self, from: Data(configJson.utf8))) ?? HelperConfig()
+
+if args.contains("--doctor") {
+  emitDoctor()
+  exit(0)
+}
 
 func emit(_ obj: [String: Any]) {
   if let data = try? JSONSerialization.data(withJSONObject: obj, options: []),
@@ -28,13 +58,97 @@ func emit(_ obj: [String: Any]) {
   }
 }
 
+func emitDoctor() {
+  let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+  let checks: [[String: Any]] = [
+    [
+      "id": "screen-recording",
+      "status": CGPreflightScreenCaptureAccess() ? "ok" : "warn",
+      "message": CGPreflightScreenCaptureAccess()
+        ? "Screen Recording permission appears granted"
+        : "Screen Recording permission is not granted or has not been requested",
+      "detail": "Required for native screenshots. Grant access in System Settings > Privacy & Security > Screen Recording."
+    ],
+    [
+      "id": "accessibility",
+      "status": AXIsProcessTrusted() ? "ok" : "warn",
+      "message": AXIsProcessTrusted()
+        ? "Accessibility permission appears granted"
+        : "Accessibility permission is not granted",
+      "detail": "Required for focused-window metadata and AX text. Grant access in System Settings > Privacy & Security > Accessibility."
+    ],
+    [
+      "id": "microphone",
+      "status": microphoneDoctorStatus(micStatus),
+      "message": microphoneDoctorMessage(micStatus),
+      "detail": "Required only when capture.audio.live_recording.enabled is true. Grant access in System Settings > Privacy & Security > Microphone."
+    ],
+    [
+      "id": "screencapture-cli",
+      "status": FileManager.default.isExecutableFile(atPath: "/usr/sbin/screencapture") ? "ok" : "fail",
+      "message": FileManager.default.isExecutableFile(atPath: "/usr/sbin/screencapture")
+        ? "screencapture helper found"
+        : "screencapture helper missing",
+      "detail": "/usr/sbin/screencapture"
+    ],
+    [
+      "id": "osascript-cli",
+      "status": FileManager.default.isExecutableFile(atPath: "/usr/bin/osascript") ? "ok" : "warn",
+      "message": FileManager.default.isExecutableFile(atPath: "/usr/bin/osascript")
+        ? "osascript helper found"
+        : "osascript helper missing",
+      "detail": "Used for browser URL extraction and Automation permission prompts."
+    ],
+    [
+      "id": "displays",
+      "status": NSScreen.screens.isEmpty ? "warn" : "ok",
+      "message": "\(NSScreen.screens.count) display(s) visible to native helper",
+      "detail": "Native screenshots are taken per display with screencapture -D."
+    ]
+  ]
+  emit([
+    "kind": "doctor",
+    "platform": platformName(),
+    "arch": archName(),
+    "checks": checks
+  ])
+}
+
+func microphoneDoctorStatus(_ status: AVAuthorizationStatus) -> String {
+  switch status {
+  case .authorized:
+    return "ok"
+  case .notDetermined:
+    return "info"
+  case .denied, .restricted:
+    return "warn"
+  @unknown default:
+    return "warn"
+  }
+}
+
+func microphoneDoctorMessage(_ status: AVAuthorizationStatus) -> String {
+  switch status {
+  case .authorized:
+    return "Microphone permission appears granted"
+  case .notDetermined:
+    return "Microphone permission has not been requested"
+  case .denied:
+    return "Microphone permission is denied"
+  case .restricted:
+    return "Microphone permission is restricted"
+  @unknown default:
+    return "Microphone permission status is unknown"
+  }
+}
+
 emit([
   "kind": "ready",
   "platform": platformName(),
   "arch": archName(),
   "capabilities": fixtureMode
     ? ["fixture-events", "ndjson-protocol"]
-    : ["ndjson-protocol"]
+    : ["ndjson-protocol", "metadata", "screenshots", "ax-text", "audio-chunks"]
 ])
 
 if fixtureMode || config.fixture == true {
@@ -108,8 +222,11 @@ func runMacCapture(config: HelperConfig) {
   let sessionId = "sess_" + String(Int(Date().timeIntervalSince1970 * 1000), radix: 36) + "_native"
   let pollInterval = max(0.25, Double(config.poll_interval_ms ?? 1500) / 1000.0)
   let idleThreshold = Double(config.idle_threshold_sec ?? 60)
+  let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 20_000) / 1000.0)
   let displays = enumerateDisplays()
   let selectedDisplays = selectDisplays(displays: displays, config: config)
+  let audioChunker = AudioChunker(config: config)
+  audioChunker.startIfEnabled()
 
   emit([
     "kind": "log",
@@ -120,6 +237,7 @@ func runMacCapture(config: HelperConfig) {
       "displays": displays.map { displayJson($0) },
       "selected_displays": selectedDisplays.map { displayJson($0) },
       "poll_interval_sec": pollInterval,
+      "content_change_interval_sec": contentChangeInterval,
       "idle_threshold_sec": idleThreshold
     ]
   ])
@@ -143,15 +261,20 @@ func runMacCapture(config: HelperConfig) {
   var lastWindow: ActiveWindow? = nil
   var lastEnteredAt = Date()
   var lastUrl: String? = nil
+  var lastSoftCaptureAt = Date.distantPast
 
   while true {
     while let command = readStdinLineNonBlocking() {
-      if command.contains("\"kind\":\"stop\"") { return }
+      if command.contains("\"kind\":\"stop\"") {
+        audioChunker.stop()
+        return
+      }
       if command.contains("\"kind\":\"pause\"") { paused = true }
       if command.contains("\"kind\":\"resume\"") { paused = false }
     }
 
     if paused {
+      audioChunker.tick()
       Thread.sleep(forTimeInterval: pollInterval)
       continue
     }
@@ -238,6 +361,7 @@ func runMacCapture(config: HelperConfig) {
           displays: selectedDisplays,
           config: config
         )
+        lastSoftCaptureAt = Date()
         lastWindow = current
         lastEnteredAt = Date()
         lastUrl = current.url
@@ -266,11 +390,22 @@ func runMacCapture(config: HelperConfig) {
           displays: selectedDisplays,
           config: config
         )
+        lastSoftCaptureAt = Date()
         lastUrl = current.url
+      } else if !idle && contentChangeInterval > 0 && Date().timeIntervalSince(lastSoftCaptureAt) >= contentChangeInterval {
+        captureScreenshots(
+          trigger: "content_change",
+          window: current,
+          sessionId: sessionId,
+          displays: selectedDisplays,
+          config: config
+        )
+        lastSoftCaptureAt = Date()
       }
     }
 
     emit(["kind": "status", "cpuPercent": 0, "memoryMB": currentMemoryMB(), "storageBytesToday": 0])
+    audioChunker.tick()
     Thread.sleep(forTimeInterval: pollInterval)
   }
 }
@@ -422,6 +557,23 @@ func captureScreenshots(
   let targets = displaysForScreenshot(window: window, selected: displays, config: config)
   for display in targets {
     if let asset = captureScreenshot(display: display, appName: window.app, config: config) {
+      let ax = accessibilityText(window: window, config: config)
+      var metadata: [String: Any] = [
+        "trigger": trigger,
+        "source": "native-macos",
+        "bytes": asset.bytes,
+        "display_id": display.index,
+        "display_name": display.name,
+        "native_capture_method": "screencapture",
+        "requested_format": config.screenshot_format ?? "webp",
+        "actual_format": "jpeg"
+      ]
+      if let ax {
+        metadata["ax_text"] = ax.text
+        metadata["ax_text_chars"] = ax.text.count
+        metadata["ax_text_truncated"] = ax.truncated
+        metadata["ax_text_duration_ms"] = ax.durationMs
+      }
       emitEvent(
         type: "screenshot",
         sessionId: sessionId,
@@ -434,16 +586,7 @@ func captureScreenshots(
         durationMs: nil,
         idleBeforeMs: nil,
         screenIndex: display.index,
-        metadata: [
-          "trigger": trigger,
-          "source": "native-macos",
-          "bytes": asset.bytes,
-          "display_id": display.index,
-          "display_name": display.name,
-          "native_capture_method": "screencapture",
-          "requested_format": config.screenshot_format ?? "webp",
-          "actual_format": "jpeg"
-        ]
+        metadata: metadata
       )
       emit(["kind": "status", "storageBytesToday": asset.bytes])
     }
@@ -453,6 +596,81 @@ func captureScreenshots(
 struct ScreenshotAsset {
   let relativePath: String
   let bytes: Int
+}
+
+struct AccessibilityText {
+  let text: String
+  let truncated: Bool
+  let durationMs: Int
+}
+
+func accessibilityText(window: ActiveWindow, config: HelperConfig) -> AccessibilityText? {
+  let cfg = config.accessibility
+  if cfg?.enabled == false { return nil }
+  let excluded = Set((cfg?.excluded_apps ?? []).map { $0.lowercased() })
+  if excluded.contains(window.app.lowercased()) { return nil }
+
+  let maxChars = cfg?.max_chars ?? 8000
+  let maxElements = cfg?.max_elements ?? 4000
+  let start = Date()
+  let app = AXUIElementCreateApplication(window.pid)
+  guard let root = focusedWindow(app) else { return nil }
+
+  var stack: [AXUIElement] = [root]
+  var text = ""
+  var visited = 0
+
+  while let element = stack.popLast() {
+    if text.count >= maxChars || visited >= maxElements { break }
+    visited += 1
+    appendTextAttribute(element, kAXValueAttribute, into: &text, maxChars: maxChars)
+    appendTextAttribute(element, kAXTitleAttribute, into: &text, maxChars: maxChars)
+    appendTextAttribute(element, kAXDescriptionAttribute, into: &text, maxChars: maxChars)
+    appendTextAttribute(element, kAXHelpAttribute, into: &text, maxChars: maxChars)
+    appendTextAttribute(element, kAXPlaceholderValueAttribute, into: &text, maxChars: maxChars)
+    for child in childrenOf(element).reversed() {
+      stack.append(child)
+    }
+  }
+
+  let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard cleaned.count >= 8 else { return nil }
+  return AccessibilityText(
+    text: cleaned,
+    truncated: text.count >= maxChars || visited >= maxElements,
+    durationMs: Int(Date().timeIntervalSince(start) * 1000)
+  )
+}
+
+func appendTextAttribute(_ element: AXUIElement, _ attr: String, into text: inout String, maxChars: Int) {
+  guard text.count < maxChars else { return }
+  var ref: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+        let value = ref else {
+    return
+  }
+  let str: String?
+  if let s = value as? String {
+    str = s
+  } else if let n = value as? NSNumber {
+    str = n.stringValue
+  } else {
+    str = nil
+  }
+  guard let str, str.count > 1, str != "missing value" else { return }
+  let remaining = max(0, maxChars - text.count)
+  if remaining == 0 { return }
+  text += String(str.prefix(remaining))
+  if text.count < maxChars { text += "\n" }
+}
+
+func childrenOf(_ element: AXUIElement) -> [AXUIElement] {
+  var ref: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
+        let children = ref as? [AXUIElement] else {
+    return []
+  }
+  return children
 }
 
 func captureScreenshot(display: DisplayInfo, appName: String, config: HelperConfig) -> ScreenshotAsset? {
@@ -524,7 +742,11 @@ func timeString(_ date: Date) -> String {
   let formatter = DateFormatter()
   formatter.calendar = Calendar(identifier: .gregorian)
   formatter.locale = Locale(identifier: "en_US_POSIX")
-  formatter.dateFormat = "HH-mm-ss"
+  // Include milliseconds so a hard-trigger screenshot and a subsequent
+  // content_change probe in the same second never collide. Collisions
+  // are dangerous because the TS shim may delete low-diff soft-trigger
+  // assets after hashing.
+  formatter.dateFormat = "HH-mm-ss-SSS"
   return formatter.string(from: date)
 }
 
@@ -632,6 +854,138 @@ func currentMemoryMB() -> Int {
   }
   if result != KERN_SUCCESS { return 0 }
   return Int(info.resident_size / 1024 / 1024)
+}
+
+final class AudioChunker: NSObject, AVAudioRecorderDelegate {
+  private let enabled: Bool
+  private let inboxPath: String
+  private let chunkSeconds: TimeInterval
+  private let sampleRate: Int
+  private let channels: Int
+  private var recorder: AVAudioRecorder?
+  private var currentStartedAt: Date?
+  private var chunkIndex = 0
+
+  init(config: HelperConfig) {
+    let live = config.audio?.live_recording
+    self.enabled = (config.capture_audio == true) && (live?.enabled == true)
+    self.inboxPath = NSString(
+      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+    ).expandingTildeInPath
+    self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
+    self.sampleRate = live?.sample_rate ?? 16_000
+    self.channels = live?.channels ?? 1
+  }
+
+  func startIfEnabled() {
+    guard enabled else { return }
+    guard ensureMicrophonePermission() else {
+      emit([
+        "kind": "error",
+        "code": "audio_permission_denied",
+        "message": "Native live audio recording is enabled but microphone permission is not granted.",
+        "fatal": false
+      ])
+      return
+    }
+    do {
+      try FileManager.default.createDirectory(
+        atPath: inboxPath,
+        withIntermediateDirectories: true
+      )
+      try startNewChunk()
+      emit([
+        "kind": "log",
+        "level": "info",
+        "message": "native live audio chunking started",
+        "data": [
+          "inbox_path": inboxPath,
+          "chunk_seconds": chunkSeconds,
+          "sample_rate": sampleRate,
+          "channels": channels
+        ]
+      ])
+    } catch {
+      emit([
+        "kind": "error",
+        "code": "audio_recording_failed",
+        "message": String(describing: error),
+        "fatal": false
+      ])
+    }
+  }
+
+  func tick() {
+    guard enabled, recorder != nil, let started = currentStartedAt else { return }
+    if Date().timeIntervalSince(started) >= chunkSeconds {
+      rotate()
+    }
+  }
+
+  func stop() {
+    recorder?.stop()
+    recorder = nil
+    currentStartedAt = nil
+  }
+
+  private func rotate() {
+    recorder?.stop()
+    recorder = nil
+    currentStartedAt = nil
+    do {
+      try startNewChunk()
+    } catch {
+      emit([
+        "kind": "error",
+        "code": "audio_chunk_rotate_failed",
+        "message": String(describing: error),
+        "fatal": false
+      ])
+    }
+  }
+
+  private func startNewChunk() throws {
+    chunkIndex += 1
+    let filename = "native-\(dayString(Date()))-\(timeString(Date()))-\(chunkIndex).m4a"
+    let url = URL(fileURLWithPath: inboxPath).appendingPathComponent(filename)
+    let settings: [String: Any] = [
+      AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+      AVSampleRateKey: sampleRate,
+      AVNumberOfChannelsKey: channels,
+      AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+    ]
+    let recorder = try AVAudioRecorder(url: url, settings: settings)
+    recorder.delegate = self
+    recorder.isMeteringEnabled = false
+    guard recorder.prepareToRecord(), recorder.record() else {
+      throw NSError(
+        domain: "cofounderos.audio",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "AVAudioRecorder failed to start"]
+      )
+    }
+    self.recorder = recorder
+    self.currentStartedAt = Date()
+  }
+
+  private func ensureMicrophonePermission() -> Bool {
+    let status = AVCaptureDevice.authorizationStatus(for: .audio)
+    switch status {
+    case .authorized:
+      return true
+    case .notDetermined:
+      let semaphore = DispatchSemaphore(value: 0)
+      var granted = false
+      AVCaptureDevice.requestAccess(for: .audio) { ok in
+        granted = ok
+        semaphore.signal()
+      }
+      _ = semaphore.wait(timeout: .now() + 30)
+      return granted
+    default:
+      return false
+    }
+  }
 }
 
 func valueAfter(_ flag: String, in args: [String]) -> String? {

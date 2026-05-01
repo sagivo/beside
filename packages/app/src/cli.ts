@@ -339,7 +339,7 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     });
   }
 
-  checks.push(await checkNativeCaptureHelper(config));
+  checks.push(...await checkNativeCaptureHelper(config));
 
   const ollamaHost =
     ((config.index.model as unknown as { ollama?: { host?: string } }).ollama?.host) ??
@@ -417,10 +417,37 @@ async function checkCommand(area: string, command: string, purpose: string): Pro
 
 async function checkNativeCaptureHelper(config: {
   capture: { plugin: string; helper_path?: string };
-}): Promise<DoctorCheck> {
+}): Promise<DoctorCheck[]> {
+  const platformArch = `${process.platform}-${process.arch}`;
+  const helperPath = nativeHelperPath(config);
+  try {
+    await fsp.access(helperPath);
+    const checks: DoctorCheck[] = [{
+      area: 'native-capture',
+      status: config.capture.plugin === 'native' ? 'ok' : 'info',
+      message: `native helper present for ${platformArch}`,
+      detail: config.capture.plugin === 'native'
+        ? helperPath
+        : `${helperPath} (set capture.plugin: native to use it)`,
+    }];
+    checks.push(...await runNativeHelperDoctor(helperPath));
+    return checks;
+  } catch {
+    return [{
+      area: 'native-capture',
+      status: config.capture.plugin === 'native' ? 'fail' : 'info',
+      message: `native helper not built for ${platformArch}`,
+      detail: config.capture.plugin === 'native'
+        ? `Run pnpm build:plugins or set capture.plugin: node. Expected: ${helperPath}`
+        : 'native capture is optional; current capture.plugin is not native',
+    }];
+  }
+}
+
+function nativeHelperPath(config: { capture: { helper_path?: string } }): string {
   const platformArch = `${process.platform}-${process.arch}`;
   const exe = process.platform === 'win32' ? 'cofounderos-capture.exe' : 'cofounderos-capture';
-  const helperPath = config.capture.helper_path
+  return config.capture.helper_path
     ? expandPath(config.capture.helper_path)
     : path.join(
       findWorkspaceRoot(process.cwd()),
@@ -432,26 +459,44 @@ async function checkNativeCaptureHelper(config: {
       platformArch,
       exe,
     );
+}
+
+async function runNativeHelperDoctor(helperPath: string): Promise<DoctorCheck[]> {
+  if (process.platform !== 'darwin') return [];
   try {
-    await fsp.access(helperPath);
-    return {
-      area: 'native-capture',
-      status: config.capture.plugin === 'native' ? 'ok' : 'info',
-      message: `native helper present for ${platformArch}`,
-      detail: config.capture.plugin === 'native'
-        ? helperPath
-        : `${helperPath} (set capture.plugin: native to use it)`,
+    const { stdout } = await runCommandCapture(helperPath, ['--doctor']);
+    const lines = stdout.split(/\r?\n/).filter(Boolean);
+    const doctorLine = lines.find((line) => line.includes('"kind":"doctor"'));
+    if (!doctorLine) {
+      return [{
+        area: 'native-permissions',
+        status: 'warn',
+        message: 'native helper did not return doctor output',
+      }];
+    }
+    const parsed = JSON.parse(doctorLine) as {
+      checks?: Array<{ id?: string; status?: DoctorStatus; message?: string; detail?: string }>;
     };
-  } catch {
-    return {
-      area: 'native-capture',
-      status: config.capture.plugin === 'native' ? 'fail' : 'info',
-      message: `native helper not built for ${platformArch}`,
-      detail: config.capture.plugin === 'native'
-        ? `Run pnpm build:plugins or set capture.plugin: node. Expected: ${helperPath}`
-        : 'native capture is optional; current capture.plugin is not native',
-    };
+    return (parsed.checks ?? []).map((check) => ({
+      area: `native-${check.id ?? 'check'}`,
+      status: normaliseDoctorStatus(check.status),
+      message: check.message ?? 'native helper check',
+      detail: check.detail,
+    }));
+  } catch (err) {
+    return [{
+      area: 'native-permissions',
+      status: 'warn',
+      message: 'native helper doctor failed',
+      detail: String(err),
+    }];
   }
+}
+
+function normaliseDoctorStatus(status: unknown): DoctorStatus {
+  return status === 'ok' || status === 'warn' || status === 'fail' || status === 'info'
+    ? status
+    : 'warn';
 }
 
 async function canRunCommand(command: string): Promise<boolean> {
@@ -463,6 +508,33 @@ async function canRunCommand(command: string): Promise<boolean> {
     });
     child.on('exit', (code) => resolve(code === 0));
     child.on('error', () => resolve(false));
+  });
+}
+
+async function runCommandCapture(
+  command: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited ${code}: ${stderr || stdout}`));
+    });
   });
 }
 
@@ -758,9 +830,7 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
       ? color.dim('backlog 0')
       : `backlog ${color.bold(`${backlogIsLowerBound ? '≥' : ''}${backlogCount.toLocaleString()}`)} events`;
     const lastHourBytes = diskByHour[diskByHour.length - 1] ?? 0;
-    const freeFragment = freeBytes != null
-      ? `  ·  ${formatBytes(freeBytes)} free`
-      : '';
+    const freeFragment = freeBytes != null ? `  ·  ${formatBytes(freeBytes)} free` : '';
     const deltaText = renderDayDelta(eventsToday, eventsYesterday);
     const pipelineText = formatPipeline(pipeline);
     const modelLine = formatModelLine(modelInfo.name, modelReady, modelInfo.isLocal);
@@ -787,9 +857,12 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
     out.push(
       sectionTitle(
         'Storage',
-        `${formatBytes(totalBytes)} total${freeFragment}  ·  ` +
-          `${formatBytes(recent24Total)} written in 24h  ·  ${formatBytes(lastHourBytes)} last 1h  ·  ${formatBytes(recent24Peak)} peak/h`,
+        `${formatBytes(totalBytes)} total${freeFragment}`,
       ),
+    );
+    out.push(
+      `  ${color.dim('writes')}  ${color.bold(`${formatBytesCompact(recent24Total)}/24h`)}  |  ` +
+        `${formatBytesCompact(lastHourBytes)}/h  ${color.dim(`(peak ${formatBytes(recent24Peak)}/h)`)}`,
     );
     for (const r of diskTop) out.push(formatDiskLine(r.label, r.bytes, totalBytes));
     if (diskOtherBytes > 0) out.push(formatDiskLine('other', diskOtherBytes, totalBytes));
@@ -1538,6 +1611,10 @@ function formatBytes(n: number): string {
     i++;
   }
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+function formatBytesCompact(n: number): string {
+  return formatBytes(n).replace(' ', '');
 }
 
 /**

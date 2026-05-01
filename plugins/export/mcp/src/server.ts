@@ -28,6 +28,9 @@ export interface McpServerOptions {
 }
 
 const DEFAULT_FRAME_TEXT_EXCERPT_CHARS = 5000;
+const DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS = 60000;
+const MAX_SEARCH_FRAMES_RESPONSE_CHARS = 90000;
+const MIN_SEARCH_FRAME_TEXT_EXCERPT_CHARS = 600;
 
 const RAW_EVENT_TYPES: readonly RawEventType[] = [
   'screenshot',
@@ -127,9 +130,18 @@ export function createMcpServer(
         app: z.string().optional().describe('Restrict to a single app name.'),
         semantic: z.boolean().optional().describe('Also include semantic embedding matches. Default true.'),
         limit: z.number().int().min(1).max(50).optional(),
+        max_response_chars: z
+          .number()
+          .int()
+          .min(2000)
+          .max(MAX_SEARCH_FRAMES_RESPONSE_CHARS)
+          .optional()
+          .describe(
+            `Approximate maximum JSON response characters, default ${DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS}. Results are packed by relevance.`,
+          ),
       },
     },
-    async ({ query, from, to, app, semantic, limit }) => {
+    async ({ query, from, to, app, semantic, limit, max_response_chars }) => {
       const frames = await services.storage.searchFrames({
         text: query,
         from,
@@ -145,23 +157,16 @@ export function createMcpServer(
           apps: app ? [app] : undefined,
         });
       const blended = blendFrameMatches(frames, semanticFrames, limit ?? 25);
+      const result = buildSearchFramesResult(
+        query,
+        blended,
+        normaliseSearchResponseChars(max_response_chars),
+      );
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(
-              {
-                query,
-                count: blended.length,
-                frames: blended.map((m) => ({
-                  ...framePreview(m.frame, textExcerptChars),
-                  retrieval: m.retrieval,
-                  semantic_score: m.semanticScore,
-                })),
-              },
-              null,
-              2,
-            ),
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };
@@ -494,7 +499,7 @@ async function listAllStrategyPages(strategy: IIndexStrategy) {
   return out;
 }
 
-function framePreview(frame: Frame, textExcerptChars: number): Record<string, unknown> {
+function framePreview(frame: Frame, textExcerptChars: number, query?: string): Record<string, unknown> {
   return {
     id: frame.id,
     timestamp: frame.timestamp,
@@ -504,7 +509,11 @@ function framePreview(frame: Frame, textExcerptChars: number): Record<string, un
     entity_path: frame.entity_path,
     entity_kind: frame.entity_kind,
     asset_path: frame.asset_path,
-    text_excerpt: frame.text ? truncate(frame.text, textExcerptChars) : null,
+    text_excerpt: frame.text
+      ? query
+        ? extractRelevantTextExcerpt(frame.text, query, textExcerptChars)
+        : truncate(frame.text, textExcerptChars)
+      : null,
     text_chars: frame.text ? frame.text.length : 0,
     text_source: frame.text_source,
     duration_ms: frame.duration_ms,
@@ -518,10 +527,171 @@ function normaliseTextExcerptChars(value: number | undefined): number {
   return Math.max(0, Math.floor(value));
 }
 
+function normaliseSearchResponseChars(value: number | undefined): number {
+  if (!Number.isFinite(value) || value == null) {
+    return DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS;
+  }
+  return Math.min(MAX_SEARCH_FRAMES_RESPONSE_CHARS, Math.max(2000, Math.floor(value)));
+}
+
 
 function truncate(s: string, n: number): string {
+  if (n <= 0) return '';
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + '…';
+}
+
+function buildSearchFramesResult(
+  query: string,
+  matches: Array<{
+    frame: Frame;
+    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+    semanticScore?: number;
+  }>,
+  maxResponseChars: number,
+): Record<string, unknown> {
+  const responseBudget = Math.max(1000, maxResponseChars - 512);
+  const result = {
+    query,
+    count: matches.length,
+    returned_count: 0,
+    omitted_count: 0,
+    max_response_chars: maxResponseChars,
+    truncated: false,
+    frames: [] as Record<string, unknown>[],
+  };
+
+  for (const match of matches) {
+    const preview = largestFittingFrameSearchPreview(match, query, result, responseBudget);
+    if (preview) {
+      result.frames.push(preview);
+      result.returned_count = result.frames.length;
+      continue;
+    }
+
+    result.omitted_count += 1;
+    result.truncated = true;
+  }
+
+  result.returned_count = result.frames.length;
+  result.omitted_count = matches.length - result.frames.length;
+  result.truncated = result.omitted_count > 0;
+  return result;
+}
+
+function largestFittingFrameSearchPreview(
+  match: {
+    frame: Frame;
+    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+    semanticScore?: number;
+  },
+  query: string,
+  result: { frames: Record<string, unknown>[] },
+  maxResponseChars: number,
+): Record<string, unknown> | null {
+  const maxTextChars = Math.max(match.frame.text?.length ?? 0, MIN_SEARCH_FRAME_TEXT_EXCERPT_CHARS);
+  let lo = 0;
+  let hi = maxTextChars;
+  let best: Record<string, unknown> | null = null;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const preview = frameSearchPreview(match, mid, query);
+    if (fitsSearchResponse(result, preview, maxResponseChars)) {
+      best = preview;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return best;
+}
+
+function frameSearchPreview(
+  match: {
+    frame: Frame;
+    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+    semanticScore?: number;
+  },
+  textExcerptChars: number,
+  query: string,
+): Record<string, unknown> {
+  return {
+    ...framePreview(match.frame, textExcerptChars, query),
+    retrieval: match.retrieval,
+    semantic_score: match.semanticScore,
+  };
+}
+
+function fitsSearchResponse(
+  result: { frames: Record<string, unknown>[] },
+  frame: Record<string, unknown>,
+  maxResponseChars: number,
+): boolean {
+  return JSON.stringify(
+    {
+      ...result,
+      returned_count: result.frames.length + 1,
+      frames: [...result.frames, frame],
+    },
+    null,
+    2,
+  ).length <= maxResponseChars;
+}
+
+function extractRelevantTextExcerpt(text: string, query: string, maxChars: number): string {
+  if (maxChars <= 0) return '';
+  if (text.length <= maxChars) return text;
+
+  const lower = text.toLowerCase();
+  const exactQuery = query.trim().toLowerCase();
+  let bestIndex = exactQuery ? lower.indexOf(exactQuery) : -1;
+
+  if (bestIndex === -1) {
+    bestIndex = bestQueryWindowStart(lower, queryTerms(query), maxChars);
+  }
+
+  if (bestIndex === -1) return truncate(text, maxChars);
+
+  const halfWindow = Math.floor(maxChars / 2);
+  const start = Math.max(0, Math.min(text.length - maxChars, bestIndex - halfWindow));
+  const end = Math.min(text.length, start + maxChars);
+  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
+}
+
+function queryTerms(query: string): string[] {
+  const terms = query
+    .toLowerCase()
+    .match(/[a-z0-9_-]+/g);
+  return [...new Set((terms ?? []).filter((term) => term.length > 1))];
+}
+
+function bestQueryWindowStart(lowerText: string, terms: string[], maxChars: number): number {
+  let bestStart = -1;
+  let bestScore = 0;
+
+  for (const term of terms) {
+    let from = 0;
+    let occurrences = 0;
+    while (occurrences < 200) {
+      const idx = lowerText.indexOf(term, from);
+      if (idx === -1) break;
+      occurrences += 1;
+
+      const start = Math.max(0, Math.min(lowerText.length - maxChars, idx - Math.floor(maxChars / 2)));
+      const window = lowerText.slice(start, start + maxChars);
+      const score = terms.reduce((sum, candidate) => sum + (window.includes(candidate) ? 1 : 0), 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = idx;
+      }
+
+      from = idx + term.length;
+    }
+  }
+
+  return bestStart;
 }
 
 function scorePage(content: string, queryLower: string): number {

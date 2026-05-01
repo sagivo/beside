@@ -39,6 +39,19 @@ const CaptureSchema = z.object({
     batch_size: z.number().int().positive().default(5),
     whisper_command: z.string().default('whisper'),
     whisper_language: z.string().optional(),
+    live_recording: z.object({
+      enabled: z.boolean().default(false),
+      chunk_seconds: z.number().int().positive().default(300),
+      format: z.enum(['m4a']).default('m4a'),
+      sample_rate: z.number().int().positive().default(16_000),
+      channels: z.number().int().positive().max(2).default(1),
+    }).default({
+      enabled: false,
+      chunk_seconds: 300,
+      format: 'm4a',
+      sample_rate: 16_000,
+      channels: 1,
+    }),
   }).default({
     inbox_path: '~/.cofounderOS/raw/audio/inbox',
     processed_path: '~/.cofounderOS/raw/audio/processed',
@@ -46,6 +59,13 @@ const CaptureSchema = z.object({
     tick_interval_sec: 60,
     batch_size: 5,
     whisper_command: 'whisper',
+    live_recording: {
+      enabled: false,
+      chunk_seconds: 300,
+      format: 'm4a',
+      sample_rate: 16_000,
+      channels: 1,
+    },
   }),
   // Output format for screenshots. WebP is ~40% smaller than JPEG at
   // visually identical quality. JPEG is kept as an option for callers
@@ -335,6 +355,12 @@ capture:
     tick_interval_sec: 60
     batch_size: 5
     whisper_command: whisper      # OpenAI Whisper CLI; .txt/.vtt/.srt files import without it
+    live_recording:
+      enabled: false              # native plugin only; records mic/input chunks into inbox
+      chunk_seconds: 300
+      format: m4a
+      sample_rate: 16000
+      channels: 1
   excluded_apps:
     - 1Password
     - Bitwarden

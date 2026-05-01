@@ -31,6 +31,22 @@ interface NativeCaptureConfig {
   excluded_url_patterns?: string[];
   capture_audio?: boolean;
   whisper_model?: string;
+  audio?: {
+    inbox_path?: string;
+    processed_path?: string;
+    failed_path?: string;
+    tick_interval_sec?: number;
+    batch_size?: number;
+    whisper_command?: string;
+    whisper_language?: string;
+    live_recording?: {
+      enabled?: boolean;
+      chunk_seconds?: number;
+      format?: 'm4a';
+      sample_rate?: number;
+      channels?: number;
+    };
+  };
   raw_root?: string;
   privacy?: {
     blur_password_fields?: boolean;
@@ -92,6 +108,22 @@ class NativeCapture implements ICapture {
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? false,
       whisper_model: config.whisper_model ?? 'tiny',
+      audio: {
+        inbox_path: expandPath(config.audio?.inbox_path ?? '~/.cofounderOS/raw/audio/inbox'),
+        processed_path: expandPath(config.audio?.processed_path ?? '~/.cofounderOS/raw/audio/processed'),
+        failed_path: expandPath(config.audio?.failed_path ?? '~/.cofounderOS/raw/audio/failed'),
+        tick_interval_sec: config.audio?.tick_interval_sec ?? 60,
+        batch_size: config.audio?.batch_size ?? 5,
+        whisper_command: config.audio?.whisper_command ?? 'whisper',
+        whisper_language: config.audio?.whisper_language,
+        live_recording: {
+          enabled: config.audio?.live_recording?.enabled ?? false,
+          chunk_seconds: config.audio?.live_recording?.chunk_seconds ?? 300,
+          format: config.audio?.live_recording?.format ?? 'm4a',
+          sample_rate: config.audio?.live_recording?.sample_rate ?? 16_000,
+          channels: config.audio?.live_recording?.channels ?? 1,
+        },
+      },
       raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
       privacy: config.privacy ?? {
         blur_password_fields: true,
@@ -260,7 +292,10 @@ class NativeCapture implements ICapture {
         );
         break;
       case 'event':
-        await this.emit(await this.prepareEvent(msg.event));
+        {
+          const event = await this.prepareEvent(msg.event);
+          if (event) await this.emit(event);
+        }
         break;
       case 'status':
         if (typeof msg.cpuPercent === 'number') this.cpuPercent = msg.cpuPercent;
@@ -291,7 +326,7 @@ class NativeCapture implements ICapture {
     }
   }
 
-  private async prepareEvent(event: RawEvent): Promise<RawEvent> {
+  private async prepareEvent(event: RawEvent): Promise<RawEvent | null> {
     if (event.type !== 'screenshot' || !event.asset_path) return event;
     try {
       return await this.postProcessScreenshot(event);
@@ -304,7 +339,7 @@ class NativeCapture implements ICapture {
     }
   }
 
-  private async postProcessScreenshot(event: RawEvent): Promise<RawEvent> {
+  private async postProcessScreenshot(event: RawEvent): Promise<RawEvent | null> {
     if (!event.asset_path) return event;
     const originalAbs = path.isAbsolute(event.asset_path)
       ? event.asset_path
@@ -313,7 +348,7 @@ class NativeCapture implements ICapture {
     const phash = await dHash(input);
     const previous = this.lastHashByScreen.get(event.screen_index);
     const diff = hashDiff(previous ?? null, phash);
-    this.lastHashByScreen.set(event.screen_index, phash);
+    const trigger = typeof event.metadata?.trigger === 'string' ? event.metadata.trigger : null;
 
     let output: Buffer = Buffer.from(input);
     let assetPath = event.asset_path;
@@ -351,6 +386,19 @@ class NativeCapture implements ICapture {
       await fs.writeFile(originalAbs, output);
       actualFormat = 'jpeg';
     }
+
+    if (trigger === 'content_change' && diff < this.config.screenshot_diff_threshold) {
+      const finalAbs = path.isAbsolute(assetPath)
+        ? assetPath
+        : path.join(this.config.raw_root, assetPath);
+      await fs.rm(finalAbs, { force: true });
+      this.logger.debug(
+        `skip native content_change screenshot (diff ${diff.toFixed(3)} < ${this.config.screenshot_diff_threshold})`,
+      );
+      return null;
+    }
+
+    this.lastHashByScreen.set(event.screen_index, phash);
 
     return {
       ...event,
