@@ -11,6 +11,8 @@
  * handler so the CLI can render a progress bar instead of a wall of logs.
  */
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ModelBootstrapHandler } from '@cofounderos/interfaces';
 
@@ -223,6 +225,28 @@ export async function installOllamaWindows(
   });
 }
 
+function resolveOllamaCommand(): { command: string; shell: boolean } {
+  if (process.platform !== 'win32') {
+    return { command: 'ollama', shell: false };
+  }
+
+  // winget can update PATH for *future* shells while the current Node
+  // process keeps its old environment. Try the common install locations
+  // before falling back to PATHEXT / shell resolution.
+  const candidates = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe'),
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Ollama', 'ollama.exe'),
+    process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Ollama', 'ollama.exe'),
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+
+  const installed = candidates.find((p) => existsSync(p));
+  if (installed) {
+    return { command: installed, shell: false };
+  }
+
+  return { command: 'ollama', shell: true };
+}
+
 /**
  * Spawn `ollama serve` in the background, detached from this process. On
  * macOS the .app already auto-starts the daemon via launchd, on Windows
@@ -236,13 +260,14 @@ export async function installOllamaWindows(
 export async function startOllamaDaemon(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     try {
-      const child = spawn('ollama', ['serve'], {
+      const resolved = resolveOllamaCommand();
+      const child = spawn(resolved.command, ['serve'], {
         detached: true,
         stdio: 'ignore',
         // On Windows `ollama` is `ollama.exe`, but other potential
         // wrappers may be `.cmd`. shell:true keeps PATHEXT resolution
         // identical to the user's shell. Harmless on POSIX.
-        shell: process.platform === 'win32',
+        shell: resolved.shell,
         // Critical on Windows: without windowsHide, a detached `ollama
         // serve` would leave a permanent console window on the user's
         // desktop until the daemon exits.

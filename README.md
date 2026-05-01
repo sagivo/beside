@@ -45,6 +45,7 @@ rather than crash.
 | `COFOUNDEROS_CONFIG` | Path to the YAML config file. Overrides the `~/.cofounderOS/config.yaml` lookup. |
 | `COFOUNDEROS_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/cofounderos` on Linux or `%APPDATA%\cofounderos` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
 | `COFOUNDEROS_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
+| `COFOUNDEROS_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Used by CI to run `capture --once` on headless Linux/macOS/Windows runners. |
 | `NO_COLOR` | Disable ANSI colour output (logs + status). |
 | `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY (CI logs that render ANSI). |
 
@@ -65,6 +66,9 @@ pnpm cli init
 
 # Show status (read-only — never triggers an install or download)
 pnpm cli status
+
+# Preflight platform/dependency checks (also read-only)
+pnpm cli doctor
 
 # Detailed stats: disk usage breakdown, events, frames, recent activity
 pnpm cli stats         # or: pnpm cli info  (alias)
@@ -101,9 +105,9 @@ What `cofounderos init` (and `start` / `index` on first launch) does:
 
 1. **Probes** the configured Ollama host. If reachable and the model is
    already pulled, it does nothing.
-2. **Auto-installs Ollama** (macOS / Linux) by piping the official
-   `https://ollama.com/install.sh` through `sh`. Inherits your TTY so any
-   `sudo` prompt surfaces directly. Live installer output is mirrored.
+2. **Auto-installs Ollama** using the platform path below (macOS / Linux:
+   official shell installer; Windows: `winget`). Inherits your TTY so any
+   `sudo` / UAC prompt surfaces directly. Live installer output is mirrored.
 3. **Starts the Ollama daemon** if it isn't already serving.
 4. **Pulls the configured model** (default: `gemma2:2b`, ~1.6 GB) with a
    live download progress bar — phase, percentage, bytes downloaded.
@@ -244,6 +248,16 @@ For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 pnpm --filter @cofounderos/app exec tsx src/cli.ts stats
 ```
 
+For headless smoke tests or CI, use the capture fixture. It writes a real
+synthetic screenshot + raw event through the same storage path as normal
+capture without touching desktop APIs or OS permissions:
+
+```bash
+COFOUNDEROS_CAPTURE_FIXTURE=1 \
+COFOUNDEROS_DATA_DIR=/tmp/cofounderos-smoke \
+pnpm cli capture --once
+```
+
 ---
 
 ## Disk usage & retention
@@ -284,8 +298,8 @@ search as first-class tools — agents don't need to read files directly.
 
 | Tool | What it does |
 |------|--------------|
-| `search_memory` | Default entrypoint. Blended search across frames + wiki pages. |
-| `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs. |
+| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. |
+| `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
 | `list_sessions` | Recent activity sessions (continuous focus runs) with primary entity, app, and active time. |
@@ -295,6 +309,60 @@ search as first-class tools — agents don't need to read files directly.
 | `query_raw_events` | Raw event log query (bypasses the index). |
 | `get_session` | Reconstruct events + screenshot paths over a time range (raw-event time slice). |
 | `trigger_reindex` | Queue an incremental or full re-index. |
+
+### Semantic embeddings
+
+V2 semantic search runs locally by default with Ollama's
+`nomic-embed-text` model. A background worker embeds each frame's
+searchable content (app, title, URL, resolved entity, OCR/accessibility
+text, and audio transcripts) and stores normalised vectors in SQLite. `search_memory` and
+`search_frames` still use FTS5 for exact keyword precision, but now blend
+in conceptual matches when wording differs.
+
+```yaml
+index:
+  embeddings:
+    enabled: true
+    batch_size: 32
+    tick_interval_min: 5
+  model:
+    ollama:
+      embedding_model: nomic-embed-text
+```
+
+The first `cofounderos init` / `start` after enabling embeddings pulls
+the embedding model alongside the chat model. If the active model adapter
+doesn't support embeddings, the worker logs one warning and the system
+falls back to keyword search unchanged.
+
+### Audio transcription
+
+V2 audio starts with a local inbox rather than live system-audio capture.
+Drop transcript files (`.txt`, `.md`, `.vtt`, `.srt`) into the inbox and
+CofounderOS imports them directly. Drop audio files (`.wav`, `.mp3`,
+`.m4a`, `.flac`, `.ogg`, `.opus`, `.webm`, `.mp4`) and CofounderOS runs
+the configured local Whisper CLI, then stores the transcript as an
+`audio_transcript` event. Those transcripts become frames with
+`text_source: audio`, so normal search, sessions, entities, embeddings,
+journals, and MCP tools all pick them up.
+
+```yaml
+capture:
+  capture_audio: true
+  whisper_model: tiny
+  audio:
+    inbox_path: ~/.cofounderOS/raw/audio/inbox
+    processed_path: ~/.cofounderOS/raw/audio/processed
+    failed_path: ~/.cofounderOS/raw/audio/failed
+    tick_interval_sec: 60
+    batch_size: 5
+    whisper_command: whisper
+```
+
+To use transcript import only, no Whisper install is needed. To transcribe
+audio files, install a compatible `whisper` command first, for example
+OpenAI Whisper's CLI. Files that fail transcription are moved to
+`failed_path` with a `.error.txt` sidecar explaining why.
 
 ### Two transports
 

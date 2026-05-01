@@ -24,6 +24,8 @@ import {
 } from '@cofounderos/core';
 import { FrameBuilder } from './frame-builder.js';
 import { SessionBuilder } from './session-builder.js';
+import { EmbeddingWorker } from './embedding-worker.js';
+import { AudioTranscriptWorker } from './audio-transcript-worker.js';
 import { OcrWorker } from './ocr-worker.js';
 import { EntityResolverWorker } from './entity-resolver.js';
 import { StorageVacuum } from './storage-vacuum.js';
@@ -53,8 +55,10 @@ export interface OrchestratorHandles {
   registry: PluginRegistry;
   frameBuilder: FrameBuilder;
   ocrWorker: OcrWorker;
+  audioTranscriptWorker: AudioTranscriptWorker;
   entityResolver: EntityResolverWorker;
   sessionBuilder: SessionBuilder;
+  embeddingWorker: EmbeddingWorker;
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
 }
@@ -65,10 +69,12 @@ const FRAME_BUILDER_JOB = 'frame-builder';
 const FRAME_BUILDER_INTERVAL_MS = 60_000;
 const OCR_WORKER_JOB = 'ocr-worker';
 const OCR_WORKER_INTERVAL_MS = 30_000;
+const AUDIO_TRANSCRIPT_JOB = 'audio-transcript-worker';
 const ENTITY_RESOLVER_JOB = 'entity-resolver';
 const ENTITY_RESOLVER_INTERVAL_MS = 90_000;
 const SESSION_BUILDER_JOB = 'session-builder';
 const SESSION_BUILDER_INTERVAL_MS = 120_000;
+const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
 
 export async function buildOrchestrator(
@@ -161,6 +167,8 @@ export async function buildOrchestrator(
   const exportServices: ExportServices = {
     storage,
     strategy,
+    model,
+    embeddingModelName: getEmbeddingModelName(config),
     dataDir,
     triggerReindex: async (_full) => {
       await scheduler.runNow(INCREMENTAL_JOB);
@@ -180,12 +188,29 @@ export async function buildOrchestrator(
     storageRoot: storage.getRoot(),
     sensitiveKeywords,
   });
+  const audioTranscriptWorker = new AudioTranscriptWorker(storage, logger, {
+    enabled: config.capture.capture_audio,
+    inboxPath: config.capture.audio.inbox_path,
+    processedPath: config.capture.audio.processed_path,
+    failedPath: config.capture.audio.failed_path,
+    whisperCommand: config.capture.audio.whisper_command,
+    whisperModel: config.capture.whisper_model,
+    whisperLanguage: config.capture.audio.whisper_language,
+    batchSize: config.capture.audio.batch_size,
+    sensitiveKeywords,
+  });
   const entityResolver = new EntityResolverWorker(storage, logger);
   const sessionsCfg = config.index.sessions;
   const sessionBuilder = new SessionBuilder(storage, logger, {
     idleThresholdMs: sessionsCfg.idle_threshold_sec * 1000,
     minActiveMs: sessionsCfg.min_active_ms,
     fallbackFrameAttentionMs: sessionsCfg.fallback_frame_attention_ms,
+  });
+  const embeddingsCfg = config.index.embeddings;
+  const embeddingWorker = new EmbeddingWorker(storage, model, logger, {
+    enabled: embeddingsCfg.enabled,
+    batchSize: embeddingsCfg.batch_size,
+    modelName: getEmbeddingModelName(config),
   });
   const vacuumCfg = config.storage.local.vacuum;
   // Resolve the effective window in ms. `*_minutes` (when set) wins
@@ -219,8 +244,10 @@ export async function buildOrchestrator(
     registry,
     frameBuilder,
     ocrWorker,
+    audioTranscriptWorker,
     entityResolver,
     sessionBuilder,
+    embeddingWorker,
     vacuum,
     loadGuard,
   };
@@ -237,7 +264,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   pagesCreated: number;
   pagesUpdated: number;
 }> {
-  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver, sessionBuilder } = handles;
+  const { storage, strategy, model, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, embeddingWorker } = handles;
   const log = logger.child('index-runner');
 
   // Materialise frames + resolve entities + group into sessions before
@@ -245,6 +272,12 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   // All passes are cheap and incremental — together they cost ~20ms
   // when there's no work.
   try {
+    const audioResult = await audioTranscriptWorker.drain();
+    if (audioResult.processed > 0) {
+      log.info(
+        `ingested ${audioResult.processed} audio transcript(s) before indexing`,
+      );
+    }
     const fbResult = await frameBuilder.drain();
     if (fbResult.framesCreated > 0) {
       log.info(`built ${fbResult.framesCreated} new frames before indexing`);
@@ -258,6 +291,10 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
       log.info(
         `grouped ${sbResult.framesProcessed} frames into ${sbResult.sessionsCreated} new + ${sbResult.sessionsExtended} extended session(s)`,
       );
+    }
+    const embResult = await embeddingWorker.drain();
+    if (embResult.processed > 0) {
+      log.info(`embedded ${embResult.processed} frame(s) for semantic search`);
     }
   } catch (err) {
     log.warn('frame/entity/session preparation failed (continuing)', { err: String(err) });
@@ -347,12 +384,17 @@ export async function runFullReindex(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { storage, strategy, model, exports, logger, config, frameBuilder, entityResolver, sessionBuilder } = handles;
+  const { storage, strategy, model, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, embeddingWorker } = handles;
   const log = logger.child('full-reindex');
   log.info(`full re-index starting (strategy=${strategy.name})`);
 
   await strategy.reset();
   await storage.clearIndexCheckpoint(strategy.name);
+
+  const audio = await audioTranscriptWorker.drain();
+  if (audio.processed > 0) {
+    log.info(`ingested ${audio.processed} audio transcript(s) before full re-index`);
+  }
 
   // Rebuild frames + entities from scratch — both are derived tables and
   // the resolver rules may have improved between runs.
@@ -377,6 +419,11 @@ export async function runFullReindex(
     log.info(
       `rebuilt ${sb.sessionsCreated} session(s) from ${sb.framesProcessed} frames`,
     );
+  }
+  await storage.clearFrameEmbeddings(getEmbeddingModelName(config));
+  const emb = await embeddingWorker.drain();
+  if (emb.processed > 0) {
+    log.info(`rebuilt ${emb.processed} frame embedding(s)`);
   }
 
   // Walk all events in chronological order, batched.
@@ -411,7 +458,7 @@ export async function runFullReindex(
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, entityResolver, sessionBuilder, vacuum, logger, loadGuard } =
+  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, embeddingWorker, vacuum, logger, loadGuard } =
     handles;
 
   // Wrap a heavy job so it skips when the machine is busy. Cheap jobs
@@ -451,6 +498,17 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       logger.child('ocr-worker').warn('tick failed', { err: String(err) });
     }
   });
+  scheduler.every(
+    AUDIO_TRANSCRIPT_JOB,
+    Math.max(15_000, config.capture.audio.tick_interval_sec * 1000),
+    async () => {
+      try {
+        await audioTranscriptWorker.tick();
+      } catch (err) {
+        logger.child('audio-transcript-worker').warn('tick failed', { err: String(err) });
+      }
+    },
+  );
   // Entity resolver runs after the frame builder so freshly built frames
   // become resolvable in the next ~30s.
   scheduler.every(ENTITY_RESOLVER_JOB, ENTITY_RESOLVER_INTERVAL_MS, async () => {
@@ -472,6 +530,17 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       logger.child('session-builder').warn('tick failed', { err: String(err) });
     }
   });
+  scheduler.every(
+    EMBEDDING_WORKER_JOB,
+    Math.max(60_000, config.index.embeddings.tick_interval_min * 60_000),
+    async () => {
+      try {
+        await embeddingWorker.tick();
+      } catch (err) {
+        logger.child('embedding-worker').warn('tick failed', { err: String(err) });
+      }
+    },
+  );
   // Vacuum runs on a slow tick (default hourly). Each tick processes a
   // small batch so it never starves capture.
   const vacuumIntervalMs = Math.max(60_000, config.storage.local.vacuum.tick_interval_min * 60_000);
@@ -517,6 +586,16 @@ export async function stopAll(handles: OrchestratorHandles): Promise<void> {
 
 export function exportRoot(dataDir: string): string {
   return path.join(dataDir, 'export');
+}
+
+function getEmbeddingModelName(config: CofounderOSConfig): string {
+  const modelBlock = config.index.model as unknown as Record<string, unknown>;
+  const pluginBlock = modelBlock[config.index.model.plugin] as
+    | Record<string, unknown>
+    | undefined;
+  const configured = pluginBlock?.embedding_model;
+  if (typeof configured === 'string' && configured.trim()) return configured;
+  return config.index.model.plugin;
 }
 
 /**

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type {
   IStorage,
@@ -9,6 +10,8 @@ import type {
   StorageStats,
   Frame,
   FrameQuery,
+  FrameEmbeddingTask,
+  FrameSemanticMatch,
   FrameOcrTask,
   FrameAsset,
   FrameAssetTier,
@@ -415,6 +418,137 @@ class LocalStorage implements IStorage {
       for (const id of ids) stmt.run(t, id);
     });
     tx(eventIds);
+  }
+
+  async listFramesNeedingEmbedding(
+    model: string,
+    limit: number,
+  ): Promise<FrameEmbeddingTask[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT frames.*,
+                frame_embeddings.content_hash AS existing_hash
+         FROM frames
+         LEFT JOIN frame_embeddings
+           ON frame_embeddings.frame_id = frames.id
+          AND frame_embeddings.model = @model
+         WHERE (
+           COALESCE(frames.text, '') != ''
+           OR COALESCE(frames.window_title, '') != ''
+           OR COALESCE(frames.url, '') != ''
+         )
+         ORDER BY frames.timestamp DESC
+         LIMIT @scanLimit`,
+      )
+      .all({
+        model,
+        // Scan a little beyond the requested batch so changed hashes can
+        // be filtered in JS without starving the worker on already-current
+        // rows near the top of the timeline.
+        scanLimit: Math.max(1, Math.floor(limit)) * 5,
+      }) as Array<RawFrameRow & { existing_hash: string | null }>;
+
+    const out: FrameEmbeddingTask[] = [];
+    for (const row of rows) {
+      const content = frameEmbeddingContent(rowToFrame(row));
+      if (!content) continue;
+      const hash = sha256(content);
+      if (row.existing_hash === hash) continue;
+      out.push({ id: row.id, content_hash: hash, content });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  async upsertFrameEmbedding(
+    frameId: string,
+    model: string,
+    contentHash: string,
+    vector: number[],
+  ): Promise<void> {
+    const cleaned = normaliseVector(vector);
+    if (cleaned.length === 0) return;
+    this.db
+      .prepare(
+        `INSERT INTO frame_embeddings
+          (frame_id, model, content_hash, vector_json, dims, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(frame_id, model) DO UPDATE SET
+           content_hash = excluded.content_hash,
+           vector_json = excluded.vector_json,
+           dims = excluded.dims,
+           created_at = excluded.created_at`,
+      )
+      .run(
+        frameId,
+        model,
+        contentHash,
+        JSON.stringify(cleaned),
+        cleaned.length,
+        new Date().toISOString(),
+      );
+  }
+
+  async searchFrameEmbeddings(
+    vector: number[],
+    query: Omit<FrameQuery, 'text' | 'embedding' | 'embeddingModel'> & {
+      model?: string;
+    } = {},
+  ): Promise<FrameSemanticMatch[]> {
+    const target = normaliseVector(vector);
+    if (target.length === 0) return [];
+
+    const where: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.model) {
+      where.push('frame_embeddings.model = @model');
+      params.model = query.model;
+    }
+    if (query.from) {
+      where.push('frames.timestamp >= @from_ts');
+      params.from_ts = query.from;
+    }
+    if (query.to) {
+      where.push('frames.timestamp <= @to_ts');
+      params.to_ts = query.to;
+    }
+    if (query.apps?.length) {
+      where.push(`frames.app IN (${query.apps.map((_, i) => `@app_${i}`).join(',')})`);
+      query.apps.forEach((a, i) => (params[`app_${i}`] = a));
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT frames.*, frame_embeddings.vector_json
+         FROM frame_embeddings
+         JOIN frames ON frames.id = frame_embeddings.frame_id
+         WHERE ${where.join(' AND ')}`,
+      )
+      .all(params) as Array<RawFrameRow & { vector_json: string }>;
+
+    const matches: FrameSemanticMatch[] = [];
+    for (const row of rows) {
+      const candidate = parseVector(row.vector_json);
+      if (candidate.length !== target.length) continue;
+      const score = dot(target, candidate);
+      if (!Number.isFinite(score)) continue;
+      matches.push({ frame: rowToFrame(row), score });
+    }
+    matches.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.frame.timestamp.localeCompare(a.frame.timestamp);
+    });
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const limit = Math.max(1, Math.floor(query.limit ?? 25));
+    return matches.slice(offset, offset + limit);
+  }
+
+  async clearFrameEmbeddings(model?: string): Promise<void> {
+    if (model) {
+      this.db.prepare('DELETE FROM frame_embeddings WHERE model = ?').run(model);
+    } else {
+      this.db.prepare('DELETE FROM frame_embeddings').run();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -855,6 +989,18 @@ class LocalStorage implements IStorage {
         tokenize='porter unicode61 remove_diacritics 2'
       );
 
+      CREATE TABLE IF NOT EXISTS frame_embeddings (
+        frame_id     TEXT NOT NULL,
+        model        TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        vector_json  TEXT NOT NULL,
+        dims         INTEGER NOT NULL,
+        created_at   TEXT NOT NULL,
+        PRIMARY KEY (frame_id, model)
+      );
+      CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model
+        ON frame_embeddings(model);
+
       CREATE TABLE IF NOT EXISTS entities (
         path             TEXT PRIMARY KEY,
         kind             TEXT NOT NULL,
@@ -1035,6 +1181,47 @@ function rowToFrame(r: RawFrameRow): Frame {
     activity_session_id: r.activity_session_id,
     source_event_ids: sourceEventIds,
   };
+}
+
+function frameEmbeddingContent(frame: Frame): string {
+  const parts = [
+    frame.app ? `App: ${frame.app}` : null,
+    frame.window_title ? `Window: ${frame.window_title}` : null,
+    frame.url ? `URL: ${frame.url}` : null,
+    frame.entity_path ? `Entity: ${frame.entity_path}` : null,
+    frame.text ? `Text: ${frame.text}` : null,
+  ].filter((p): p is string => Boolean(p));
+  return parts.join('\n').trim();
+}
+
+function sha256(input: string): string {
+  return createHash('sha256').update(input).digest('hex');
+}
+
+function parseVector(json: string): number[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return normaliseVector(parsed);
+  } catch {
+    return [];
+  }
+}
+
+function normaliseVector(values: unknown[]): number[] {
+  const nums = values
+    .map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : null))
+    .filter((v): v is number => v != null);
+  const norm = Math.sqrt(nums.reduce((acc, v) => acc + v * v, 0));
+  if (!Number.isFinite(norm) || norm === 0) return [];
+  return nums.map((v) => v / norm);
+}
+
+function dot(a: number[], b: number[]): number {
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out += a[i]! * b[i]!;
+  // Convert cosine [-1, 1] into a friendlier [0, 1] score.
+  return (out + 1) / 2;
 }
 
 interface RawEntityRow {

@@ -31,6 +31,22 @@ const CaptureSchema = z.object({
   idle_threshold_sec: z.number().int().positive().default(60),
   capture_audio: z.boolean().default(false),
   whisper_model: z.string().default('tiny'),
+  audio: z.object({
+    inbox_path: z.string().default('~/.cofounderOS/raw/audio/inbox'),
+    processed_path: z.string().default('~/.cofounderOS/raw/audio/processed'),
+    failed_path: z.string().default('~/.cofounderOS/raw/audio/failed'),
+    tick_interval_sec: z.number().int().positive().default(60),
+    batch_size: z.number().int().positive().default(5),
+    whisper_command: z.string().default('whisper'),
+    whisper_language: z.string().optional(),
+  }).default({
+    inbox_path: '~/.cofounderOS/raw/audio/inbox',
+    processed_path: '~/.cofounderOS/raw/audio/processed',
+    failed_path: '~/.cofounderOS/raw/audio/failed',
+    tick_interval_sec: 60,
+    batch_size: 5,
+    whisper_command: 'whisper',
+  }),
   // Output format for screenshots. WebP is ~40% smaller than JPEG at
   // visually identical quality. JPEG is kept as an option for callers
   // that need OS-native compatibility (e.g., older Quick Look stacks).
@@ -173,10 +189,25 @@ const IndexSchema = z.object({
     min_active_ms: 30_000,
     fallback_frame_attention_ms: 5_000,
   }),
+  // Semantic embeddings (V2). Embeddings are derived from frame
+  // text/title/url and blended into MCP search for conceptual matches
+  // that keyword FTS would miss.
+  embeddings: z.object({
+    enabled: z.boolean().default(true),
+    batch_size: z.number().int().positive().default(32),
+    tick_interval_min: z.number().int().positive().default(5),
+    search_weight: z.number().positive().default(0.35),
+  }).default({
+    enabled: true,
+    batch_size: 32,
+    tick_interval_min: 5,
+    search_weight: 0.35,
+  }),
   model: z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({
       model: z.string().default('gemma2:2b'),
+      embedding_model: z.string().default('nomic-embed-text'),
       host: z.string().default('http://127.0.0.1:11434'),
       vision_model: z.string().optional(),
       // First-run UX: auto-install Ollama and auto-pull the model the
@@ -184,6 +215,7 @@ const IndexSchema = z.object({
       auto_install: z.boolean().default(true),
     }).default({
       model: 'gemma2:2b',
+      embedding_model: 'nomic-embed-text',
       host: 'http://127.0.0.1:11434',
       auto_install: true,
     }),
@@ -198,7 +230,11 @@ const IndexSchema = z.object({
     }).optional(),
   }).default({
     plugin: 'ollama',
-    ollama: { model: 'gemma2:2b', host: 'http://127.0.0.1:11434' },
+    ollama: {
+      model: 'gemma2:2b',
+      embedding_model: 'nomic-embed-text',
+      host: 'http://127.0.0.1:11434',
+    },
   }),
 }).passthrough();
 
@@ -292,6 +328,13 @@ capture:
   content_change_min_interval_ms: 20000 # min ms between soft-trigger captures
   capture_audio: false            # V2
   whisper_model: tiny             # V2
+  audio:
+    inbox_path: ~/.cofounderOS/raw/audio/inbox
+    processed_path: ~/.cofounderOS/raw/audio/processed
+    failed_path: ~/.cofounderOS/raw/audio/failed
+    tick_interval_sec: 60
+    batch_size: 5
+    whisper_command: whisper      # OpenAI Whisper CLI; .txt/.vtt/.srt files import without it
   excluded_apps:
     - 1Password
     - Bitwarden
@@ -369,10 +412,19 @@ index:
     idle_threshold_sec: 300
     afk_threshold_sec: 120
     min_active_ms: 30000
+  # Semantic embeddings (V2). Generated from frame text/title/url and
+  # blended into MCP search so conceptual matches work even when the
+  # exact keyword is absent.
+  embeddings:
+    enabled: true
+    batch_size: 32
+    tick_interval_min: 5
+    search_weight: 0.35
   model:
     plugin: ollama
     ollama:
       model: gemma2:2b           # swap for gemma4:e4b once your Ollama has it
+      embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
       auto_install: true         # auto-install Ollama + pull model on first run
 

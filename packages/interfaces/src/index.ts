@@ -135,7 +135,8 @@ export interface StorageQuery {
 /**
  * A `Frame` is the materialised retrieval unit of CofounderOS — a single
  * "moment" you were looking at, joining a screenshot with its window /
- * URL metadata and (eventually) its OCR'd or accessibility-extracted text.
+ * URL metadata and (eventually) its OCR'd, accessibility-extracted, or
+ * audio-transcribed text.
  *
  * Frames are derived from raw events by the FrameBuilder; they are the
  * primary substrate for search, the daily journal, and the wiki indexer.
@@ -151,9 +152,9 @@ export interface Frame {
   app_bundle_id: string;
   window_title: string;
   url: string | null;
-  /** OCR'd or accessibility-extracted text. Null until a worker fills it. */
+  /** OCR'd, accessibility-extracted, or audio-transcribed text. */
   text: string | null;
-  text_source: 'ocr' | 'accessibility' | 'none' | null;
+  text_source: 'ocr' | 'accessibility' | 'audio' | 'none' | null;
   asset_path: string | null;
   perceptual_hash: string | null;
   trigger: string | null;
@@ -178,11 +179,36 @@ export interface Frame {
 export interface FrameQuery {
   /** FTS5 query against `text`, `app`, `window_title`, `url`. */
   text?: string;
+  /**
+   * Optional semantic vector for conceptual retrieval. When provided,
+   * storage adapters that materialise embeddings may return nearest
+   * neighbours blended with any FTS filters. Adapters without embeddings
+   * can ignore this field.
+   */
+  embedding?: number[];
+  /** Which embedding model produced `embedding`. Defaults to adapter-specific. */
+  embeddingModel?: string;
   from?: string;
   to?: string;
   apps?: string[];
   limit?: number;
   offset?: number;
+}
+
+export interface FrameEmbeddingTask {
+  id: string;
+  /**
+   * Stable text digest for change detection. If the frame text/title/url
+   * changes, the worker writes a new embedding for the new digest.
+   */
+  content_hash: string;
+  content: string;
+}
+
+export interface FrameSemanticMatch {
+  frame: Frame;
+  /** Cosine similarity in [0, 1] after normalisation. Higher is better. */
+  score: number;
 }
 
 /** Lightweight projection used by the OCR worker. */
@@ -372,6 +398,34 @@ export interface IStorage {
   /** Mark raw events as having been folded into a frame. */
   markFramed(eventIds: string[]): Promise<void>;
 
+  /**
+   * Frames whose searchable content has no current embedding for the
+   * requested model. Used by the EmbeddingWorker.
+   */
+  listFramesNeedingEmbedding(
+    model: string,
+    limit: number,
+  ): Promise<FrameEmbeddingTask[]>;
+
+  /** Insert or replace a frame embedding for `model`. */
+  upsertFrameEmbedding(
+    frameId: string,
+    model: string,
+    contentHash: string,
+    vector: number[],
+  ): Promise<void>;
+
+  /** Semantic nearest-neighbour search over frame embeddings. */
+  searchFrameEmbeddings(
+    vector: number[],
+    query?: Omit<FrameQuery, 'text' | 'embedding' | 'embeddingModel'> & {
+      model?: string;
+    },
+  ): Promise<FrameSemanticMatch[]>;
+
+  /** Clear all derived embeddings, or only embeddings for one model. */
+  clearFrameEmbeddings(model?: string): Promise<void>;
+
   // -------------------------------------------------------------------------
   // Entities (PR 6) — semantic rollup of frames
   //
@@ -527,6 +581,12 @@ export interface IModelAdapter {
     images: Buffer[],
     options?: CompletionOptions,
   ): Promise<string>;
+  /**
+   * Optional embedding endpoint. Adapters that implement this return one
+   * vector per input, in the same order. The host normalises/storage-ranks
+   * vectors, so adapters may return raw model output.
+   */
+  embed?(texts: string[]): Promise<number[][]>;
   isAvailable(): Promise<boolean>;
   getModelInfo(): ModelInfo;
 
@@ -637,6 +697,10 @@ export interface ExportStatus {
 export interface ExportServices {
   storage: IStorage;
   strategy: IIndexStrategy;
+  /** Active model adapter. Query-style exports use this for embeddings. */
+  model: IModelAdapter;
+  /** Storage key for embeddings produced by the active model adapter. */
+  embeddingModelName?: string;
   /** Absolute path to the data dir (raw assets root). */
   dataDir: string;
   /**
@@ -899,12 +963,12 @@ function renderFrame(f: Frame, lines: string[], assetUrlPrefix: string): void {
     .join(' · ');
   const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
   lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
-  // OCR and accessibility are equally valid sources of human-readable
-  // text — both already pass through the same PII redactor before
-  // landing in storage, so neither needs special treatment here.
+  // OCR, accessibility, and audio are equally valid sources of
+  // human-readable text — all pass through a PII redactor before
+  // landing in storage, so none needs special treatment here.
   if (
     f.text &&
-    (f.text_source === 'ocr' || f.text_source === 'accessibility') &&
+    (f.text_source === 'ocr' || f.text_source === 'accessibility' || f.text_source === 'audio') &&
     f.text.trim()
   ) {
     const snippet = f.text.replace(/\s+/g, ' ').trim().slice(0, 200);

@@ -66,6 +66,8 @@ class McpExport implements IExport {
     this.services = {
       storage: services.storage,
       strategy: services.strategy,
+      model: (services as ExportServices).model,
+      embeddingModelName: (services as ExportServices).embeddingModelName,
       triggerReindex: (services as ExportServices).triggerReindex,
     };
   }

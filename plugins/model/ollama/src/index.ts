@@ -20,6 +20,7 @@ import {
 interface OllamaModelConfig {
   host?: string;
   model?: string;
+  embedding_model?: string;
   vision_model?: string;
   /** Skip the auto-install + auto-pull bootstrap on first run. */
   auto_install?: boolean;
@@ -30,6 +31,7 @@ interface OllamaModelConfig {
 // resolves to ::1 first while Ollama is only listening on v4.
 const DEFAULT_HOST = 'http://127.0.0.1:11434';
 const DEFAULT_MODEL = 'gemma2:2b';
+const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const PULL_FAMILIES_VISION_OK = ['gemma2', 'gemma3', 'gemma4', 'llava', 'llama4', 'qwen2-vl'];
 
@@ -37,6 +39,7 @@ class OllamaAdapter implements IModelAdapter {
   private readonly logger: Logger;
   readonly host: string;
   readonly model: string;
+  readonly embeddingModel: string;
   readonly visionModel: string;
   private readonly autoInstall: boolean;
   private readonly client: Ollama;
@@ -46,6 +49,7 @@ class OllamaAdapter implements IModelAdapter {
     this.logger = logger.child('model-ollama');
     this.host = config.host ?? DEFAULT_HOST;
     this.model = config.model ?? DEFAULT_MODEL;
+    this.embeddingModel = config.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
     this.visionModel = config.vision_model ?? this.model;
     this.autoInstall = config.auto_install ?? true;
     this.client = new Ollama({ host: this.host });
@@ -64,7 +68,7 @@ class OllamaAdapter implements IModelAdapter {
 
   async isAvailable(): Promise<boolean> {
     if (!(await isOllamaReachable(this.host))) return false;
-    return await this.modelPresent();
+    return await this.modelPresent(this.model);
   }
 
   async complete(prompt: string, options: CompletionOptions = {}): Promise<string> {
@@ -115,6 +119,55 @@ class OllamaAdapter implements IModelAdapter {
     return res.message.content;
   }
 
+  async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    // Ollama's modern endpoint is /api/embed and accepts batched input.
+    // The npm client version we use doesn't expose a stable typed wrapper
+    // across releases, so call the local HTTP endpoint directly and keep
+    // a fallback to the older /api/embeddings single-input endpoint.
+    try {
+      const res = await fetch(new URL('/api/embed', this.host), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.embeddingModel,
+          input: texts,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`Ollama /api/embed ${res.status}: ${await res.text()}`);
+      }
+      const body = await res.json() as {
+        embeddings?: unknown;
+      };
+      if (!Array.isArray(body.embeddings)) {
+        throw new Error('Ollama /api/embed returned no embeddings array');
+      }
+      return body.embeddings.map((v) => parseEmbedding(v));
+    } catch (err) {
+      this.logger.debug('batched embed failed; falling back to /api/embeddings', {
+        err: String(err),
+      });
+      const out: number[][] = [];
+      for (const text of texts) {
+        const res = await fetch(new URL('/api/embeddings', this.host), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: this.embeddingModel,
+            prompt: text,
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`Ollama /api/embeddings ${res.status}: ${await res.text()}`);
+        }
+        const body = await res.json() as { embedding?: unknown };
+        out.push(parseEmbedding(body.embedding));
+      }
+      return out;
+    }
+  }
+
   /**
    * Idempotent first-run setup. Installs Ollama if missing, starts the
    * daemon if it isn't serving, downloads the configured model if it
@@ -138,12 +191,13 @@ class OllamaAdapter implements IModelAdapter {
 
     // Fast path: server reachable and model present.
     if (await isOllamaReachable(this.host)) {
-      if (await this.modelPresent()) {
+      if (await this.modelPresent(this.model) && await this.modelPresent(this.embeddingModel)) {
         emit({ kind: 'ready', model: this.model });
         return;
       }
       // Server up but model missing — skip install/start, jump to pull.
-      await this.pullModel(emit);
+      await this.pullModel(emit, this.model);
+      await this.pullModel(emit, this.embeddingModel);
       emit({ kind: 'ready', model: this.model });
       return;
     }
@@ -160,7 +214,8 @@ class OllamaAdapter implements IModelAdapter {
     }
 
     await this.startServer(emit);
-    await this.pullModel(emit);
+    await this.pullModel(emit, this.model);
+    await this.pullModel(emit, this.embeddingModel);
     emit({ kind: 'ready', model: this.model });
   }
 
@@ -208,16 +263,16 @@ class OllamaAdapter implements IModelAdapter {
     emit({ kind: 'server_ready', host: this.host });
   }
 
-  private async pullModel(emit: ModelBootstrapHandler): Promise<void> {
-    if (await this.modelPresent()) return;
+  private async pullModel(emit: ModelBootstrapHandler, model: string): Promise<void> {
+    if (await this.modelPresent(model)) return;
 
     emit({
       kind: 'pull_started',
-      model: this.model,
-      sizeHint: this.sizeHint(),
+      model,
+      sizeHint: this.sizeHint(model),
     });
     try {
-      const stream = await this.client.pull({ model: this.model, stream: true });
+      const stream = await this.client.pull({ model, stream: true });
       let lastReportedAt = 0;
       for await (const part of stream as AsyncIterable<Record<string, unknown>>) {
         const status = String(part.status ?? '');
@@ -229,20 +284,20 @@ class OllamaAdapter implements IModelAdapter {
         if (now - lastReportedAt < 100 && completed < total) continue;
         lastReportedAt = now;
 
-        emit({ kind: 'pull_progress', model: this.model, status, completed, total });
+        emit({ kind: 'pull_progress', model, status, completed, total });
       }
     } catch (err) {
       const reason = (err as Error).message;
-      emit({ kind: 'pull_failed', model: this.model, reason });
-      throw new Error(`Failed to pull ${this.model}: ${reason}`);
+      emit({ kind: 'pull_failed', model, reason });
+      throw new Error(`Failed to pull ${model}: ${reason}`);
     }
-    emit({ kind: 'pull_done', model: this.model });
+    emit({ kind: 'pull_done', model });
   }
 
-  private async modelPresent(): Promise<boolean> {
+  private async modelPresent(model: string): Promise<boolean> {
     try {
       const list = await this.client.list();
-      const wanted = this.model;
+      const wanted = model;
       const wantedFamily = wanted.split(':')[0];
       return list.models.some((m) => {
         if (m.name === wanted) return true;
@@ -254,9 +309,10 @@ class OllamaAdapter implements IModelAdapter {
     }
   }
 
-  private sizeHint(): string {
+  private sizeHint(model: string): string {
     // Coarse heuristic so the CLI can warn the user before a 4GB download.
-    const m = this.model.toLowerCase();
+    const m = model.toLowerCase();
+    if (m.includes('embed')) return '~300 MB';
     if (m.includes(':2b')) return '~1.6 GB';
     if (m.includes(':3b')) return '~2 GB';
     if (m.includes(':e4b') || m.includes(':4b')) return '~3 GB';
@@ -276,6 +332,20 @@ const factory: PluginFactory<IModelAdapter> = (ctx) => {
   // multi-GB download behind the user's back.
   return new OllamaAdapter((ctx.config as OllamaModelConfig) ?? {}, ctx.logger);
 };
+
+function parseEmbedding(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    throw new Error('embedding response was not an array');
+  }
+  const out = value.map((v) => {
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new Error('embedding response contained a non-numeric value');
+    }
+    return v;
+  });
+  if (out.length === 0) throw new Error('embedding response was empty');
+  return out;
+}
 
 export default factory;
 export { OllamaAdapter };

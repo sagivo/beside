@@ -160,6 +160,9 @@ interface ActiveWindowInfo {
 }
 
 const SAFE_APP = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 40);
+const FIXTURE_CAPTURE =
+  process.env.COFOUNDEROS_CAPTURE_FIXTURE === '1' ||
+  process.env.COFOUNDEROS_FAKE_DISPLAYS === '1';
 
 /**
  * Encode a raw screenshot buffer to the configured output format. WebP
@@ -333,6 +336,7 @@ class NodeCapture implements ICapture {
   // `frame.url` is permanently null.
   private readonly unsupportedBrowserNotified = new Set<string>();
   private readonly browserPermissionDeniedNotified = new Set<string>();
+  private readonly fixtureMode = FIXTURE_CAPTURE;
 
   /**
    * Native AX-text reader. Only present on macOS when the helper binary
@@ -657,6 +661,11 @@ class NodeCapture implements ICapture {
   }
 
   private async loadNativeMods(): Promise<void> {
+    if (this.fixtureMode) {
+      await this.loadFixtureMods();
+      return;
+    }
+
     if (!this.activeWinMod && !this.activeWinFailed) {
       try {
         this.activeWinMod = await import('active-win');
@@ -682,6 +691,76 @@ class NodeCapture implements ICapture {
           err: String(err),
         });
       }
+    }
+    await this.probeDisplays();
+  }
+
+  /**
+   * Headless capture fixture used by CI and smoke tests. It exercises the
+   * same event/storage/image-encoding path as a real `capture --once`, but
+   * avoids desktop APIs (`active-win`, `screenshot-desktop`, permissions,
+   * X11/Wayland/Windows desktop sessions). Enable with:
+   *
+   *   COFOUNDEROS_CAPTURE_FIXTURE=1
+   *
+   * `COFOUNDEROS_FAKE_DISPLAYS=1` is accepted as a compatibility alias
+   * because older spike docs used that name.
+   */
+  private async loadFixtureMods(): Promise<void> {
+    if (!this.activeWinMod) {
+      this.activeWinMod = async () => ({
+        title: 'CofounderOS Capture Fixture',
+        url: 'https://example.invalid/cofounderos-fixture',
+        owner: {
+          name: 'CofounderOS Fixture',
+          bundleId: 'os.cofounder.fixture',
+          processId: process.pid,
+        },
+        bounds: { x: 20, y: 20, width: 760, height: 520 },
+      });
+    }
+    if (!this.screenshotMod) {
+      const shot = Object.assign(
+        async () => sharp({
+          create: {
+            width: 800,
+            height: 600,
+            channels: 3,
+            background: { r: 32, g: 42, b: 56 },
+          },
+        })
+          .composite([
+            {
+              input: Buffer.from(
+                `<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+                  <rect width="800" height="600" fill="#202a38"/>
+                  <text x="48" y="84" fill="#e5eefc" font-family="Arial, sans-serif" font-size="34">
+                    CofounderOS capture fixture
+                  </text>
+                  <text x="48" y="138" fill="#9fb3cc" font-family="Arial, sans-serif" font-size="22">
+                    ${new Date().toISOString()}
+                  </text>
+                </svg>`,
+              ),
+            },
+          ])
+          .png()
+          .toBuffer(),
+        {
+          listDisplays: async () => [
+            {
+              id: 'fixture-0',
+              name: 'Fixture Display',
+              left: 0,
+              top: 0,
+              width: 800,
+              height: 600,
+            },
+          ],
+        },
+      );
+      this.screenshotMod = shot;
+      this.logger.info('capture fixture mode enabled (COFOUNDEROS_CAPTURE_FIXTURE=1)');
     }
     await this.probeDisplays();
   }

@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import process from 'node:process';
+import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import readline from 'node:readline';
+import { spawn } from 'node:child_process';
 import {
   createLogger,
   writeDefaultConfigIfMissing,
@@ -62,6 +64,8 @@ Commands:
                              model (Gemma) so the agent is ready to index.
   status                     Show capture state, storage stats, and index state.
                              (Read-only — never triggers an install or download.)
+  doctor                     Preflight check for platform, deps, permissions hints,
+                             data dir, Ollama, and MCP config.
   stats (alias: info)        Detailed snapshot of your data: disk usage breakdown,
                              event/frame counts, recent activity, last operations.
                              Optional: --json (machine-readable output)
@@ -112,6 +116,10 @@ async function main(): Promise<void> {
 
     case 'status':
       await cmdStatus(logger, args);
+      return;
+
+    case 'doctor':
+      await cmdDoctor(args);
       return;
 
     case 'stats':
@@ -242,6 +250,203 @@ ${handles.exports.map((e) => `- ${e.name}: ${JSON.stringify(e.getStatus())}`).jo
   }
 }
 
+type DoctorStatus = 'ok' | 'warn' | 'fail' | 'info';
+
+interface DoctorCheck {
+  area: string;
+  status: DoctorStatus;
+  message: string;
+  detail?: string;
+}
+
+async function cmdDoctor(args: ParsedArgs): Promise<void> {
+  const checks: DoctorCheck[] = [];
+  const loaded = await loadConfig(configFromArgs(args).configPath);
+  const config = loaded.config;
+  const dataDir = loaded.dataDir;
+
+  const nodeMajor = Number(process.versions.node.split('.')[0] ?? 0);
+  checks.push({
+    area: 'runtime',
+    status: nodeMajor >= 20 ? 'ok' : 'fail',
+    message: `Node ${process.versions.node}`,
+    detail: nodeMajor >= 20 ? 'meets >=20 requirement' : 'install Node 20 LTS or newer',
+  });
+  checks.push({
+    area: 'runtime',
+    status: 'info',
+    message: `${platformName()} ${os.release()} (${process.arch})`,
+  });
+
+  try {
+    await fsp.mkdir(dataDir, { recursive: true });
+    await fsp.access(dataDir);
+    checks.push({
+      area: 'config',
+      status: 'ok',
+      message: `data dir writable: ${dataDir}`,
+      detail: `config: ${loaded.sourcePath}`,
+    });
+  } catch (err) {
+    checks.push({
+      area: 'config',
+      status: 'fail',
+      message: `data dir not writable: ${dataDir}`,
+      detail: String(err),
+    });
+  }
+
+  const importChecks = await Promise.all([
+    checkImport('native', 'sharp', 'image encoding', 'fail'),
+    checkImport('native', 'better-sqlite3', 'local SQLite storage', 'fail'),
+    checkImport('capture', 'active-win', 'active window metadata', 'warn'),
+    checkImport('capture', 'screenshot-desktop', 'screen capture', 'warn'),
+  ]);
+  checks.push(...importChecks);
+
+  if (process.platform === 'darwin') {
+    checks.push(await checkCommand('capture', 'screencapture', 'macOS screen capture CLI'));
+    checks.push(await checkCommand('capture', 'osascript', 'macOS browser URL / window fallback'));
+    checks.push({
+      area: 'permissions',
+      status: 'info',
+      message: 'macOS requires Screen Recording, Accessibility, and Automation permissions',
+      detail: 'Run `cofounderos capture --once`; if capture is blank or URL is null, grant access in System Settings.',
+    });
+  } else if (process.platform === 'linux') {
+    const wayland = Boolean(process.env.WAYLAND_DISPLAY);
+    const x11 = Boolean(process.env.DISPLAY);
+    checks.push({
+      area: 'capture',
+      status: x11 ? 'ok' : wayland ? 'warn' : 'warn',
+      message: x11
+        ? `X11 display detected (${process.env.DISPLAY})`
+        : wayland
+          ? `Wayland session detected (${process.env.WAYLAND_DISPLAY})`
+          : 'no DISPLAY / WAYLAND_DISPLAY detected',
+      detail: x11
+        ? 'active-win and screenshot-desktop are expected to work.'
+        : 'Wayland/headless capture is partial; use an X11 session for full capture.',
+    });
+    checks.push(await checkCommand('capture', 'xprop', 'Linux active-window metadata helper'));
+  } else if (process.platform === 'win32') {
+    checks.push(await checkCommand('bootstrap', 'winget', 'Windows Ollama auto-install'));
+    checks.push({
+      area: 'native',
+      status: 'info',
+      message: 'If native prebuilds are unavailable, install Visual Studio Build Tools + Python 3',
+    });
+  }
+
+  const ollamaHost =
+    ((config.index.model as unknown as { ollama?: { host?: string } }).ollama?.host) ??
+    'http://127.0.0.1:11434';
+  checks.push(await checkHttp('model', `${ollamaHost}/api/tags`, 'Ollama API reachable'));
+
+  const mcp = config.export.plugins.find((p) => p.name === 'mcp') as
+    | { host?: string; port?: number; enabled?: boolean }
+    | undefined;
+  if (!mcp || mcp.enabled === false) {
+    checks.push({ area: 'mcp', status: 'warn', message: 'MCP export is disabled or missing' });
+  } else {
+    checks.push({
+      area: 'mcp',
+      status: 'ok',
+      message: `MCP configured at http://${mcp.host ?? '127.0.0.1'}:${mcp.port ?? 3456}`,
+    });
+  }
+
+  const failCount = checks.filter((c) => c.status === 'fail').length;
+  const warnCount = checks.filter((c) => c.status === 'warn').length;
+
+  // eslint-disable-next-line no-console
+  console.log(`# CofounderOS — doctor
+
+${checks.map(formatDoctorCheck).join('\n')}
+
+summary: ${failCount} fail, ${warnCount} warn, ${checks.length - failCount - warnCount} ok/info
+`);
+
+  if (failCount > 0) process.exitCode = 1;
+}
+
+function platformName(): string {
+  if (process.platform === 'darwin') return 'macOS';
+  if (process.platform === 'win32') return 'Windows';
+  if (process.platform === 'linux') return 'Linux';
+  return process.platform;
+}
+
+function formatDoctorCheck(c: DoctorCheck): string {
+  const icon = c.status === 'ok' ? 'ok' : c.status === 'warn' ? 'warn' : c.status === 'fail' ? 'fail' : 'info';
+  const detail = c.detail ? `\n    ${c.detail}` : '';
+  return `- [${icon}] ${c.area}: ${c.message}${detail}`;
+}
+
+async function checkImport(
+  area: string,
+  specifier: string,
+  purpose: string,
+  failureStatus: Extract<DoctorStatus, 'warn' | 'fail'>,
+): Promise<DoctorCheck> {
+  try {
+    await import(specifier);
+    return { area, status: 'ok', message: `${specifier} importable`, detail: purpose };
+  } catch (err) {
+    return {
+      area,
+      status: failureStatus,
+      message: `${specifier} failed to import`,
+      detail: `${purpose}; ${String(err)}`,
+    };
+  }
+}
+
+async function checkCommand(area: string, command: string, purpose: string): Promise<DoctorCheck> {
+  const available = await canRunCommand(command);
+  return {
+    area,
+    status: available ? 'ok' : 'warn',
+    message: available ? `${command} found` : `${command} not found on PATH`,
+    detail: purpose,
+  };
+}
+
+async function canRunCommand(command: string): Promise<boolean> {
+  const probe = process.platform === 'win32' ? 'where' : 'which';
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn(probe, [command], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.on('exit', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+
+async function checkHttp(area: string, url: string, purpose: string): Promise<DoctorCheck> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 1200);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    return {
+      area,
+      status: res.ok ? 'ok' : 'warn',
+      message: `${purpose}: HTTP ${res.status}`,
+      detail: url,
+    };
+  } catch {
+    return {
+      area,
+      status: 'warn',
+      message: `${purpose}: no response`,
+      detail: `${url} (run \`cofounderos init\` or use --offline)`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {
   const handles = await buildOrchestrator(logger, configFromArgs(args));
   try {
@@ -251,6 +456,81 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
     const storageStats = await handles.storage.getStats();
     const captureStatus = handles.capture.getStatus();
     const days = await handles.storage.listDays();
+    const modelInfo = handles.model.getModelInfo();
+    // Probe the model adapter without bootstrapping. `isAvailable` is
+    // a fast HTTP check for adapters that own a daemon (Ollama); in-
+    // process adapters typically return `true` immediately.
+    const modelReady = await handles.model.isAvailable().catch(() => false);
+
+    // Free disk on the data volume — single most actionable "you're
+    // about to run out" signal.
+    const freeBytes = await measureFreeBytes(dataDir);
+
+    // Capture rate + lag: latest-event timestamp tells us if capture
+    // is alive; events in the last hour give us a current cadence even
+    // when "events today" is misleading (e.g. fresh process restart).
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    const lastHourEvents = await handles.storage.readEvents({
+      from: oneHourAgo,
+      limit: 50_000,
+    });
+    const eventsLastHour = lastHourEvents.length;
+    const lastEventTs = storageStats.newestEvent;
+
+    // Today vs. yesterday delta. Local-day boundaries so the comparison
+    // matches the user's calendar, not UTC.
+    const dayKey = (d: Date): string => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    const todayKey = dayKey(new Date());
+    const yesterdayKey = dayKey(new Date(Date.now() - 24 * 60 * 60_000));
+
+    // Backlog for the active index strategy. Capped scan so massive
+    // unindexed queues don't make `stats` slow; we report ">= cap" if
+    // we hit the lid.
+    const BACKLOG_CAP = 5000;
+    const backlogEvents = await handles.storage
+      .readEvents({
+        unindexed_for_strategy: indexState.strategy,
+        limit: BACKLOG_CAP,
+      })
+      .catch(() => []);
+    const backlogCount = backlogEvents.length;
+    const backlogIsLowerBound = backlogCount >= BACKLOG_CAP;
+
+    // Pipeline queues. Same capped-scan trick — we only need a rough
+    // "is there work waiting?" number for the dashboard.
+    const PIPELINE_CAP = 1000;
+    const [pendingOcrTasks, pendingResolveTasks, pendingEmbedTasks] =
+      await Promise.all([
+        handles.storage.listFramesNeedingOcr(PIPELINE_CAP).catch(() => []),
+        handles.storage.listFramesNeedingResolution(PIPELINE_CAP).catch(() => []),
+        handles.storage
+          .listFramesNeedingEmbedding(modelInfo.name, PIPELINE_CAP)
+          .catch(() => []),
+      ]);
+    const pipeline = {
+      ocr: pendingOcrTasks.length,
+      resolve: pendingResolveTasks.length,
+      embed: pendingEmbedTasks.length,
+      cap: PIPELINE_CAP,
+    };
+
+    // MCP: configured host:port + a connect probe. We never start the
+    // server inside `stats`, so this just tells the user whether the
+    // MCP they configured is currently reachable (e.g. another
+    // `cofounderos start` is running).
+    const mcpRef = handles.config.export.plugins.find(
+      (p) => p.name === 'mcp',
+    ) as { name: string; enabled?: boolean; host?: string; port?: number } | undefined;
+    const mcpEnabled = !!mcpRef && mcpRef.enabled !== false;
+    const mcpHost = mcpRef?.host ?? '127.0.0.1';
+    const mcpPort = mcpRef?.port ?? 3456;
+    const mcpUrl = mcpEnabled ? `http://${mcpHost}:${mcpPort}` : null;
+    const mcpReady = mcpUrl ? await probeHttp(`${mcpUrl}/health`, 600) : false;
 
     // Disk usage broken down by component.
     const diskTargets: Array<{ label: string; path: string }> = [
@@ -262,10 +542,23 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
       { label: 'index',               path: indexState.rootPath },
       { label: 'exports',             path: path.join(dataDir, 'export') },
     ];
+    // Bucket file sizes by mtime hour for the last-24h sparkline at the
+    // same time we compute totals — saves a second pass over the trees.
+    const measuredAt = Date.now();
     const diskRows = await Promise.all(
-      diskTargets.map(async (t) => ({ ...t, bytes: await measurePath(t.path) })),
+      diskTargets.map(async (t) => {
+        const { totalBytes: bytes, recentByHour } = await measurePathDetailed(t.path, measuredAt);
+        return { ...t, bytes, recentByHour };
+      }),
     );
     const totalBytes = diskRows.reduce((acc, r) => acc + r.bytes, 0);
+    // Aggregate per-hour bytes across every target. recentByHour[0] is the
+    // oldest hour shown (23-24h ago); recentByHour[23] is the most recent
+    // (within the last hour).
+    const diskByHour = new Array<number>(24).fill(0);
+    for (const r of diskRows) {
+      for (let i = 0; i < 24; i++) diskByHour[i] += r.recentByHour[i] ?? 0;
+    }
 
     // Frame stats.
     let frameTiers: Record<string, number> = {};
@@ -301,6 +594,17 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
       const d = e.timestamp.slice(0, 10);
       byDay[d] = (byDay[d] ?? 0) + 1;
     }
+    const eventsToday = byDay[todayKey] ?? 0;
+    const eventsYesterday = byDay[yesterdayKey] ?? 0;
+
+    // SQLite WAL: bytes (already collected via diskRows) + age of the
+    // last checkpoint (≈ mtime of the .db file, since checkpoints
+    // rewrite the main DB pages).
+    const walRow = diskRows.find((r) => r.label === 'sqlite WAL');
+    const walBytes = walRow?.bytes ?? 0;
+    const dbMtimeMs = await safeMtimeMs(path.join(storageRoot, 'cofounderOS.db'));
+    const lastCheckpointAgoMs =
+      walBytes > 0 && dbMtimeMs ? Math.max(0, Date.now() - dbMtimeMs) : null;
 
     if (args.flags.json) {
       // eslint-disable-next-line no-console
@@ -311,7 +615,14 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
             storageRoot,
             disk: {
               total: totalBytes,
+              free: freeBytes,
               breakdown: diskRows.map((r) => ({ label: r.label, path: r.path, bytes: r.bytes })),
+              // 24 entries, oldest first. Each value is bytes whose file
+              // mtime falls within that hour (counted across all targets).
+              last24Hours: diskByHour,
+              lastHourBytes: diskByHour[diskByHour.length - 1] ?? 0,
+              walBytes,
+              lastCheckpointAgoMs,
             },
             events: {
               total: storageStats.totalEvents,
@@ -321,23 +632,46 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
               topApps: storageStats.eventsByApp,
               activeDays: days.length,
               last7Days: byDay,
-              today: captureStatus.eventsToday,
+              today: eventsToday,
+              yesterday: eventsYesterday,
+              lastHour: eventsLastHour,
+              lastEventAt: lastEventTs,
             },
-            frames: { total: totalFrames, byTier: frameTiers },
+            frames: {
+              total: totalFrames,
+              byTier: frameTiers,
+              pendingOcr: pipeline.ocr,
+              pendingResolution: pipeline.resolve,
+              pendingEmbedding: pipeline.embed,
+              pendingCap: pipeline.cap,
+            },
             entities: { total: entityCount, recent: topEntities },
             index: {
               strategy: indexState.strategy,
               rootPath: indexState.rootPath,
               pageCount: indexState.pageCount,
               eventsCovered: indexState.eventsCovered,
+              eventsBacklog: backlogCount,
+              eventsBacklogIsLowerBound: backlogIsLowerBound,
               lastIncrementalRun: indexState.lastIncrementalRun,
               lastReorganisationRun: indexState.lastReorganisationRun,
             },
+            model: {
+              name: modelInfo.name,
+              isLocal: modelInfo.isLocal,
+              ready: modelReady,
+            },
+            mcp: mcpUrl
+              ? { enabled: true, url: mcpUrl, ready: mcpReady }
+              : { enabled: false },
             capture: {
               running: captureStatus.running,
               paused: captureStatus.paused,
-              eventsToday: captureStatus.eventsToday,
+              eventsToday: eventsToday,
+              eventsYesterday: eventsYesterday,
+              eventsLastHour,
               storageBytesToday: captureStatus.storageBytesToday,
+              lastEventAt: lastEventTs,
             },
           },
           null,
@@ -360,114 +694,101 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
       : color.dim('never');
 
     const out: string[] = [];
-    const W = 64;
-
-    out.push(color.bold(color.cyan('CofounderOS')) + color.dim('  •  stats')); 
-    out.push(color.dim(`data dir: ${dataDir}`));
-    out.push('');
-
-    // ── Capture ────────────────────────────────────────────
-    out.push(sectionHeader('Capture', W));
     const captureDot = captureStatus.running
       ? captureStatus.paused
         ? color.yellow('●') + ' paused'
         : color.green('●') + ' running'
       : color.red('●') + ' stopped';
-    out.push(`  status     ${captureDot}`);
-    out.push(
-      `  today      ${color.bold(String(captureStatus.eventsToday))} events  ` +
-        color.dim(`(${formatBytes(captureStatus.storageBytesToday)})`),
-    );
-    out.push('');
-
-    // ── Disk usage ─────────────────────────────────────────
-    out.push(sectionHeader(`Disk usage  ${color.dim('total')} ${color.bold(formatBytes(totalBytes))}`, W));
+    const idxBarColor: ColorName = indexedPct >= 95 ? 'green' : indexedPct >= 60 ? 'yellow' : 'red';
+    const recent24Total = diskByHour.reduce((a, b) => a + b, 0);
+    const recent24Peak = Math.max(0, ...diskByHour);
     const sortedDisk = [...diskRows].sort((a, b) => b.bytes - a.bytes);
-    const labelW = Math.max(...sortedDisk.map((r) => r.label.length));
-    for (const r of sortedDisk) {
-      const pct = totalBytes > 0 ? r.bytes / totalBytes : 0;
-      out.push(
-        `  ${r.label.padEnd(labelW)}  ${formatBytes(r.bytes).padStart(9)}  ` +
-          `${miniBar(pct, 16, 'cyan')} ${color.dim(formatPct(pct).padStart(4))}`,
-      );
-    }
+    const diskTop = sortedDisk.slice(0, 3);
+    const diskOtherBytes = sortedDisk.slice(3).reduce((acc, r) => acc + r.bytes, 0);
+    const tierOrder = ['original', 'compressed', 'thumbnail', 'deleted'] as const;
+    const frameParts = tierOrder.map((t) => `${t} ${(frameTiers[t] ?? 0).toLocaleString()}`);
+
+    const lastEventAgo = lastEventTs
+      ? color.dim(`last event ${formatRelativeTime(lastEventTs)}`)
+      : color.dim('no events yet');
+    const captureRate = `${eventsLastHour.toLocaleString()}/h`;
+    const backlogText = backlogCount === 0
+      ? color.dim('backlog 0')
+      : `backlog ${color.bold(`${backlogIsLowerBound ? '≥' : ''}${backlogCount.toLocaleString()}`)} events`;
+    const lastHourBytes = diskByHour[diskByHour.length - 1] ?? 0;
+    const freeFragment = freeBytes != null
+      ? `  ·  ${formatBytes(freeBytes)} free`
+      : '';
+    const deltaText = renderDayDelta(eventsToday, eventsYesterday);
+    const pipelineText = formatPipeline(pipeline);
+    const modelLine = formatModelLine(modelInfo.name, modelReady, modelInfo.isLocal);
+    const mcpLine = formatMcpLine(mcpEnabled, mcpUrl, mcpReady);
+    out.push(color.bold(color.cyan('CofounderOS')) + color.dim('  stats'));
+    out.push(color.dim(dataDir));
+    out.push('');
+    out.push(
+      `${sectionLabel('Capture')} ${captureDot}` +
+        `   ${sectionLabel('today')} ${color.bold(eventsToday.toLocaleString())} events ${color.dim(`(${formatBytes(captureStatus.storageBytesToday)})`)}` +
+        `   ${sectionLabel('rate')} ${color.bold(captureRate)}` +
+        `   ${lastEventAgo}`,
+    );
+    out.push(
+      `${sectionLabel('Index')}   ${miniBar(indexedPct / 100, 16, idxBarColor)} ` +
+        `${color.bold(formatPct(indexedPct / 100))} covered` +
+        `   ${color.dim(`${indexState.eventsCovered.toLocaleString()} / ${storageStats.totalEvents.toLocaleString()} events`)}` +
+        `   ${backlogText}`,
+    );
+    out.push(`${sectionLabel('Model')}   ${modelLine}`);
+    if (mcpEnabled) out.push(`${sectionLabel('MCP')}     ${mcpLine}`);
     out.push('');
 
-    // ── Events ─────────────────────────────────────────────
-    out.push(sectionHeader('Events', W));
-    out.push(`  total      ${color.bold(storageStats.totalEvents.toLocaleString())}`);
     out.push(
-      `  range      ${storageStats.oldestEvent ? formatTs(storageStats.oldestEvent) : '-'} ${color.dim('→')} ` +
+      sectionTitle(
+        'Storage',
+        `${formatBytes(totalBytes)} total${freeFragment}  ·  ` +
+          `${formatBytes(recent24Total)} written in 24h  ·  ${formatBytes(lastHourBytes)} last 1h  ·  ${formatBytes(recent24Peak)} peak/h`,
+      ),
+    );
+    for (const r of diskTop) out.push(formatDiskLine(r.label, r.bytes, totalBytes));
+    if (diskOtherBytes > 0) out.push(formatDiskLine('other', diskOtherBytes, totalBytes));
+    if (walBytes > 0) {
+      const checkpointPart = lastCheckpointAgoMs != null
+        ? `  ${color.dim(`(checkpoint ${formatDurationShort(lastCheckpointAgoMs)} ago)`)}`
+        : '';
+      out.push(`  ${color.dim('wal')}     ${formatBytes(walBytes)}${checkpointPart}`);
+    }
+    out.push(`  ${color.dim('24h')}     ${color.dim('-24h')} ${sparkline(diskByHour, 'cyan')} ${color.dim('now')}`);
+    out.push('');
+
+    out.push(sectionTitle('Activity'));
+    out.push(
+      `  events  ${color.bold(storageStats.totalEvents.toLocaleString())} total  ·  ${days.length.toLocaleString()} active days  ·  ` +
+        `${storageStats.oldestEvent ? formatTs(storageStats.oldestEvent) : '-'} ${color.dim('→')} ` +
         `${storageStats.newestEvent ? formatTs(storageStats.newestEvent) : '-'}`,
     );
-    if (days.length > 0) {
-      out.push(`  active     ${days.length} days  ${color.dim(`(${days[0]} … ${days[days.length - 1]})`)}`);
-    } else {
-      out.push(`  active     ${days.length} days`);
-    }
-    out.push('');
-    out.push(`  ${color.dim('last 7 days')}`);
-    out.push(formatLast7Days(byDay));
-    out.push('');
-    out.push(`  ${color.dim('by type')}`);
-    out.push(formatBreakdown(storageStats.eventsByType, 'magenta'));
-    out.push('');
-    out.push(`  ${color.dim('top apps')}`);
-    out.push(formatBreakdown(storageStats.eventsByApp, 'blue'));
-    out.push('');
-
-    // ── Frames ─────────────────────────────────────────────
-    out.push(sectionHeader(`Frames  ${color.dim('total')} ${color.bold(totalFrames.toLocaleString())}`, W));
-    if (Object.keys(frameTiers).length === 0) {
-      out.push(color.dim('  (none)'));
-    } else {
-      const tierOrder = ['original', 'compressed', 'thumbnail', 'deleted'] as const;
-      const tierColors: Record<string, ColorName> = {
-        original: 'green',
-        compressed: 'cyan',
-        thumbnail: 'blue',
-        deleted: 'red',
-      };
-      for (const t of tierOrder) {
-        const n = frameTiers[t] ?? 0;
-        const pct = totalFrames > 0 ? n / totalFrames : 0;
-        out.push(
-          `  ${t.padEnd(11)}${String(n).padStart(7)}  ` +
-            `${miniBar(pct, 16, tierColors[t] ?? 'cyan')} ${color.dim(formatPct(pct).padStart(4))}`,
-        );
-      }
-    }
-    out.push('');
-
-    // ── Entities ───────────────────────────────────────────
-    out.push(sectionHeader(`Entities  ${color.dim('total')} ${color.bold(entityCount.toLocaleString())}`, W));
-    if (topEntities.length === 0) {
-      out.push(color.dim('  (no entities resolved yet)'));
-    } else {
-      const titleW = Math.min(40, Math.max(...topEntities.map((e) => e.title.length)));
-      const kindW = Math.max(...topEntities.map((e) => e.kind.length));
-      for (const e of topEntities) {
-        out.push(
-          `  ${e.title.slice(0, titleW).padEnd(titleW)}  ` +
-            `${color.dim(`[${e.kind.padEnd(kindW)}]`)}  ` +
-            `${color.bold(String(e.frames).padStart(5))} ${color.dim('frames')}  ` +
-            `${color.dim(formatRelativeTime(e.lastSeen))}`,
-        );
-      }
-    }
-    out.push('');
-
-    // ── Index ──────────────────────────────────────────────
-    out.push(sectionHeader(`Index  ${color.dim(indexState.strategy)}`, W));
-    const idxBarColor: ColorName = indexedPct >= 95 ? 'green' : indexedPct >= 60 ? 'yellow' : 'red';
     out.push(
-      `  coverage   ${miniBar(indexedPct / 100, 24, idxBarColor)} ` +
-        `${color.bold(formatPct(indexedPct / 100).padStart(4))}  ` +
-        `${color.dim(`${indexState.eventsCovered.toLocaleString()} / ${storageStats.totalEvents.toLocaleString()}`)}`,
+      `  today   ${color.bold(eventsToday.toLocaleString())}  ${color.dim('vs yesterday')} ${eventsYesterday.toLocaleString()}  ${deltaText}`,
     );
-    out.push(`  pages      ${color.bold(String(indexState.pageCount))}`);
-    out.push(`  last incr  ${lastIncremental}`);
-    out.push(`  last reorg ${lastReorg}`);
+    out.push(`  7 days  ${formatLast7DaysCompact(byDay)}`);
+    out.push(`  types   ${formatInlineBreakdown(storageStats.eventsByType, 'magenta', 3)}`);
+    out.push(`  apps    ${formatInlineBreakdown(storageStats.eventsByApp, 'blue', 3)}`);
+    out.push('');
+
+    out.push(sectionTitle('Memory'));
+    out.push(`  frames    ${color.bold(totalFrames.toLocaleString())} total  ·  ${frameParts.join(color.dim(' · '))}`);
+    out.push(
+      `  entities  ${color.bold(entityCount.toLocaleString())} total  ·  ` +
+        `${topEntities.length > 0 ? formatInlineEntities(topEntities, 2) : color.dim('none resolved yet')}`,
+    );
+    out.push(`  pipeline  ${pipelineText}`);
+    out.push('');
+
+    out.push(sectionTitle('Index', indexState.strategy));
+    out.push(
+      `  pages     ${color.bold(String(indexState.pageCount))}  ·  coverage ${miniBar(indexedPct / 100, 18, idxBarColor)} ` +
+        `${color.bold(formatPct(indexedPct / 100))}  ·  ${backlogText}`,
+    );
+    out.push(`  runs      incremental ${lastIncremental}  ·  reorg ${lastReorg}`);
 
     // eslint-disable-next-line no-console
     console.log(out.join('\n'));
@@ -478,28 +799,56 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
 
 /**
  * Best-effort recursive disk usage. Returns 0 for missing paths.
+ *
+ * In addition to the running total, buckets each file's size by mtime
+ * into one of 24 one-hour windows ending at `now`. Bucket index 0 is
+ * the *oldest* hour shown (23-24h ago); bucket index 23 is the most
+ * recent (within the last hour). Files outside the 24h window
+ * contribute to `totalBytes` only.
+ *
  * Used only by `stats` — small enough not to need streaming.
  */
-async function measurePath(p: string): Promise<number> {
-  let stat: import('node:fs').Stats;
-  try {
-    stat = await fsp.stat(p);
-  } catch {
-    return 0;
+async function measurePathDetailed(
+  p: string,
+  now: number,
+): Promise<{ totalBytes: number; recentByHour: number[] }> {
+  const recentByHour = new Array<number>(24).fill(0);
+  let totalBytes = 0;
+  const horizonMs = 24 * 60 * 60 * 1000;
+
+  async function walk(filePath: string): Promise<void> {
+    let stat: import('node:fs').Stats;
+    try {
+      stat = await fsp.stat(filePath);
+    } catch {
+      return;
+    }
+    if (stat.isFile()) {
+      totalBytes += stat.size;
+      const ageMs = now - stat.mtimeMs;
+      if (ageMs >= 0 && ageMs < horizonMs) {
+        const hoursAgo = Math.floor(ageMs / (60 * 60 * 1000));
+        const bucket = 23 - hoursAgo;
+        if (bucket >= 0 && bucket < 24) {
+          recentByHour[bucket] = (recentByHour[bucket] ?? 0) + stat.size;
+        }
+      }
+      return;
+    }
+    if (!stat.isDirectory()) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fsp.readdir(filePath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      await walk(path.join(filePath, e.name));
+    }
   }
-  if (stat.isFile()) return stat.size;
-  if (!stat.isDirectory()) return 0;
-  let total = 0;
-  let entries: import('node:fs').Dirent[];
-  try {
-    entries = await fsp.readdir(p, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  for (const e of entries) {
-    total += await measurePath(path.join(p, e.name));
-  }
-  return total;
+
+  await walk(p);
+  return { totalBytes, recentByHour };
 }
 
 /**
@@ -583,12 +932,6 @@ function visibleLen(s: string): number {
   return s.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
-function sectionHeader(title: string, width: number): string {
-  const visible = visibleLen(title);
-  const dashes = Math.max(2, width - visible - 4);
-  return `${color.dim('──')} ${color.bold(title)} ${color.dim('─'.repeat(dashes))}`;
-}
-
 function miniBar(fraction: number, width: number, c: ColorName): string {
   const f = Math.max(0, Math.min(1, fraction));
   const filled = Math.round(f * width);
@@ -602,30 +945,179 @@ function formatPct(fraction: number): string {
   return p >= 10 ? `${Math.round(p)}%` : `${p.toFixed(1)}%`;
 }
 
-function formatBreakdown(record: Record<string, number>, c: ColorName): string {
+function sectionLabel(s: string): string {
+  return color.bold(s) + color.dim(':');
+}
+
+function sectionTitle(title: string, detail?: string): string {
+  return detail ? `${color.bold(title)}  ${color.dim(detail)}` : color.bold(title);
+}
+
+function formatDiskLine(label: string, bytes: number, totalBytes: number): string {
+  const pct = totalBytes > 0 ? bytes / totalBytes : 0;
+  return `  ${label.padEnd(22)} ${formatBytes(bytes).padStart(8)}  ${color.dim(formatPct(pct))}`;
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  if (max <= 1) return s.slice(0, max);
+  return `${s.slice(0, max - 1)}…`;
+}
+
+function sparkline(values: number[], c: ColorName): string {
+  const max = Math.max(0, ...values);
+  const blocks = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+  if (max === 0) return color.dim('·'.repeat(values.length));
+  return values
+    .map((n) => {
+      if (n <= 0) return color.dim('·');
+      const idx = Math.max(0, Math.min(blocks.length - 1, Math.ceil((n / max) * blocks.length) - 1));
+      return color.by(c, blocks[idx] ?? '▁');
+    })
+    .join('');
+}
+
+function formatLast7DaysCompact(byDay: Record<string, number>): string {
+  const days: string[] = [];
+  const today = new Date();
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const values = days.map((d) => byDay[d] ?? 0);
+  const labels = days.map((d) => (weekday[new Date(d + 'T00:00:00Z').getUTCDay()] ?? '???').slice(0, 2)).join(' ');
+  const todayCount = values[values.length - 1] ?? 0;
+  const peak = Math.max(0, ...values);
+  return (
+    `${color.dim(labels)}  ${sparkline(values, 'cyan')}  ` +
+    `today ${color.bold(todayCount.toLocaleString())}  peak ${peak.toLocaleString()}`
+  );
+}
+
+function formatInlineBreakdown(record: Record<string, number>, c: ColorName, limit: number): string {
   const entries = Object.entries(record)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 6);
-  if (entries.length === 0) return color.dim('    (none)');
-  const total = entries.reduce((acc, [, v]) => acc + v, 0);
-  const max = Math.max(...entries.map(([, v]) => v));
-  const keyW = Math.min(20, Math.max(...entries.map(([k]) => k.length)));
+    .slice(0, limit);
+  if (entries.length === 0) return color.dim('none');
+  const total = Object.values(record).reduce((acc, v) => acc + v, 0);
   return entries
-    .map(([k, v]) => {
+    .map(([key, v]) => {
       const pct = total > 0 ? v / total : 0;
-      const barFrac = max > 0 ? v / max : 0;
-      return (
-        `    ${k.slice(0, keyW).padEnd(keyW)}  ${String(v).padStart(7)}  ` +
-        `${miniBar(barFrac, 14, c)} ${color.dim(formatPct(pct).padStart(4))}`
-      );
+      return `${color.by(c, key)} ${v.toLocaleString()} ${color.dim(formatPct(pct))}`;
     })
-    .join('\n');
+    .join(color.dim(' · '));
+}
+
+function formatInlineEntities(
+  entities: Array<{ title: string; kind: string; frames: number; lastSeen: string }>,
+  limit: number,
+): string {
+  return entities
+    .slice(0, limit)
+    .map(
+      (e) =>
+        `${truncate(e.title, 24)} ${color.dim(`[${e.kind}]`)} ` +
+        `${e.frames.toLocaleString()}f ${color.dim(formatRelativeTime(e.lastSeen))}`,
+    )
+    .join(color.dim(' · '));
 }
 
 function formatTs(iso: string): string {
   // Trim to "YYYY-MM-DD HH:MM" for readability.
   const t = iso.slice(0, 16).replace('T', ' ');
   return t || iso;
+}
+
+/**
+ * Free bytes on the filesystem hosting `p`. Returns `null` if the
+ * platform doesn't support `fs.statfs` (older Node) or the call fails.
+ */
+async function measureFreeBytes(p: string): Promise<number | null> {
+  const statfs = (fsp as unknown as {
+    statfs?: (path: string) => Promise<{ bsize: number; bavail: number }>;
+  }).statfs;
+  if (!statfs) return null;
+  try {
+    const s = await statfs(p);
+    return s.bsize * s.bavail;
+  } catch {
+    return null;
+  }
+}
+
+async function safeMtimeMs(p: string): Promise<number | null> {
+  try {
+    const s = await fsp.stat(p);
+    return s.mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cheap one-shot HTTP HEAD-like probe. We use GET because some servers
+ * reject HEAD; the body is discarded. Any response (even 404) means
+ * "something is listening", which is what `stats` cares about.
+ */
+async function probeHttp(url: string, timeoutMs: number): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    await fetch(url, { signal: ctrl.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function renderDayDelta(today: number, yesterday: number): string {
+  if (yesterday === 0 && today === 0) return color.dim('—');
+  if (yesterday === 0) return color.green(`+${today.toLocaleString()} new`);
+  const diff = today - yesterday;
+  const pct = Math.round((diff / yesterday) * 100);
+  if (diff === 0) return color.dim('0%');
+  const sign = diff > 0 ? '+' : '';
+  const text = `${sign}${pct}%`;
+  return diff > 0 ? color.green(text) : color.yellow(text);
+}
+
+function formatPipeline(p: { ocr: number; resolve: number; embed: number; cap: number }): string {
+  const fmt = (label: string, n: number): string => {
+    const display = n >= p.cap ? `≥${n.toLocaleString()}` : n.toLocaleString();
+    const body = `${label} ${display}`;
+    return n > 0 ? color.bold(body) : color.dim(body);
+  };
+  return `${fmt('ocr', p.ocr)} ${color.dim('·')} ${fmt('resolve', p.resolve)} ${color.dim('·')} ${fmt('embed', p.embed)}`;
+}
+
+function formatModelLine(name: string, ready: boolean, isLocal: boolean): string {
+  const dot = ready ? color.green('●') + ' ready' : color.red('●') + ' unreachable';
+  const tag = color.dim(isLocal ? '[local]' : '[remote]');
+  return `${dot}  ${color.bold(name)}  ${tag}`;
+}
+
+function formatMcpLine(enabled: boolean, url: string | null, ready: boolean): string {
+  if (!enabled || !url) return color.dim('disabled');
+  const dot = ready ? color.green('●') + ' listening' : color.dim('○') + ' offline';
+  return `${dot}  ${color.bold(url)}`;
+}
+
+/**
+ * Compact relative-duration formatter for "X ago"-style suffixes.
+ * Picks the largest unit that yields a value ≥ 1.
+ *   42_000     → "42s"
+ *   3_600_000  → "1h"
+ */
+function formatDurationShort(ms: number): string {
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86_400) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86_400)}d`;
 }
 
 function formatRelativeTime(iso: string): string {
@@ -820,6 +1312,8 @@ async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs)
       stdioMcp.bindServices({
         storage: handles.storage,
         strategy: handles.strategy,
+        model: handles.model,
+        embeddingModelName: handles.embeddingWorker.getModelName(),
         dataDir: handles.loaded.dataDir,
         triggerReindex: async () => {
           await runIncremental(handles);

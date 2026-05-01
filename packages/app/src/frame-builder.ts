@@ -39,6 +39,7 @@ const FRAMABLE_TYPES = new Set([
   'window_focus',
   'window_blur',
   'url_change',
+  'audio_transcript',
 ]);
 
 export interface FrameBuilderResult {
@@ -109,12 +110,12 @@ export class FrameBuilder {
       for (const r of related) consumedEventIds.add(r.id);
     }
 
-    // Pass 2 — orphan focus/url events become text-only frames. Group
+    // Pass 2 — orphan focus/url/audio events become text-only frames. Group
     // consecutive same-(app,url,title) events so a tab switch + immediate
     // focus event don't produce two adjacent identical frames.
     const orphans = candidates
       .filter((e) => !consumedEventIds.has(e.id))
-      .filter((e) => e.type === 'window_focus' || e.type === 'url_change');
+      .filter((e) => e.type === 'window_focus' || e.type === 'url_change' || e.type === 'audio_transcript');
 
     let group: RawEvent[] = [];
     const flushGroup = (): void => {
@@ -131,7 +132,7 @@ export class FrameBuilder {
       const frame = buildTextOnlyFrame(group);
       if (!(DROP_UNKNOWN_FRAMES && isUnknown(frame))) {
         // Suppress text-only frames that vanished within a flicker window.
-        if (gap >= MIN_TEXT_ONLY_GAP_MS || group.length > 1 || frame.url) {
+        if (gap >= MIN_TEXT_ONLY_GAP_MS || group.length > 1 || frame.url || frame.text_source === 'audio') {
           frames.push(frame);
         }
       }
@@ -281,6 +282,12 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
   const head = group[0]!;
   const url = firstNonNull(group, (e) => e.url);
   const windowTitle = firstNonNull(group, (e) => e.window_title) ?? '';
+  const audioText = group
+    .filter((e) => e.type === 'audio_transcript' && e.content)
+    .map((e) => e.content)
+    .join('\n\n')
+    .trim();
+  const isAudio = audioText.length > 0;
   return {
     id: `frm_${head.id.slice(4)}`,
     timestamp: head.timestamp,
@@ -290,11 +297,15 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     app_bundle_id: head.app_bundle_id ?? '',
     window_title: windowTitle,
     url,
-    text: null,
-    text_source: 'none',
+    text: isAudio ? audioText : null,
+    text_source: isAudio ? 'audio' : 'none',
     asset_path: null,
     perceptual_hash: null,
-    trigger: head.type === 'url_change' ? 'url' : 'focus',
+    trigger: head.type === 'audio_transcript'
+      ? 'audio'
+      : head.type === 'url_change'
+        ? 'url'
+        : 'focus',
     session_id: head.session_id,
     duration_ms: null,
     entity_path: null,

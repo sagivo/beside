@@ -57,6 +57,12 @@ jobs:
       - name: Smoke - cli help
         run: node packages/app/dist/cli.js help
 
+      - name: Smoke - cli doctor
+        env:
+          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          NO_COLOR: '1'
+        run: node packages/app/dist/cli.js doctor
+
       # Plugin discovery + per-layer instantiation. Constructors only —
       # nothing is started, so capture doesn't actually probe displays.
       # We point COFOUNDEROS_DATA_DIR at the runner workspace so the
@@ -79,3 +85,14 @@ jobs:
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
           NO_COLOR: '1'
         run: node packages/app/dist/cli.js status
+
+      # Fixture capture exercises the same storage + image encoding +
+      # event write path as `capture --once`, but swaps desktop APIs for
+      # deterministic in-process fakes so it is safe on headless Linux,
+      # macOS runners without Screen Recording, and hosted Windows.
+      - name: Smoke - capture once (fixture)
+        env:
+          COFOUNDEROS_CAPTURE_FIXTURE: '1'
+          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-capture
+          NO_COLOR: '1'
+        run: node packages/app/dist/cli.js capture --once

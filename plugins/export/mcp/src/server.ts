@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   IStorage,
   IIndexStrategy,
+  IModelAdapter,
   Logger,
   RawEventType,
   Frame,
@@ -17,6 +18,8 @@ import { renderJournalMarkdown } from '@cofounderos/interfaces';
 export interface McpServices {
   storage: IStorage;
   strategy: IIndexStrategy;
+  model?: IModelAdapter;
+  embeddingModelName?: string;
   triggerReindex?: (full?: boolean) => Promise<void>;
 }
 
@@ -57,12 +60,18 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
       const queryLower = query.toLowerCase();
 
       // 1. Frame-level retrieval — the "specific moment" answers.
+      // Keyword FTS remains the precision path; semantic search adds
+      // conceptual recall for queries whose wording differs from what
+      // was on screen.
       let frames: Frame[] = [];
+      let semanticFrames: Array<{ frame: Frame; score: number }> = [];
       try {
         frames = await services.storage.searchFrames({ text: query, limit: cap });
       } catch (err) {
         log.debug('searchFrames unavailable', { err: String(err) });
       }
+      semanticFrames = await semanticFrameSearch(services, query, cap);
+      const blendedFrames = blendFrameMatches(frames, semanticFrames, cap);
 
       // 2. Wiki page retrieval — the "synthesised summary" answers.
       const pages = await listAllStrategyPages(services.strategy);
@@ -74,7 +83,11 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
 
       const result = {
         query,
-        frame_matches: frames.map(framePreview),
+        frame_matches: blendedFrames.map((m) => ({
+          ...framePreview(m.frame),
+          retrieval: m.retrieval,
+          semantic_score: m.semanticScore,
+        })),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
           excerpt: extractExcerpt(r.page.content, queryLower),
@@ -83,7 +96,7 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
         })),
       };
       log.debug(
-        `search_memory "${query}" → ${frames.length} frames, ${ranked.length} pages`,
+        `search_memory "${query}" → ${blendedFrames.length} frames, ${ranked.length} pages`,
       );
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -101,10 +114,11 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
         from: z.string().optional().describe('ISO timestamp lower bound.'),
         to: z.string().optional().describe('ISO timestamp upper bound.'),
         app: z.string().optional().describe('Restrict to a single app name.'),
+        semantic: z.boolean().optional().describe('Also include semantic embedding matches. Default true.'),
         limit: z.number().int().min(1).max(50).optional(),
       },
     },
-    async ({ query, from, to, app, limit }) => {
+    async ({ query, from, to, app, semantic, limit }) => {
       const frames = await services.storage.searchFrames({
         text: query,
         from,
@@ -112,12 +126,28 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
         apps: app ? [app] : undefined,
         limit: limit ?? 25,
       });
+      const semanticFrames = semantic === false
+        ? []
+        : await semanticFrameSearch(services, query, limit ?? 25, {
+          from,
+          to,
+          apps: app ? [app] : undefined,
+        });
+      const blended = blendFrameMatches(frames, semanticFrames, limit ?? 25);
       return {
         content: [
           {
             type: 'text',
             text: JSON.stringify(
-              { query, count: frames.length, frames: frames.map(framePreview) },
+              {
+                query,
+                count: blended.length,
+                frames: blended.map((m) => ({
+                  ...framePreview(m.frame),
+                  retrieval: m.retrieval,
+                  semantic_score: m.semanticScore,
+                })),
+              },
               null,
               2,
             ),
@@ -504,6 +534,89 @@ function extractExcerpt(content: string, queryLower: string): string {
   const start = Math.max(0, idx - 80);
   const end = Math.min(content.length, idx + queryLower.length + 120);
   return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+}
+
+async function semanticFrameSearch(
+  services: McpServices,
+  query: string,
+  limit: number,
+  filters: { from?: string; to?: string; apps?: string[] } = {},
+): Promise<Array<{ frame: Frame; score: number }>> {
+  if (!services.model || typeof services.model.embed !== 'function') return [];
+  try {
+    const [vector] = await services.model.embed([query]);
+    if (!vector) return [];
+    return await services.storage.searchFrameEmbeddings(vector, {
+      ...filters,
+      model: services.embeddingModelName,
+      limit,
+    });
+  } catch {
+    return [];
+  }
+}
+
+function blendFrameMatches(
+  ftsFrames: Frame[],
+  semanticFrames: Array<{ frame: Frame; score: number }>,
+  limit: number,
+): Array<{
+  frame: Frame;
+  retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+  semanticScore?: number;
+}> {
+  const byId = new Map<string, {
+    frame: Frame;
+    keywordRank?: number;
+    semanticRank?: number;
+    semanticScore?: number;
+  }>();
+  ftsFrames.forEach((frame, idx) => {
+    byId.set(frame.id, { frame, keywordRank: idx + 1 });
+  });
+  semanticFrames.forEach((hit, idx) => {
+    const existing = byId.get(hit.frame.id);
+    if (existing) {
+      existing.semanticRank = idx + 1;
+      existing.semanticScore = hit.score;
+    } else {
+      byId.set(hit.frame.id, {
+        frame: hit.frame,
+        semanticRank: idx + 1,
+        semanticScore: hit.score,
+      });
+    }
+  });
+
+  return [...byId.values()]
+    .map((m) => {
+      const keywordScore = m.keywordRank ? 1 / (m.keywordRank + 1) : 0;
+      const semanticScore = m.semanticRank
+        ? (m.semanticScore ?? 0) * (1 / (m.semanticRank + 1))
+        : 0;
+      const bonus = m.keywordRank && m.semanticRank ? 0.25 : 0;
+      const retrieval: 'keyword' | 'semantic' | 'keyword+semantic' = m.keywordRank && m.semanticRank
+        ? 'keyword+semantic'
+        : m.keywordRank
+          ? 'keyword'
+          : 'semantic';
+      return {
+        frame: m.frame,
+        retrieval,
+        semanticScore: m.semanticScore,
+        rankScore: keywordScore + semanticScore + bonus,
+      };
+    })
+    .sort((a, b) => {
+      if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
+      return b.frame.timestamp.localeCompare(a.frame.timestamp);
+    })
+    .slice(0, limit)
+    .map(({ frame, retrieval, semanticScore }) => ({
+      frame,
+      retrieval,
+      semanticScore,
+    }));
 }
 
 // ---------------------------------------------------------------------------
