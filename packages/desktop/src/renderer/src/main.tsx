@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './style.css';
-import type { ActivitySession, DoctorCheck, Frame, JournalDay, LoadedConfig, RuntimeOverview } from './global';
+import type { ActivitySession, DoctorCheck, Frame, JournalDay, LoadedConfig, ModelBootstrapProgress, RuntimeOverview } from './global';
 
 type Screen = 'home' | 'setup' | 'journals' | 'settings' | 'help';
 
@@ -42,10 +42,14 @@ function App() {
   const [journal, setJournal] = useState<JournalDay | null>(null);
   const [config, setConfig] = useState<LoadedConfig | null>(null);
   const [logs, setLogs] = useState('');
+  const [bootstrapEvents, setBootstrapEvents] = useState<ModelBootstrapProgress[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     window.cofounderos?.onDesktopLogs?.((nextLogs) => setLogs(nextLogs || ''));
+    window.cofounderos?.onBootstrapProgress?.((progress) => {
+      setBootstrapEvents((events) => [...events.slice(-40), progress]);
+    });
   }, []);
 
   useEffect(() => {
@@ -112,7 +116,11 @@ function App() {
         ) : screen === 'home' ? (
           <Home overview={overview} onRefresh={() => loadScreen('home')} onStart={startRuntime} onStop={stopRuntime} />
         ) : screen === 'setup' ? (
-          <Setup checks={doctor} onRefresh={() => loadScreen('setup')} />
+          <Setup checks={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('setup')} onBootstrap={async () => {
+            setBootstrapEvents([]);
+            await window.cofounderos.bootstrapModel();
+            setDoctor(await window.cofounderos.runDoctor());
+          }} />
         ) : screen === 'journals' ? (
           <Journals days={days} selectedDay={selectedDay} journal={journal} onRefresh={() => loadScreen('journals')} onChooseDay={chooseDay} />
         ) : screen === 'settings' ? (
@@ -198,7 +206,27 @@ function Stat({ title, value, detail }: { title: string; value: string; detail: 
   );
 }
 
-function Setup({ checks, onRefresh }: { checks: DoctorCheck[] | null; onRefresh: () => void }) {
+function Setup({
+  checks,
+  bootstrapEvents,
+  onRefresh,
+  onBootstrap,
+}: {
+  checks: DoctorCheck[] | null;
+  bootstrapEvents: ModelBootstrapProgress[];
+  onRefresh: () => void;
+  onBootstrap: () => Promise<void>;
+}) {
+  const [bootstrapping, setBootstrapping] = useState(false);
+  async function runBootstrap() {
+    setBootstrapping(true);
+    try {
+      await onBootstrap();
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   if (!checks) {
     return (
       <>
@@ -215,8 +243,22 @@ function Setup({ checks, onRefresh }: { checks: DoctorCheck[] | null; onRefresh:
         title="Setup"
         subtitle={failures ? 'Some setup steps need attention.' : warnings ? 'CofounderOS can run, with a few warnings.' : 'Everything looks ready.'}
       >
+        <button className="btn primary" onClick={() => void runBootstrap()} disabled={bootstrapping}>{bootstrapping ? 'Preparing...' : 'Prepare local AI model'}</button>
         <button className="btn" onClick={onRefresh}>Run checks again</button>
       </Header>
+      {bootstrapEvents.length ? (
+        <>
+          <h2>Model Setup Progress</h2>
+          <div className="card progress-card">
+            {bootstrapEvents.slice(-10).map((event, index) => (
+              <div className="progress-row" key={`${event.kind}-${index}`}>
+                <Pill tone={event.kind.includes('failed') ? 'fail' : event.kind === 'ready' || event.kind.includes('done') ? 'ok' : undefined}>{event.kind}</Pill>
+                <span>{bootstrapMessage(event)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
       <div className="list">
         {checks.map((check, index) => (
           <div className="card" key={`${check.area}-${index}`}>
@@ -236,6 +278,16 @@ function Setup({ checks, onRefresh }: { checks: DoctorCheck[] | null; onRefresh:
   );
 }
 
+function bootstrapMessage(event: ModelBootstrapProgress): string {
+  if (event.message) return event.message;
+  if (event.line) return event.line;
+  if (event.reason) return event.reason;
+  if (event.status && typeof event.completed === 'number' && typeof event.total === 'number' && event.total > 0) {
+    return `${event.model ?? 'model'} ${event.status} ${Math.round((event.completed / event.total) * 100)}%`;
+  }
+  return event.model ?? event.tool ?? event.host ?? '';
+}
+
 function Journals({
   days,
   selectedDay,
@@ -249,13 +301,60 @@ function Journals({
   onRefresh: () => void;
   onChooseDay: (day: string) => void;
 }) {
+  const [query, setQuery] = useState('');
+  const [selectedApp, setSelectedApp] = useState('');
+  const [searchResults, setSearchResults] = useState<Frame[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const sessions = journal?.sessions ?? [];
   const frames = journal?.frames ?? [];
+  const appOptions = Array.from(new Set(frames.map((frame) => frame.app).filter(Boolean) as string[])).sort();
+  const sessionFrames = selectedSessionId
+    ? frames.filter((frame) => frame.activity_session_id === selectedSessionId)
+    : [];
+  const filteredFrames = frames.filter((frame) => {
+    if (selectedApp && frame.app !== selectedApp) return false;
+    return true;
+  });
+  const visibleFrames = searchResults ?? filteredFrames;
+
+  async function runSearch() {
+    if (!query.trim()) {
+      setSearchResults(null);
+      return;
+    }
+    setSearching(true);
+    try {
+      setSearchResults(await window.cofounderos.searchFrames({
+        text: query.trim(),
+        day: selectedDay ?? undefined,
+        apps: selectedApp ? [selectedApp] : undefined,
+        limit: 50,
+      }));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function clearSearch() {
+    setQuery('');
+    setSearchResults(null);
+  }
+
   return (
     <>
       <Header title="Journals" subtitle="Explore saved work sessions and captured moments.">
         <button className="btn" onClick={onRefresh}>Refresh</button>
       </Header>
+      <div className="card toolbar">
+        <input placeholder="Search captured moments..." value={query} onChange={(e) => setQuery(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === 'Enter') void runSearch(); }} />
+        <select value={selectedApp} onChange={(e) => { setSelectedApp(e.currentTarget.value); setSearchResults(null); }}>
+          <option value="">All apps</option>
+          {appOptions.map((app) => <option key={app} value={app}>{app}</option>)}
+        </select>
+        <button className="btn primary" onClick={() => void runSearch()} disabled={searching}>{searching ? 'Searching...' : 'Search'}</button>
+        <button className="btn" onClick={clearSearch}>Clear</button>
+      </div>
       {days.length ? (
         <div className="days">
           {days.map((day) => (
@@ -272,25 +371,43 @@ function Journals({
             <Stat title="Work Sessions" value={sessions.length.toString()} detail="Grouped by focus and idle gaps" />
           </div>
           <h2>Sessions</h2>
-          <SessionList sessions={sessions} />
-          <h2>Recent Moments</h2>
-          <FrameList frames={frames} />
+          <SessionList sessions={sessions} selectedSessionId={selectedSessionId} onSelect={setSelectedSessionId} />
+          {selectedSessionId ? (
+            <>
+              <h2>Selected Session</h2>
+              <FrameList frames={sessionFrames} />
+            </>
+          ) : null}
+          <h2>{searchResults ? 'Search Results' : selectedApp ? `${selectedApp} Moments` : 'Recent Moments'}</h2>
+          <FrameList frames={visibleFrames} />
         </>
       ) : null}
     </>
   );
 }
 
-function SessionList({ sessions }: { sessions: ActivitySession[] }) {
+function SessionList({
+  sessions,
+  selectedSessionId,
+  onSelect,
+}: {
+  sessions: ActivitySession[];
+  selectedSessionId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
   if (!sessions.length) return <div className="empty">No sessions for this day yet.</div>;
   return (
     <div className="list">
       {sessions.slice(0, 20).map((session, index) => (
-        <div className="card" key={`${session.started_at}-${index}`}>
+        <button
+          className={`card session-card ${selectedSessionId === session.id ? 'selected' : ''}`}
+          key={`${session.started_at}-${index}`}
+          onClick={() => onSelect(selectedSessionId === session.id ? null : session.id ?? null)}
+        >
           <strong>{(session.started_at || '').slice(11, 16)} - {(session.ended_at || '').slice(11, 16)}</strong>
           <p>{session.primary_entity_path || session.primary_app || 'Unresolved activity'}</p>
           <p className="muted">{Math.round((session.active_ms || 0) / 60000)} active min · {session.frame_count} moments</p>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -301,12 +418,54 @@ function FrameList({ frames }: { frames: Frame[] }) {
   return (
     <div className="list">
       {frames.slice(0, 30).map((frame, index) => (
-        <div className="card" key={`${frame.timestamp}-${index}`}>
-          <strong>{(frame.timestamp || '').slice(11, 19)} · {frame.app || 'Unknown app'}</strong>
-          <p>{frame.window_title || '(no title)'}</p>
-          {frame.text ? <p className="muted">{String(frame.text).replace(/\s+/g, ' ').slice(0, 180)}</p> : null}
-        </div>
+        <FrameCard frame={frame} key={`${frame.id ?? frame.timestamp}-${index}`} />
       ))}
+    </div>
+  );
+}
+
+function FrameCard({ frame }: { frame: Frame }) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let revoke: string | null = null;
+    let cancelled = false;
+    async function loadThumb() {
+      if (!frame.asset_path) {
+        setThumbUrl(null);
+        return;
+      }
+      try {
+        const bytes = await window.cofounderos.readAsset(frame.asset_path);
+        if (cancelled) return;
+        const type = frame.asset_path.endsWith('.jpg') || frame.asset_path.endsWith('.jpeg')
+          ? 'image/jpeg'
+          : frame.asset_path.endsWith('.png')
+            ? 'image/png'
+            : 'image/webp';
+        revoke = URL.createObjectURL(new Blob([bytes], { type }));
+        setThumbUrl(revoke);
+      } catch {
+        setThumbUrl(null);
+      }
+    }
+    void loadThumb();
+    return () => {
+      cancelled = true;
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [frame.asset_path]);
+
+  return (
+    <div className="card frame-card">
+      {thumbUrl ? <img src={thumbUrl} alt="" /> : <div className="thumb-placeholder">No screenshot</div>}
+      <div>
+        <strong>{(frame.timestamp || '').slice(11, 19)} · {frame.app || 'Unknown app'}</strong>
+        <p>{frame.window_title || '(no title)'}</p>
+        {frame.entity_path ? <p className="muted">{frame.entity_path}</p> : null}
+        {frame.url ? <p className="muted">{frame.url}</p> : null}
+        {frame.text ? <p className="muted">{String(frame.text).replace(/\s+/g, ' ').slice(0, 220)}</p> : null}
+      </div>
     </div>
   );
 }

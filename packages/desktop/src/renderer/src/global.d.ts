@@ -14,7 +14,9 @@ declare global {
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
+      bootstrapModel: () => Promise<{ ready: true }>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
+      onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
     };
   }
 }
@@ -54,6 +56,9 @@ export interface DoctorCheck {
   detail?: string;
   action?: string;
 }
+
+export type ModelBootstrapProgress =
+  | { kind: string; message?: string; model?: string; status?: string; completed?: number; total?: number; line?: string; tool?: string; host?: string; reason?: string };
 
 export interface LoadedConfig {
   sourcePath: string;
@@ -116,13 +121,20 @@ export interface JournalDay {
 }
 
 export interface Frame {
+  id?: string;
   timestamp?: string;
+  day?: string;
   app?: string;
   window_title?: string;
+  url?: string | null;
   text?: string | null;
+  asset_path?: string | null;
+  activity_session_id?: string | null;
+  entity_path?: string | null;
 }
 
 export interface ActivitySession {
+  id?: string;
   started_at?: string;
   ended_at?: string;
   primary_entity_path?: string | null;

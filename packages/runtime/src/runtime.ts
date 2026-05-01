@@ -121,6 +121,10 @@ export class CofounderRuntime {
     this.status = 'running';
   }
 
+  async bootstrapModel(onProgress?: Parameters<typeof bootstrapModel>[1]): Promise<void> {
+    await this.withHandles((handles) => bootstrapModel(handles, onProgress));
+  }
+
   async stop(): Promise<void> {
     if (!this.handles) {
       this.status = 'stopped';

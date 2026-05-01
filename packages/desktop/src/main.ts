@@ -70,9 +70,16 @@ type RuntimeResponse =
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };
 
+type RuntimeEvent = {
+  id: number;
+  event: string;
+  payload: unknown;
+};
+
 class RuntimeServiceClient {
   private readonly child: ChildProcess;
   private nextId = 1;
+  private readonly listeners = new Map<string, Set<(payload: unknown) => void>>();
   private readonly pending = new Map<number, {
     resolve: (value: unknown) => void;
     reject: (reason?: unknown) => void;
@@ -99,6 +106,9 @@ class RuntimeServiceClient {
       void refreshTray();
       if (statusWindow) void renderStatusWindow();
     });
+    this.on('bootstrap-progress', (payload) => {
+      statusWindow?.webContents.send('cofounderos:bootstrap-progress', payload);
+    });
 
     const rl = readline.createInterface({
       input: this.child.stdout!,
@@ -124,17 +134,29 @@ class RuntimeServiceClient {
     });
   }
 
+  on(event: string, callback: (payload: unknown) => void): void {
+    const listeners = this.listeners.get(event) ?? new Set();
+    listeners.add(callback);
+    this.listeners.set(event, listeners);
+  }
+
   close(): void {
     this.child.kill('SIGTERM');
     this.rejectAll(new Error('runtime service closed'));
   }
 
   private handleLine(line: string): void {
-    let response: RuntimeResponse;
+    let response: RuntimeResponse | RuntimeEvent;
     try {
-      response = JSON.parse(line) as RuntimeResponse;
+      response = JSON.parse(line) as RuntimeResponse | RuntimeEvent;
     } catch {
       appendLog(`[runtime stdout] ${line}`);
+      return;
+    }
+    if ('event' in response) {
+      for (const listener of this.listeners.get(response.event) ?? []) {
+        listener(response.payload);
+      }
       return;
     }
     const pending = this.pending.get(response.id);
@@ -498,6 +520,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:stop-runtime', async () => {
     await stopManagedRuntime();
     return { stopped: true };
+  });
+  ipcMain.handle('cofounderos:bootstrap-model', async () => {
+    return await (await getRuntimeForRequest()).call('bootstrapModel');
   });
 }
 

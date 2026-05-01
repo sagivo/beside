@@ -12,8 +12,12 @@ const api = {
   readAsset: (assetPath: string) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
+  bootstrapModel: () => ipcRenderer.invoke('cofounderos:bootstrap-model'),
   onDesktopLogs: (callback: (logs: string) => void) => {
     ipcRenderer.on('cofounderos:desktop-logs', (_event, logs: string) => callback(logs));
+  },
+  onBootstrapProgress: (callback: (progress: unknown) => void) => {
+    ipcRenderer.on('cofounderos:bootstrap-progress', (_event, progress: unknown) => callback(progress));
   },
 };
 

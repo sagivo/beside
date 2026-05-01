@@ -50,6 +50,11 @@ async function handle(req: Request): Promise<unknown> {
     case 'start':
       await runtime.start({ bootstrap: false });
       return await runtime.getOverview();
+    case 'bootstrapModel':
+      await runtime.bootstrapModel((event) => {
+        process.stdout.write(`${JSON.stringify({ id: req.id, event: 'bootstrap-progress', payload: event })}\n`);
+      });
+      return { ready: true };
     case 'stop':
       await runtime.stop();
       return { stopped: true };
