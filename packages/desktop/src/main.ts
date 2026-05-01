@@ -415,6 +415,11 @@ async function startRuntime(): Promise<void> {
   // tears handles down so the new config can re-apply. Always send a
   // start request through the existing client in that case; runtime.start
   // is idempotent when status === 'running'.
+  //
+  // IMPORTANT: do NOT call renderStatusWindow here. That reloads the
+  // renderer HTML and would remount the React tree, wiping any in-flight
+  // UI state (e.g. the onboarding step). The renderer keeps itself fresh
+  // via its own polling.
   if (managedRuntime) {
     try {
       await managedRuntime.call('start');
@@ -424,7 +429,6 @@ async function startRuntime(): Promise<void> {
       void dialog.showErrorBox('CofounderOS failed to start', String(err));
     } finally {
       await refreshTray();
-      if (statusWindow) await renderStatusWindow();
     }
     return;
   }

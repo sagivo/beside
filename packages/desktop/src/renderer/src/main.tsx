@@ -861,22 +861,28 @@ function FirstCaptureStep({
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [didAttemptStart, setDidAttemptStart] = useState(false);
-  const initialEventsRef = React.useRef<number | null>(null);
+  const initialTotalRef = React.useRef<number | null>(null);
 
-  // Snapshot the events count on the first overview we see; we'll consider
-  // the user's first capture done when the count grows beyond this.
+  // Remember the total at arrival so we can detect growth — but show the
+  // user the actual today/total count (a 0-delta with pre-existing data is
+  // confusing). We use the delta only to celebrate "your first NEW moment".
   useEffect(() => {
     if (!overview) return;
-    if (initialEventsRef.current == null) {
-      initialEventsRef.current = overview.storage.totalEvents;
+    if (initialTotalRef.current == null) {
+      initialTotalRef.current = overview.storage.totalEvents;
     }
   }, [overview]);
 
-  const baseline = initialEventsRef.current ?? 0;
-  const captured = overview ? Math.max(0, overview.storage.totalEvents - baseline) : 0;
+  const eventsToday = overview?.capture.eventsToday ?? 0;
+  const totalEvents = overview?.storage.totalEvents ?? 0;
+  const displayCount = eventsToday > 0 ? eventsToday : totalEvents;
+  const baseline = initialTotalRef.current ?? totalEvents;
+  const newSinceArrival = Math.max(0, totalEvents - baseline);
   const captureLive = !!overview?.capture.running && !overview.capture.paused;
   const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
-  const hasFirst = captured >= 1;
+  // Allow continue when capture is live AND either: a brand new moment
+  // arrived since arrival, OR the user already has events (returning user).
+  const hasFirst = captureLive && (newSinceArrival >= 1 || displayCount >= 1);
 
   async function startCapturing(): Promise<void> {
     setStarting(true);
@@ -919,8 +925,15 @@ function FirstCaptureStep({
           <div className="onb-capture-icon">{Icon.eye}</div>
         </div>
         <div className="onb-capture-counter">
-          <div className="onb-capture-count">{captured}</div>
-          <div className="onb-capture-count-label">{captured === 1 ? 'moment captured' : 'moments captured'}</div>
+          <div className="onb-capture-count">{formatNumber(displayCount)}</div>
+          <div className="onb-capture-count-label">
+            {eventsToday > 0
+              ? (displayCount === 1 ? 'moment captured today' : 'moments captured today')
+              : (displayCount === 1 ? 'moment captured' : 'moments captured')}
+            {newSinceArrival > 0 && (
+              <span className="onb-new-pill"> +{newSinceArrival} new</span>
+            )}
+          </div>
         </div>
         <div className={`onb-capture-status ${captureLive ? 'live' : capturePaused ? 'paused' : ''}`}>
           {captureLive ? 'Capturing — try doing something on your computer'
@@ -961,7 +974,7 @@ function FirstCaptureStep({
             {hasFirst ? 'Continue' : 'Waiting for first moment…'}
             {hasFirst && Icon.arrowRight}
           </button>
-        ) : showAdvance ? (
+        ) : showAdvance || displayCount > 0 ? (
           <button className="btn ghost" onClick={onContinue} title="Skip ahead — you can fix capture later from Home">
             Continue anyway{Icon.arrowRight}
           </button>

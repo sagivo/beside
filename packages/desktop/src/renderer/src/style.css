@@ -562,12 +562,13 @@ button { cursor: pointer; border: none; background: none; }
 
 /* ============ ONBOARDING ============ */
 .onboarding {
-  min-height: 100vh;
+  height: 100vh;
   background:
     radial-gradient(1100px 600px at 50% -120px, var(--accent-soft) 0%, rgba(0,0,0,0) 70%),
     var(--bg);
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
   -webkit-app-region: drag;
 }
 .onboarding > * { -webkit-app-region: no-drag; }
@@ -616,6 +617,8 @@ button { cursor: pointer; border: none; background: none; }
   display: grid;
   place-items: start center;
   padding: 12px 28px 64px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .onb-card {
@@ -1009,7 +1012,25 @@ button { cursor: pointer; border: none; background: none; }
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
-.onb-capture-count-label { font-size: 13px; color: var(--ink-muted); margin-top: 6px; }
+.onb-capture-count-label {
+  font-size: 13px;
+  color: var(--ink-muted);
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.onb-new-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--good-soft);
+  color: var(--good);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
 
 .onb-capture-status {
   font-size: 13.5px;
