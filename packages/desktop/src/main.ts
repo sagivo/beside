@@ -190,9 +190,20 @@ class RuntimeServiceClient {
 }
 
 app.setName('CofounderOS');
+if (process.platform === 'darwin') {
+  // Influences the application menu title shown when the app is in
+  // foreground (regular activation policy). Without this, macOS falls
+  // back to the bundle's CFBundleName which is "Electron" in dev builds.
+  try {
+    app.setAboutPanelOptions({ applicationName: 'CofounderOS' });
+  } catch {
+    // setAboutPanelOptions is best-effort.
+  }
+}
 
 app.whenReady().then(async () => {
   registerRuntimeIpc();
+  applyBrandDockIcon();
   if (useMacAccessoryMode) {
     // Run as a proper menu-bar/accessory app. In regular foreground
     // mode Electron gets normal app menus ("Electron", "File", "Edit"...)
@@ -343,11 +354,13 @@ async function refreshTray(): Promise<void> {
 async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void> {
   enterMacStatusWindowMode();
   if (!statusWindow) {
+    const brandIconPath = resolveBrandIconPath();
     statusWindow = new BrowserWindow({
       width: 860,
       height: 760,
       title: 'CofounderOS Status',
       show: false,
+      ...(brandIconPath ? { icon: brandIconPath } : {}),
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -397,7 +410,24 @@ async function renderStatusWindow(): Promise<void> {
 }
 
 async function startRuntime(): Promise<void> {
-  if (managedRuntime) return;
+  // The subprocess may already be alive (managedRuntime is set) yet the
+  // runtime inside it could be stopped — e.g. after saveConfigPatch which
+  // tears handles down so the new config can re-apply. Always send a
+  // start request through the existing client in that case; runtime.start
+  // is idempotent when status === 'running'.
+  if (managedRuntime) {
+    try {
+      await managedRuntime.call('start');
+      appendLog('CofounderOS runtime started (existing client).');
+    } catch (err) {
+      appendLog(`Runtime restart on existing client failed: ${String(err)}`);
+      void dialog.showErrorBox('CofounderOS failed to start', String(err));
+    } finally {
+      await refreshTray();
+      if (statusWindow) await renderStatusWindow();
+    }
+    return;
+  }
   appendLog('Starting CofounderOS runtime from desktop...');
   const runtime = new RuntimeServiceClient();
   managedRuntime = runtime;
@@ -563,6 +593,12 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:resume-capture', async () => {
     return await (await getRuntimeForRequest()).call('resumeCapture');
   });
+  ipcMain.handle('cofounderos:trigger-index', async () => {
+    return await (await getRuntimeForRequest()).call('triggerIndex');
+  });
+  ipcMain.handle('cofounderos:trigger-reorganise', async () => {
+    return await (await getRuntimeForRequest()).call('triggerReorganise');
+  });
   ipcMain.handle('cofounderos:bootstrap-model', async () => {
     return await (await getRuntimeForRequest()).call('bootstrapModel');
   });
@@ -639,6 +675,40 @@ function formatBytes(n: number): string {
     idx++;
   }
   return `${value >= 10 || idx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
+}
+
+function resolveBrandIconPath(): string | null {
+  const candidates = [
+    path.resolve(here, '../build/icon.png'),
+    path.resolve(here, '../../build/icon.png'),
+    path.resolve(repoRoot, 'packages/desktop/build/icon.png'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const image = nativeImage.createFromPath(candidate);
+      if (!image.isEmpty()) return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
+function applyBrandDockIcon(): void {
+  const iconPath = resolveBrandIconPath();
+  if (!iconPath) {
+    appendLog('Brand icon not found; cmd+tab will use default Electron icon.');
+    return;
+  }
+  try {
+    const image = nativeImage.createFromPath(iconPath);
+    if (process.platform === 'darwin') {
+      app.dock?.setIcon(image);
+    }
+    appendLog(`Brand icon loaded from ${iconPath}`);
+  } catch (err) {
+    appendLog(`Failed to apply brand icon: ${String(err)}`);
+  }
 }
 
 function makeTrayImage(): Electron.NativeImage {

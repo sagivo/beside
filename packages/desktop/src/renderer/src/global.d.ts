@@ -16,6 +16,8 @@ declare global {
       stopRuntime: () => Promise<{ stopped: true }>;
       pauseCapture: () => Promise<RuntimeOverview>;
       resumeCapture: () => Promise<RuntimeOverview>;
+      triggerIndex: () => Promise<RuntimeOverview>;
+      triggerReorganise: () => Promise<RuntimeOverview>;
       bootstrapModel: () => Promise<{ ready: true }>;
       getStartAtLogin: () => Promise<boolean>;
       setStartAtLogin: (enabled: boolean) => Promise<boolean>;

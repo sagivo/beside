@@ -62,6 +62,12 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.pauseCapture();
     case 'resumeCapture':
       return await runtime.resumeCapture();
+    case 'triggerIndex':
+      await runtime.triggerIndex();
+      return await runtime.getOverview();
+    case 'triggerReorganise':
+      await runtime.triggerReorganise();
+      return await runtime.getOverview();
     case 'overview':
       return await runtime.getOverview();
     case 'doctor':
