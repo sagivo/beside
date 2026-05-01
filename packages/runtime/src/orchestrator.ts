@@ -83,7 +83,9 @@ export async function buildOrchestrator(
 ): Promise<OrchestratorHandles> {
   const loaded = await loadConfig(opts.configPath);
   const { config, dataDir } = loaded;
-  const workspaceRoot = opts.workspaceRoot ?? findWorkspaceRoot(process.cwd());
+  const workspaceRoot = opts.workspaceRoot
+    ?? process.env.COFOUNDEROS_RESOURCE_ROOT
+    ?? findWorkspaceRoot(process.cwd());
 
   logger.info(`config loaded from ${loaded.sourcePath}`);
   logger.info(`data_dir = ${dataDir}`);

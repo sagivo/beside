@@ -11,14 +11,35 @@ export function expandPath(p: string): string {
 }
 
 /**
+ * OS-conventional data directory for packaged desktop builds. The legacy
+ * default remains ~/.cofounderOS for source/dev continuity, but installers
+ * can opt into this path without duplicating platform logic.
+ */
+export function defaultPlatformDataDir(appName = 'CofounderOS'): string {
+  if (process.platform === 'win32') {
+    const root = process.env.APPDATA || process.env.LOCALAPPDATA || os.homedir();
+    return path.join(root, appName);
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', appName);
+  }
+  const xdg = process.env.XDG_DATA_HOME;
+  return path.join(xdg && xdg.trim() ? xdg : path.join(os.homedir(), '.local', 'share'), appName.toLowerCase());
+}
+
+/**
  * Default data directory. Honours $COFOUNDEROS_DATA_DIR so users (and
  * CI / tests / power-users on every OS) can redirect persistent state
- * without editing config.yaml. Falls back to $HOME/.cofounderOS, which
- * resolves correctly on macOS, Linux, and Windows via os.homedir().
+ * without editing config.yaml. Source/dev installs keep the historical
+ * $HOME/.cofounderOS path; packaged apps can set
+ * COFOUNDEROS_USE_PLATFORM_DATA_DIR=1 to use OS-conventional locations.
  */
 export function defaultDataDir(): string {
   const fromEnv = process.env.COFOUNDEROS_DATA_DIR;
   if (fromEnv && fromEnv.trim().length > 0) return expandPath(fromEnv);
+  if (process.env.COFOUNDEROS_USE_PLATFORM_DATA_DIR === '1') {
+    return defaultPlatformDataDir();
+  }
   return path.join(os.homedir(), '.cofounderOS');
 }
 

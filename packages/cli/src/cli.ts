@@ -16,14 +16,15 @@ import {
 import {
   buildOrchestrator,
   bootstrapModel,
+  createRuntime,
   runIncremental,
   runReorganisation,
   runFullReindex,
   startAll,
   stopAll,
   useOfflineModel,
-} from './orchestrator.js';
-import type { OrchestratorHandles } from './orchestrator.js';
+} from '@cofounderos/runtime';
+import type { OrchestratorHandles } from '@cofounderos/runtime';
 import { createBootstrapRenderer } from './bootstrap-progress.js';
 
 interface ParsedArgs {
@@ -196,59 +197,46 @@ async function cmdInit(logger: ReturnType<typeof createLogger>, args: ParsedArgs
 }
 
 async function cmdStatus(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {
-  const handles = await buildOrchestrator(logger, configFromArgs(args));
-  try {
-    const captureStatus = handles.capture.getStatus();
-    const storageStats = await handles.storage.getStats();
-    const indexState = await handles.strategy.getState();
-    const modelInfo = handles.model.getModelInfo();
-    // Probe but never bootstrap — `status` should be a snapshot.
-    const modelReady = await handles.model.isAvailable();
-    const loadSnap = handles.loadGuard.snapshot();
-    const loadCfg = handles.config.system.load_guard;
+  const runtime = createRuntime({ ...configFromArgs(args), logger });
+  const overview = await runtime.getOverview();
 
-    // eslint-disable-next-line no-console
-    console.log(`# CofounderOS — status
+  // eslint-disable-next-line no-console
+  console.log(`# CofounderOS — status
 
-## Capture (${handles.config.capture.plugin})
-running:        ${captureStatus.running}
-paused:         ${captureStatus.paused}
-events today:   ${captureStatus.eventsToday}
-storage today:  ${formatBytes(captureStatus.storageBytesToday)}
-process memory: ${captureStatus.memoryMB} MB
+## Capture
+running:        ${overview.capture.running}
+paused:         ${overview.capture.paused}
+events today:   ${overview.capture.eventsToday}
+storage today:  ${formatBytes(overview.capture.storageBytesToday)}
+process memory: ${overview.capture.memoryMB} MB
 
-## Storage (${handles.config.storage.plugin})
-root:           ${handles.storage.getRoot()}
-total events:   ${storageStats.totalEvents}
-total assets:   ${formatBytes(storageStats.totalAssetBytes)}
-oldest:         ${storageStats.oldestEvent ?? '-'}
-newest:         ${storageStats.newestEvent ?? '-'}
-events by type: ${formatRecord(storageStats.eventsByType)}
-top apps:       ${formatRecord(storageStats.eventsByApp)}
+## Storage
+root:           ${overview.storageRoot}
+total events:   ${overview.storage.totalEvents}
+total assets:   ${formatBytes(overview.storage.totalAssetBytes)}
+oldest:         ${overview.storage.oldestEvent ?? '-'}
+newest:         ${overview.storage.newestEvent ?? '-'}
+events by type: ${formatRecord(overview.storage.eventsByType)}
+top apps:       ${formatRecord(overview.storage.eventsByApp)}
 
-## Index (${indexState.strategy})
-root:           ${indexState.rootPath}
-pages:          ${indexState.pageCount}
-events covered: ${indexState.eventsCovered}
-last incr run:  ${indexState.lastIncrementalRun ?? 'never'}${formatNextIncremental(indexState.lastIncrementalRun, handles.config.index.incremental_interval_min)}
-last reorg run: ${indexState.lastReorganisationRun ?? 'never'}
-incr cadence:   every ${handles.config.index.incremental_interval_min} min (idle ceiling)
-reorg cadence:  ${handles.config.index.reorganise_schedule}
+## Index (${overview.index.strategy})
+root:           ${overview.index.rootPath}
+pages:          ${overview.index.pageCount}
+events covered: ${overview.index.eventsCovered}
+last incr run:  ${overview.index.lastIncrementalRun ?? 'never'}
+last reorg run: ${overview.index.lastReorganisationRun ?? 'never'}
 
 ## Model
-ready:          ${modelReady ? 'yes' : 'no — run `cofounderos init` to install/pull'}
-${JSON.stringify(modelInfo, null, 2)}
+ready:          ${overview.model.ready ? 'yes' : 'no — run `cofounderos init` to install/pull'}
+${JSON.stringify({ name: overview.model.name, isLocal: overview.model.isLocal }, null, 2)}
 
 ## System
-load (1m):      ${formatLoad(loadSnap.normalised)} (${loadSnap.loadavg1?.toFixed(2) ?? 'n/a'} / ${loadSnap.cpuCount} CPUs)
-load_guard:     ${loadCfg.enabled ? `enabled (skip heavy jobs at ≥ ${loadCfg.threshold})` : 'disabled'}
+load (1m):      ${formatLoad(overview.system.load)}
+load_guard:     ${overview.system.loadGuardEnabled ? 'enabled' : 'disabled'}
 
 ## Exports
-${handles.exports.map((e) => `- ${e.name}: ${JSON.stringify(e.getStatus())}`).join('\n')}
+${overview.exports.map((e) => `- ${e.name}: ${JSON.stringify(e)}`).join('\n')}
 `);
-  } finally {
-    await stopAll(handles);
-  }
 }
 
 type DoctorStatus = 'ok' | 'warn' | 'fail' | 'info';
@@ -261,41 +249,21 @@ interface DoctorCheck {
 }
 
 async function cmdDoctor(args: ParsedArgs): Promise<void> {
-  const checks: DoctorCheck[] = [];
-  const loaded = await loadConfig(configFromArgs(args).configPath);
-  const config = loaded.config;
-  const dataDir = loaded.dataDir;
+  const runtime = createRuntime(configFromArgs(args));
+  const checks: DoctorCheck[] = await runtime.runDoctor();
 
   const nodeMajor = Number(process.versions.node.split('.')[0] ?? 0);
-  checks.push({
+  checks.unshift({
     area: 'runtime',
     status: nodeMajor >= 20 ? 'ok' : 'fail',
     message: `Node ${process.versions.node}`,
     detail: nodeMajor >= 20 ? 'meets >=20 requirement' : 'install Node 20 LTS or newer',
   });
-  checks.push({
+  checks.splice(1, 0, {
     area: 'runtime',
     status: 'info',
     message: `${platformName()} ${os.release()} (${process.arch})`,
   });
-
-  try {
-    await fsp.mkdir(dataDir, { recursive: true });
-    await fsp.access(dataDir);
-    checks.push({
-      area: 'config',
-      status: 'ok',
-      message: `data dir writable: ${dataDir}`,
-      detail: `config: ${loaded.sourcePath}`,
-    });
-  } catch (err) {
-    checks.push({
-      area: 'config',
-      status: 'fail',
-      message: `data dir not writable: ${dataDir}`,
-      detail: String(err),
-    });
-  }
 
   const importChecks = await Promise.all([
     checkImport('native', 'sharp', 'image encoding', 'fail'),
@@ -339,25 +307,8 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     });
   }
 
-  checks.push(...await checkNativeCaptureHelper(config));
-
-  const ollamaHost =
-    ((config.index.model as unknown as { ollama?: { host?: string } }).ollama?.host) ??
-    'http://127.0.0.1:11434';
-  checks.push(await checkHttp('model', `${ollamaHost}/api/tags`, 'Ollama API reachable'));
-
-  const mcp = config.export.plugins.find((p) => p.name === 'mcp') as
-    | { host?: string; port?: number; enabled?: boolean }
-    | undefined;
-  if (!mcp || mcp.enabled === false) {
-    checks.push({ area: 'mcp', status: 'warn', message: 'MCP export is disabled or missing' });
-  } else {
-    checks.push({
-      area: 'mcp',
-      status: 'ok',
-      message: `MCP configured at http://${mcp.host ?? '127.0.0.1'}:${mcp.port ?? 3456}`,
-    });
-  }
+  const loaded = await runtime.readConfig();
+  checks.push(...await checkNativeCaptureHelper(loaded.config));
 
   const failCount = checks.filter((c) => c.status === 'fail').length;
   const warnCount = checks.filter((c) => c.status === 'warn').length;

@@ -113,9 +113,12 @@ pnpm cli doctor
 pnpm cli stats         # or: pnpm cli info  (alias)
 pnpm cli stats --json  # machine-readable
 
-# Start the full pipeline: capture + scheduled indexing + MCP server.
-# If `init` wasn't run, this will bootstrap the model on first launch.
-pnpm cli start
+# Start the desktop tray. It auto-starts the daemon if it is not already
+# running and provides Start/Stop, Status, Doctor, and quick links.
+pnpm start
+
+# Headless/server mode: start the runtime through the CLI interface.
+pnpm daemon        # equivalent to: pnpm cli start
 
 # Run a single capture cycle (useful before committing to background mode)
 pnpm cli capture --once
@@ -254,7 +257,7 @@ can tell which monitor a frame came from. If you preferred the previous
 
 ## Development
 
-`pnpm cli ...` runs the **compiled** output at `packages/app/dist/cli.js`, so
+`pnpm cli ...` runs the **compiled** output at `packages/cli/dist/cli.js`, so
 edits aren't picked up until you rebuild. For live development, just run:
 
 ```bash
@@ -284,7 +287,7 @@ explicit rebuild.)
 For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 
 ```bash
-pnpm --filter @cofounderos/app exec tsx src/cli.ts stats
+pnpm --filter @cofounderos/cli exec tsx src/cli.ts stats
 ```
 
 For headless smoke tests or CI, use the capture fixture. It writes a real
@@ -373,6 +376,26 @@ The first `cofounderos init` / `start` after enabling embeddings pulls
 the embedding model alongside the chat model. If the active model adapter
 doesn't support embeddings, the worker logs one warning and the system
 falls back to keyword search unchanged.
+
+### Hosted model plugins
+
+Ollama remains the default local model, but the model layer is swappable.
+The built-in `openai` plugin works with OpenAI's API and compatible
+gateways that implement `/chat/completions` and `/embeddings`:
+
+```yaml
+index:
+  model:
+    plugin: openai
+    openai:
+      api_key: ${OPENAI_API_KEY}      # or set OPENAI_API_KEY in the environment
+      base_url: https://api.openai.com/v1
+      model: gpt-4o-mini
+      embedding_model: text-embedding-3-small
+```
+
+No storage or index changes are required — the same `IModelAdapter`
+contract powers wiki indexing, vision calls, and semantic embeddings.
 
 ### Audio transcription
 
@@ -528,17 +551,19 @@ export:
 
 ## Repository layout
 
-`packages/` holds the **host** (3 npm workspace packages). `plugins/` holds
+`packages/` holds the **host** workspace packages. `plugins/` holds
 the **drop-in plugin folders** — both built-in and third-party — one folder
 per layer, one folder per plugin underneath.
 
 ```
 cofounderos/
-├── packages/                   The host. 3 npm workspace packages.
+├── packages/                   The host workspace packages.
 │   ├── interfaces/             Shared types: ICapture, IStorage, IModelAdapter,
 │   │                           IIndexStrategy, IExport, RawEvent schema.
 │   ├── core/                   Config loader, plugin loader, event bus, scheduler.
-│   └── app/                    CLI orchestrator (cofounderos ...).
+│   ├── runtime/                Shared lifecycle, workers, status, journals, search.
+│   ├── cli/                    Terminal interface (cofounderos ...).
+│   └── desktop/                Electron desktop interface over the runtime.
 └── plugins/                    Drop-in plugins. No package.json needed.
     ├── capture/
     │   ├── node/               Default capture: event-driven Node recorder.
@@ -577,6 +602,11 @@ The host never imports any plugin by name. Discovery walks `plugins/` at
 runtime, validates `plugin.json` against `@cofounderos/interfaces`, and
 dynamically imports the entrypoint. To activate a plugin, reference it by
 manifest `name` from `config.yaml` (e.g. `storage.plugin: local`).
+
+The CLI and desktop app both call `@cofounderos/runtime`; neither owns the
+product lifecycle by itself. Packaged desktop builds should place the runtime
+resource root at `resources/cofounderos` (or set `COFOUNDEROS_RESOURCE_ROOT`)
+so runtime plugin discovery can find `plugins/` without a source checkout.
 
 Runtime dependencies common to plugins (`sharp`, `better-sqlite3`,
 `active-win`, `ollama`, `@modelcontextprotocol/sdk`, `zod`, …) are hoisted

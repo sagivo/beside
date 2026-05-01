@@ -246,7 +246,9 @@ const IndexSchema = z.object({
     openai: z.object({
       api_key: z.string().optional(),
       base_url: z.string().default('https://api.openai.com/v1'),
-      model: z.string().default('gpt-4o'),
+      model: z.string().default('gpt-4o-mini'),
+      vision_model: z.string().optional(),
+      embedding_model: z.string().default('text-embedding-3-small'),
     }).optional(),
   }).default({
     plugin: 'ollama',
@@ -453,6 +455,13 @@ index:
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
       auto_install: true         # auto-install Ollama + pull model on first run
+    # To use a hosted OpenAI-compatible model instead:
+    # plugin: openai
+    # openai:
+    #   api_key: \${OPENAI_API_KEY}
+    #   base_url: https://api.openai.com/v1
+    #   model: gpt-4o-mini
+    #   embedding_model: text-embedding-3-small
 
 # Cross-cutting system guards
 system:
@@ -519,6 +528,35 @@ export async function loadConfig(configPath?: string): Promise<LoadedConfig> {
   rerootStockPaths(config);
   const dataDir = expandPath(config.app.data_dir);
   return { config, dataDir, sourcePath };
+}
+
+export function validateConfig(raw: unknown): {
+  ok: true;
+  config: CofounderOSConfig;
+} | {
+  ok: false;
+  issues: Array<{ path: string; message: string }>;
+} {
+  const parsed = ConfigSchema.safeParse(raw);
+  if (parsed.success) return { ok: true, config: parsed.data };
+  return {
+    ok: false,
+    issues: parsed.error.issues.map((issue) => ({
+      path: issue.path.join('.'),
+      message: issue.message,
+    })),
+  };
+}
+
+export async function writeConfig(
+  config: CofounderOSConfig,
+  configPath?: string,
+): Promise<{ path: string }> {
+  const target = await resolveConfigPath(configPath);
+  const validated = ConfigSchema.parse(config);
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, YAML.stringify(validated), 'utf8');
+  return { path: target };
 }
 
 /**

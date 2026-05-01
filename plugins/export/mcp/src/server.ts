@@ -12,6 +12,8 @@ import type {
   Logger,
   RawEventType,
   Frame,
+  EntityKind,
+  FrameTextSource,
 } from '@cofounderos/interfaces';
 import { renderJournalMarkdown } from '@cofounderos/interfaces';
 
@@ -26,6 +28,16 @@ export interface McpServices {
 export interface McpServerOptions {
   textExcerptChars?: number;
 }
+
+type FrameMatch = {
+  frame: Frame;
+  retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+  semanticScore?: number;
+  context?: {
+    before: Frame[];
+    after: Frame[];
+  };
+};
 
 const DEFAULT_FRAME_TEXT_EXCERPT_CHARS = 5000;
 const DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS = 60000;
@@ -45,6 +57,25 @@ const RAW_EVENT_TYPES: readonly RawEventType[] = [
   'app_launch',
   'app_quit',
   'clipboard_summary',
+];
+
+const ENTITY_KINDS: readonly EntityKind[] = [
+  'project',
+  'repo',
+  'meeting',
+  'contact',
+  'channel',
+  'doc',
+  'webpage',
+  'app',
+];
+
+const FRAME_TEXT_SOURCES: readonly FrameTextSource[] = [
+  'ocr',
+  'accessibility',
+  'ocr_accessibility',
+  'audio',
+  'none',
 ];
 
 export function createMcpServer(
@@ -71,7 +102,6 @@ export function createMcpServer(
     },
     async ({ query, limit }) => {
       const cap = limit ?? 5;
-      const queryLower = query.toLowerCase();
 
       // 1. Frame-level retrieval — the "specific moment" answers.
       // Keyword FTS remains the precision path; semantic search adds
@@ -90,7 +120,7 @@ export function createMcpServer(
       // 2. Wiki page retrieval — the "synthesised summary" answers.
       const pages = await listAllStrategyPages(services.strategy);
       const ranked = pages
-        .map((p) => ({ page: p, score: scorePage(p.content, queryLower) }))
+        .map((p) => ({ page: p, score: scorePage(p.path, p.content, query) }))
         .filter((r) => r.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, cap);
@@ -98,13 +128,14 @@ export function createMcpServer(
       const result = {
         query,
         frame_matches: blendedFrames.map((m) => ({
-          ...framePreview(m.frame, textExcerptChars),
+          ...framePreview(m.frame, textExcerptChars, query),
           retrieval: m.retrieval,
           semantic_score: m.semanticScore,
         })),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
-          excerpt: extractExcerpt(r.page.content, queryLower),
+          score: r.score,
+          excerpt: extractExcerpt(r.page.content, query),
           last_updated: r.page.lastUpdated,
           source_event_count: r.page.sourceEventIds.length,
         })),
@@ -127,9 +158,31 @@ export function createMcpServer(
         query: z.string().describe('Free-text query.'),
         from: z.string().optional().describe('ISO timestamp lower bound.'),
         to: z.string().optional().describe('ISO timestamp upper bound.'),
+        day: z.string().optional().describe('Restrict to one YYYY-MM-DD day.'),
         app: z.string().optional().describe('Restrict to a single app name.'),
+        entity_path: z.string().optional().describe('Restrict to frames resolved to this entity path.'),
+        entity_kind: z
+          .enum(ENTITY_KINDS as [EntityKind, ...EntityKind[]])
+          .optional()
+          .describe('Restrict to an entity kind such as project, repo, doc, webpage, or app.'),
+        activity_session_id: z
+          .string()
+          .optional()
+          .describe('Restrict to frames in a specific activity session id.'),
+        url_domain: z.string().optional().describe('Restrict to URLs containing this domain/host.'),
+        text_source: z
+          .enum(FRAME_TEXT_SOURCES as [FrameTextSource, ...FrameTextSource[]])
+          .optional()
+          .describe('Restrict by frame text source.'),
         semantic: z.boolean().optional().describe('Also include semantic embedding matches. Default true.'),
         limit: z.number().int().min(1).max(50).optional(),
+        offset: z.number().int().min(0).max(500).optional().describe('Skip this many blended results.'),
+        include_context: z
+          .boolean()
+          .optional()
+          .describe('Include nearby frames around each returned hit. Default false.'),
+        context_before: z.number().int().min(0).max(10).optional().describe('Context frames before each hit.'),
+        context_after: z.number().int().min(0).max(10).optional().describe('Context frames after each hit.'),
         max_response_chars: z
           .number()
           .int()
@@ -141,22 +194,57 @@ export function createMcpServer(
           ),
       },
     },
-    async ({ query, from, to, app, semantic, limit, max_response_chars }) => {
-      const frames = await services.storage.searchFrames({
-        text: query,
+    async ({
+      query,
+      from,
+      to,
+      day,
+      app,
+      entity_path,
+      entity_kind,
+      activity_session_id,
+      url_domain,
+      text_source,
+      semantic,
+      limit,
+      offset,
+      include_context,
+      context_before,
+      context_after,
+      max_response_chars,
+    }) => {
+      const requestedLimit = limit ?? 25;
+      const requestedOffset = offset ?? 0;
+      const candidateLimit = requestedLimit + requestedOffset;
+      const filters = {
         from,
         to,
+        day,
         apps: app ? [app] : undefined,
-        limit: limit ?? 25,
+        entityPath: entity_path,
+        entityKind: entity_kind,
+        activitySessionId: activity_session_id,
+        urlDomain: url_domain,
+        textSource: text_source,
+      };
+      const frames = await services.storage.searchFrames({
+        text: query,
+        ...filters,
+        limit: candidateLimit,
       });
       const semanticFrames = semantic === false
         ? []
-        : await semanticFrameSearch(services, query, limit ?? 25, {
-          from,
-          to,
-          apps: app ? [app] : undefined,
-        });
-      const blended = blendFrameMatches(frames, semanticFrames, limit ?? 25);
+        : await semanticFrameSearch(services, query, candidateLimit, filters);
+      const blended = blendFrameMatches(frames, semanticFrames, candidateLimit)
+        .slice(requestedOffset, requestedOffset + requestedLimit);
+      if (include_context) {
+        await attachFrameContexts(
+          services,
+          blended,
+          context_before ?? 2,
+          context_after ?? 2,
+        );
+      }
       const result = buildSearchFramesResult(
         query,
         blended,
@@ -278,6 +366,127 @@ export function createMcpServer(
       const text = await services.strategy.readRootIndex();
       return {
         content: [{ type: 'text', text: text || '_(index empty — no events indexed yet)_' }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'list_entities',
+    {
+      description:
+        'List remembered entities (projects, repos, docs, webpages, apps, etc.) by recent activity. Use before drilling into an entity-specific history.',
+      inputSchema: {
+        query: z.string().optional().describe('Optional text filter over entity title and path.'),
+        kind: z
+          .enum(ENTITY_KINDS as [EntityKind, ...EntityKind[]])
+          .optional()
+          .describe('Restrict to one entity kind.'),
+        since_last_seen: z.string().optional().describe('Only entities last seen on or after this ISO timestamp.'),
+        limit: z.number().int().min(1).max(500).optional().describe('Max entities to return. Default 100.'),
+      },
+    },
+    async ({ query, kind, since_last_seen, limit }) => {
+      const cap = limit ?? 100;
+      const entities = await services.storage.listEntities({
+        kind,
+        sinceLastSeen: since_last_seen,
+        limit: query ? Math.min(500, cap * 4) : cap,
+      });
+      const terms = query ? queryTerms(query) : [];
+      const filtered = terms.length === 0
+        ? entities
+        : entities.filter((entity) => {
+          const haystack = `${entity.title} ${entity.path}`.toLowerCase();
+          return terms.every((term) => haystack.includes(term));
+        });
+      const result = filtered.slice(0, cap).map((entity) => ({
+        path: entity.path,
+        kind: entity.kind,
+        title: entity.title,
+        first_seen: entity.firstSeen,
+        last_seen: entity.lastSeen,
+        focused_min: Math.round(entity.totalFocusedMs / 60_000),
+        frame_count: entity.frameCount,
+      }));
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_entity',
+    {
+      description:
+        'Read one remembered entity by stable path. Optionally include its earliest frames as evidence.',
+      inputSchema: {
+        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        include_frames: z.boolean().optional().describe('Include frames belonging to this entity. Default false.'),
+        frame_limit: z.number().int().min(1).max(200).optional().describe('Max frames when include_frames is true.'),
+      },
+    },
+    async ({ path, include_frames, frame_limit }) => {
+      const entity = await services.storage.getEntity(path);
+      if (!entity) {
+        return {
+          content: [{ type: 'text', text: `Entity "${path}" not found.` }],
+          isError: true,
+        };
+      }
+      const frames = include_frames
+        ? await services.storage.getEntityFrames(path, frame_limit ?? 50)
+        : [];
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                path: entity.path,
+                kind: entity.kind,
+                title: entity.title,
+                first_seen: entity.firstSeen,
+                last_seen: entity.lastSeen,
+                focused_min: Math.round(entity.totalFocusedMs / 60_000),
+                frame_count: entity.frameCount,
+                frames: frames.map((frame) => framePreview(frame, textExcerptChars)),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_entity_frames',
+    {
+      description:
+        'Return frames for a remembered entity, oldest first. Use after list_entities/get_entity to inspect the evidence for a project, repo, doc, webpage, or app.',
+      inputSchema: {
+        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        limit: z.number().int().min(1).max(500).optional().describe('Max frames to return. Default 100.'),
+      },
+    },
+    async ({ path, limit }) => {
+      const frames = await services.storage.getEntityFrames(path, limit ?? 100);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                path,
+                count: frames.length,
+                frames: frames.map((frame) => framePreview(frame, textExcerptChars)),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
     },
   );
@@ -454,6 +663,22 @@ export function createMcpServer(
   return server;
 }
 
+async function attachFrameContexts(
+  services: McpServices,
+  matches: FrameMatch[],
+  before: number,
+  after: number,
+): Promise<void> {
+  await Promise.all(matches.map(async (match) => {
+    const ctx = await services.storage.getFrameContext(match.frame.id, before, after);
+    if (!ctx) return;
+    match.context = {
+      before: ctx.before,
+      after: ctx.after,
+    };
+  }));
+}
+
 async function listAllStrategyPages(strategy: IIndexStrategy) {
   // The IIndexStrategy interface intentionally doesn't expose a list method
   // in the published surface — but the Karpathy implementation does. We
@@ -503,11 +728,13 @@ function framePreview(frame: Frame, textExcerptChars: number, query?: string): R
   return {
     id: frame.id,
     timestamp: frame.timestamp,
+    day: frame.day,
     app: frame.app,
     window_title: frame.window_title,
     url: frame.url,
     entity_path: frame.entity_path,
     entity_kind: frame.entity_kind,
+    activity_session_id: frame.activity_session_id,
     asset_path: frame.asset_path,
     text_excerpt: frame.text
       ? query
@@ -543,11 +770,7 @@ function truncate(s: string, n: number): string {
 
 function buildSearchFramesResult(
   query: string,
-  matches: Array<{
-    frame: Frame;
-    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
-    semanticScore?: number;
-  }>,
+  matches: FrameMatch[],
   maxResponseChars: number,
 ): Record<string, unknown> {
   const responseBudget = Math.max(1000, maxResponseChars - 512);
@@ -580,11 +803,7 @@ function buildSearchFramesResult(
 }
 
 function largestFittingFrameSearchPreview(
-  match: {
-    frame: Frame;
-    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
-    semanticScore?: number;
-  },
+  match: FrameMatch,
   query: string,
   result: { frames: Record<string, unknown>[] },
   maxResponseChars: number,
@@ -609,19 +828,23 @@ function largestFittingFrameSearchPreview(
 }
 
 function frameSearchPreview(
-  match: {
-    frame: Frame;
-    retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
-    semanticScore?: number;
-  },
+  match: FrameMatch,
   textExcerptChars: number,
   query: string,
 ): Record<string, unknown> {
-  return {
+  const preview: Record<string, unknown> = {
     ...framePreview(match.frame, textExcerptChars, query),
     retrieval: match.retrieval,
     semantic_score: match.semanticScore,
   };
+  if (match.context) {
+    const contextExcerptChars = Math.min(textExcerptChars, 1000);
+    preview.context = {
+      before: match.context.before.map((frame) => framePreview(frame, contextExcerptChars, query)),
+      after: match.context.after.map((frame) => framePreview(frame, contextExcerptChars, query)),
+    };
+  }
+  return preview;
 }
 
 function fitsSearchResponse(
@@ -694,43 +917,58 @@ function bestQueryWindowStart(lowerText: string, terms: string[], maxChars: numb
   return bestStart;
 }
 
-function scorePage(content: string, queryLower: string): number {
+function scorePage(path: string, content: string, query: string): number {
   if (!content) return 0;
+  const queryLower = query.trim().toLowerCase();
   const lower = content.toLowerCase();
-  // Crude relevance: count of substring occurrences. Good enough for an
-  // MVP local agent.
+  const pathLower = path.toLowerCase();
   let score = 0;
-  let from = 0;
-  while (true) {
-    const idx = lower.indexOf(queryLower, from);
-    if (idx === -1) break;
-    score += 1;
-    from = idx + queryLower.length;
+
+  if (queryLower) {
+    score += countOccurrences(pathLower, queryLower) * 10;
+    score += countOccurrences(lower, queryLower) * 6;
   }
-  // Token overlap fallback for multi-word queries.
-  if (score === 0) {
-    const tokens = queryLower.split(/\s+/).filter((t) => t.length > 3);
-    for (const t of tokens) {
-      if (lower.includes(t)) score += 1;
-    }
+
+  const terms = queryTerms(query).filter((term) => term.length > 2);
+  for (const term of terms) {
+    score += countOccurrences(pathLower, term) * 4;
+    score += countOccurrences(lower, term);
   }
   return score;
 }
 
-function extractExcerpt(content: string, queryLower: string): string {
-  const lower = content.toLowerCase();
-  const idx = lower.indexOf(queryLower);
-  if (idx === -1) return content.slice(0, 200);
-  const start = Math.max(0, idx - 80);
-  const end = Math.min(content.length, idx + queryLower.length + 120);
-  return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+function countOccurrences(lowerText: string, lowerNeedle: string): number {
+  if (!lowerNeedle) return 0;
+  let count = 0;
+  let from = 0;
+  while (count < 100) {
+    const idx = lowerText.indexOf(lowerNeedle, from);
+    if (idx === -1) break;
+    count += 1;
+    from = idx + lowerNeedle.length;
+  }
+  return count;
+}
+
+function extractExcerpt(content: string, query: string): string {
+  return extractRelevantTextExcerpt(content, query, 800);
 }
 
 async function semanticFrameSearch(
   services: McpServices,
   query: string,
   limit: number,
-  filters: { from?: string; to?: string; apps?: string[] } = {},
+  filters: {
+    from?: string;
+    to?: string;
+    day?: string;
+    apps?: string[];
+    entityPath?: string;
+    entityKind?: EntityKind;
+    activitySessionId?: string;
+    urlDomain?: string;
+    textSource?: FrameTextSource;
+  } = {},
 ): Promise<Array<{ frame: Frame; score: number }>> {
   if (!services.model || typeof services.model.embed !== 'function') return [];
   try {
@@ -750,11 +988,7 @@ function blendFrameMatches(
   ftsFrames: Frame[],
   semanticFrames: Array<{ frame: Frame; score: number }>,
   limit: number,
-): Array<{
-  frame: Frame;
-  retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
-  semanticScore?: number;
-}> {
+): FrameMatch[] {
   const byId = new Map<string, {
     frame: Frame;
     keywordRank?: number;

@@ -1,0 +1,18 @@
+{
+  "name": "openai",
+  "version": "0.2.0",
+  "layer": "model",
+  "interface": "IModelAdapter",
+  "entrypoint": "dist/index.js",
+  "description": "OpenAI-compatible hosted model adapter for chat, vision, and embeddings.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "api_key": { "type": "string" },
+      "base_url": { "type": "string", "default": "https://api.openai.com/v1" },
+      "model": { "type": "string", "default": "gpt-4o-mini" },
+      "vision_model": { "type": "string" },
+      "embedding_model": { "type": "string", "default": "text-embedding-3-small" }
+    }
+  }
+}

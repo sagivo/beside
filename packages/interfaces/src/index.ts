@@ -198,6 +198,12 @@ export interface FrameQuery {
   from?: string;
   to?: string;
   apps?: string[];
+  day?: string;
+  entityPath?: string;
+  entityKind?: EntityKind;
+  activitySessionId?: string;
+  urlDomain?: string;
+  textSource?: FrameTextSource;
   limit?: number;
   offset?: number;
 }

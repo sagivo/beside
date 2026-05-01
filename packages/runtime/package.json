@@ -1,0 +1,23 @@
+{
+  "name": "@cofounderos/runtime",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "pnpm --filter @cofounderos/core run build && tsc -p tsconfig.json",
+    "clean": "rimraf dist *.tsbuildinfo",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"(no tests)\""
+  },
+  "dependencies": {
+    "@cofounderos/core": "workspace:*",
+    "@cofounderos/interfaces": "workspace:*",
+    "sharp": "^0.33.5",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.4",
+    "typescript": "^5.6.3"
+  }
+}

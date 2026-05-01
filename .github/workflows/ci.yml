@@ -55,13 +55,13 @@ jobs:
       # addons opened by side-effect imports don't crash the process,
       # and the shebang/entry works under `node`.
       - name: Smoke - cli help
-        run: node packages/app/dist/cli.js help
+        run: node packages/cli/dist/cli.js help
 
       - name: Smoke - cli doctor
         env:
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
           NO_COLOR: '1'
-        run: node packages/app/dist/cli.js doctor
+        run: node packages/cli/dist/cli.js doctor
 
       # Plugin discovery + per-layer instantiation. Constructors only —
       # nothing is started, so capture doesn't actually probe displays.
@@ -73,7 +73,7 @@ jobs:
         env:
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
           NO_COLOR: '1'
-        run: node packages/app/dist/cli.js plugin list
+        run: node packages/cli/dist/cli.js plugin list
 
       # Status exercises every plugin's getStatus / getStats. The
       # capture plugin's getStatus is pure (memory + counters; no
@@ -84,7 +84,7 @@ jobs:
         env:
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
           NO_COLOR: '1'
-        run: node packages/app/dist/cli.js status
+        run: node packages/cli/dist/cli.js status
 
       # Fixture capture exercises the same storage + image encoding +
       # event write path as `capture --once`, but swaps desktop APIs for
@@ -95,4 +95,4 @@ jobs:
           COFOUNDEROS_CAPTURE_FIXTURE: '1'
           COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-capture
           NO_COLOR: '1'
-        run: node packages/app/dist/cli.js capture --once
+        run: node packages/cli/dist/cli.js capture --once

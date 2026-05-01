@@ -1,0 +1,587 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawn, type ChildProcess } from 'node:child_process';
+import readline from 'node:readline';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  Tray,
+  nativeImage,
+  shell,
+  dialog,
+} from 'electron';
+import { defaultDataDir } from '@cofounderos/core';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, '../../..');
+const workspaceRoot = resolveRuntimeWorkspaceRoot();
+if (app.isPackaged && !process.env.COFOUNDEROS_DATA_DIR) {
+  process.env.COFOUNDEROS_USE_PLATFORM_DATA_DIR ??= '1';
+}
+const dataDir = defaultDataDir();
+const configPath = path.join(dataDir, 'config.yaml');
+const markdownExportDir = path.join(dataDir, 'export/markdown');
+
+let tray: Tray | null = null;
+let statusWindow: BrowserWindow | null = null;
+let managedRuntime: RuntimeServiceClient | null = null;
+let statusItemHelper: ChildProcess | null = null;
+let lastLogs: string[] = [];
+
+type RuntimeOverview = {
+  status: string;
+  configPath: string;
+  dataDir: string;
+  storageRoot: string;
+  capture: {
+    running: boolean;
+    paused: boolean;
+    eventsToday: number;
+  };
+  storage: {
+    totalEvents: number;
+    totalAssetBytes: number;
+  };
+  index: {
+    pageCount: number;
+    eventsCovered: number;
+  };
+  model: {
+    name: string;
+    ready: boolean;
+  };
+  exports: Array<{
+    name: string;
+    running: boolean;
+  }>;
+};
+
+type RuntimeDoctorCheck = {
+  area: string;
+  status: string;
+  message: string;
+  detail?: string;
+  action?: string;
+};
+
+type RuntimeResponse =
+  | { id: number; ok: true; result: unknown }
+  | { id: number; ok: false; error: string };
+
+class RuntimeServiceClient {
+  private readonly child: ChildProcess;
+  private nextId = 1;
+  private readonly pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (reason?: unknown) => void;
+  }>();
+
+  constructor() {
+    const servicePath = path.join(here, 'runtime-service.js');
+    const env = {
+      ...process.env,
+      COFOUNDEROS_RESOURCE_ROOT: workspaceRoot,
+    };
+    this.child = spawn(process.env.COFUNDEROS_NODE ?? 'node', [servicePath], {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    this.child.stderr?.setEncoding('utf8');
+    this.child.stderr?.on('data', (chunk: string) => appendLog(chunk.trimEnd()));
+    this.child.on('error', (err) => this.rejectAll(err));
+    this.child.on('exit', (code, signal) => {
+      const err = new Error(`runtime service exited (code=${code}, signal=${signal})`);
+      this.rejectAll(err);
+      if (managedRuntime === this) managedRuntime = null;
+      void refreshTray();
+      if (statusWindow) void renderStatusWindow();
+    });
+
+    const rl = readline.createInterface({
+      input: this.child.stdout!,
+      crlfDelay: Infinity,
+    });
+    rl.on('line', (line) => this.handleLine(line));
+  }
+
+  async call<T = unknown>(method: string, params?: unknown): Promise<T> {
+    const id = this.nextId++;
+    const payload = `${JSON.stringify({ id, method, params })}\n`;
+    return await new Promise<T>((resolve, reject) => {
+      this.pending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      this.child.stdin?.write(payload, (err) => {
+        if (err) {
+          this.pending.delete(id);
+          reject(err);
+        }
+      });
+    });
+  }
+
+  close(): void {
+    this.child.kill('SIGTERM');
+    this.rejectAll(new Error('runtime service closed'));
+  }
+
+  private handleLine(line: string): void {
+    let response: RuntimeResponse;
+    try {
+      response = JSON.parse(line) as RuntimeResponse;
+    } catch {
+      appendLog(`[runtime stdout] ${line}`);
+      return;
+    }
+    const pending = this.pending.get(response.id);
+    if (!pending) return;
+    this.pending.delete(response.id);
+    if (response.ok) pending.resolve(response.result);
+    else pending.reject(new Error(response.error));
+  }
+
+  private rejectAll(err: unknown): void {
+    for (const pending of this.pending.values()) {
+      pending.reject(err);
+    }
+    this.pending.clear();
+  }
+}
+
+app.setName('CofounderOS');
+
+app.whenReady().then(async () => {
+  registerRuntimeIpc();
+  if (process.platform === 'darwin') {
+    // Run as a proper menu-bar/accessory app. In regular foreground
+    // mode Electron gets normal app menus ("Electron", "File", "Edit"...)
+    // and the status item can fail to present visibly when launched from
+    // the unbundled dev binary on Sequoia.
+    app.setActivationPolicy('accessory');
+    if (process.env.COFOUNDEROS_DESKTOP_SHOW_DOCK !== '1') {
+      app.dock?.hide();
+    }
+  }
+  if (process.platform === 'darwin') {
+    if (!startNativeStatusItem()) {
+      createElectronTrayFallback();
+    }
+  } else {
+    createElectronTrayFallback();
+  }
+  await startDaemonIfNeeded();
+  if (process.env.COFOUNDEROS_DESKTOP_SHOW_ON_START !== '0') {
+    await showStatusWindow();
+  }
+});
+
+app.on('window-all-closed', () => {
+  // Keep the tray process alive after the status window closes.
+});
+
+app.on('before-quit', () => {
+  if (statusItemHelper && !statusItemHelper.killed) {
+    statusItemHelper.kill('SIGTERM');
+  }
+  if (managedRuntime) {
+    managedRuntime.close();
+  }
+});
+
+function createElectronTrayFallback(): void {
+  try {
+    tray = new Tray(makeTrayImage());
+    if (process.platform === 'darwin') tray.setTitle(' CO');
+    tray.setToolTip('CofounderOS — click for status');
+    appendLog('Electron tray fallback created');
+    void refreshTray();
+    tray.on('click', () => {
+      void showStatusWindow();
+    });
+  } catch (err) {
+    appendLog(`Tray icon failed to create: ${String(err)}`);
+    void dialog.showErrorBox(
+      'CofounderOS tray failed to load',
+      `${String(err)}\n\nThe app will still run; use the status window to control it.`,
+    );
+  }
+}
+
+function startNativeStatusItem(): boolean {
+  const helperPath = path.resolve(here, 'native/cofounderos-status-item');
+  try {
+    const helper = spawn(helperPath, [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    statusItemHelper = helper;
+    helper.stdout?.setEncoding('utf8');
+    helper.stderr?.setEncoding('utf8');
+    helper.stdout?.on('data', (chunk: string) => {
+      for (const line of chunk.split(/\r?\n/).filter(Boolean)) {
+        appendLog(`[status-item] ${line}`);
+        try {
+          const msg = JSON.parse(line) as { kind?: string };
+          if (msg.kind === 'show-status') void showStatusWindow();
+          if (msg.kind === 'quit') app.quit();
+          if (msg.kind === 'ready') appendLog('Native macOS status item ready');
+        } catch {
+          // Non-JSON stdout is just diagnostic output.
+        }
+      }
+    });
+    helper.stderr?.on('data', (chunk: string) => {
+      appendLog(`[status-item stderr] ${chunk.trimEnd()}`);
+    });
+    helper.on('exit', (code, signal) => {
+      appendLog(`Native status item exited (code=${code}, signal=${signal})`);
+      if (statusItemHelper === helper) statusItemHelper = null;
+    });
+    helper.on('error', (err) => {
+      appendLog(`Native status item failed to start: ${String(err)}`);
+      if (statusItemHelper === helper) statusItemHelper = null;
+    });
+    appendLog(`Starting native macOS status item: ${helperPath}`);
+    return true;
+  } catch (err) {
+    appendLog(`Native status item unavailable: ${String(err)}`);
+    statusItemHelper = null;
+    return false;
+  }
+}
+
+async function refreshTray(): Promise<void> {
+  if (!tray) return;
+  const health = await getHealth();
+  const managed = managedRuntime != null;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: health.ok ? 'CofounderOS: running' : 'CofounderOS: stopped',
+      enabled: false,
+    },
+    {
+      label: managed ? 'Runtime managed by desktop' : 'Runtime not managed by desktop',
+      enabled: false,
+    },
+    { type: 'separator' },
+    {
+      label: 'Show Status',
+      click: () => void showStatusWindow(),
+    },
+    {
+      label: health.ok ? 'Start Runtime (already running)' : 'Start Runtime',
+      enabled: !health.ok && !managedRuntime,
+      click: () => void startRuntime(),
+    },
+    {
+      label: managedRuntime ? 'Stop Managed Runtime' : 'Stop Managed Runtime (not started here)',
+      enabled: Boolean(managedRuntime),
+      click: () => void stopManagedRuntime(),
+    },
+    { type: 'separator' },
+    {
+      label: 'Run Doctor',
+      click: () => void showStatusWindow({ focus: 'doctor' }),
+    },
+    {
+      label: 'Open Markdown Export',
+      click: () => void shell.openPath(markdownExportDir),
+    },
+    {
+      label: 'Open Data Folder',
+      click: () => void shell.openPath(dataDir),
+    },
+    {
+      label: 'Open Config',
+      click: () => void shell.openPath(configPath),
+    },
+    { type: 'separator' },
+    {
+      label: 'Quit Tray',
+      click: () => app.quit(),
+    },
+  ]));
+}
+
+async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void> {
+  if (!statusWindow) {
+    statusWindow = new BrowserWindow({
+      width: 860,
+      height: 760,
+      title: 'CofounderOS Status',
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(here, 'preload.cjs'),
+      },
+    });
+    statusWindow.on('closed', () => {
+      statusWindow = null;
+    });
+    statusWindow.webContents.on('console-message', (_event, level, message) => {
+      appendLog(`[renderer:${level}] ${message}`);
+    });
+    statusWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+      appendLog(`[renderer] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
+    });
+    statusWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+      appendLog(`[renderer] preload failed ${preloadPath}: ${error.message}`);
+    });
+  }
+  await renderStatusWindow();
+  statusWindow.show();
+  statusWindow.focus();
+}
+
+async function renderStatusWindow(): Promise<void> {
+  if (!statusWindow) return;
+  await statusWindow.loadFile(path.join(here, 'renderer', 'index.html'));
+  statusWindow.webContents.once('did-finish-load', () => {
+    statusWindow?.webContents.send('cofounderos:desktop-logs', lastLogs.slice(-120).join('\n'));
+  });
+}
+
+async function startRuntime(): Promise<void> {
+  if (managedRuntime) return;
+  appendLog('Starting CofounderOS runtime from desktop...');
+  const runtime = new RuntimeServiceClient();
+  managedRuntime = runtime;
+  try {
+    await runtime.call('start');
+    appendLog('CofounderOS runtime started.');
+  } catch (err) {
+    runtime.close();
+    managedRuntime = null;
+    appendLog(`Runtime failed to start: ${String(err)}`);
+    void dialog.showErrorBox('CofounderOS failed to start', String(err));
+  } finally {
+    await refreshTray();
+    if (statusWindow) await renderStatusWindow();
+  }
+}
+
+async function startDaemonIfNeeded(): Promise<void> {
+  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART === '0') {
+    appendLog('Desktop autostart disabled by COFOUNDEROS_DESKTOP_AUTOSTART=0.');
+    return;
+  }
+  const health = await getHealth();
+  if (health.ok) {
+    appendLog('CofounderOS runtime already running; desktop will monitor it.');
+    await refreshTray();
+    return;
+  }
+  await startRuntime();
+}
+
+async function stopManagedRuntime(): Promise<void> {
+  if (!managedRuntime) return;
+  appendLog('Stopping managed CofounderOS runtime...');
+  const runtime = managedRuntime;
+  managedRuntime = null;
+  await runtime.call('stop').catch((err) => appendLog(`Runtime stop failed: ${String(err)}`));
+  runtime.close();
+  await refreshTray();
+  if (statusWindow) await renderStatusWindow();
+}
+
+async function getHealth(): Promise<{ ok: boolean; text: string }> {
+  if (managedRuntime) {
+    try {
+      const overview = await managedRuntime.call<RuntimeOverview>('overview');
+      return {
+        ok: overview.status === 'running',
+        text: `${overview.status}; capture running=${overview.capture.running}`,
+      };
+    } catch (err) {
+      return { ok: false, text: String(err) };
+    }
+  }
+  try {
+    const res = await fetch('http://127.0.0.1:3456/health', {
+      signal: AbortSignal.timeout(1200),
+    });
+    const text = await res.text();
+    return { ok: res.ok, text };
+  } catch (err) {
+    return { ok: false, text: String(err) };
+  }
+}
+
+async function getRuntimeStatusText(): Promise<string> {
+  const runtime = await getRuntimeForRequest();
+  const overview = await runtime.call<RuntimeOverview>('overview');
+  return [
+    '# CofounderOS runtime',
+    '',
+    `status: ${overview.status}`,
+    `config: ${overview.configPath}`,
+    `data: ${overview.dataDir}`,
+    '',
+    '## Memory capture',
+    `running: ${overview.capture.running}`,
+    `paused: ${overview.capture.paused}`,
+    `events today: ${overview.capture.eventsToday}`,
+    '',
+    '## Storage',
+    `root: ${overview.storageRoot}`,
+    `events: ${overview.storage.totalEvents}`,
+    `assets: ${formatBytes(overview.storage.totalAssetBytes)}`,
+    '',
+    '## Memory organization',
+    `pages: ${overview.index.pageCount}`,
+    `events covered: ${overview.index.eventsCovered}`,
+    '',
+    '## Local AI model',
+    `${overview.model.name}: ${overview.model.ready ? 'ready' : 'not ready'}`,
+    '',
+    '## Exports',
+    ...overview.exports.map((exp) => `${exp.name}: ${exp.running ? 'running' : 'stopped'}`),
+  ].join('\n');
+}
+
+async function getRuntimeDoctorText(): Promise<string> {
+  const runtime = await getRuntimeForRequest();
+  const checks = await runtime.call<RuntimeDoctorCheck[]>('doctor');
+  const failCount = checks.filter((check) => check.status === 'fail').length;
+  const warnCount = checks.filter((check) => check.status === 'warn').length;
+  return [
+    '# CofounderOS doctor',
+    '',
+    ...checks.map((check) => {
+      const detail = check.detail ? `\n    ${check.detail}` : '';
+      const action = check.action ? `\n    next: ${check.action}` : '';
+      return `- [${check.status}] ${check.area}: ${check.message}${detail}${action}`;
+    }),
+    '',
+    `summary: ${failCount} fail, ${warnCount} warn, ${checks.length - failCount - warnCount} ok/info`,
+  ].join('\n');
+}
+
+function registerRuntimeIpc(): void {
+  ipcMain.handle('cofounderos:overview', async () => {
+    return await (await getRuntimeForRequest()).call('overview');
+  });
+  ipcMain.handle('cofounderos:doctor', async () => {
+    return await (await getRuntimeForRequest()).call('doctor');
+  });
+  ipcMain.handle('cofounderos:read-config', async () => {
+    return await (await getRuntimeForRequest()).call('readConfig');
+  });
+  ipcMain.handle('cofounderos:validate-config', async (_event, config: unknown) => {
+    return await (await getRuntimeForRequest()).call('validateConfig', config);
+  });
+  ipcMain.handle('cofounderos:save-config-patch', async (_event, patch: unknown) => {
+    return await (await getRuntimeForRequest()).call('saveConfigPatch', patch);
+  });
+  ipcMain.handle('cofounderos:list-journal-days', async () => {
+    return await (await getRuntimeForRequest()).call('listJournalDays');
+  });
+  ipcMain.handle('cofounderos:get-journal-day', async (_event, day: string) => {
+    return await (await getRuntimeForRequest()).call('getJournalDay', day);
+  });
+  ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('searchFrames', query);
+  });
+  ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
+    const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
+    return new Uint8Array(Buffer.from(result.base64, 'base64'));
+  });
+  ipcMain.handle('cofounderos:start-runtime', async () => {
+    await startRuntime();
+    return await (await getRuntimeForRequest()).call('overview');
+  });
+  ipcMain.handle('cofounderos:stop-runtime', async () => {
+    await stopManagedRuntime();
+    return { stopped: true };
+  });
+}
+
+async function getRuntimeForRequest(): Promise<RuntimeServiceClient> {
+  if (!managedRuntime) {
+    managedRuntime = new RuntimeServiceClient();
+  }
+  return managedRuntime;
+}
+
+function appendLog(line: string): void {
+  if (!line) return;
+  lastLogs.push(...line.split(/\r?\n/).filter(Boolean).map((l) => {
+    return `[${new Date().toLocaleTimeString()}] ${l}`;
+  }));
+  if (lastLogs.length > 400) lastLogs = lastLogs.slice(-400);
+}
+
+function resolveRuntimeWorkspaceRoot(): string {
+  const envRoot = process.env.COFOUNDEROS_RESOURCE_ROOT;
+  if (envRoot && envRoot.trim()) return envRoot;
+  if (app.isPackaged) {
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    if (resourcesPath) {
+      // Packaged builds should place plugins/ and native helpers under this
+      // resource root so runtime plugin discovery does not depend on a repo.
+      return path.join(resourcesPath, 'cofounderos');
+    }
+  }
+  return repoRoot;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = n;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx++;
+  }
+  return `${value >= 10 || idx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
+}
+
+function makeTrayImage(): Electron.NativeImage {
+  // Load real on-disk PNG assets — Electron's nativeImage prefers a real
+  // file path with @2x retina sibling on macOS, which gives us a reliably
+  // visible status item slot on Sequoia. Buffer/data-URL inputs render
+  // empty in some menu-bar scenarios.
+  const candidates = [
+    path.resolve(here, '../assets/trayTemplate.png'),
+    path.resolve(here, '../../assets/trayTemplate.png'),
+    path.resolve(repoRoot, 'packages/desktop/assets/trayTemplate.png'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const image = nativeImage.createFromPath(candidate);
+      if (!image.isEmpty()) {
+        image.setTemplateImage(true);
+        appendLog(`Tray icon loaded from ${candidate}`);
+        return image;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  appendLog('Tray icon assets not found; falling back to in-memory PNG');
+  const fallback = nativeImage.createFromBuffer(drawTrayPng());
+  fallback.setTemplateImage(true);
+  return fallback;
+}
+
+function drawTrayPng(): Buffer {
+  const base64 =
+    'iVBORw0KGgoAAAANSUhEUgAAABYAAAAWCAYAAADEtGw7AAAAQUlEQVR4nO3PsQ0AMAjA' +
+    'sP7//0qUDhCJDAyNgg5BPcgZS5IkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkScf' +
+    'YwQATTwHAyVLFpQAAAABJRU5ErkJggg==';
+  return Buffer.from(base64, 'base64');
+}

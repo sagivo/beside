@@ -314,6 +314,30 @@ class LocalStorage implements IStorage {
         sql.push(`AND frames.app IN (${query.apps.map((_, i) => `@app_${i}`).join(',')})`);
         query.apps.forEach((a, i) => (params[`app_${i}`] = a));
       }
+      if (query.day) {
+        sql.push('AND frames.day = @day');
+        params.day = query.day;
+      }
+      if (query.entityPath) {
+        sql.push('AND frames.entity_path = @entity_path');
+        params.entity_path = query.entityPath;
+      }
+      if (query.entityKind) {
+        sql.push('AND frames.entity_kind = @entity_kind');
+        params.entity_kind = query.entityKind;
+      }
+      if (query.activitySessionId) {
+        sql.push('AND frames.activity_session_id = @activity_session_id');
+        params.activity_session_id = query.activitySessionId;
+      }
+      if (query.urlDomain) {
+        sql.push('AND frames.url LIKE @url_domain');
+        params.url_domain = `%${query.urlDomain}%`;
+      }
+      if (query.textSource) {
+        sql.push('AND frames.text_source = @text_source');
+        params.text_source = query.textSource;
+      }
       sql.push('ORDER BY bm25(frame_text) ASC');
       sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 25))}`);
       if (query.offset) sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
@@ -332,6 +356,30 @@ class LocalStorage implements IStorage {
     if (query.apps?.length) {
       sql.push(`AND app IN (${query.apps.map((_, i) => `@app_${i}`).join(',')})`);
       query.apps.forEach((a, i) => (params[`app_${i}`] = a));
+    }
+    if (query.day) {
+      sql.push('AND day = @day');
+      params.day = query.day;
+    }
+    if (query.entityPath) {
+      sql.push('AND entity_path = @entity_path');
+      params.entity_path = query.entityPath;
+    }
+    if (query.entityKind) {
+      sql.push('AND entity_kind = @entity_kind');
+      params.entity_kind = query.entityKind;
+    }
+    if (query.activitySessionId) {
+      sql.push('AND activity_session_id = @activity_session_id');
+      params.activity_session_id = query.activitySessionId;
+    }
+    if (query.urlDomain) {
+      sql.push('AND url LIKE @url_domain');
+      params.url_domain = `%${query.urlDomain}%`;
+    }
+    if (query.textSource) {
+      sql.push('AND text_source = @text_source');
+      params.text_source = query.textSource;
     }
     sql.push('ORDER BY timestamp DESC');
     sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 50))}`);
@@ -530,6 +578,30 @@ class LocalStorage implements IStorage {
     if (query.apps?.length) {
       where.push(`frames.app IN (${query.apps.map((_, i) => `@app_${i}`).join(',')})`);
       query.apps.forEach((a, i) => (params[`app_${i}`] = a));
+    }
+    if (query.day) {
+      where.push('frames.day = @day');
+      params.day = query.day;
+    }
+    if (query.entityPath) {
+      where.push('frames.entity_path = @entity_path');
+      params.entity_path = query.entityPath;
+    }
+    if (query.entityKind) {
+      where.push('frames.entity_kind = @entity_kind');
+      params.entity_kind = query.entityKind;
+    }
+    if (query.activitySessionId) {
+      where.push('frames.activity_session_id = @activity_session_id');
+      params.activity_session_id = query.activitySessionId;
+    }
+    if (query.urlDomain) {
+      where.push('frames.url LIKE @url_domain');
+      params.url_domain = `%${query.urlDomain}%`;
+    }
+    if (query.textSource) {
+      where.push('frames.text_source = @text_source');
+      params.text_source = query.textSource;
     }
 
     const rows = this.db

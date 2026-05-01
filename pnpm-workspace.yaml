@@ -1,8 +1,10 @@
 packages:
-  # The 3 npm workspace packages. Plugins are NOT listed here — they live
+  # Workspace packages. Plugins are NOT listed here — they live
   # under `plugins/<layer>/<name>/`, are discovered at runtime via
   # plugin.json, and are compiled at build time by
   # scripts/build-plugins.mjs. No package.json needed in plugin folders.
   - "packages/interfaces"
   - "packages/core"
-  - "packages/app"
+  - "packages/runtime"
+  - "packages/cli"
+  - "packages/desktop"
