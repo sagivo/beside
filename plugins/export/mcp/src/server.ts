@@ -23,6 +23,12 @@ export interface McpServices {
   triggerReindex?: (full?: boolean) => Promise<void>;
 }
 
+export interface McpServerOptions {
+  textExcerptChars?: number;
+}
+
+const DEFAULT_FRAME_TEXT_EXCERPT_CHARS = 5000;
+
 const RAW_EVENT_TYPES: readonly RawEventType[] = [
   'screenshot',
   'audio_transcript',
@@ -38,8 +44,13 @@ const RAW_EVENT_TYPES: readonly RawEventType[] = [
   'clipboard_summary',
 ];
 
-export function createMcpServer(services: McpServices, logger: Logger): McpServer {
+export function createMcpServer(
+  services: McpServices,
+  logger: Logger,
+  options: McpServerOptions = {},
+): McpServer {
   const log = logger.child('mcp-server');
+  const textExcerptChars = normaliseTextExcerptChars(options.textExcerptChars);
   const server = new McpServer({
     name: 'cofounderos',
     version: '0.2.0',
@@ -84,7 +95,7 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
       const result = {
         query,
         frame_matches: blendedFrames.map((m) => ({
-          ...framePreview(m.frame),
+          ...framePreview(m.frame, textExcerptChars),
           retrieval: m.retrieval,
           semantic_score: m.semanticScore,
         })),
@@ -143,7 +154,7 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
                 query,
                 count: blended.length,
                 frames: blended.map((m) => ({
-                  ...framePreview(m.frame),
+                  ...framePreview(m.frame, textExcerptChars),
                   retrieval: m.retrieval,
                   semantic_score: m.semanticScore,
                 })),
@@ -186,9 +197,9 @@ export function createMcpServer(services: McpServices, logger: Logger): McpServe
             type: 'text',
             text: JSON.stringify(
               {
-                anchor: framePreview(ctx.anchor),
-                before: ctx.before.map(framePreview),
-                after: ctx.after.map(framePreview),
+                anchor: framePreview(ctx.anchor, textExcerptChars),
+                before: ctx.before.map((frame) => framePreview(frame, textExcerptChars)),
+                after: ctx.after.map((frame) => framePreview(frame, textExcerptChars)),
               },
               null,
               2,
@@ -483,7 +494,7 @@ async function listAllStrategyPages(strategy: IIndexStrategy) {
   return out;
 }
 
-function framePreview(frame: Frame): Record<string, unknown> {
+function framePreview(frame: Frame, textExcerptChars: number): Record<string, unknown> {
   return {
     id: frame.id,
     timestamp: frame.timestamp,
@@ -493,11 +504,20 @@ function framePreview(frame: Frame): Record<string, unknown> {
     entity_path: frame.entity_path,
     entity_kind: frame.entity_kind,
     asset_path: frame.asset_path,
-    text_excerpt: frame.text ? truncate(frame.text, 240) : null,
+    text_excerpt: frame.text ? truncate(frame.text, textExcerptChars) : null,
+    text_chars: frame.text ? frame.text.length : 0,
     text_source: frame.text_source,
     duration_ms: frame.duration_ms,
   };
 }
+
+function normaliseTextExcerptChars(value: number | undefined): number {
+  if (!Number.isFinite(value) || value == null) {
+    return DEFAULT_FRAME_TEXT_EXCERPT_CHARS;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;

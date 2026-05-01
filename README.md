@@ -38,6 +38,31 @@ Anything not in the matrix above (e.g. arbitrary Linux DEs on Wayland)
 should still install and run — capture will just degrade and log warnings
 rather than crash.
 
+### Capture plugins
+
+The default capture plugin is still the TypeScript/Node implementation:
+
+```yaml
+capture:
+  plugin: node
+```
+
+The native capture plugin is available as an experimental sidecar-backed
+plugin:
+
+```yaml
+capture:
+  plugin: native
+```
+
+Both implement the same `ICapture` interface and emit the same `RawEvent`
+shape, so storage, frames, sessions, embeddings, index, Markdown export,
+and MCP do not care which one is active. The native plugin currently
+installs the JS shim, NDJSON child-process protocol, and a platform helper
+binary with fixture-mode support. Real macOS/Windows/Linux capture APIs
+will land behind that same protocol incrementally. If native capture is
+unavailable, switch back to `capture.plugin: node`.
+
 ### Environment variables
 
 | Variable | What it does |
@@ -460,15 +485,15 @@ The agent should call `get_journal` or `search_memory` and stream back a
 synthesised answer grounded in your captured frames. If a tool call fails,
 check `pnpm cli status` — the MCP `url` row should show `http://127.0.0.1:3456`.
 
-### Changing the port / host
+### Changing the port / host / preview size
 
 ```yaml
 export:
   plugins:
     - name: mcp
-      config:
-        host: 127.0.0.1
-        port: 3456
+      host: 127.0.0.1
+      port: 3456
+      text_excerpt_chars: 5000
 ```
 
 ---
@@ -488,7 +513,8 @@ cofounderos/
 │   └── app/                    CLI orchestrator (cofounderos ...).
 └── plugins/                    Drop-in plugins. No package.json needed.
     ├── capture/
-    │   └── node/               Default capture: event-driven Node recorder.
+    │   ├── node/               Default capture: event-driven Node recorder.
+    │   └── native/             Experimental native sidecar capture plugin.
     ├── storage/
     │   └── local/              Default storage: ~/.cofounderOS/raw + SQLite.
     ├── model/

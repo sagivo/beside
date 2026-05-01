@@ -14,6 +14,7 @@ import {
   startHttpServer,
   startStdioServer,
   type McpServices,
+  type McpServerOptions,
   type RunningHttpServer,
 } from './server.js';
 
@@ -21,6 +22,7 @@ interface McpExportConfig {
   host?: string;
   port?: number;
   transport?: 'http' | 'stdio';
+  text_excerpt_chars?: number;
 }
 
 /**
@@ -37,6 +39,7 @@ class McpExport implements IExport {
   private readonly host: string;
   private readonly port: number;
   private readonly transport: 'http' | 'stdio';
+  private readonly serverOptions: McpServerOptions;
 
   private services: McpServices | null = null;
   private httpServer: RunningHttpServer | null = null;
@@ -54,6 +57,9 @@ class McpExport implements IExport {
     this.host = config.host ?? '127.0.0.1';
     this.port = config.port ?? 3456;
     this.transport = config.transport ?? 'http';
+    this.serverOptions = {
+      textExcerptChars: config.text_excerpt_chars,
+    };
   }
 
   /**
@@ -81,15 +87,16 @@ class McpExport implements IExport {
     }
     if (this.transport === 'stdio') {
       // stdio is single-session by definition, so one server is enough.
-      const server = createMcpServer(this.services, this.logger);
+      const server = createMcpServer(this.services, this.logger, this.serverOptions);
       this.stdioHandle = await startStdioServer(server, this.logger);
     } else {
       // HTTP is multi-session; the SDK requires a fresh McpServer per
       // transport, so we hand startHttpServer a factory rather than a
       // single instance.
       const services = this.services;
+      const serverOptions = this.serverOptions;
       this.httpServer = await startHttpServer(
-        () => createMcpServer(services, this.logger),
+        () => createMcpServer(services, this.logger, serverOptions),
         this.host,
         this.port,
         this.logger,

@@ -10,7 +10,8 @@
     "properties": {
       "host": { "type": "string" },
       "port": { "type": "integer" },
-      "transport": { "type": "string", "enum": ["http", "stdio"] }
+      "transport": { "type": "string", "enum": ["http", "stdio"] },
+      "text_excerpt_chars": { "type": "integer", "minimum": 0, "default": 5000 }
     }
   }
 }

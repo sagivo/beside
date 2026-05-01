@@ -1,12 +1,12 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { IStorage, Logger } from '@cofounderos/interfaces';
+import type { FrameTextSource, IStorage, Logger } from '@cofounderos/interfaces';
 import { redactPii } from './pii.js';
 
 /**
- * OCR worker — runs in the background, picks frames whose `text` is
- * still `null`, runs Tesseract over the screenshot, redacts PII, writes
- * the text back via `storage.setFrameText`.
+ * OCR worker — runs in the background, picks screenshot frames whose pixels
+ * have not been OCR'd yet, runs Tesseract over the screenshot, redacts PII,
+ * writes the text back via `storage.setFrameText`.
  *
  * Tesseract.js is a pure-WASM build with no system dependency, which
  * matches our "ships out of the box" promise. It costs ~1-3s per frame
@@ -20,7 +20,7 @@ import { redactPii } from './pii.js';
  *  - Reuses a single Tesseract worker across ticks (worker creation is
  *    expensive — ~2s — and would dominate runtime if recreated).
  *  - Never blocks indexing or capture: failures are logged and the frame
- *    is left for the next tick.
+ *    is marked as attempted so corrupt assets do not loop forever.
  */
 
 interface OcrWorkerOptions {
@@ -50,15 +50,12 @@ type TesseractWorker = {
 };
 
 /**
- * Maximum width (in px) we feed to Tesseract. Retina captures come in at
- * 3024px wide on a 14" MBP — way more pixels than Tesseract needs to read
- * UI text, and the extra resolution actively hurts: hairline dividers and
- * 1-2px UI artifacts survive page segmentation as degenerate "line"
- * candidates and trigger Leptonica's `Image too small to scale!!` warnings.
- * Downscaling to ~logical resolution (1512px) eliminates those artifacts
- * and roughly halves OCR runtime with negligible recall loss.
+ * Longest edge (px) of the temporary image we feed to Tesseract. This does
+ * not change the stored screenshot. It gives downscaled UI captures enough
+ * pixels for small text while still capping native Retina screenshots before
+ * Leptonica starts treating hairline borders as text candidates.
  */
-const OCR_MAX_WIDTH = 1600;
+const OCR_WORKING_MAX_DIM = 2000;
 
 /**
  * Leptonica (the image library Tesseract bundles) writes diagnostic lines
@@ -90,37 +87,38 @@ function installLeptonicaStderrFilter(): void {
   if (stderrFilterInstalled) return;
   stderrFilterInstalled = true;
   const original = process.stderr.write.bind(process.stderr);
-  // We accept the same overloads as `process.stderr.write`. Buffers are
-  // passed through verbatim — Leptonica writes plain ASCII strings, so the
-  // Buffer path is effectively never our message and we don't want to
-  // decode unrelated binary output.
+  // We accept the same overloads as `process.stderr.write`. Leptonica often
+  // writes through native stderr as Buffer chunks, so inspect UTF-8 text in
+  // both string and Uint8Array paths while passing unrelated chunks through.
   const filtered = ((
     chunk: string | Uint8Array,
     encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
     cb?: (err?: Error | null) => void,
   ): boolean => {
-    if (typeof chunk === 'string') {
-      const lines = chunk.split('\n');
-      const kept = lines.filter((line, idx) => {
-        // Preserve a trailing empty string that comes from a terminating
-        // newline so we don't accidentally collapse line boundaries.
-        if (idx === lines.length - 1 && line === '') return true;
-        return !LEPTONICA_NOISE.some((re) => re.test(line));
-      });
-      if (kept.length === 0) {
-        if (typeof encodingOrCb === 'function') encodingOrCb();
-        else if (typeof cb === 'function') cb();
-        return true;
-      }
-      const out = kept.join('\n');
-      if (out === chunk) {
-        return original(chunk, encodingOrCb as BufferEncoding, cb);
-      }
-      return original(out, encodingOrCb as BufferEncoding, cb);
+    const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    const out = filterLeptonicaNoise(text);
+    if (out === text) {
+      return original(chunk, encodingOrCb as BufferEncoding, cb);
     }
-    return original(chunk, encodingOrCb as BufferEncoding, cb);
+    const done = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
+    if (out.length === 0) {
+      if (done) done();
+      return true;
+    }
+    return original(out, done);
   }) as typeof process.stderr.write;
   process.stderr.write = filtered;
+}
+
+function filterLeptonicaNoise(text: string): string {
+  const lines = text.split('\n');
+  const kept = lines.filter((line, idx) => {
+    // Preserve a trailing empty string that comes from a terminating newline
+    // so unrelated multi-line chunks keep their final line boundary.
+    if (idx === lines.length - 1 && line === '') return true;
+    return !LEPTONICA_NOISE.some((re) => re.test(line));
+  });
+  return kept.join('\n');
 }
 
 export class OcrWorker {
@@ -177,12 +175,15 @@ export class OcrWorker {
         const abs = path.isAbsolute(task.asset_path)
           ? task.asset_path
           : path.join(this.storageRoot, task.asset_path);
+        const existingText = (task.existing_text ?? '').trim();
+        const completedSource = completedOcrSource(task.existing_source, existingText);
         // Confirm the file still exists; old screenshots may have been
         // vacuumed away.
         try {
           await fs.access(abs);
         } catch {
-          await this.storage.setFrameText(task.id, '', 'ocr');
+          await this.storage.setFrameText(task.id, existingText, completedSource);
+          processed += 1;
           continue;
         }
         const input = await prepareForOcr(abs);
@@ -190,21 +191,27 @@ export class OcrWorker {
           // Image too small / unreadable to OCR — record empty text so
           // it won't be re-queued, and skip the recognize() call (which
           // is what was producing the Leptonica box-clip noise).
-          await this.storage.setFrameText(task.id, '', 'ocr');
+          await this.storage.setFrameText(task.id, existingText, completedSource);
           processed += 1;
           continue;
         }
         const result = await worker.recognize(input);
         const raw = (result.data.text ?? '').trim();
         const cleaned = redactPii(raw, this.sensitiveKeywords);
-        await this.storage.setFrameText(task.id, cleaned, 'ocr');
+        const merged = mergeVisualText(cleaned, existingText);
+        await this.storage.setFrameText(task.id, merged, completedSource);
         processed += 1;
       } catch (err) {
         failed += 1;
         this.logger.debug(`ocr failed for frame ${task.id}`, { err: String(err) });
-        // Mark with empty text so we don't retry forever on a corrupt file.
+        // Mark as OCR-attempted so we don't retry forever on a corrupt file.
         try {
-          await this.storage.setFrameText(task.id, '', 'ocr');
+          const existingText = (task.existing_text ?? '').trim();
+          await this.storage.setFrameText(
+            task.id,
+            existingText,
+            completedOcrSource(task.existing_source, existingText),
+          );
         } catch {
           // ignore
         }
@@ -288,18 +295,43 @@ export class OcrWorker {
   }
 }
 
+function completedOcrSource(
+  existingSource: FrameTextSource | null,
+  existingText: string,
+): Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'> {
+  return existingSource === 'accessibility' && existingText
+    ? 'ocr_accessibility'
+    : 'ocr';
+}
+
+function mergeVisualText(ocrText: string, accessibilityText: string): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  for (const block of [ocrText, accessibilityText]) {
+    for (const rawLine of block.split(/\r?\n/)) {
+      const line = rawLine.replace(/\s+/g, ' ').trim();
+      if (!line) continue;
+      const key = line.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(line);
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
 /**
- * Downscale Retina-resolution screenshots before feeding them to Tesseract.
+ * Prepare a temporary OCR input without changing the captured asset.
+ * Stored screenshots are usually WebP and may be capped for disk usage, so
+ * we decode through sharp, resize to a stable working size, normalize
+ * contrast, and hand Tesseract a PNG buffer. Dark-mode screenshots are
+ * inverted because Tesseract is much better at black text on light
+ * backgrounds than the reverse.
  *
- * macOS captures come in at native pixel density (e.g. 3024×1964 on a 14"
- * MBP) — that's 2× the logical resolution the UI was designed at. The
- * extra detail doesn't help OCR (text is heavily oversampled) but it
- * *does* hurt: hairline dividers, 1-2px window borders, scrollbars, and
- * focus rings survive page segmentation as 2-pixel-wide "line" candidates
- * and produce a flood of `Image too small to scale!!` warnings from
- * Leptonica. Downscaling collapses those artifacts to sub-pixel and
- * roughly halves recognition time. Falls back to the raw file path on
- * failure so a sharp glitch never blocks OCR.
+ * Falls back to the raw file path on failure so a sharp glitch never blocks
+ * OCR entirely.
  */
 /**
  * Minimum image dimension (px) we'll send to Tesseract. Below this,
@@ -330,11 +362,24 @@ async function prepareForOcr(absPath: string): Promise<string | Buffer | null> {
       // Skip — caller treats `null` as "no text, don't bother Tesseract".
       return null;
     }
-    if (meta.width <= OCR_MAX_WIDTH) {
-      return absPath;
+    const stats = await img
+      .clone()
+      .resize({ width: 64, height: 64, fit: 'inside' })
+      .grayscale()
+      .stats();
+    const meanLuminance = stats.channels[0]?.mean ?? 255;
+    let pipeline = img
+      .resize({
+        width: OCR_WORKING_MAX_DIM,
+        height: OCR_WORKING_MAX_DIM,
+        fit: 'inside',
+      })
+      .grayscale()
+      .normalise();
+    if (meanLuminance < 128) {
+      pipeline = pipeline.negate({ alpha: false });
     }
-    return await img
-      .resize({ width: OCR_MAX_WIDTH, withoutEnlargement: true })
+    return await pipeline
       .png({ compressionLevel: 1 })
       .toBuffer();
   } catch {

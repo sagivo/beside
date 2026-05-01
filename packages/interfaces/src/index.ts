@@ -152,9 +152,9 @@ export interface Frame {
   app_bundle_id: string;
   window_title: string;
   url: string | null;
-  /** OCR'd, accessibility-extracted, or audio-transcribed text. */
+  /** OCR'd, accessibility-extracted, combined visual text, or audio-transcribed text. */
   text: string | null;
-  text_source: 'ocr' | 'accessibility' | 'audio' | 'none' | null;
+  text_source: FrameTextSource | null;
   asset_path: string | null;
   perceptual_hash: string | null;
   trigger: string | null;
@@ -175,6 +175,13 @@ export interface Frame {
   /** Raw event ids that contributed to this frame. */
   source_event_ids: string[];
 }
+
+export type FrameTextSource =
+  | 'ocr'
+  | 'accessibility'
+  | 'ocr_accessibility'
+  | 'audio'
+  | 'none';
 
 export interface FrameQuery {
   /** FTS5 query against `text`, `app`, `window_title`, `url`. */
@@ -215,6 +222,8 @@ export interface FrameSemanticMatch {
 export interface FrameOcrTask {
   id: string;
   asset_path: string;
+  existing_text: string | null;
+  existing_source: FrameTextSource | null;
 }
 
 /**
@@ -392,7 +401,7 @@ export interface IStorage {
   setFrameText(
     frameId: string,
     text: string,
-    source: 'ocr' | 'accessibility',
+    source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>,
   ): Promise<void>;
 
   /** Mark raw events as having been folded into a frame. */
@@ -963,12 +972,17 @@ function renderFrame(f: Frame, lines: string[], assetUrlPrefix: string): void {
     .join(' · ');
   const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
   lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
-  // OCR, accessibility, and audio are equally valid sources of
-  // human-readable text — all pass through a PII redactor before
-  // landing in storage, so none needs special treatment here.
+  // OCR, accessibility, mixed visual extraction, and audio are equally
+  // valid sources of human-readable text — all pass through a PII redactor
+  // before landing in storage, so none needs special treatment here.
   if (
     f.text &&
-    (f.text_source === 'ocr' || f.text_source === 'accessibility' || f.text_source === 'audio') &&
+    (
+      f.text_source === 'ocr' ||
+      f.text_source === 'accessibility' ||
+      f.text_source === 'ocr_accessibility' ||
+      f.text_source === 'audio'
+    ) &&
     f.text.trim()
   ) {
     const snippet = f.text.replace(/\s+/g, ' ').trim().slice(0, 200);

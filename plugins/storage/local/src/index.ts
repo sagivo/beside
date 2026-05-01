@@ -13,6 +13,7 @@ import type {
   FrameEmbeddingTask,
   FrameSemanticMatch,
   FrameOcrTask,
+  FrameTextSource,
   FrameAsset,
   FrameAssetTier,
   EntityRef,
@@ -31,6 +32,8 @@ interface LocalStorageConfig {
   max_size_gb?: number;
   retention_days?: number;
 }
+
+const MAX_EMBEDDING_TEXT_CHARS = 3000;
 
 class LocalStorage implements IStorage {
   private readonly root: string;
@@ -373,18 +376,30 @@ class LocalStorage implements IStorage {
   async listFramesNeedingOcr(limit: number): Promise<FrameOcrTask[]> {
     const rows = this.db
       .prepare(
-        `SELECT id, asset_path FROM frames
-         WHERE text_source IS NULL AND asset_path IS NOT NULL
+        `SELECT id, asset_path, text AS existing_text, text_source AS existing_source
+         FROM frames
+         WHERE asset_path IS NOT NULL
+           AND (text_source IS NULL OR text_source = 'accessibility')
          ORDER BY timestamp DESC LIMIT ?`,
       )
-      .all(Math.max(1, Math.floor(limit))) as Array<{ id: string; asset_path: string }>;
-    return rows.map((r) => ({ id: r.id, asset_path: r.asset_path }));
+      .all(Math.max(1, Math.floor(limit))) as Array<{
+        id: string;
+        asset_path: string;
+        existing_text: string | null;
+        existing_source: string | null;
+      }>;
+    return rows.map((r) => ({
+      id: r.id,
+      asset_path: r.asset_path,
+      existing_text: r.existing_text,
+      existing_source: (r.existing_source as FrameTextSource | null) ?? null,
+    }));
   }
 
   async setFrameText(
     frameId: string,
     text: string,
-    source: 'ocr' | 'accessibility',
+    source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>,
   ): Promise<void> {
     const tx = this.db.transaction(() => {
       this.db
@@ -976,9 +991,13 @@ class LocalStorage implements IStorage {
       CREATE INDEX IF NOT EXISTS idx_frames_app ON frames(app);
       CREATE INDEX IF NOT EXISTS idx_frames_url ON frames(url);
       CREATE INDEX IF NOT EXISTS idx_frames_session ON frames(session_id);
-      -- Workers find un-OCR'd frames via this partial index.
+      -- Workers find frames that still need visual OCR. Pure AX text is
+      -- queued too because browser accessibility trees often expose chrome
+      -- labels before page content; OCR supplements that with visible text.
       CREATE INDEX IF NOT EXISTS idx_frames_pending_ocr
-        ON frames(timestamp DESC) WHERE text_source IS NULL AND asset_path IS NOT NULL;
+        ON frames(timestamp DESC)
+        WHERE asset_path IS NOT NULL
+          AND (text_source IS NULL OR text_source = 'accessibility');
 
       CREATE VIRTUAL TABLE IF NOT EXISTS frame_text USING fts5(
         frame_id UNINDEXED,
@@ -1048,6 +1067,11 @@ class LocalStorage implements IStorage {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_events_framed ON events(framed_at) WHERE framed_at IS NULL;
        CREATE INDEX IF NOT EXISTS idx_frames_entity ON frames(entity_path);
+       DROP INDEX IF EXISTS idx_frames_pending_ocr;
+       CREATE INDEX idx_frames_pending_ocr
+         ON frames(timestamp DESC)
+         WHERE asset_path IS NOT NULL
+           AND (text_source IS NULL OR text_source = 'accessibility');
        CREATE INDEX IF NOT EXISTS idx_frames_pending_entity
          ON frames(timestamp DESC) WHERE entity_path IS NULL;
        CREATE INDEX IF NOT EXISTS idx_frames_vacuum
@@ -1189,9 +1213,15 @@ function frameEmbeddingContent(frame: Frame): string {
     frame.window_title ? `Window: ${frame.window_title}` : null,
     frame.url ? `URL: ${frame.url}` : null,
     frame.entity_path ? `Entity: ${frame.entity_path}` : null,
-    frame.text ? `Text: ${frame.text}` : null,
+    frame.text ? `Text: ${truncateForEmbedding(frame.text, MAX_EMBEDDING_TEXT_CHARS)}` : null,
   ].filter((p): p is string => Boolean(p));
   return parts.join('\n').trim();
+}
+
+function truncateForEmbedding(text: string, maxChars: number): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return cleaned.slice(0, maxChars).trimEnd();
 }
 
 function sha256(input: string): string {

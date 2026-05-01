@@ -446,6 +446,7 @@ export:
     - name: mcp
       port: 3456
       host: 127.0.0.1
+      text_excerpt_chars: 5000       # max OCR/AX text chars returned per frame preview
 `;
 
 export interface LoadedConfig {

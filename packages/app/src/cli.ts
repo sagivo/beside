@@ -11,6 +11,7 @@ import {
   defaultDataDir,
   loadConfig,
   expandPath,
+  findWorkspaceRoot,
 } from '@cofounderos/core';
 import {
   buildOrchestrator,
@@ -338,6 +339,8 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
     });
   }
 
+  checks.push(await checkNativeCaptureHelper(config));
+
   const ollamaHost =
     ((config.index.model as unknown as { ollama?: { host?: string } }).ollama?.host) ??
     'http://127.0.0.1:11434';
@@ -410,6 +413,45 @@ async function checkCommand(area: string, command: string, purpose: string): Pro
     message: available ? `${command} found` : `${command} not found on PATH`,
     detail: purpose,
   };
+}
+
+async function checkNativeCaptureHelper(config: {
+  capture: { plugin: string; helper_path?: string };
+}): Promise<DoctorCheck> {
+  const platformArch = `${process.platform}-${process.arch}`;
+  const exe = process.platform === 'win32' ? 'cofounderos-capture.exe' : 'cofounderos-capture';
+  const helperPath = config.capture.helper_path
+    ? expandPath(config.capture.helper_path)
+    : path.join(
+      findWorkspaceRoot(process.cwd()),
+      'plugins',
+      'capture',
+      'native',
+      'dist',
+      'native',
+      platformArch,
+      exe,
+    );
+  try {
+    await fsp.access(helperPath);
+    return {
+      area: 'native-capture',
+      status: config.capture.plugin === 'native' ? 'ok' : 'info',
+      message: `native helper present for ${platformArch}`,
+      detail: config.capture.plugin === 'native'
+        ? helperPath
+        : `${helperPath} (set capture.plugin: native to use it)`,
+    };
+  } catch {
+    return {
+      area: 'native-capture',
+      status: config.capture.plugin === 'native' ? 'fail' : 'info',
+      message: `native helper not built for ${platformArch}`,
+      detail: config.capture.plugin === 'native'
+        ? `Run pnpm build:plugins or set capture.plugin: node. Expected: ${helperPath}`
+        : 'native capture is optional; current capture.plugin is not native',
+    };
+  }
 }
 
 async function canRunCommand(command: string): Promise<boolean> {
@@ -1301,12 +1343,16 @@ async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs)
     return;
   }
   if (stdio) {
+    const mcpRef =
+      (handles.config.export.plugins.find((p) => p.name === 'mcp') as
+        | Record<string, unknown>
+        | undefined) ?? {};
     // Re-instantiate the mcp export via the registry with stdio transport
     // — no static import of the plugin class, just config override.
     const stdioMcp = await handles.registry.loadExport('mcp', {
       dataDir: handles.loaded.dataDir,
       logger: handles.logger.child('mcp-stdio-cli'),
-      config: { transport: 'stdio' },
+      config: { ...mcpRef, transport: 'stdio' },
     });
     if (typeof stdioMcp.bindServices === 'function') {
       stdioMcp.bindServices({

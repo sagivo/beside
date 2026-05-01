@@ -1,0 +1,28 @@
+{
+  "name": "native",
+  "version": "0.2.0",
+  "layer": "capture",
+  "interface": "ICapture",
+  "entrypoint": "dist/index.js",
+  "description": "Native sidecar capture plugin. A TypeScript ICapture shim launches a platform-specific helper binary that emits RawEvent NDJSON.",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "helper_path": { "type": "string" },
+      "fixture": { "type": "boolean", "default": false },
+      "restart_on_crash": { "type": "boolean", "default": true },
+      "poll_interval_ms": { "type": "integer" },
+      "screenshot_diff_threshold": { "type": "number" },
+      "idle_threshold_sec": { "type": "integer" },
+      "screenshot_format": { "type": "string", "enum": ["webp", "jpeg"] },
+      "screenshot_quality": { "type": "integer" },
+      "screenshot_max_dim": { "type": "integer" },
+      "content_change_min_interval_ms": { "type": "integer" },
+      "excluded_apps": { "type": "array", "items": { "type": "string" } },
+      "excluded_url_patterns": { "type": "array", "items": { "type": "string" } },
+      "multi_screen": { "type": "boolean", "default": false },
+      "screens": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+      "capture_mode": { "type": "string", "enum": ["all", "active"], "default": "active" }
+    }
+  }
+}
