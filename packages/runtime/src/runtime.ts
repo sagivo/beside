@@ -141,6 +141,20 @@ export class CofounderRuntime {
     await this.start(options);
   }
 
+  async pauseCapture(): Promise<RuntimeOverview> {
+    return await this.withHandles(async (handles) => {
+      await handles.capture.pause();
+      return await this.getOverview();
+    });
+  }
+
+  async resumeCapture(): Promise<RuntimeOverview> {
+    return await this.withHandles(async (handles) => {
+      await handles.capture.resume();
+      return await this.getOverview();
+    });
+  }
+
   async getOverview(): Promise<RuntimeOverview> {
     return await this.withHandles(async (handles) => {
       const capture = handles.capture.getStatus();

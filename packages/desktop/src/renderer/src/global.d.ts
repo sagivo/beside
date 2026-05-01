@@ -14,7 +14,13 @@ declare global {
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
+      pauseCapture: () => Promise<RuntimeOverview>;
+      resumeCapture: () => Promise<RuntimeOverview>;
       bootstrapModel: () => Promise<{ ready: true }>;
+      getStartAtLogin: () => Promise<boolean>;
+      setStartAtLogin: (enabled: boolean) => Promise<boolean>;
+      openPath: (target: 'config' | 'data' | 'markdown') => Promise<{ opened: string }>;
+      copyText: (text: string) => Promise<{ copied: true }>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
     };
@@ -30,6 +36,7 @@ export interface RuntimeOverview {
     running: boolean;
     paused: boolean;
     eventsToday: number;
+    storageBytesToday?: number;
   };
   storage: {
     totalEvents: number;

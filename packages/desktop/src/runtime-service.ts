@@ -58,6 +58,10 @@ async function handle(req: Request): Promise<unknown> {
     case 'stop':
       await runtime.stop();
       return { stopped: true };
+    case 'pauseCapture':
+      return await runtime.pauseCapture();
+    case 'resumeCapture':
+      return await runtime.resumeCapture();
     case 'overview':
       return await runtime.getOverview();
     case 'doctor':

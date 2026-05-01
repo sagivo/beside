@@ -5,6 +5,7 @@ import readline from 'node:readline';
 import {
   app,
   BrowserWindow,
+  clipboard,
   ipcMain,
   Menu,
   Tray,
@@ -87,11 +88,16 @@ class RuntimeServiceClient {
 
   constructor() {
     const servicePath = path.join(here, 'runtime-service.js');
+    const command = app.isPackaged
+      ? process.execPath
+      : process.env.COFUNDEROS_NODE ?? 'node';
+    const args = [servicePath];
     const env = {
       ...process.env,
       COFOUNDEROS_RESOURCE_ROOT: workspaceRoot,
+      ...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
     };
-    this.child = spawn(process.env.COFUNDEROS_NODE ?? 'node', [servicePath], {
+    this.child = spawn(command, args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -521,8 +527,38 @@ function registerRuntimeIpc(): void {
     await stopManagedRuntime();
     return { stopped: true };
   });
+  ipcMain.handle('cofounderos:pause-capture', async () => {
+    return await (await getRuntimeForRequest()).call('pauseCapture');
+  });
+  ipcMain.handle('cofounderos:resume-capture', async () => {
+    return await (await getRuntimeForRequest()).call('resumeCapture');
+  });
   ipcMain.handle('cofounderos:bootstrap-model', async () => {
     return await (await getRuntimeForRequest()).call('bootstrapModel');
+  });
+  ipcMain.handle('cofounderos:get-start-at-login', async () => {
+    return app.getLoginItemSettings().openAtLogin;
+  });
+  ipcMain.handle('cofounderos:set-start-at-login', async (_event, enabled: boolean) => {
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: true,
+    });
+    return app.getLoginItemSettings().openAtLogin;
+  });
+  ipcMain.handle('cofounderos:open-path', async (_event, target: 'config' | 'data' | 'markdown') => {
+    const targetPath = target === 'config'
+      ? configPath
+      : target === 'data'
+        ? dataDir
+        : markdownExportDir;
+    const error = await shell.openPath(targetPath);
+    if (error) throw new Error(error);
+    return { opened: targetPath };
+  });
+  ipcMain.handle('cofounderos:copy-text', async (_event, text: string) => {
+    clipboard.writeText(text);
+    return { copied: true };
   });
 }
 
