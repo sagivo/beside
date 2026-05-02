@@ -40,6 +40,47 @@ interface StrategyConfig {
   batch_size?: number;
   archive_after_days?: number;
   summary_threshold_pages?: number;
+  /**
+   * Minimum total focused minutes an `apps/<x>` entity needs before
+   * it earns a wiki page of its own. After P1 entity lifting, what's
+   * left on `apps/*` is mostly transient tool use that nobody wants
+   * a paragraph about. Default 5 minutes.
+   */
+  app_page_min_minutes?: number;
+  /**
+   * Minimum frame count an `apps/<x>` entity needs before it earns a
+   * page. Acts as a floor independent of duration (a single multi-hour
+   * idle window shouldn't earn a page). Default 20.
+   */
+  app_page_min_frames?: number;
+}
+
+/**
+ * `apps/<slug>` entities that are NEVER worth a wiki page, regardless
+ * of focused-time accumulation. These are macOS / system / framework
+ * processes that hold focus by accident — turning them into prose
+ * paragraphs is pure noise. The list is conservative: anything not
+ * here is still subject to the duration / frame thresholds.
+ */
+const NOISE_APP_SLUGS: ReadonlySet<string> = new Set([
+  'loginwindow',
+  'captive-network-assistant',
+  'system-settings',
+  'activity-monitor',
+  'electron',
+  'cloudflare-warp',
+  'spotlight',
+  'window-server',
+  'dock',
+  'control-center',
+  'notification-center',
+  'screencaptureui',
+  'cofounderos', // the host app itself
+]);
+
+function isNoiseAppEntity(entityPath: string): boolean {
+  if (!entityPath.startsWith('apps/')) return false;
+  return NOISE_APP_SLUGS.has(entityPath.slice('apps/'.length));
 }
 
 export class KarpathyStrategy implements IIndexStrategy {
@@ -51,6 +92,8 @@ export class KarpathyStrategy implements IIndexStrategy {
   private readonly batchSize: number;
   private readonly archiveAfterDays: number;
   private readonly summaryThresholdPages: number;
+  private readonly appPageMinMs: number;
+  private readonly appPageMinFrames: number;
   private store!: PageStore;
   /**
    * Captured on the first `getUnindexedEvents` call. We use it inside
@@ -64,6 +107,28 @@ export class KarpathyStrategy implements IIndexStrategy {
     this.batchSize = config.batch_size ?? 50;
     this.archiveAfterDays = config.archive_after_days ?? 30;
     this.summaryThresholdPages = config.summary_threshold_pages ?? 5;
+    this.appPageMinMs = (config.app_page_min_minutes ?? 5) * 60_000;
+    this.appPageMinFrames = config.app_page_min_frames ?? 20;
+  }
+
+  /**
+   * Should we render a wiki page for this entity? After session-aware
+   * lifting (see SessionBuilder.maybeLiftSupportingAppFrames) the
+   * `apps/*` rows are mostly transient: brief Electron flickers,
+   * loginwindow takeovers during sleep/wake, captive-network captives.
+   * Filter them out here so the wiki stays focused on actual knowledge
+   * (projects, repos, meetings, channels, contacts, docs, real apps).
+   *
+   * The rules are deliberately simple — anything in the system noise
+   * deny-list is rejected outright; everything else needs both
+   * meaningful focused time AND a non-trivial frame count.
+   */
+  private shouldRenderEntityPage(entity: EntityRecord): boolean {
+    if (entity.kind !== 'app') return true;
+    if (isNoiseAppEntity(entity.path)) return false;
+    if (entity.totalFocusedMs < this.appPageMinMs) return false;
+    if (entity.frameCount < this.appPageMinFrames) return false;
+    return true;
   }
 
   async init(rootPath: string): Promise<void> {
@@ -133,11 +198,26 @@ export class KarpathyStrategy implements IIndexStrategy {
 
     const pagesToCreate: IndexPage[] = [];
     const pagesToUpdate: IndexPage[] = [];
+    const pagesToDelete: string[] = [];
+    let skippedNoise = 0;
 
     for (const entity of dirtyByPath.values()) {
       const frames = await this.storage.getEntityFrames(entity.path, 500);
       if (frames.length === 0) continue;
-      const existing = await this.store.readPage(`${entity.path}.md`);
+
+      const pagePath = `${entity.path}.md`;
+      const existing = await this.store.readPage(pagePath);
+
+      // Apply the entity-page filter. If a previously-indexed entity
+      // has now slipped below the threshold (e.g. its real frames got
+      // lifted out by SessionBuilder), tear down the stale page so
+      // the wiki doesn't carry permanent dead pages around.
+      if (!this.shouldRenderEntityPage(entity)) {
+        skippedNoise += 1;
+        if (existing) pagesToDelete.push(pagePath);
+        continue;
+      }
+
       const page = await this.renderEntityPage(entity, frames, existing, model);
       if (existing) pagesToUpdate.push(page);
       else pagesToCreate.push(page);
@@ -145,22 +225,26 @@ export class KarpathyStrategy implements IIndexStrategy {
 
     const newPagesByPath = new Map<string, IndexPage>();
     [...pagesToCreate, ...pagesToUpdate].forEach((p) => newPagesByPath.set(p.path, p));
-    const allPages = await this.collectAllPagesAfterUpdate(newPagesByPath);
+    const allPages = await this.collectAllPagesAfterUpdate(
+      newPagesByPath,
+      new Set(pagesToDelete),
+    );
     const newRootIndex = renderRootIndex(allPages, {
       lastIncrementalRun: isoTimestamp(),
       lastReorganisationRun: currentIndex.lastReorganisationRun,
       eventsCovered: currentIndex.eventsCovered + events.length,
     });
 
+    const noiseSuffix = skippedNoise > 0 ? ` (skipped ${skippedNoise} below-threshold app entit${skippedNoise === 1 ? 'y' : 'ies'})` : '';
     this.logger.info(
-      `karpathy: ${pagesToCreate.length} new + ${pagesToUpdate.length} updated pages` +
-        ` from ${dirtyByPath.size} active entities`,
+      `karpathy: ${pagesToCreate.length} new + ${pagesToUpdate.length} updated + ${pagesToDelete.length} deleted pages` +
+        ` from ${dirtyByPath.size} active entities${noiseSuffix}`,
     );
 
     return {
       pagesToCreate,
       pagesToUpdate,
-      pagesToDelete: [],
+      pagesToDelete,
       newRootIndex,
       reorganisationNotes: '',
     };
@@ -216,6 +300,32 @@ export class KarpathyStrategy implements IIndexStrategy {
         pagesToCreate.push(archived);
         pagesToDelete.push(p.path);
         summary.archived.push(p.path);
+      }
+    }
+
+    // 1b. Stale `apps/*` page sweep. Pages whose backing entity has
+    //     dropped below the threshold (e.g. lifting moved its frames
+    //     into a project; or it was always noise like apps/electron)
+    //     are deleted outright — no point archiving content nobody
+    //     wanted in the first place. Requires a storage handle, which
+    //     we may not have here in offline / test contexts; skip
+    //     silently in that case.
+    if (this.storage) {
+      let stalePagesDropped = 0;
+      for (const p of pages) {
+        if (!p.path.startsWith('apps/')) continue;
+        if (pagesToDelete.includes(p.path)) continue; // already archived above
+        const entityPath = p.path.replace(/\.md$/, '');
+        const entity = await this.storage.getEntity(entityPath);
+        if (!entity || !this.shouldRenderEntityPage(entity)) {
+          pagesToDelete.push(p.path);
+          stalePagesDropped += 1;
+        }
+      }
+      if (stalePagesDropped > 0) {
+        this.logger.info(
+          `karpathy reorg: dropped ${stalePagesDropped} stale apps/* page(s) below threshold`,
+        );
       }
     }
 

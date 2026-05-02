@@ -40,9 +40,17 @@ export function bootstrapMessage(event: ModelBootstrapProgress): string {
   return event.model ?? event.tool ?? event.host ?? event.kind;
 }
 
+export function localDayKey(d: Date = new Date()): string {
+  if (Number.isNaN(d.getTime())) return '';
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 export function prettyDay(day: string): string {
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const today = localDayKey();
+  const yesterday = localDayKey(new Date(Date.now() - 86400000));
   if (day === today) return 'Today';
   if (day === yesterday) return 'Yesterday';
   try {
@@ -55,4 +63,27 @@ export function prettyDay(day: string): string {
   } catch {
     return day;
   }
+}
+
+export function formatLocalTime(value?: string | null, options?: { seconds?: boolean }): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value.slice(11, options?.seconds ? 19 : 16) || '—';
+  return d.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...(options?.seconds ? { second: '2-digit' } : {}),
+  });
+}
+
+export function formatLocalDateTime(value?: string | null): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value.slice(0, 16).replace('T', ' ') || '—';
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }

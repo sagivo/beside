@@ -288,6 +288,68 @@ export interface ListEntitiesQuery {
   sinceLastSeen?: string;
 }
 
+export interface SearchEntitiesQuery {
+  /** Free-text query — matched against `title` and the path tail. */
+  text: string;
+  /** Optionally restrict to one entity kind. */
+  kind?: EntityKind;
+  limit?: number;
+  /**
+   * If true, include `apps/*` entities flagged as noise (loginwindow,
+   * electron, system-settings, …). Defaults to false — autocomplete
+   * normally wants to surface meaningful entities only, but
+   * diagnostic / debug UIs can opt back in.
+   */
+  includeNoise?: boolean;
+}
+
+/**
+ * One row of an entity co-occurrence query — entities that share
+ * activity sessions with a target entity, ranked by how often they
+ * appear together. Used by the "who do I work with on X?" and "what
+ * else lights up alongside this channel?" UI patterns.
+ */
+export interface EntityCoOccurrence {
+  /** Path of the entity that appears alongside the target. */
+  path: string;
+  kind: EntityKind;
+  title: string;
+  /** Distinct activity sessions in which both entities appeared. */
+  sharedSessions: number;
+  /**
+   * Combined attention time (frame `duration_ms` sum) the partner
+   * accumulated across those shared sessions. Higher = more
+   * meaningful overlap, not just a fleeting tab.
+   */
+  sharedFocusedMs: number;
+  /** Most recent shared session's start time, ISO. */
+  lastSharedAt: string;
+}
+
+/** Timeline bucket granularities supported by `getEntityTimeline`. */
+export type TimelineGranularity = 'day' | 'hour';
+
+export interface EntityTimelineBucket {
+  /** Bucket label — `YYYY-MM-DD` for day, `YYYY-MM-DDTHH` for hour. */
+  bucket: string;
+  /** Frames in this bucket attributed to the entity. */
+  frames: number;
+  /** Sum of `frames.duration_ms` for those frames. */
+  focusedMs: number;
+  /** Distinct activity sessions touched in this bucket. */
+  sessions: number;
+}
+
+export interface EntityTimelineQuery {
+  granularity?: TimelineGranularity;
+  /** Inclusive lower bound (ISO). Optional. */
+  from?: string;
+  /** Inclusive upper bound (ISO). Optional. */
+  to?: string;
+  /** Cap on returned buckets, newest first. Default 30. */
+  limit?: number;
+}
+
 /**
  * A continuous run of focused user activity, bounded by idle gaps. The
  * SessionBuilder groups frames into sessions whenever the gap between
@@ -462,8 +524,78 @@ export interface IStorage {
   /** List entities, newest activity first. */
   listEntities(query?: ListEntitiesQuery): Promise<EntityRecord[]>;
 
+  /**
+   * Free-text search across entity titles + paths. Backed by FTS5 on
+   * adapters that materialise an `entities_fts` table; otherwise falls
+   * back to a `LIKE` scan. Used by the desktop UI for entity
+   * autocomplete and by the indexer for fuzzy entity lookups.
+   */
+  searchEntities(query: SearchEntitiesQuery): Promise<EntityRecord[]>;
+
   /** Frames belonging to an entity, oldest first. */
   getEntityFrames(path: string, limit?: number): Promise<Frame[]>;
+
+  /**
+   * Find entities that frequently appear in the same activity
+   * sessions as `entityPath`. Powers "who do I work with on X?",
+   * "what projects involve channel Y?", "what apps are part of my
+   * cofounderos work?" — questions that today need raw SQL.
+   *
+   * Implementations should:
+   *  - Self-exclude the target entity from results.
+   *  - Rank by shared session count, breaking ties by combined
+   *    attention ms, then recency.
+   *  - Return at most `limit` rows (default 25).
+   */
+  listEntityCoOccurrences(
+    entityPath: string,
+    limit?: number,
+  ): Promise<EntityCoOccurrence[]>;
+
+  /**
+   * Bucket an entity's frames into per-day or per-hour slots, with
+   * frame count, focused-time sum, and distinct-session count for
+   * each bucket. Powers timeline charts ("when have I worked on
+   * cofounderos this week?") without forcing the UI to build the
+   * aggregation itself.
+   */
+  getEntityTimeline(
+    entityPath: string,
+    query?: EntityTimelineQuery,
+  ): Promise<EntityTimelineBucket[]>;
+
+  /**
+   * Reattribute a known set of frames from one or more "fallback" app
+   * entities (e.g. `apps/cursor`, `apps/warp`) to a single concrete
+   * target entity (typically the dominant project of the activity
+   * session those frames belong to).
+   *
+   * Used by the SessionBuilder to rescue editor / terminal frames that
+   * the per-frame resolver couldn't tie to a project on their own —
+   * window titles like just `"Cursor"` or `"Cursor Agents"` carry no
+   * project hint, so they otherwise pile up under `apps/<editor>`.
+   *
+   * The caller passes `frameIds` rather than a session id so this can
+   * run before frames have been assigned to a session, and so its
+   * filtering semantics are explicit ("move exactly these frames if
+   * their current entity matches one of `fromAppPaths`").
+   *
+   * Implementations MUST:
+   *  1. Move only frames whose id is in `frameIds` AND whose current
+   *     `entity_path` is in `fromAppPaths`.
+   *  2. Refresh the `entities` rollup for every entity touched (the
+   *     source `apps/*` rows shrink, the target row grows). A null /
+   *     zero-frame source row should be deleted to keep the entities
+   *     table clean.
+   *
+   * Returns the number of frames moved + the paths of the entity rows
+   * that were refreshed (caller can use this for logging).
+   */
+  reattributeFrames(input: {
+    frameIds: string[];
+    fromAppPaths: string[];
+    target: EntityRef;
+  }): Promise<{ moved: number; refreshedEntities: string[] }>;
 
   // -------------------------------------------------------------------------
   // Vacuum (asset retention)

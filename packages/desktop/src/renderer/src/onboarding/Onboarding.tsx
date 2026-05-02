@@ -31,7 +31,7 @@ import {
   pullPercent,
   type InstallPhase,
 } from '@/lib/bootstrap-phases';
-import { formatBytes, formatNumber } from '@/lib/format';
+import { formatBytes, formatLocalTime, formatNumber } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { Frame, ModelBootstrapProgress, RuntimeOverview } from '@/global';
 
@@ -130,7 +130,15 @@ export function Onboarding({
     };
   }, []);
 
+  // Subscribe to live overview push (heartbeat every 2s plus after every
+  // mutation). Falls back to a sparse manual poll only if the push channel
+  // isn't available — important because onboarding decides when to advance
+  // based on capture state changing.
   React.useEffect(() => {
+    if (window.cofounderos?.onOverview) {
+      window.cofounderos.onOverview((next) => setOverview(next));
+      return;
+    }
     const timer = window.setInterval(async () => {
       try {
         const next = await window.cofounderos?.getOverview();
@@ -960,7 +968,7 @@ function FirstSearchStep({
                   className="flex gap-3 rounded-md border bg-card p-3 text-sm"
                 >
                   <div className="font-mono text-xs text-muted-foreground w-12 shrink-0">
-                    {(f.timestamp || '').slice(11, 16) || '—'}
+                    {formatLocalTime(f.timestamp)}
                   </div>
                   <div className="min-w-0">
                     <div className="font-medium truncate">{f.app || 'Unknown app'}</div>

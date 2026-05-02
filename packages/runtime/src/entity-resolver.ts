@@ -274,7 +274,7 @@ function resolveContact(frame: Frame): EntityRef | null {
   return null;
 }
 
-const CODE_APPS = new Set([
+export const CODE_APPS = new Set([
   'Code',
   'Code - Insiders',
   'Visual Studio Code',
@@ -299,7 +299,7 @@ const CODE_APPS = new Set([
   'Nova',
 ]);
 
-const TERMINAL_APPS = new Set([
+export const TERMINAL_APPS = new Set([
   'Terminal',
   'iTerm2',
   'iTerm',
@@ -310,6 +310,29 @@ const TERMINAL_APPS = new Set([
   'WezTerm',
   'Tabby',
 ]);
+
+/**
+ * Apps whose `apps/<slug>` entity is a "fallback" rather than a true
+ * top-level identity — when the per-frame resolver couldn't tease a
+ * project / repo / channel out of the window title, the frame ends up
+ * here. The SessionBuilder uses this set to decide which orphan frames
+ * are eligible to be lifted into a session's dominant non-app entity.
+ *
+ * Notably absent: communications apps (Slack, Mail, Discord, WhatsApp).
+ * Their `apps/*` fallback usually means "user was on the home / threads
+ * view, not a specific channel" and lifting those into an unrelated
+ * project would be wrong. Leave them where the per-frame resolver put
+ * them.
+ */
+export const SUPPORTING_APP_SLUGS: ReadonlySet<string> = new Set(
+  [...CODE_APPS, ...TERMINAL_APPS].map((a) => slugify(a)),
+);
+
+/** Returns true if `entityPath` is `apps/<slug>` for a supporting app. */
+export function isSupportingAppEntity(entityPath: string | null | undefined): boolean {
+  if (!entityPath || !entityPath.startsWith('apps/')) return false;
+  return SUPPORTING_APP_SLUGS.has(entityPath.slice('apps/'.length));
+}
 
 function resolveProject(frame: Frame): EntityRef | null {
   const isCode = CODE_APPS.has(frame.app);

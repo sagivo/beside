@@ -17,6 +17,12 @@ function send(response: Response): void {
   process.stdout.write(`${JSON.stringify(response)}\n`);
 }
 
+function sendEvent(event: string, payload: unknown): void {
+  // `id: 0` because heartbeat events aren't tied to a specific request.
+  // The client (main.ts) ignores `id` for events anyway.
+  process.stdout.write(`${JSON.stringify({ id: 0, event, payload })}\n`);
+}
+
 const logger: Logger = {
   debug: (msg, ...rest) => emitLog('debug', msg, rest),
   info: (msg, ...rest) => emitLog('info', msg, rest),
@@ -45,29 +51,90 @@ const runtime = createRuntime({
   workspaceRoot: process.env.COFOUNDEROS_RESOURCE_ROOT,
 });
 
+// ---------------------------------------------------------------------
+// Push-based overview broadcasting.
+//
+// The renderer used to poll `getOverview()` on a setInterval. That meant
+// every UI surface paid a polling cost and lag was capped by the
+// interval (2-5s). Now the runtime-service is the single source of truth
+// and pushes overview snapshots:
+//
+//   - on a 2s heartbeat while running
+//   - immediately after any state-mutating call (start/stop/pause/
+//     resume/triggerIndex/triggerReorganise/saveConfigPatch)
+//
+// `pushOverview` is fire-and-forget; if `getOverview` rejects we just
+// skip that tick rather than crashing the service.
+// ---------------------------------------------------------------------
+
+let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+async function pushOverview(): Promise<void> {
+  try {
+    const overview = await runtime.getOverview();
+    sendEvent('overview', overview);
+  } catch {
+    // Runtime is mid-restart or not yet started; let the next mutation
+    // or heartbeat retry. Errors here are very noisy in the desktop log.
+  }
+}
+
+function startHeartbeat(): void {
+  if (heartbeat) return;
+  heartbeat = setInterval(() => {
+    void pushOverview();
+  }, 2000);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeat) {
+    clearInterval(heartbeat);
+    heartbeat = null;
+  }
+}
+
+startHeartbeat();
+
 async function handle(req: Request): Promise<unknown> {
   switch (req.method) {
-    case 'start':
+    case 'start': {
       await runtime.start({ bootstrap: false });
-      return await runtime.getOverview();
+      const ov = await runtime.getOverview();
+      sendEvent('overview', ov);
+      return ov;
+    }
     case 'bootstrapModel':
       await runtime.bootstrapModel((event) => {
         process.stdout.write(`${JSON.stringify({ id: req.id, event: 'bootstrap-progress', payload: event })}\n`);
       });
+      void pushOverview();
       return { ready: true };
     case 'stop':
       await runtime.stop();
+      void pushOverview();
       return { stopped: true };
-    case 'pauseCapture':
-      return await runtime.pauseCapture();
-    case 'resumeCapture':
-      return await runtime.resumeCapture();
-    case 'triggerIndex':
+    case 'pauseCapture': {
+      const ov = await runtime.pauseCapture();
+      sendEvent('overview', ov);
+      return ov;
+    }
+    case 'resumeCapture': {
+      const ov = await runtime.resumeCapture();
+      sendEvent('overview', ov);
+      return ov;
+    }
+    case 'triggerIndex': {
       await runtime.triggerIndex();
-      return await runtime.getOverview();
-    case 'triggerReorganise':
+      const ov = await runtime.getOverview();
+      sendEvent('overview', ov);
+      return ov;
+    }
+    case 'triggerReorganise': {
       await runtime.triggerReorganise();
-      return await runtime.getOverview();
+      const ov = await runtime.getOverview();
+      sendEvent('overview', ov);
+      return ov;
+    }
     case 'overview':
       return await runtime.getOverview();
     case 'doctor':
@@ -76,8 +143,11 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.readConfig();
     case 'validateConfig':
       return runtime.validateConfig(req.params);
-    case 'saveConfigPatch':
-      return await runtime.saveConfigPatch(req.params as Record<string, unknown>);
+    case 'saveConfigPatch': {
+      const result = await runtime.saveConfigPatch(req.params as Record<string, unknown>);
+      void pushOverview();
+      return result;
+    }
     case 'listJournalDays':
       return await runtime.listJournalDays();
     case 'getJournalDay':
@@ -115,10 +185,10 @@ rl.on('line', (line) => {
   })();
 });
 
-process.on('SIGTERM', () => {
+function shutdown(): void {
+  stopHeartbeat();
   void runtime.stop().finally(() => process.exit(0));
-});
+}
 
-process.on('SIGINT', () => {
-  void runtime.stop().finally(() => process.exit(0));
-});
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

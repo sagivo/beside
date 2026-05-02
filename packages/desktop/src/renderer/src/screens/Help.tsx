@@ -1,10 +1,12 @@
 import * as React from 'react';
-import { Check, Copy, FolderOpen, RefreshCcw, Sparkles } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Copy, FolderOpen, RefreshCcw, Sparkles } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
+import { CHANGELOG, markChangelogSeen } from '@/lib/changelog';
 
 export function Help({
   logs,
@@ -13,44 +15,83 @@ export function Help({
   logs: string;
   onRestartOnboarding: () => void;
 }) {
-  const [copied, setCopied] = React.useState(false);
+  React.useEffect(() => {
+    markChangelogSeen();
+  }, []);
 
   async function copyDiagnostics() {
-    const [overview, checks, _config] = await Promise.all([
-      window.cofounderos.getOverview(),
-      window.cofounderos.runDoctor(),
-      window.cofounderos.readConfig(),
-    ]);
-    const text = [
-      '# CofounderOS Diagnostics',
-      `Generated: ${new Date().toISOString()}`,
-      '',
-      `Status: ${overview.status}`,
-      `Capture: ${overview.capture.running ? (overview.capture.paused ? 'paused' : 'running') : 'stopped'}`,
-      `Today: ${overview.capture.eventsToday} events`,
-      `Model: ${overview.model.name} (${overview.model.ready ? 'ready' : 'not ready'})`,
-      '',
-      '## Checks',
-      ...checks.map((c) => `- [${c.status}] ${c.area}: ${c.message}`),
-      '',
-      '## Logs',
-      logs || '(none)',
-    ].join('\n');
-    await window.cofounderos.copyText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    try {
+      const [overview, checks, _config] = await Promise.all([
+        window.cofounderos.getOverview(),
+        window.cofounderos.runDoctor(),
+        window.cofounderos.readConfig(),
+      ]);
+      const text = [
+        '# CofounderOS Diagnostics',
+        `Generated: ${new Date().toISOString()}`,
+        '',
+        `Status: ${overview.status}`,
+        `Capture: ${overview.capture.running ? (overview.capture.paused ? 'paused' : 'running') : 'stopped'}`,
+        `Today: ${overview.capture.eventsToday} events`,
+        `Model: ${overview.model.name} (${overview.model.ready ? 'ready' : 'not ready'})`,
+        '',
+        '## Checks',
+        ...checks.map((c) => `- [${c.status}] ${c.area}: ${c.message}`),
+        '',
+        '## Logs',
+        logs || '(none)',
+      ].join('\n');
+      await window.cofounderos.copyText(text);
+      toast.success('Diagnostics copied to clipboard', {
+        description: 'Paste it into a support thread or save it for later.',
+      });
+    } catch (err) {
+      toast.error('Could not gather diagnostics', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return (
     <div className="flex flex-col gap-6 pt-6">
       <PageHeader title="Help" description="Need a hand? You're in the right place." />
 
-      {copied && (
-        <Alert variant="success">
-          <Check />
-          <AlertTitle>Diagnostics copied to clipboard</AlertTitle>
-          <AlertDescription>Paste it into a support thread or save it for later.</AlertDescription>
-        </Alert>
+      {CHANGELOG.length > 0 && (
+        <section>
+          <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+            What's new
+          </h3>
+          <div className="flex flex-col gap-3">
+            {CHANGELOG.slice(0, 3).map((entry, i) => (
+              <Card key={entry.id}>
+                <CardHeader>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        {i === 0 && <Sparkles className="size-4 text-primary" />}
+                        {entry.title}
+                      </CardTitle>
+                      <CardDescription className="mt-1 flex flex-wrap items-center gap-2">
+                        <Badge variant="muted">{entry.version}</Badge>
+                        <span className="text-xs">{entry.date}</span>
+                      </CardDescription>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <ul className="flex flex-col gap-1.5 text-sm">
+                    {entry.items.map((item, j) => (
+                      <li key={j} className="flex gap-2">
+                        <span className="text-muted-foreground/60 mt-1">·</span>
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
       )}
 
       <Card>

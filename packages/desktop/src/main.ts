@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -24,12 +25,56 @@ if (app.isPackaged && !process.env.COFOUNDEROS_DATA_DIR) {
 const dataDir = defaultDataDir();
 const configPath = path.join(dataDir, 'config.yaml');
 const markdownExportDir = path.join(dataDir, 'export/markdown');
+const windowStatePath = path.join(dataDir, 'desktop-window.json');
+
+interface WindowState {
+  width: number;
+  height: number;
+  x?: number;
+  y?: number;
+  maximized?: boolean;
+}
+
+const DEFAULT_WINDOW_STATE: WindowState = { width: 860, height: 760 };
+
+function loadWindowState(): WindowState {
+  try {
+    const raw = fs.readFileSync(windowStatePath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<WindowState>;
+    const width = typeof parsed.width === 'number' && parsed.width > 400 ? parsed.width : DEFAULT_WINDOW_STATE.width;
+    const height = typeof parsed.height === 'number' && parsed.height > 300 ? parsed.height : DEFAULT_WINDOW_STATE.height;
+    const out: WindowState = { width, height };
+    if (typeof parsed.x === 'number' && Number.isFinite(parsed.x)) out.x = parsed.x;
+    if (typeof parsed.y === 'number' && Number.isFinite(parsed.y)) out.y = parsed.y;
+    if (parsed.maximized === true) out.maximized = true;
+    return out;
+  } catch {
+    return { ...DEFAULT_WINDOW_STATE };
+  }
+}
+
+function saveWindowState(win: BrowserWindow): void {
+  try {
+    const state: WindowState = win.isMaximized()
+      ? { ...DEFAULT_WINDOW_STATE, maximized: true }
+      : (() => {
+          const [width, height] = win.getSize();
+          const [x, y] = win.getPosition();
+          return { width, height, x, y };
+        })();
+    fs.mkdirSync(path.dirname(windowStatePath), { recursive: true });
+    fs.writeFileSync(windowStatePath, JSON.stringify(state, null, 2), 'utf8');
+  } catch (err) {
+    appendLog(`Failed to persist window state: ${String(err)}`);
+  }
+}
 
 let tray: Tray | null = null;
 let statusWindow: BrowserWindow | null = null;
 let managedRuntime: RuntimeServiceClient | null = null;
 let statusItemHelper: ChildProcess | null = null;
 let lastLogs: string[] = [];
+let lastOverview: RuntimeOverview | null = null;
 
 const useMacAccessoryMode =
   process.platform === 'darwin' && process.env.COFOUNDEROS_DESKTOP_SHOW_DOCK !== '1';
@@ -123,6 +168,10 @@ class RuntimeServiceClient {
     });
     this.on('bootstrap-progress', (payload) => {
       statusWindow?.webContents.send('cofounderos:bootstrap-progress', payload);
+    });
+    this.on('overview', (payload) => {
+      lastOverview = payload as RuntimeOverview;
+      statusWindow?.webContents.send('cofounderos:overview', payload);
     });
 
     const rl = readline.createInterface({
@@ -244,6 +293,13 @@ function createElectronTrayFallback(): void {
     tray.setToolTip('CofounderOS — click for status');
     appendLog('Electron tray fallback created');
     void refreshTray();
+    // Keep the tray menu's "N today" line live without hammering the
+    // runtime; 15s is plenty for an at-a-glance count and well below
+    // any user-noticeable staleness on a context menu open.
+    const trayRefreshTimer = setInterval(() => {
+      void refreshTray();
+    }, 15000);
+    app.once('before-quit', () => clearInterval(trayRefreshTimer));
     tray.on('click', () => {
       void showStatusWindow();
     });
@@ -301,51 +357,98 @@ function startNativeStatusItem(): boolean {
 async function refreshTray(): Promise<void> {
   if (!tray) return;
   const health = await getHealth();
-  const managed = managedRuntime != null;
+  // Prefer the cached push'd overview to avoid round-tripping the runtime
+  // on every tray refresh tick. Falls back to an explicit call when
+  // there's no cached value yet (e.g. cold start).
+  const overview =
+    lastOverview ??
+    (managedRuntime
+      ? await managedRuntime.call<RuntimeOverview>('overview').catch(() => null)
+      : null);
+  const captureLive = !!overview?.capture.running && !overview.capture.paused;
+  const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
+  const eventsToday = overview?.capture.eventsToday ?? 0;
+
+  const statusLabel = !health.ok
+    ? 'CofounderOS — stopped'
+    : captureLive
+      ? `CofounderOS — capturing (${eventsToday} today)`
+      : capturePaused
+        ? 'CofounderOS — capture paused'
+        : 'CofounderOS — idle';
+
+  const captureToggle: Electron.MenuItemConstructorOptions =
+    captureLive
+      ? {
+          label: 'Pause Capture',
+          accelerator: 'CommandOrControl+.',
+          click: async () => {
+            try { await (await getRuntimeForRequest()).call('pauseCapture'); } catch (err) {
+              appendLog(`Pause capture failed: ${String(err)}`);
+            }
+            await refreshTray();
+          },
+        }
+      : capturePaused
+        ? {
+            label: 'Resume Capture',
+            accelerator: 'CommandOrControl+.',
+            click: async () => {
+              try { await (await getRuntimeForRequest()).call('resumeCapture'); } catch (err) {
+                appendLog(`Resume capture failed: ${String(err)}`);
+              }
+              await refreshTray();
+            },
+          }
+        : {
+            label: 'Start CofounderOS',
+            click: () => void startRuntime(),
+            enabled: !health.ok && !managedRuntime,
+          };
+
   tray.setContextMenu(Menu.buildFromTemplate([
-    {
-      label: health.ok ? 'CofounderOS: running' : 'CofounderOS: stopped',
-      enabled: false,
-    },
-    {
-      label: managed ? 'Runtime managed by desktop' : 'Runtime not managed by desktop',
-      enabled: false,
-    },
+    { label: statusLabel, enabled: false },
     { type: 'separator' },
     {
-      label: 'Show Status',
+      label: 'Open CofounderOS',
+      accelerator: 'CommandOrControl+O',
       click: () => void showStatusWindow(),
     },
-    {
-      label: health.ok ? 'Start Runtime (already running)' : 'Start Runtime',
-      enabled: !health.ok && !managedRuntime,
-      click: () => void startRuntime(),
-    },
-    {
-      label: managedRuntime ? 'Stop Managed Runtime' : 'Stop Managed Runtime (not started here)',
-      enabled: Boolean(managedRuntime),
-      click: () => void stopManagedRuntime(),
-    },
+    captureToggle,
     { type: 'separator' },
     {
       label: 'Run Doctor',
       click: () => void showStatusWindow({ focus: 'doctor' }),
     },
     {
-      label: 'Open Markdown Export',
-      click: () => void shell.openPath(markdownExportDir),
-    },
-    {
-      label: 'Open Data Folder',
-      click: () => void shell.openPath(dataDir),
-    },
-    {
-      label: 'Open Config',
-      click: () => void shell.openPath(configPath),
+      label: 'Reveal Files',
+      submenu: [
+        {
+          label: 'Markdown Export',
+          click: () => void shell.openPath(markdownExportDir),
+        },
+        {
+          label: 'Data Folder',
+          click: () => void shell.openPath(dataDir),
+        },
+        {
+          label: 'Config File',
+          click: () => void shell.openPath(configPath),
+        },
+      ],
     },
     { type: 'separator' },
+    ...(managedRuntime
+      ? ([
+          {
+            label: 'Stop Managed Runtime',
+            click: () => void stopManagedRuntime(),
+          } satisfies Electron.MenuItemConstructorOptions,
+        ])
+      : []),
     {
-      label: 'Quit Tray',
+      label: 'Quit',
+      accelerator: 'CommandOrControl+Q',
       click: () => app.quit(),
     },
   ]));
@@ -355,9 +458,12 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
   enterMacStatusWindowMode();
   if (!statusWindow) {
     const brandIconPath = resolveBrandIconPath();
+    const savedState = loadWindowState();
     statusWindow = new BrowserWindow({
-      width: 860,
-      height: 760,
+      width: savedState.width,
+      height: savedState.height,
+      ...(savedState.x !== undefined ? { x: savedState.x } : {}),
+      ...(savedState.y !== undefined ? { y: savedState.y } : {}),
       title: 'CofounderOS Status',
       show: false,
       ...(brandIconPath ? { icon: brandIconPath } : {}),
@@ -366,6 +472,26 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
         contextIsolation: true,
         preload: path.join(here, 'preload.cjs'),
       },
+    });
+    if (savedState.maximized) statusWindow.maximize();
+
+    // Debounce persistence so a drag doesn't write a hundred files in a
+    // row — most of the time we just save once when motion settles.
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleSave = () => {
+      if (!statusWindow) return;
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        if (statusWindow && !statusWindow.isDestroyed()) saveWindowState(statusWindow);
+      }, 400);
+    };
+    statusWindow.on('resize', scheduleSave);
+    statusWindow.on('move', scheduleSave);
+    statusWindow.on('maximize', scheduleSave);
+    statusWindow.on('unmaximize', scheduleSave);
+
+    statusWindow.on('close', () => {
+      if (statusWindow && !statusWindow.isDestroyed()) saveWindowState(statusWindow);
     });
     statusWindow.on('closed', () => {
       statusWindow = null;
@@ -406,6 +532,9 @@ async function renderStatusWindow(): Promise<void> {
   await statusWindow.loadFile(path.join(here, 'renderer', 'index.html'));
   statusWindow.webContents.once('did-finish-load', () => {
     statusWindow?.webContents.send('cofounderos:desktop-logs', lastLogs.slice(-120).join('\n'));
+    if (lastOverview) {
+      statusWindow?.webContents.send('cofounderos:overview', lastOverview);
+    }
   });
 }
 

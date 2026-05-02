@@ -21,8 +21,16 @@
   <script>
     (function () {
       try {
-        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        if (prefersDark) document.documentElement.classList.add('dark');
+        var pref = localStorage.getItem('cofounderos:theme');
+        var resolved;
+        if (pref === 'light' || pref === 'dark') {
+          resolved = pref;
+        } else {
+          resolved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light';
+        }
+        if (resolved === 'dark') document.documentElement.classList.add('dark');
       } catch (e) { /* ignore */ }
     })();
   </script>

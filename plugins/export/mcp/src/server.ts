@@ -374,32 +374,52 @@ export function createMcpServer(
     'list_entities',
     {
       description:
-        'List remembered entities (projects, repos, docs, webpages, apps, etc.) by recent activity. Use before drilling into an entity-specific history.',
+        'List remembered entities (projects, repos, docs, webpages, apps, etc.) by recent activity. When `query` is set, uses FTS5 BM25 ranking; otherwise sorts by last activity. Use before drilling into an entity-specific history.',
       inputSchema: {
-        query: z.string().optional().describe('Optional text filter over entity title and path.'),
+        query: z
+          .string()
+          .optional()
+          .describe(
+            'Optional free-text query against entity title and path. FTS-ranked when set.',
+          ),
         kind: z
           .enum(ENTITY_KINDS as [EntityKind, ...EntityKind[]])
           .optional()
           .describe('Restrict to one entity kind.'),
         since_last_seen: z.string().optional().describe('Only entities last seen on or after this ISO timestamp.'),
+        include_noise: z
+          .boolean()
+          .optional()
+          .describe(
+            'Include system-noise app entities (apps/electron, apps/loginwindow, etc.). Defaults to false; only set when debugging.',
+          ),
         limit: z.number().int().min(1).max(500).optional().describe('Max entities to return. Default 100.'),
       },
     },
-    async ({ query, kind, since_last_seen, limit }) => {
+    async ({ query, kind, since_last_seen, include_noise, limit }) => {
       const cap = limit ?? 100;
-      const entities = await services.storage.listEntities({
-        kind,
-        sinceLastSeen: since_last_seen,
-        limit: query ? Math.min(500, cap * 4) : cap,
-      });
-      const terms = query ? queryTerms(query) : [];
-      const filtered = terms.length === 0
-        ? entities
-        : entities.filter((entity) => {
-          const haystack = `${entity.title} ${entity.path}`.toLowerCase();
-          return terms.every((term) => haystack.includes(term));
+      let entities;
+      if (query && query.trim().length > 0) {
+        // FTS5-ranked path (skips noise apps unless include_noise is set).
+        entities = await services.storage.searchEntities({
+          text: query,
+          kind,
+          limit: cap,
+          includeNoise: include_noise,
         });
-      const result = filtered.slice(0, cap).map((entity) => ({
+        // Optional recency cutoff is applied client-side here so we
+        // don't have to push it into the FTS query.
+        if (since_last_seen) {
+          entities = entities.filter((e) => e.lastSeen >= since_last_seen);
+        }
+      } else {
+        entities = await services.storage.listEntities({
+          kind,
+          sinceLastSeen: since_last_seen,
+          limit: cap,
+        });
+      }
+      const result = entities.map((entity) => ({
         path: entity.path,
         kind: entity.kind,
         title: entity.title,
@@ -481,6 +501,106 @@ export function createMcpServer(
                 path,
                 count: frames.length,
                 frames: frames.map((frame) => framePreview(frame, textExcerptChars)),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'list_entity_neighbours',
+    {
+      description:
+        'List entities that recurrently appear in the same activity sessions as the given entity — the working knowledge graph. Use to answer "who do I work with on X?", "what projects involve channel Y?", "what apps are part of my work on Z?". Ranks by shared session count, then combined attention time, then recency.',
+      inputSchema: {
+        path: z
+          .string()
+          .describe('Anchor entity path, e.g. "projects/cofounderos" or "contacts/milan-lazic".'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('Max neighbours to return. Default 25.'),
+      },
+    },
+    async ({ path, limit }) => {
+      const neighbours = await services.storage.listEntityCoOccurrences(path, limit ?? 25);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                anchor: path,
+                count: neighbours.length,
+                neighbours: neighbours.map((n) => ({
+                  path: n.path,
+                  kind: n.kind,
+                  title: n.title,
+                  shared_sessions: n.sharedSessions,
+                  shared_focused_min: Math.round(n.sharedFocusedMs / 60_000),
+                  last_shared_at: n.lastSharedAt,
+                })),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_entity_timeline',
+    {
+      description:
+        'Return per-day or per-hour attention buckets for an entity — frame count, focused minutes, and distinct activity sessions per bucket. Powers "when have I worked on X this week?" and chart-driving UIs. Buckets are returned newest first.',
+      inputSchema: {
+        path: z.string().describe('Entity path, e.g. "projects/cofounderos".'),
+        granularity: z
+          .enum(['day', 'hour'])
+          .optional()
+          .describe('Bucket size. Default "day".'),
+        from: z.string().optional().describe('Inclusive lower bound (ISO timestamp).'),
+        to: z.string().optional().describe('Inclusive upper bound (ISO timestamp).'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe('Max buckets returned. Default 30.'),
+      },
+    },
+    async ({ path, granularity, from, to, limit }) => {
+      const buckets = await services.storage.getEntityTimeline(path, {
+        granularity,
+        from,
+        to,
+        limit,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                path,
+                granularity: granularity ?? 'day',
+                count: buckets.length,
+                buckets: buckets.map((b) => ({
+                  bucket: b.bucket,
+                  frames: b.frames,
+                  focused_min: Math.round(b.focusedMs / 60_000),
+                  sessions: b.sessions,
+                })),
               },
               null,
               2,

@@ -20,6 +20,10 @@ import type {
   EntityRecord,
   EntityKind,
   ListEntitiesQuery,
+  SearchEntitiesQuery,
+  EntityCoOccurrence,
+  EntityTimelineBucket,
+  EntityTimelineQuery,
   ActivitySession,
   ListSessionsQuery,
   PluginFactory,
@@ -93,7 +97,7 @@ class LocalStorage implements IStorage {
   }
 
   async readEvents(query: StorageQuery): Promise<RawEvent[]> {
-    const sql: string[] = ['SELECT raw FROM events WHERE 1=1'];
+    const sql: string[] = [`SELECT ${EVENT_SELECT_COLUMNS} FROM events WHERE 1=1`];
     const params: Record<string, unknown> = {};
 
     if (query.from) {
@@ -121,8 +125,11 @@ class LocalStorage implements IStorage {
       params.cp = query.since_checkpoint;
     }
     if (query.unindexed_for_strategy) {
+      // High-water mark: anything strictly newer than the strategy's
+      // last marked event is unindexed. COALESCE handles the "never
+      // indexed" case (returns '' so all events qualify).
       sql.push(
-        'AND id NOT IN (SELECT event_id FROM index_marks WHERE strategy = @strat)',
+        "AND id > COALESCE((SELECT last_event_id FROM index_state WHERE strategy = @strat), '')",
       );
       params.strat = query.unindexed_for_strategy;
     }
@@ -138,8 +145,8 @@ class LocalStorage implements IStorage {
       sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
     }
 
-    const rows = this.db.prepare(sql.join(' ')).all(params) as Array<{ raw: string }>;
-    return rows.map((r) => JSON.parse(r.raw) as RawEvent);
+    const rows = this.db.prepare(sql.join(' ')).all(params) as RawEventRow[];
+    return rows.map(rowToEvent);
   }
 
   async listDays(): Promise<string[]> {
@@ -200,26 +207,36 @@ class LocalStorage implements IStorage {
 
   async markIndexed(strategy: string, eventIds: string[]): Promise<void> {
     if (eventIds.length === 0) return;
-    const stmt = this.db.prepare(
-      'INSERT OR IGNORE INTO index_marks (strategy, event_id, marked_at) VALUES (@s, @e, @t)',
-    );
-    const tx = this.db.transaction((ids: string[]) => {
-      const t = new Date().toISOString();
-      for (const id of ids) stmt.run({ s: strategy, e: id, t });
-    });
-    tx(eventIds);
+    // Find the lex-max event id in the batch. Event ids are
+    // `evt_<base36-ms>_<uuid>` (see @cofounderos/core/ids.ts), so
+    // string ordering = chronological ordering.
+    let maxId = eventIds[0]!;
+    for (let i = 1; i < eventIds.length; i++) {
+      if (eventIds[i]! > maxId) maxId = eventIds[i]!;
+    }
+    // Monotonic upsert — the HWM only ever moves forward, even if a
+    // batch happens to include an out-of-order id smaller than the
+    // current checkpoint (which would be a bug in the indexer flow,
+    // but defending here is cheap).
+    this.db
+      .prepare(
+        `INSERT INTO index_state (strategy, last_event_id, last_marked_at)
+         VALUES (@s, @e, @t)
+         ON CONFLICT(strategy) DO UPDATE SET
+           last_event_id  = MAX(index_state.last_event_id, excluded.last_event_id),
+           last_marked_at = excluded.last_marked_at`,
+      )
+      .run({ s: strategy, e: maxId, t: new Date().toISOString() });
   }
 
   async clearIndexCheckpoint(strategy: string): Promise<void> {
-    this.db.prepare('DELETE FROM index_marks WHERE strategy = ?').run(strategy);
+    this.db.prepare('DELETE FROM index_state WHERE strategy = ?').run(strategy);
   }
 
   async getIndexCheckpoint(strategy: string): Promise<string | null> {
     const row = this.db
-      .prepare(
-        'SELECT MAX(event_id) AS last FROM index_marks WHERE strategy = ?',
-      )
-      .get(strategy) as { last: string | null };
+      .prepare('SELECT last_event_id AS last FROM index_state WHERE strategy = ?')
+      .get(strategy) as { last: string | null } | undefined;
     return row?.last ?? null;
   }
 
@@ -271,14 +288,13 @@ class LocalStorage implements IStorage {
       this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frame.id);
       this.db
         .prepare(
-          'INSERT INTO frame_text (frame_id, text, app, window_title, url) VALUES (?, ?, ?, ?, ?)',
+          'INSERT INTO frame_text (frame_id, text, window_title, app) VALUES (?, ?, ?, ?)',
         )
         .run(
           frame.id,
           frame.text ?? '',
-          frame.app ?? '',
           frame.window_title ?? '',
-          frame.url ?? '',
+          frame.app ?? '',
         );
     });
     tx();
@@ -339,7 +355,14 @@ class LocalStorage implements IStorage {
         sql.push('AND frames.text_source = @text_source');
         params.text_source = query.textSource;
       }
-      sql.push('ORDER BY bm25(frame_text) ASC');
+      // Weighted BM25: window-title hits are far more diagnostic than
+      // body-text or app-name hits ("README.md — cofounderos" tells
+      // you exactly what the user was looking at). Body still
+      // contributes; bare app-name hits are downweighted because every
+      // Slack frame contains the word "Slack".
+      // Column order = (text, window_title, app); FTS5 weights are
+      // multipliers — higher weight = stronger preference.
+      sql.push('ORDER BY bm25(frame_text, 1.0, 2.0, 0.3) ASC');
       sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 25))}`);
       if (query.offset) sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
       return (this.db.prepare(sql.join(' ')).all(params) as RawFrameRow[]).map(rowToFrame);
@@ -458,19 +481,17 @@ class LocalStorage implements IStorage {
         .run(text, source, frameId);
       // Refresh FTS row so the new text is immediately searchable.
       const row = this.db
-        .prepare(
-          'SELECT app, window_title, url FROM frames WHERE id = ?',
-        )
+        .prepare('SELECT window_title, app FROM frames WHERE id = ?')
         .get(frameId) as
-        | { app: string | null; window_title: string | null; url: string | null }
+        | { window_title: string | null; app: string | null }
         | undefined;
       if (row) {
         this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
         this.db
           .prepare(
-            'INSERT INTO frame_text (frame_id, text, app, window_title, url) VALUES (?, ?, ?, ?, ?)',
+            'INSERT INTO frame_text (frame_id, text, window_title, app) VALUES (?, ?, ?, ?)',
           )
-          .run(frameId, text, row.app ?? '', row.window_title ?? '', row.url ?? '');
+          .run(frameId, text, row.window_title ?? '', row.app ?? '');
       }
     });
     tx();
@@ -780,6 +801,291 @@ class LocalStorage implements IStorage {
     return rows.map(rowToFrame);
   }
 
+  async listEntityCoOccurrences(
+    entityPath: string,
+    limit?: number,
+  ): Promise<EntityCoOccurrence[]> {
+    const cap = Math.max(1, Math.floor(limit ?? 25));
+    // Self-join frames on activity_session_id, restrict the LHS to
+    // the target entity, then aggregate by partner. The
+    // idx_frames_activity_session + idx_frames_entity_ts indexes let
+    // SQLite drive both sides cheaply. We pull `partner.entity_kind`
+    // (NOT NULL when entity_path is) so the result type stays clean.
+    const rows = this.db
+      .prepare(
+        `SELECT
+           partner.entity_path AS path,
+           partner.entity_kind AS kind,
+           COALESCE(entities.title, '') AS title,
+           COUNT(DISTINCT partner.activity_session_id) AS shared_sessions,
+           COALESCE(SUM(partner.duration_ms), 0) AS shared_ms,
+           MAX(partner.timestamp) AS last_shared_at
+         FROM frames target
+         JOIN frames partner
+           ON partner.activity_session_id = target.activity_session_id
+          AND partner.entity_path IS NOT NULL
+          AND partner.entity_path != target.entity_path
+         LEFT JOIN entities ON entities.path = partner.entity_path
+         WHERE target.entity_path = @path
+           AND target.activity_session_id IS NOT NULL
+         GROUP BY partner.entity_path, partner.entity_kind
+         ORDER BY shared_sessions DESC, shared_ms DESC, last_shared_at DESC
+         LIMIT @limit`,
+      )
+      .all({ path: entityPath, limit: cap }) as Array<{
+      path: string;
+      kind: string;
+      title: string;
+      shared_sessions: number;
+      shared_ms: number;
+      last_shared_at: string;
+    }>;
+    return rows.map((r) => ({
+      path: r.path,
+      kind: r.kind as EntityKind,
+      title: r.title || pathToTitle(r.path),
+      sharedSessions: r.shared_sessions,
+      sharedFocusedMs: r.shared_ms,
+      lastSharedAt: r.last_shared_at,
+    }));
+  }
+
+  async getEntityTimeline(
+    entityPath: string,
+    query: EntityTimelineQuery = {},
+  ): Promise<EntityTimelineBucket[]> {
+    const granularity = query.granularity ?? 'day';
+    const limit = Math.max(1, Math.floor(query.limit ?? 30));
+    // Bucket key: SQLite has no DATE_TRUNC. For day, we already store
+    // the YYYY-MM-DD `day` column on every frame. For hour, slice the
+    // ISO timestamp at 13 chars (`YYYY-MM-DDTHH`).
+    const bucketExpr =
+      granularity === 'day' ? 'day' : 'substr(timestamp, 1, 13)';
+    const where: string[] = ['entity_path = @path'];
+    const params: Record<string, unknown> = { path: entityPath, limit };
+    if (query.from) {
+      where.push('timestamp >= @from_ts');
+      params.from_ts = query.from;
+    }
+    if (query.to) {
+      where.push('timestamp <= @to_ts');
+      params.to_ts = query.to;
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT
+           ${bucketExpr} AS bucket,
+           COUNT(*) AS frames,
+           COALESCE(SUM(duration_ms), 0) AS focused_ms,
+           COUNT(DISTINCT activity_session_id) AS sessions
+         FROM frames
+         WHERE ${where.join(' AND ')}
+         GROUP BY bucket
+         ORDER BY bucket DESC
+         LIMIT @limit`,
+      )
+      .all(params) as Array<{
+      bucket: string;
+      frames: number;
+      focused_ms: number;
+      sessions: number;
+    }>;
+    return rows.map((r) => ({
+      bucket: r.bucket,
+      frames: r.frames,
+      focusedMs: r.focused_ms,
+      sessions: r.sessions,
+    }));
+  }
+
+  async searchEntities(query: SearchEntitiesQuery): Promise<EntityRecord[]> {
+    const text = (query.text ?? '').trim();
+    if (!text) return [];
+    const limit = Math.max(1, Math.floor(query.limit ?? 25));
+
+    // FTS5 path — sanitised query, BM25 ranking. We OR-match against
+    // both the title column and the tokenised path tail so a single
+    // query like "cofounder" hits both `title=Cofounderos` and
+    // `path=projects/cofounderos`.
+    const ftsQuery = sanitiseFtsQuery(text);
+    if (ftsQuery && ftsQuery !== '""') {
+      const params: Record<string, unknown> = { q: ftsQuery, limit };
+      let kindClause = '';
+      if (query.kind) {
+        kindClause = 'AND entities.kind = @kind';
+        params.kind = query.kind;
+      }
+      const rows = this.db
+        .prepare(
+          `SELECT entities.*
+           FROM entities_fts
+           JOIN entities ON entities.path = entities_fts.path
+           WHERE entities_fts MATCH @q ${kindClause}
+           ORDER BY bm25(entities_fts) ASC, entities.last_seen DESC
+           LIMIT @limit`,
+        )
+        .all(params) as RawEntityRow[];
+      if (rows.length > 0) return rows.map(rowToEntity);
+    }
+
+    // Fallback substring scan — handles inputs that the FTS sanitiser
+    // strips entirely (pure punctuation) and very fresh DBs where the
+    // FTS hasn't been backfilled yet. Includes a noise filter that
+    // mirrors the entities_ai trigger, opt-out via `includeNoise`.
+    const params: Record<string, unknown> = {
+      like: `%${text.toLowerCase()}%`,
+      limit,
+    };
+    let kindClause = '';
+    if (query.kind) {
+      kindClause = 'AND kind = @kind';
+      params.kind = query.kind;
+    }
+    const noiseClause = query.includeNoise
+      ? ''
+      : `AND path NOT IN (
+          'apps/loginwindow', 'apps/captive-network-assistant',
+          'apps/system-settings', 'apps/activity-monitor',
+          'apps/electron', 'apps/cloudflare-warp',
+          'apps/spotlight', 'apps/window-server', 'apps/dock',
+          'apps/control-center', 'apps/notification-center',
+          'apps/screencaptureui', 'apps/cofounderos'
+        )`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM entities
+         WHERE (LOWER(title) LIKE @like OR LOWER(path) LIKE @like)
+           ${kindClause} ${noiseClause}
+         ORDER BY last_seen DESC
+         LIMIT @limit`,
+      )
+      .all(params) as RawEntityRow[];
+    return rows.map(rowToEntity);
+  }
+
+  async reattributeFrames(input: {
+    frameIds: string[];
+    fromAppPaths: string[];
+    target: EntityRef;
+  }): Promise<{ moved: number; refreshedEntities: string[] }> {
+    if (input.fromAppPaths.length === 0 || input.frameIds.length === 0) {
+      return { moved: 0, refreshedEntities: [] };
+    }
+
+    const targetPath = input.target.path;
+    const fromPlaceholders = input.fromAppPaths.map(() => '?').join(',');
+    const idPlaceholders = input.frameIds.map(() => '?').join(',');
+
+    // 1. Identify the affected entities up front — both the source
+    //    apps/* rows we're shrinking and the target row we're growing.
+    //    `affectedPaths` is the deduped set we'll re-aggregate at the end.
+    const affectedPaths = new Set<string>([targetPath, ...input.fromAppPaths]);
+
+    // 2. Move the frames in one statement. We exclude frames already
+    //    on the target so re-running this is a no-op.
+    const updateStmt = this.db.prepare(
+      `UPDATE frames
+         SET entity_path = ?, entity_kind = ?
+       WHERE id IN (${idPlaceholders})
+         AND entity_path IN (${fromPlaceholders})
+         AND entity_path != ?`,
+    );
+    const moved = updateStmt.run(
+      targetPath,
+      input.target.kind,
+      ...input.frameIds,
+      ...input.fromAppPaths,
+      targetPath,
+    ).changes;
+
+    if (moved === 0) return { moved: 0, refreshedEntities: [] };
+
+    // 3. Recompute the entities table for only the affected rows. This
+    //    is much cheaper than the global rebuildEntityCounts() — we only
+    //    touch the few entities that actually changed shape.
+    const refreshed: string[] = [];
+    const tx = this.db.transaction(() => {
+      for (const path of affectedPaths) {
+        const stats = this.db
+          .prepare(
+            `SELECT MIN(timestamp) AS first_seen,
+                    MAX(timestamp) AS last_seen,
+                    COALESCE(SUM(duration_ms), 0) AS total_focused_ms,
+                    COUNT(*) AS frame_count,
+                    MAX(entity_kind) AS kind,
+                    COALESCE(MAX(window_title), '') AS title_hint
+             FROM frames WHERE entity_path = ?`,
+          )
+          .get(path) as
+          | {
+              first_seen: string | null;
+              last_seen: string | null;
+              total_focused_ms: number;
+              frame_count: number;
+              kind: string | null;
+              title_hint: string;
+            }
+          | undefined;
+
+        if (!stats || stats.frame_count === 0) {
+          // Source apps/* row that lost its last frame. Drop the row
+          // (the `entities_ad` trigger cleans up the FTS entry).
+          this.db.prepare('DELETE FROM entities WHERE path = ?').run(path);
+          refreshed.push(path);
+          continue;
+        }
+
+        // Title preference: when refreshing the lift target, use the
+        // resolver-supplied title (it already encodes "projects/cofounderos"
+        // → "Cofounderos"). For other refreshed rows, fall back to the
+        // existing entity's title or a path-derived best guess.
+        let title = path === targetPath ? input.target.title : '';
+        if (!title) {
+          const existing = this.db
+            .prepare('SELECT title FROM entities WHERE path = ?')
+            .get(path) as { title: string } | undefined;
+          title = existing?.title || pathToTitle(path) || stats.title_hint || path;
+        }
+
+        const kind =
+          path === targetPath
+            ? input.target.kind
+            : ((stats.kind as EntityKind | null) ??
+              ((this.db
+                .prepare('SELECT kind FROM entities WHERE path = ?')
+                .get(path) as { kind: string } | undefined)?.kind as EntityKind | undefined) ??
+              'app');
+
+        this.db
+          .prepare(
+            `INSERT INTO entities
+              (path, kind, title, first_seen, last_seen, total_focused_ms, frame_count)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(path) DO UPDATE SET
+               kind = excluded.kind,
+               title = excluded.title,
+               first_seen = excluded.first_seen,
+               last_seen = excluded.last_seen,
+               total_focused_ms = excluded.total_focused_ms,
+               frame_count = excluded.frame_count`,
+          )
+          .run(
+            path,
+            kind,
+            title,
+            stats.first_seen ?? new Date().toISOString(),
+            stats.last_seen ?? new Date().toISOString(),
+            stats.total_focused_ms,
+            stats.frame_count,
+          );
+        refreshed.push(path);
+      }
+    });
+    tx();
+
+    return { moved, refreshedEntities: refreshed };
+  }
+
   // -------------------------------------------------------------------------
   // Vacuum
   // -------------------------------------------------------------------------
@@ -1015,32 +1321,52 @@ class LocalStorage implements IStorage {
     // dropped tables, vector format change).
     // ---------------------------------------------------------------------
     this.db.exec(`
+      -- events: append-only audit log of raw capture events.
+      --
+      -- The previous schema kept the entire JSON event in a "raw" TEXT
+      -- column alongside the typed projections, doubling storage on
+      -- every row. That column has been retired: every field RawEvent
+      -- carries either has its own typed column below, or rides in
+      -- "extra_json" (which holds metadata plus any future fields the
+      -- schema doesn't know about -- this preserves forward
+      -- compatibility without paying ~2KB/row for duplicated payload).
       CREATE TABLE IF NOT EXISTS events (
-        id           TEXT PRIMARY KEY,
-        timestamp    TEXT NOT NULL,
-        type         TEXT NOT NULL,
-        app          TEXT,
-        window_title TEXT,
-        url          TEXT,
-        content      TEXT,
-        asset_path   TEXT,
-        session_id   TEXT,
-        day          TEXT,
-        raw          TEXT NOT NULL,
-        framed_at    TEXT
+        id                TEXT PRIMARY KEY,
+        timestamp         TEXT NOT NULL,
+        type              TEXT NOT NULL,
+        app               TEXT,
+        app_bundle_id     TEXT,
+        window_title      TEXT,
+        url               TEXT,
+        content           TEXT,
+        asset_path        TEXT,
+        session_id        TEXT,
+        day               TEXT,
+        duration_ms       INTEGER,
+        idle_before_ms    INTEGER,
+        screen_index      INTEGER,
+        capture_plugin    TEXT,
+        privacy_filtered  INTEGER,
+        extra_json        TEXT,
+        framed_at         TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_events_day ON events(day);
       CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);
       CREATE INDEX IF NOT EXISTS idx_events_app ON events(app);
       CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 
-      CREATE TABLE IF NOT EXISTS index_marks (
-        strategy   TEXT NOT NULL,
-        event_id   TEXT NOT NULL,
-        marked_at  TEXT NOT NULL,
-        PRIMARY KEY (strategy, event_id)
+      -- index_state: per-strategy high-water mark. The previous
+      -- design (index_marks) stored one row per (strategy, event_id),
+      -- which scaled O(events) and chewed ~800KB on a small DB. Since
+      -- events are processed in chronological order and event IDs sort
+      -- lexicographically by time (see core/ids.ts), a single
+      -- per-strategy "last_event_id" row is sufficient to identify
+      -- "everything newer is unindexed".
+      CREATE TABLE IF NOT EXISTS index_state (
+        strategy        TEXT PRIMARY KEY,
+        last_event_id   TEXT NOT NULL,
+        last_marked_at  TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_marks_strategy ON index_marks(strategy);
 
       CREATE TABLE IF NOT EXISTS frames (
         id                  TEXT PRIMARY KEY,
@@ -1067,12 +1393,18 @@ class LocalStorage implements IStorage {
         created_at          TEXT NOT NULL
       );
 
+      -- frame_text: free-text search over a frame's body + window
+      -- title + app. URL is intentionally excluded -- it lives in the
+      -- indexed frames.url_host column where it can be exact-matched
+      -- without polluting the porter stemmer (which mangled hostnames
+      -- like "developer.mozilla.org" into "develop"). Search uses
+      -- weighted BM25 (see searchFrames) to prefer window-title hits
+      -- over body hits over bare app-name hits.
       CREATE VIRTUAL TABLE IF NOT EXISTS frame_text USING fts5(
         frame_id UNINDEXED,
         text,
-        app,
         window_title,
-        url,
+        app,
         tokenize='porter unicode61 remove_diacritics 2'
       );
 
@@ -1102,6 +1434,57 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_entities_kind ON entities(kind);
       CREATE INDEX IF NOT EXISTS idx_entities_last_seen ON entities(last_seen DESC);
+
+      -- entities_fts: free-text search over entity title + path tail
+      -- (the human-readable parts). The path is stored alongside title so
+      -- the desktop UI can autocomplete on either ("cofounder" matches
+      -- both "projects/cofounderos" and "Cofounderos"). The kind column
+      -- is non-tokenised so we can filter without scanning.
+      CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
+        path UNINDEXED,
+        title,
+        path_tail,
+        kind UNINDEXED,
+        tokenize='unicode61 remove_diacritics 2'
+      );
+
+      -- Keep entities_fts in sync with the entities table via triggers
+      -- so we never have to remember to update it from app code.
+      -- The WHEN clause skips system-noise apps (loginwindow,
+      -- electron, system-settings, ...) -- they're useless in
+      -- autocomplete. searchEntities can opt back in via
+      -- includeNoise: true, which falls through to the LIKE scan.
+      CREATE TRIGGER IF NOT EXISTS entities_ai AFTER INSERT ON entities
+      WHEN NEW.path NOT IN (
+        'apps/loginwindow', 'apps/captive-network-assistant',
+        'apps/system-settings', 'apps/activity-monitor',
+        'apps/electron', 'apps/cloudflare-warp',
+        'apps/spotlight', 'apps/window-server', 'apps/dock',
+        'apps/control-center', 'apps/notification-center',
+        'apps/screencaptureui', 'apps/cofounderos'
+      )
+      BEGIN
+        INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
+        VALUES (NULL, NEW.path, NEW.title,
+                REPLACE(REPLACE(NEW.path, '/', ' '), '-', ' '), NEW.kind);
+      END;
+      CREATE TRIGGER IF NOT EXISTS entities_au AFTER UPDATE ON entities BEGIN
+        DELETE FROM entities_fts WHERE path = OLD.path;
+        INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
+        SELECT NULL, NEW.path, NEW.title,
+               REPLACE(REPLACE(NEW.path, '/', ' '), '-', ' '), NEW.kind
+        WHERE NEW.path NOT IN (
+          'apps/loginwindow', 'apps/captive-network-assistant',
+          'apps/system-settings', 'apps/activity-monitor',
+          'apps/electron', 'apps/cloudflare-warp',
+          'apps/spotlight', 'apps/window-server', 'apps/dock',
+          'apps/control-center', 'apps/notification-center',
+          'apps/screencaptureui', 'apps/cofounderos'
+        );
+      END;
+      CREATE TRIGGER IF NOT EXISTS entities_ad AFTER DELETE ON entities BEGIN
+        DELETE FROM entities_fts WHERE path = OLD.path;
+      END;
 
       -- Activity sessions: continuous user-focus runs derived from frames,
       -- bounded by idle gaps. Distinct from frames.session_id (capture
@@ -1138,6 +1521,14 @@ class LocalStorage implements IStorage {
     //    public release. ALL of these no-op on a fresh install where the
     //    base CREATE TABLE already declares the column.
     this.maybeAddColumn('events', 'framed_at', 'TEXT');
+    // Event columns promoted out of `raw` JSON (see maybeMigrateEventsRaw).
+    this.maybeAddColumn('events', 'app_bundle_id', 'TEXT');
+    this.maybeAddColumn('events', 'duration_ms', 'INTEGER');
+    this.maybeAddColumn('events', 'idle_before_ms', 'INTEGER');
+    this.maybeAddColumn('events', 'screen_index', 'INTEGER');
+    this.maybeAddColumn('events', 'capture_plugin', 'TEXT');
+    this.maybeAddColumn('events', 'privacy_filtered', 'INTEGER');
+    this.maybeAddColumn('events', 'extra_json', 'TEXT');
     this.maybeAddColumn('frames', 'entity_path', 'TEXT');
     this.maybeAddColumn('frames', 'entity_kind', 'TEXT');
     this.maybeAddColumn('frames', 'vacuum_tier', 'TEXT');
@@ -1247,7 +1638,112 @@ class LocalStorage implements IStorage {
       DROP INDEX IF EXISTS idx_frames_ts;        -- frames are practically always filtered by day/entity/app first
     `);
 
-    // 7. One-shot reclaim & re-stats. Driven by PRAGMA user_version so
+    // 7a. frame_text schema migration: drop the legacy `url` column
+    //     (URLs now live in the indexed `frames.url_host` column where
+    //     they don't poison the porter stemmer) and rebuild the FTS
+    //     content from the `frames` table. Detected by inspecting
+    //     `pragma table_info(frame_text)`.
+    this.maybeRebuildFrameTextFts();
+
+    // 7c. index_marks → index_state. Compress 1-row-per-event into
+    //     1-row-per-strategy (the per-event marker was vestigial; we
+    //     only ever query MAX(event_id) by strategy).
+    this.maybeMigrateIndexMarks();
+
+    // 7d. events.raw → typed columns + extra_json. Parses the existing
+    //     JSON and writes its components into the new columns added
+    //     by the maybeAddColumn calls above, then drops `raw`.
+    this.maybeMigrateEventsRaw();
+
+    // 7b. Recreate the entities triggers so the new noise filter
+    //     (WHEN clause excluding system app entities like apps/electron,
+    //     apps/loginwindow, ...) takes effect on existing installs.
+    //     `CREATE TRIGGER IF NOT EXISTS` is a no-op when the trigger
+    //     name exists, so we drop+recreate to pick up the new body.
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS entities_ai;
+      DROP TRIGGER IF EXISTS entities_au;
+      DROP TRIGGER IF EXISTS entities_ad;
+      CREATE TRIGGER entities_ai AFTER INSERT ON entities
+      WHEN NEW.path NOT IN (
+        'apps/loginwindow', 'apps/captive-network-assistant',
+        'apps/system-settings', 'apps/activity-monitor',
+        'apps/electron', 'apps/cloudflare-warp',
+        'apps/spotlight', 'apps/window-server', 'apps/dock',
+        'apps/control-center', 'apps/notification-center',
+        'apps/screencaptureui', 'apps/cofounderos'
+      )
+      BEGIN
+        INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
+        VALUES (NULL, NEW.path, NEW.title,
+                REPLACE(REPLACE(NEW.path, '/', ' '), '-', ' '), NEW.kind);
+      END;
+      CREATE TRIGGER entities_au AFTER UPDATE ON entities BEGIN
+        DELETE FROM entities_fts WHERE path = OLD.path;
+        INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
+        SELECT NULL, NEW.path, NEW.title,
+               REPLACE(REPLACE(NEW.path, '/', ' '), '-', ' '), NEW.kind
+        WHERE NEW.path NOT IN (
+          'apps/loginwindow', 'apps/captive-network-assistant',
+          'apps/system-settings', 'apps/activity-monitor',
+          'apps/electron', 'apps/cloudflare-warp',
+          'apps/spotlight', 'apps/window-server', 'apps/dock',
+          'apps/control-center', 'apps/notification-center',
+          'apps/screencaptureui', 'apps/cofounderos'
+        );
+      END;
+      CREATE TRIGGER entities_ad AFTER DELETE ON entities BEGIN
+        DELETE FROM entities_fts WHERE path = OLD.path;
+      END;
+    `);
+
+    // 7c. Backfill entities_fts for installs that already had entities
+    //     before the FTS table existed; also purge any noise-app rows
+    //     a previous backfill (pre-noise-filter) leaked into the index.
+    const purged = this.db
+      .prepare(
+        `DELETE FROM entities_fts WHERE path IN (
+          'apps/loginwindow', 'apps/captive-network-assistant',
+          'apps/system-settings', 'apps/activity-monitor',
+          'apps/electron', 'apps/cloudflare-warp',
+          'apps/spotlight', 'apps/window-server', 'apps/dock',
+          'apps/control-center', 'apps/notification-center',
+          'apps/screencaptureui', 'apps/cofounderos'
+        )`,
+      )
+      .run().changes;
+    if (purged > 0) {
+      this.logger.info(`migrated: purged ${purged} noise app row(s) from entities_fts`);
+    }
+    const ftsCount = (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM entities_fts')
+        .get() as { n: number }
+    ).n;
+    const entCount = (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM entities')
+        .get() as { n: number }
+    ).n;
+    if (ftsCount === 0 && entCount > 0) {
+      this.db.exec(`
+        INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
+        SELECT NULL, path, title,
+               REPLACE(REPLACE(path, '/', ' '), '-', ' '), kind
+        FROM entities
+        WHERE path NOT IN (
+          'apps/loginwindow', 'apps/captive-network-assistant',
+          'apps/system-settings', 'apps/activity-monitor',
+          'apps/electron', 'apps/cloudflare-warp',
+          'apps/spotlight', 'apps/window-server', 'apps/dock',
+          'apps/control-center', 'apps/notification-center',
+          'apps/screencaptureui', 'apps/cofounderos'
+        );
+      `);
+      this.logger.info(`migrated: backfilled entities_fts with ${entCount} entity row(s)`);
+    }
+
+    // 8. One-shot reclaim & re-stats. Driven by PRAGMA user_version so
     //    we only pay the VACUUM cost once across all installs that
     //    upgrade through this migration. ANALYZE is cheap and updates
     //    the planner's stat1 tables for the new composite indexes.
@@ -1255,7 +1751,7 @@ class LocalStorage implements IStorage {
       | { user_version: number }
       | undefined;
     const currentVersion = versionRow?.user_version ?? 0;
-    const TARGET_VERSION = 1;
+    const TARGET_VERSION = 5;
     if (currentVersion < TARGET_VERSION) {
       try {
         this.db.exec('VACUUM');
@@ -1369,6 +1865,47 @@ class LocalStorage implements IStorage {
     return Boolean(row);
   }
 
+  /**
+   * Rebuild `frame_text` if its column shape no longer matches what
+   * the storage adapter writes. FTS5 virtual tables don't support
+   * `ALTER TABLE`, so we DROP + CREATE + repopulate from the canonical
+   * `frames` table. Idempotent: a no-op once `frame_text` has the
+   * expected columns.
+   */
+  private maybeRebuildFrameTextFts(): void {
+    const cols = this.db
+      .prepare('PRAGMA table_info(frame_text)')
+      .all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    // The new shape lacks `url`. If it's still there, we're on the old
+    // schema and need to rebuild.
+    if (!names.has('url')) return;
+
+    this.logger.info('migrating: rebuilding frame_text FTS without url column');
+    const start = Date.now();
+    this.db.exec(`
+      DROP TABLE IF EXISTS frame_text;
+      CREATE VIRTUAL TABLE frame_text USING fts5(
+        frame_id UNINDEXED,
+        text,
+        window_title,
+        app,
+        tokenize='porter unicode61 remove_diacritics 2'
+      );
+      INSERT INTO frame_text(frame_id, text, window_title, app)
+        SELECT id, COALESCE(text, ''), COALESCE(window_title, ''), COALESCE(app, '')
+        FROM frames;
+    `);
+    const populated = (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM frame_text')
+        .get() as { n: number }
+    ).n;
+    this.logger.info(
+      `migrated: rebuilt frame_text with ${populated} row(s) in ${Date.now() - start}ms`,
+    );
+  }
+
   private maybeAddColumn(table: string, column: string, ddl: string): void {
     const cols = this.db
       .prepare(`PRAGMA table_info(${table})`)
@@ -1379,17 +1916,150 @@ class LocalStorage implements IStorage {
     }
   }
 
+  /**
+   * Migrate the legacy `index_marks` table (1 row per (strategy,
+   * event_id), ~800KB on a small DB) into `index_state` (1 row per
+   * strategy holding a high-water `last_event_id`). Called only if
+   * the legacy table still exists; idempotent.
+   */
+  private maybeMigrateIndexMarks(): void {
+    if (!this.tableExists('index_marks')) return;
+    const rows = this.db
+      .prepare(
+        `SELECT strategy, MAX(event_id) AS last_event_id, MAX(marked_at) AS last_marked_at
+         FROM index_marks
+         GROUP BY strategy`,
+      )
+      .all() as Array<{
+        strategy: string;
+        last_event_id: string;
+        last_marked_at: string;
+      }>;
+    const upsert = this.db.prepare(
+      `INSERT INTO index_state (strategy, last_event_id, last_marked_at)
+       VALUES (@strategy, @last_event_id, @last_marked_at)
+       ON CONFLICT(strategy) DO UPDATE SET
+         last_event_id  = MAX(index_state.last_event_id, excluded.last_event_id),
+         last_marked_at = excluded.last_marked_at`,
+    );
+    const tx = this.db.transaction(() => {
+      for (const r of rows) {
+        upsert.run(r);
+      }
+      this.db.exec('DROP TABLE index_marks;');
+    });
+    tx();
+    this.logger.info(
+      `migrated: collapsed index_marks (${rows.length} strategy row(s)) into index_state`,
+    );
+  }
+
+  /**
+   * Migrate the legacy `events.raw` JSON column into the typed
+   * columns added by `maybeAddColumn` above + an `extra_json` column
+   * for fields not promoted to columns. Drops `raw` at the end.
+   * Idempotent — detects the legacy column via `PRAGMA table_info`.
+   */
+  private maybeMigrateEventsRaw(): void {
+    const cols = this.db
+      .prepare('PRAGMA table_info(events)')
+      .all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'raw')) return;
+
+    // Anything still NULL in extra_json (or any of the promoted
+    // columns) on rows where `raw` is set needs reconstruction. We
+    // gate on `extra_json IS NULL` as the cheap heuristic — it's
+    // never null after a fresh insert under the new schema.
+    const pending = (
+      this.db
+        .prepare(
+          'SELECT COUNT(*) AS n FROM events WHERE raw IS NOT NULL AND extra_json IS NULL',
+        )
+        .get() as { n: number }
+    ).n;
+
+    if (pending > 0) {
+      const start = Date.now();
+      const rows = this.db
+        .prepare(
+          'SELECT id, raw FROM events WHERE raw IS NOT NULL AND extra_json IS NULL',
+        )
+        .all() as Array<{ id: string; raw: string }>;
+      const upd = this.db.prepare(
+        `UPDATE events SET
+            app_bundle_id    = @app_bundle_id,
+            duration_ms      = @duration_ms,
+            idle_before_ms   = @idle_before_ms,
+            screen_index     = @screen_index,
+            capture_plugin   = @capture_plugin,
+            privacy_filtered = @privacy_filtered,
+            extra_json       = @extra_json
+          WHERE id = @id`,
+      );
+      const tx = this.db.transaction(() => {
+        for (const r of rows) {
+          let parsed: Partial<RawEvent>;
+          try {
+            parsed = JSON.parse(r.raw) as Partial<RawEvent>;
+          } catch {
+            // Unparseable payload — leave row's promoted columns NULL
+            // but still set extra_json so we can drop the column.
+            upd.run({
+              id: r.id,
+              app_bundle_id: null,
+              duration_ms: null,
+              idle_before_ms: null,
+              screen_index: null,
+              capture_plugin: null,
+              privacy_filtered: 0,
+              extra_json: '{"_corrupt":true}',
+            });
+            continue;
+          }
+          upd.run({
+            id: r.id,
+            app_bundle_id: parsed.app_bundle_id ?? null,
+            duration_ms: parsed.duration_ms ?? null,
+            idle_before_ms: parsed.idle_before_ms ?? null,
+            screen_index:
+              typeof parsed.screen_index === 'number' ? parsed.screen_index : null,
+            capture_plugin: parsed.capture_plugin ?? null,
+            privacy_filtered: parsed.privacy_filtered ? 1 : 0,
+            extra_json: serialiseEventExtra(parsed as RawEvent),
+          });
+        }
+      });
+      tx();
+      this.logger.info(
+        `migrated: backfilled ${rows.length} event(s) from raw JSON into typed columns ` +
+          `in ${Date.now() - start}ms`,
+      );
+    }
+
+    // Now drop `raw`.
+    try {
+      this.db.exec('ALTER TABLE events DROP COLUMN raw');
+      this.logger.info('migrated: dropped events.raw');
+    } catch (err) {
+      this.logger.warn('DROP COLUMN events.raw failed; leaving in place', {
+        err: String(err),
+      });
+    }
+  }
+
   private upsertEventRow(event: RawEvent, day: string): void {
     // NOTE: free-text search on events was removed in favour of `frames` /
     // `frame_text`. Frames carry the full OCR + accessibility text, joined
     // with app/window/url; events are kept as the raw audit log only.
     const upsert = this.db.prepare(`
       INSERT INTO events
-        (id, timestamp, type, app, window_title, url, content,
-         asset_path, session_id, day, raw)
+        (id, timestamp, type, app, app_bundle_id, window_title, url, content,
+         asset_path, session_id, day, duration_ms, idle_before_ms, screen_index,
+         capture_plugin, privacy_filtered, extra_json)
       VALUES
-        (@id, @timestamp, @type, @app, @window_title, @url, @content,
-         @asset_path, @session_id, @day, @raw)
+        (@id, @timestamp, @type, @app, @app_bundle_id, @window_title, @url, @content,
+         @asset_path, @session_id, @day, @duration_ms, @idle_before_ms, @screen_index,
+         @capture_plugin, @privacy_filtered, @extra_json)
       ON CONFLICT(id) DO NOTHING
     `);
     upsert.run({
@@ -1397,13 +2067,19 @@ class LocalStorage implements IStorage {
       timestamp: event.timestamp,
       type: event.type,
       app: event.app ?? null,
+      app_bundle_id: event.app_bundle_id ?? null,
       window_title: event.window_title ?? null,
       url: event.url,
       content: event.content,
       asset_path: event.asset_path,
       session_id: event.session_id,
       day,
-      raw: JSON.stringify(event),
+      duration_ms: event.duration_ms,
+      idle_before_ms: event.idle_before_ms,
+      screen_index: typeof event.screen_index === 'number' ? event.screen_index : null,
+      capture_plugin: event.capture_plugin ?? null,
+      privacy_filtered: event.privacy_filtered ? 1 : 0,
+      extra_json: serialiseEventExtra(event),
     });
   }
 
@@ -1434,6 +2110,106 @@ class LocalStorage implements IStorage {
     await walk(rawDir);
     return total;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Event row helpers — reconstruct RawEvent from the typed columns +
+// extra_json, instead of round-tripping through a duplicated `raw` JSON
+// string. Saves ~10MB on the live DB, scales with retention.
+// ---------------------------------------------------------------------------
+
+const EVENT_SELECT_COLUMNS =
+  'id, timestamp, type, app, app_bundle_id, window_title, url, content, ' +
+  'asset_path, session_id, duration_ms, idle_before_ms, screen_index, ' +
+  'capture_plugin, privacy_filtered, extra_json';
+
+interface RawEventRow {
+  id: string;
+  timestamp: string;
+  type: string;
+  app: string | null;
+  app_bundle_id: string | null;
+  window_title: string | null;
+  url: string | null;
+  content: string | null;
+  asset_path: string | null;
+  session_id: string | null;
+  duration_ms: number | null;
+  idle_before_ms: number | null;
+  screen_index: number | null;
+  capture_plugin: string | null;
+  privacy_filtered: number | null;
+  extra_json: string | null;
+}
+
+function rowToEvent(r: RawEventRow): RawEvent {
+  let metadata: Record<string, unknown> = {};
+  if (r.extra_json) {
+    try {
+      const parsed = JSON.parse(r.extra_json) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object') metadata = parsed;
+    } catch {
+      // tolerate corruption — empty metadata is better than crashing read
+    }
+  }
+  return {
+    id: r.id,
+    timestamp: r.timestamp,
+    type: r.type as RawEvent['type'],
+    app: r.app ?? '',
+    app_bundle_id: r.app_bundle_id ?? '',
+    window_title: r.window_title ?? '',
+    url: r.url,
+    content: r.content,
+    asset_path: r.asset_path,
+    session_id: r.session_id ?? '',
+    duration_ms: r.duration_ms,
+    idle_before_ms: r.idle_before_ms,
+    screen_index: r.screen_index ?? 0,
+    metadata,
+    privacy_filtered: r.privacy_filtered === 1,
+    capture_plugin: r.capture_plugin ?? '',
+  };
+}
+
+/**
+ * Persist any event field NOT mapped to a typed column into a single
+ * JSON blob. Today that's just `metadata` plus any future top-level
+ * field a newer capture plugin might emit (forward-compatibility
+ * insurance). Returns null when there's nothing to keep so older
+ * rows don't carry empty `{}` strings.
+ */
+function serialiseEventExtra(event: RawEvent): string | null {
+  const TYPED_KEYS = new Set([
+    'id',
+    'timestamp',
+    'type',
+    'app',
+    'app_bundle_id',
+    'window_title',
+    'url',
+    'content',
+    'asset_path',
+    'session_id',
+    'duration_ms',
+    'idle_before_ms',
+    'screen_index',
+    'capture_plugin',
+    'privacy_filtered',
+  ]);
+  const extras: Record<string, unknown> = {};
+  // Always include metadata (kitchen sink) when non-empty.
+  if (event.metadata && Object.keys(event.metadata).length > 0) {
+    extras.metadata = event.metadata;
+  }
+  // Sweep up unknown top-level fields in case a future capture plugin
+  // adds a property not declared on the RawEvent interface yet.
+  for (const [k, v] of Object.entries(event as unknown as Record<string, unknown>)) {
+    if (TYPED_KEYS.has(k) || k === 'metadata') continue;
+    extras[k] = v;
+  }
+  if (Object.keys(extras).length === 0) return null;
+  return JSON.stringify(extras);
 }
 
 interface RawFrameRow {

@@ -1,6 +1,11 @@
 import * as React from 'react';
 import { AppShell } from '@/components/AppShell';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ErrorView } from '@/components/ErrorView';
+import { FrameDetailProvider } from '@/components/FrameDetailDialog';
+import { Toaster, toast } from '@/components/ui/sonner';
+import { SidebarStateProvider } from '@/lib/sidebar-state';
+import { ThemeProvider } from '@/lib/theme';
 import { Connect } from '@/screens/Connect';
 import { Dashboard } from '@/screens/Dashboard';
 import { Help } from '@/screens/Help';
@@ -20,6 +25,19 @@ import type {
 import '@/lib/thumbnail-cache';
 
 export function App() {
+  return (
+    <ThemeProvider>
+      <SidebarStateProvider>
+        <FrameDetailProvider>
+          <AppInner />
+          <Toaster />
+        </FrameDetailProvider>
+      </SidebarStateProvider>
+    </ThemeProvider>
+  );
+}
+
+function AppInner() {
   const [screen, setScreen] = React.useState<Screen>('dashboard');
   const [overview, setOverview] = React.useState<RuntimeOverview | null>(null);
   const [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null);
@@ -43,17 +61,10 @@ export function App() {
     window.cofounderos?.onBootstrapProgress?.((progress) => {
       setBootstrapEvents((events) => [...events.slice(-80), progress]);
     });
-  }, []);
-
-  React.useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const apply = (matches: boolean) => {
-      document.documentElement.classList.toggle('dark', matches);
-    };
-    apply(mq.matches);
-    const listener = (e: MediaQueryListEvent) => apply(e.matches);
-    mq.addEventListener('change', listener);
-    return () => mq.removeEventListener('change', listener);
+    // Real-time overview push from the runtime service. Replaces what
+    // used to be a 2-5s setInterval — main.ts forwards every overview
+    // snapshot the runtime emits (heartbeat + after each mutation).
+    window.cofounderos?.onOverview?.((next) => setOverview(next));
   }, []);
 
   React.useEffect(() => {
@@ -61,14 +72,16 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, showOnboarding]);
 
+  // Sparse safety-net poll. We trust the push channel for normal
+  // operation, but if the runtime service ever wedges or the IPC
+  // subscription drops, this guarantees we recover within 30s.
   React.useEffect(() => {
-    const intervalMs = overview?.indexing.running ? 2000 : 5000;
     const timer = window.setInterval(() => {
       if (!window.cofounderos) return;
       void window.cofounderos.getOverview().then(setOverview).catch(() => undefined);
-    }, intervalMs);
+    }, 30000);
     return () => window.clearInterval(timer);
-  }, [overview?.indexing.running]);
+  }, []);
 
   async function loadScreen(next: Screen) {
     try {
@@ -114,7 +127,94 @@ export function App() {
     const url = `http://${host}:${port}`;
     const snippet = JSON.stringify({ mcpServers: { cofounderos: { url } } }, null, 2);
     await window.cofounderos.copyText(snippet);
+    toast.success('MCP snippet copied', { description: 'Paste it into your AI app settings.' });
   }
+
+  // Capture / index actions with toast feedback. Centralised here so the
+  // Dashboard, AppShell command palette, and any future surface all get the
+  // same UX without duplicating the toast wiring.
+  const actions = React.useMemo(
+    () => ({
+      onStart: async () => {
+        try {
+          setOverview(await window.cofounderos.startRuntime());
+          toast.success('Capture started');
+        } catch (err) {
+          toast.error('Could not start capture', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onStop: async () => {
+        try {
+          await window.cofounderos.stopRuntime();
+          setOverview(await window.cofounderos.getOverview().catch(() => null));
+          toast.info('Capture stopped');
+        } catch (err) {
+          toast.error('Could not stop capture', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onPause: async () => {
+        try {
+          setOverview(await window.cofounderos.pauseCapture());
+          toast.info('Capture paused');
+        } catch (err) {
+          toast.error('Could not pause capture', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onResume: async () => {
+        try {
+          setOverview(await window.cofounderos.resumeCapture());
+          toast.success('Capture resumed');
+        } catch (err) {
+          toast.error('Could not resume capture', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onTriggerIndex: async () => {
+        try {
+          setOverview(await window.cofounderos.triggerIndex());
+          toast.success('Organizing memories…', {
+            description: 'This runs in the background.',
+          });
+        } catch (err) {
+          toast.error('Could not start indexer', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onTriggerReorganise: async () => {
+        try {
+          setOverview(await window.cofounderos.triggerReorganise());
+          toast.success('Rebuilding summaries…', {
+            description: 'This runs in the background.',
+          });
+        } catch (err) {
+          toast.error('Could not rebuild summaries', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onBootstrap: async () => {
+        setBootstrapEvents([]);
+        try {
+          await window.cofounderos.bootstrapModel();
+          setDoctor(await window.cofounderos.runDoctor());
+          toast.success('Local AI is ready');
+        } catch (err) {
+          toast.error('AI setup failed', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+    }),
+    [],
+  );
 
   if (showOnboarding) {
     return (
@@ -134,88 +234,68 @@ export function App() {
     );
   }
 
+  const screenContent = error ? (
+    <div className="pt-6">
+      <ErrorView error={error} onRetry={() => loadScreen(screen)} />
+    </div>
+  ) : screen === 'dashboard' ? (
+    <Dashboard
+      overview={overview}
+      doctor={doctor}
+      bootstrapEvents={bootstrapEvents}
+      onRefresh={() => loadScreen('dashboard')}
+      onStart={actions.onStart}
+      onStop={actions.onStop}
+      onPause={actions.onPause}
+      onResume={actions.onResume}
+      onTriggerIndex={actions.onTriggerIndex}
+      onTriggerReorganise={actions.onTriggerReorganise}
+      onBootstrap={actions.onBootstrap}
+      onGoTimeline={() => setScreen('timeline')}
+    />
+  ) : screen === 'timeline' ? (
+    <Timeline
+      days={days}
+      selectedDay={selectedDay}
+      journal={journal}
+      onChooseDay={chooseDay}
+      onRefresh={() => loadScreen('timeline')}
+    />
+  ) : screen === 'search' ? (
+    <Search days={days} />
+  ) : screen === 'connect' ? (
+    <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
+  ) : screen === 'settings' ? (
+    <Settings config={config} onSaved={setConfig} />
+  ) : (
+    <Help
+      logs={logs}
+      onRestartOnboarding={() => {
+        try {
+          localStorage.removeItem(ONBOARDING_KEY);
+        } catch {
+          /* ignore */
+        }
+        setShowOnboarding(true);
+      }}
+    />
+  );
+
   return (
     <AppShell
       screen={screen}
       onChange={setScreen}
       overview={overview}
-      onStart={async () => setOverview(await window.cofounderos.startRuntime())}
-      onStop={async () => {
-        await window.cofounderos.stopRuntime();
-        setOverview(await window.cofounderos.getOverview().catch(() => null));
-      }}
-      onPause={async () => setOverview(await window.cofounderos.pauseCapture())}
-      onResume={async () => setOverview(await window.cofounderos.resumeCapture())}
-      onTriggerIndex={async () => setOverview(await window.cofounderos.triggerIndex())}
-      onTriggerReorganise={async () =>
-        setOverview(await window.cofounderos.triggerReorganise())
-      }
-      onBootstrap={async () => {
-        setBootstrapEvents([]);
-        await window.cofounderos.bootstrapModel();
-        setDoctor(await window.cofounderos.runDoctor());
-      }}
+      onStart={actions.onStart}
+      onStop={actions.onStop}
+      onPause={actions.onPause}
+      onResume={actions.onResume}
+      onTriggerIndex={actions.onTriggerIndex}
+      onTriggerReorganise={actions.onTriggerReorganise}
+      onBootstrap={actions.onBootstrap}
       onCopyMcpSnippet={copyMcpSnippet}
     >
-      {error ? (
-        <div className="pt-6">
-          <ErrorView error={error} onRetry={() => loadScreen(screen)} />
-        </div>
-      ) : screen === 'dashboard' ? (
-        <Dashboard
-          overview={overview}
-          doctor={doctor}
-          bootstrapEvents={bootstrapEvents}
-          onRefresh={() => loadScreen('dashboard')}
-          onStart={async () => setOverview(await window.cofounderos.startRuntime())}
-          onStop={async () => {
-            await window.cofounderos.stopRuntime();
-            setOverview(await window.cofounderos.getOverview().catch(() => null));
-          }}
-          onPause={async () => setOverview(await window.cofounderos.pauseCapture())}
-          onResume={async () => setOverview(await window.cofounderos.resumeCapture())}
-          onTriggerIndex={async () => setOverview(await window.cofounderos.triggerIndex())}
-          onTriggerReorganise={async () =>
-            setOverview(await window.cofounderos.triggerReorganise())
-          }
-          onBootstrap={async () => {
-            setBootstrapEvents([]);
-            await window.cofounderos.bootstrapModel();
-            setDoctor(await window.cofounderos.runDoctor());
-          }}
-          onGoTimeline={() => setScreen('timeline')}
-        />
-      ) : screen === 'timeline' ? (
-        <Timeline
-          days={days}
-          selectedDay={selectedDay}
-          journal={journal}
-          onChooseDay={chooseDay}
-          onRefresh={() => loadScreen('timeline')}
-        />
-      ) : screen === 'search' ? (
-        <Search days={days} />
-      ) : screen === 'connect' ? (
-        <Connect
-          overview={overview}
-          config={config}
-          onRefresh={() => loadScreen('connect')}
-        />
-      ) : screen === 'settings' ? (
-        <Settings config={config} onSaved={setConfig} />
-      ) : (
-        <Help
-          logs={logs}
-          onRestartOnboarding={() => {
-            try {
-              localStorage.removeItem(ONBOARDING_KEY);
-            } catch {
-              /* ignore */
-            }
-            setShowOnboarding(true);
-          }}
-        />
-      )}
+      <ErrorBoundary resetKey={screen}>{screenContent}</ErrorBoundary>
     </AppShell>
   );
 }

@@ -1,15 +1,19 @@
 import * as React from 'react';
-import { Check, FolderOpen, Save, X } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { FolderOpen, Monitor, Moon, Power, Save, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Separator } from '@/components/ui/separator';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
+import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
+import { useTheme, type ThemePreference } from '@/lib/theme';
+import { cn } from '@/lib/utils';
 import type { LoadedConfig } from '@/global';
 
 interface SettingsDraft {
@@ -38,10 +42,8 @@ export function Settings({
 }) {
   const [draft, setDraft] = React.useState<SettingsDraft | null>(null);
   const [saving, setSaving] = React.useState(false);
-  const [message, setMessage] = React.useState<{ kind: 'ok' | 'error'; text: string } | null>(
-    null,
-  );
   const [startAtLogin, setStartAtLogin] = React.useState<boolean | null>(null);
+  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   React.useEffect(() => {
     if (config) setDraft(settingsDraftFromConfig(config));
@@ -58,6 +60,20 @@ export function Settings({
     return (
       <div className="flex flex-col gap-6 pt-6">
         <PageHeader title="Settings" description="Loading…" />
+        <Skeleton className="h-9 w-72" />
+        <Card>
+          <CardContent className="flex flex-col gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="flex items-center justify-between gap-4">
+                <div className="flex-1 space-y-2">
+                  <Skeleton className="h-4 w-40" />
+                  <Skeleton className="h-3 w-72" />
+                </div>
+                <Skeleton className="h-5 w-9 rounded-full" />
+              </div>
+            ))}
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -67,21 +83,35 @@ export function Settings({
 
   const set = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => {
     setDraft({ ...currentDraft, [key]: value });
-    setMessage(null);
   };
   const baseline = settingsDraftFromConfig(loadedConfig);
   const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(baseline);
 
-  async function save() {
+  async function save(opts: { restart?: boolean } = {}) {
     if (!hasUnsavedChanges) return;
     setSaving(true);
-    setMessage(null);
     try {
       const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(currentDraft));
       onSaved(next);
-      setMessage({ kind: 'ok', text: 'Saved! Changes apply next time you start.' });
+      if (opts.restart) {
+        try {
+          await window.cofounderos.stopRuntime();
+          await window.cofounderos.startRuntime();
+          toast.success('Settings saved & runtime restarted');
+        } catch (err) {
+          toast.error('Saved, but restart failed', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else {
+        toast.success('Settings saved', {
+          description: 'Some changes apply on next start.',
+        });
+      }
     } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof Error ? err.message : String(err) });
+      toast.error('Could not save settings', {
+        description: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setSaving(false);
     }
@@ -95,7 +125,6 @@ export function Settings({
 
   function resetDraft() {
     setDraft(settingsDraftFromConfig(loadedConfig));
-    setMessage(null);
   }
 
   return (
@@ -125,14 +154,6 @@ export function Settings({
         }
       />
 
-      {message && (
-        <Alert variant={message.kind === 'error' ? 'destructive' : 'success'}>
-          {message.kind === 'ok' ? <Check /> : <X />}
-          <AlertTitle>{message.kind === 'ok' ? 'Saved' : 'Could not save'}</AlertTitle>
-          <AlertDescription>{message.text}</AlertDescription>
-        </Alert>
-      )}
-
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="self-start">
           <TabsTrigger value="general">General</TabsTrigger>
@@ -144,13 +165,23 @@ export function Settings({
 
         <TabsContent value="general">
           <Card>
-            <CardContent>
+            <CardContent className="flex flex-col gap-0">
               <ToggleRow
                 title="Open at startup"
                 description="CofounderOS opens quietly in the background when you sign in."
                 checked={Boolean(startAtLogin)}
                 onChange={(v) => void toggleStartAtLogin(v)}
               />
+              <Separator className="my-4" />
+              <div className="flex flex-col gap-3">
+                <div>
+                  <h4 className="font-medium">Appearance</h4>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Match your system, or pick a fixed theme.
+                  </p>
+                </div>
+                <ThemePicker value={themePreference} onChange={setThemePreference} />
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -299,10 +330,51 @@ export function Settings({
       <SaveBar
         hasUnsavedChanges={hasUnsavedChanges}
         saving={saving}
-        onSave={save}
+        onSave={() => void save()}
+        onSaveAndRestart={() => void save({ restart: true })}
         onReset={resetDraft}
       />
     </div>
+  );
+}
+
+function ThemePicker({
+  value,
+  onChange,
+}: {
+  value: ThemePreference;
+  onChange: (next: ThemePreference) => void;
+}) {
+  const options: Array<{ id: ThemePreference; label: string; icon: React.ReactNode }> = [
+    { id: 'auto', label: 'Auto', icon: <Monitor /> },
+    { id: 'light', label: 'Light', icon: <Sun /> },
+    { id: 'dark', label: 'Dark', icon: <Moon /> },
+  ];
+  return (
+    <RadioGroup
+      value={value}
+      onValueChange={(v) => onChange(v as ThemePreference)}
+      className="grid grid-cols-3 gap-2"
+    >
+      {options.map((opt) => (
+        <Label
+          key={opt.id}
+          htmlFor={`theme-${opt.id}`}
+          className={cn(
+            'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border bg-card p-3 text-sm font-normal transition-colors',
+            value === opt.id
+              ? 'border-primary ring-2 ring-primary/20'
+              : 'hover:bg-accent/40',
+          )}
+        >
+          <RadioGroupItem value={opt.id} id={`theme-${opt.id}`} className="sr-only" />
+          <div className="size-8 grid place-items-center text-muted-foreground [&>svg]:size-4">
+            {opt.icon}
+          </div>
+          <span className="font-medium">{opt.label}</span>
+        </Label>
+      ))}
+    </RadioGroup>
   );
 }
 
@@ -350,21 +422,39 @@ function SaveBar({
   hasUnsavedChanges,
   saving,
   onSave,
+  onSaveAndRestart,
   onReset,
 }: {
   hasUnsavedChanges: boolean;
   saving: boolean;
   onSave: () => void;
+  onSaveAndRestart: () => void;
   onReset: () => void;
 }) {
   if (!hasUnsavedChanges) return null;
   return (
-    <div className="fixed bottom-4 left-64 right-4 z-30 mx-auto max-w-2xl">
-      <div className="flex items-center justify-between gap-3 rounded-xl border bg-popover px-4 py-3 shadow-lg">
-        <p className="text-sm">You have unsaved changes.</p>
+    <div
+      className="fixed bottom-4 right-4 z-30 mx-auto max-w-2xl pl-4 animate-in fade-in-0 slide-in-from-bottom-3"
+      style={{ left: 'var(--sidebar-w, 15rem)' }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-popover px-4 py-3 shadow-lg">
+        <p className="text-sm">
+          You have unsaved changes.{' '}
+          <span className="text-muted-foreground">Some take effect on next start.</span>
+        </p>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onReset}>
+          <Button variant="ghost" size="sm" onClick={onReset} disabled={saving}>
             Reset
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSaveAndRestart}
+            disabled={saving}
+            title="Save and restart the runtime so changes apply now"
+          >
+            <Power />
+            {saving ? 'Working…' : 'Save & restart'}
           </Button>
           <Button size="sm" onClick={onSave} disabled={saving}>
             <Save />

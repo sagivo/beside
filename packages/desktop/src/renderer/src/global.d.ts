@@ -25,6 +25,7 @@ declare global {
       copyText: (text: string) => Promise<{ copied: true }>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
+      onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
     };
   }
 }

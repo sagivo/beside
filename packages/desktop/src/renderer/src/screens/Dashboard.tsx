@@ -16,6 +16,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+import { Skeleton } from '@/components/ui/skeleton';
+import { AppBreakdown } from '@/components/AppBreakdown';
+import { LiveCaptureStrip } from '@/components/LiveCaptureStrip';
 import { PageHeader } from '@/components/PageHeader';
 import { bootstrapMessage, formatBytes, formatNumber, indexingStatusText } from '@/lib/format';
 import { cn } from '@/lib/utils';
@@ -59,6 +62,29 @@ export function Dashboard({
     return (
       <div className="flex flex-col gap-6 pt-6">
         <PageHeader title="Dashboard" description="Getting things ready…" />
+        <Card>
+          <CardContent className="flex items-center gap-5">
+            <Skeleton className="size-14 rounded-xl" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-5 w-48" />
+              <Skeleton className="h-4 w-72" />
+            </div>
+            <Skeleton className="h-10 w-24" />
+          </CardContent>
+        </Card>
+        <div className="grid gap-4 sm:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader>
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-9 w-20 mt-1" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-3 w-32" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
@@ -151,6 +177,8 @@ export function Dashboard({
         </Alert>
       )}
 
+      <LiveCaptureStrip overview={overview} onGoTimeline={onGoTimeline} />
+
       {needsModelSetup && (
         <Alert variant="warning">
           <Sparkles />
@@ -185,11 +213,7 @@ export function Dashboard({
       )}
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <button
-          type="button"
-          onClick={onGoTimeline}
-          className="text-left group"
-        >
+        <button type="button" onClick={onGoTimeline} className="text-left group">
           <Card className="h-full transition-colors group-hover:border-primary/40">
             <CardHeader>
               <CardDescription>Captured today</CardDescription>
@@ -225,6 +249,8 @@ export function Dashboard({
           </CardContent>
         </Card>
       </div>
+
+      <AppBreakdown overview={overview} />
 
       <section>
         <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">

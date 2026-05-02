@@ -27,6 +27,9 @@ const api = {
   onBootstrapProgress: (callback: (progress: unknown) => void) => {
     ipcRenderer.on('cofounderos:bootstrap-progress', (_event, progress: unknown) => callback(progress));
   },
+  onOverview: (callback: (overview: unknown) => void) => {
+    ipcRenderer.on('cofounderos:overview', (_event, overview: unknown) => callback(overview));
+  },
 };
 
 contextBridge.exposeInMainWorld('cofounderos', api);

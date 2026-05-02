@@ -5,8 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
-import { prettyDay } from '@/lib/format';
+import { useFrameDetail } from '@/components/FrameDetailDialog';
+import { formatLocalTime, prettyDay } from '@/lib/format';
+import { listItemProps, useListKeyboardNav } from '@/lib/list-keys';
 import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
 import type { ActivitySession, Frame, JournalDay } from '@/global';
@@ -25,7 +28,8 @@ export function Timeline({
   onRefresh: () => void;
 }) {
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
-  const [copiedSummary, setCopiedSummary] = React.useState(false);
+
+  useListKeyboardNav();
 
   const sessions = journal?.sessions ?? [];
   const frames = journal?.frames ?? [];
@@ -38,8 +42,9 @@ export function Timeline({
     if (!journal) return;
     const summary = renderDaySummary(journal);
     await window.cofounderos.copyText(summary);
-    setCopiedSummary(true);
-    window.setTimeout(() => setCopiedSummary(false), 2200);
+    toast.success('Day summary copied', {
+      description: `${frames.length} moments · ${sessions.length} sessions`,
+    });
   }
 
   return (
@@ -123,7 +128,7 @@ export function Timeline({
                     </div>
                     <Button variant="outline" size="sm" onClick={() => void copyDaySummary()}>
                       <Copy />
-                      {copiedSummary ? 'Copied!' : 'Copy summary'}
+                      Copy summary
                     </Button>
                   </div>
                 </CardHeader>
@@ -215,8 +220,8 @@ function SessionRow({
   selected: boolean;
   onClick: () => void;
 }) {
-  const start = (session.started_at || '').slice(11, 16);
-  const end = (session.ended_at || '').slice(11, 16);
+  const start = formatLocalTime(session.started_at);
+  const end = formatLocalTime(session.ended_at);
   const minutes = Math.round((session.active_ms || 0) / 60000);
   return (
     <button
@@ -245,6 +250,7 @@ function SessionRow({
 
 function MomentCard({ frame }: { frame: Frame }) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
+  const detail = useFrameDetail();
   React.useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -279,10 +285,19 @@ function MomentCard({ frame }: { frame: Frame }) {
   }, [frame.asset_path]);
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card overflow-hidden">
+    <button
+      type="button"
+      onClick={() => detail.open(frame)}
+      {...listItemProps}
+      className="group flex flex-col gap-2 rounded-lg border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+    >
       <div className="aspect-video w-full bg-muted/40 grid place-items-center overflow-hidden">
         {thumbUrl ? (
-          <img className="w-full h-full object-cover" src={thumbUrl} alt="" />
+          <img
+            className="w-full h-full object-cover transition-transform group-hover:scale-[1.02]"
+            src={thumbUrl}
+            alt=""
+          />
         ) : (
           <div className="flex flex-col items-center gap-1 text-muted-foreground">
             <ImageOff className="size-6" />
@@ -293,7 +308,7 @@ function MomentCard({ frame }: { frame: Frame }) {
       <div className="px-3 pb-3 flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs text-muted-foreground">
-            {(frame.timestamp || '').slice(11, 16)}
+            {formatLocalTime(frame.timestamp)}
           </span>
           <Badge variant="muted" className="truncate max-w-[140px]">
             {frame.app || 'Unknown app'}
@@ -308,7 +323,7 @@ function MomentCard({ frame }: { frame: Frame }) {
               : 'No details')}
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -332,8 +347,8 @@ function renderDaySummary(journal: JournalDay): string {
     lines.push('- No work sessions found yet.');
   } else {
     for (const session of sessions.slice(0, 12)) {
-      const start = (session.started_at || '').slice(11, 16);
-      const end = (session.ended_at || '').slice(11, 16);
+      const start = formatLocalTime(session.started_at);
+      const end = formatLocalTime(session.ended_at);
       const label = session.primary_entity_path || session.primary_app || 'Mixed work';
       lines.push(
         `- ${start}-${end}: ${label} (${Math.round((session.active_ms || 0) / 60000)} active min, ${session.frame_count} moments)`,
@@ -342,7 +357,7 @@ function renderDaySummary(journal: JournalDay): string {
   }
   lines.push('', '## Recent moments');
   for (const frame of frames.slice(0, 12)) {
-    const time = (frame.timestamp || '').slice(11, 16);
+    const time = formatLocalTime(frame.timestamp);
     const title = frame.window_title || frame.entity_path || frame.url || 'Untitled';
     lines.push(`- ${time} · ${frame.app || 'Unknown app'} · ${title}`);
   }

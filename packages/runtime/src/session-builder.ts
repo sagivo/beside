@@ -6,6 +6,42 @@ import type {
   Logger,
 } from '@cofounderos/interfaces';
 import { newActivitySessionId, dayKey } from '@cofounderos/core';
+import {
+  isSupportingAppEntity,
+  CODE_APPS,
+  TERMINAL_APPS,
+} from './entity-resolver.js';
+
+/**
+ * Entity kinds that the lift will fold supporting-app orphans into.
+ * Restricted to `project` and `repo` deliberately:
+ *
+ * - A Slack channel or DM doesn't "own" Cursor work that happened
+ *   nearby — we'd misattribute coding sessions to whoever sent the
+ *   most recent message.
+ * - A meeting / doc page is similarly an orthogonal context.
+ *
+ * Only project / repo entities map cleanly to "what code did the
+ * user produce in this session", which is the question the lift is
+ * answering.
+ */
+const LIFT_TARGET_KINDS: ReadonlySet<EntityKind> = new Set([
+  'project',
+  'repo',
+]);
+
+/** Apps whose dominance triggers the lift. Coding/terminal sessions only. */
+const LIFT_TRIGGER_APPS: ReadonlySet<string> = new Set([
+  ...CODE_APPS,
+  ...TERMINAL_APPS,
+]);
+
+/**
+ * Floor on the target's absolute attention. Prevents lifting on the
+ * strength of one or two stray frames where the resolver got lucky.
+ * 20s is roughly four 5-second screenshots in the same project.
+ */
+const LIFT_MIN_TARGET_MS = 20_000;
 
 /**
  * SessionBuilder — turns the chronological stream of frames into
@@ -291,6 +327,15 @@ export class SessionBuilder {
 
   private async persist(acc: SessionAccumulator): Promise<void> {
     if (acc.frameIds.length === 0) return;
+
+    // Session-aware entity lifting: if a supporting app (Cursor, Warp,
+    // …) has frames here that the per-frame resolver could only park
+    // under `apps/<app>` AND the session is dominated by a real
+    // non-app entity (project / repo / channel / …), reattribute
+    // those orphans into the dominant entity. Updates `acc` in place
+    // so the persisted session reflects the lifted state.
+    await this.maybeLiftSupportingAppFrames(acc);
+
     const entityRanking = [...acc.entityWeights.entries()].sort(
       (a, b) => b[1].ms - a[1].ms,
     );
@@ -325,4 +370,107 @@ export class SessionBuilder {
       );
     }
   }
+
+  /**
+   * If this session was *primarily* a coding / terminal session AND
+   * already contains a project / repo entity that the per-frame
+   * resolver was able to identify on its own, lift any supporting-app
+   * orphans (e.g. `apps/cursor` frames whose window title was bare
+   * `"Cursor"` with no project hint) into that project.
+   *
+   * Conditions for the lift to fire:
+   *   (a) The session's primary app is a known code editor or
+   *       terminal (LIFT_TRIGGER_APPS) — the user was mostly coding.
+   *   (b) >= 1 supporting-app orphan exists in the session
+   *       (otherwise there's nothing to move).
+   *   (c) The session contains at least one project / repo entity
+   *       (otherwise we have no informed guess about what the orphans
+   *       belong to — leaving them on `apps/cursor` is honest).
+   *   (d) The dominant project / repo passes a small absolute floor on
+   *       attention (LIFT_MIN_TARGET_MS), so a 5-second tab into a
+   *       project doesn't absorb an hour of unrelated editor work.
+   *
+   * No-op when any of these conditions fails — the resolver-supplied
+   * `apps/<editor>` page remains the home for that work.
+   */
+  private async maybeLiftSupportingAppFrames(
+    acc: SessionAccumulator,
+  ): Promise<void> {
+    // (a) primary app must be a code editor or terminal
+    let primaryApp: string | null = null;
+    let primaryAppMs = -1;
+    for (const [app, ms] of acc.appWeights) {
+      if (ms > primaryAppMs) {
+        primaryAppMs = ms;
+        primaryApp = app;
+      }
+    }
+    if (!primaryApp || !LIFT_TRIGGER_APPS.has(primaryApp)) return;
+
+    // (b) + (c) + (d) — find supporting orphans + dominant project / repo
+    let target: { path: string; kind: EntityKind; ms: number } | null = null;
+    const supportingOrphans: Array<{ path: string; ms: number }> = [];
+    for (const [path, info] of acc.entityWeights) {
+      if (LIFT_TARGET_KINDS.has(info.kind)) {
+        if (!target || info.ms > target.ms) {
+          target = { path, kind: info.kind, ms: info.ms };
+        }
+      } else if (info.kind === 'app' && isSupportingAppEntity(path)) {
+        supportingOrphans.push({ path, ms: info.ms });
+      }
+    }
+    if (!target || supportingOrphans.length === 0) return;
+    if (target.ms < LIFT_MIN_TARGET_MS) return;
+
+    // Resolve a stable title for the target. Use what we already have
+    // in the entities table when possible — it preserves the
+    // resolver-supplied human-readable form (e.g. "Cofounderos" for
+    // `projects/cofounderos`). If the entity row doesn't exist yet
+    // (brand-new session), fall back to a path-derived title.
+    const existing = await this.storage.getEntity(target.path);
+    const title = existing?.title ?? deriveFallbackTitle(target.path);
+
+    const fromAppPaths = supportingOrphans.map((o) => o.path);
+    const result = await this.storage.reattributeFrames({
+      frameIds: acc.frameIds,
+      fromAppPaths,
+      target: { path: target.path, kind: target.kind, title },
+    });
+    if (result.moved === 0) return;
+
+    // Reflect the lift in the in-memory accumulator so the session row
+    // we're about to persist gets the correct primary_entity_path.
+    let liftedMs = 0;
+    for (const orphan of supportingOrphans) {
+      liftedMs += orphan.ms;
+      acc.entityWeights.delete(orphan.path);
+    }
+    const cur = acc.entityWeights.get(target.path);
+    if (cur) {
+      cur.ms += liftedMs;
+    } else {
+      acc.entityWeights.set(target.path, { kind: target.kind, ms: liftedMs });
+    }
+
+    this.logger.info(
+      `lifted ${result.moved} frame(s) from ${fromAppPaths.join(', ')} → ${target.path} ` +
+        `(session ${acc.id}, ${(liftedMs / 1000).toFixed(1)}s of attention)`,
+    );
+  }
+}
+
+/**
+ * Derive a humane title from an entity path when nothing better is
+ * available. Mirrors the storage adapter's pathToTitle helper but
+ * lives here so the SessionBuilder doesn't have to import storage
+ * internals.
+ */
+function deriveFallbackTitle(p: string): string {
+  const last = p.split('/').pop() ?? p;
+  return (
+    last
+      .replace(/[-_]+/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim() || p
+  );
 }
