@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   createLogger,
   defaultDataDir,
@@ -14,6 +15,10 @@ import type {
   ExportStatus,
   Frame,
   FrameQuery,
+  Insight,
+  InsightAnswer,
+  InsightEvidence,
+  InsightQuery,
   IndexState,
   Logger,
   StorageStats,
@@ -29,6 +34,7 @@ import {
   type OrchestratorHandles,
   type OrchestratorOptions,
 } from './orchestrator.js';
+import { redactPii } from './pii.js';
 
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
@@ -324,6 +330,65 @@ export class CofounderRuntime {
     return await this.withHandles((handles) => handles.storage.searchFrames(query));
   }
 
+  async listInsights(query: InsightQuery = {}): Promise<Insight[]> {
+    return await this.withHandles((handles) => handles.storage.listInsights(query));
+  }
+
+  async runInsightsNow(): Promise<Insight[]> {
+    return await this.withHandles(async (handles) => {
+      await handles.insightsWorker.tick();
+      return await handles.storage.listInsights({ status: 'active', limit: 50 });
+    });
+  }
+
+  async askInsights(input: { question: string; from?: string; to?: string }): Promise<InsightAnswer> {
+    const question = input.question.trim();
+    if (!question) throw new Error('Question is required');
+    return await this.withHandles(async (handles) => {
+      const ready = await handles.model.isAvailable().catch(() => false);
+      if (!ready) {
+        throw new Error('Local AI is unavailable. Set up local AI before asking Insights.');
+      }
+
+      const now = new Date().toISOString();
+      const from = input.from ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const to = input.to ?? now;
+      const frames = await handles.storage.searchFrames({
+        text: question,
+        from,
+        to,
+        limit: 30,
+      }).catch(() => [] as Frame[]);
+      const sessions = await handles.storage.listSessions({
+        from,
+        to,
+        order: 'recent',
+        limit: 25,
+      });
+      const evidence = buildInsightAnswerEvidence(
+        question,
+        frames,
+        sessions,
+        handles.config.capture.privacy.sensitive_keywords ?? [],
+      );
+      const raw = await handles.model.complete(buildInsightQuestionPrompt(question, evidence), {
+        responseFormat: 'json',
+        temperature: 0.2,
+        maxTokens: 1200,
+        systemPrompt: 'You answer questions about local activity data. Use only the provided evidence.',
+      });
+      const answer = parseInsightAnswer(question, raw, evidence, now);
+      if (answer.generated_insight && hasEvidence(answer.generated_insight.evidence)) {
+        await handles.storage.upsertInsight(answer.generated_insight);
+      }
+      return answer;
+    });
+  }
+
+  async dismissInsight(id: string): Promise<void> {
+    await this.withHandles((handles) => handles.storage.dismissInsight(id));
+  }
+
   async readAsset(assetPath: string): Promise<Buffer> {
     return await this.withHandles(async (handles) => {
       const storageRoot = path.resolve(handles.storage.getRoot());
@@ -394,6 +459,165 @@ function latestIso(values: Array<string | null>): string | null {
     if (value && (!latest || value > latest)) latest = value;
   }
   return latest;
+}
+
+function buildInsightAnswerEvidence(
+  question: string,
+  frames: Frame[],
+  sessions: ActivitySession[],
+  sensitiveKeywords: string[],
+): InsightEvidence {
+  const relevantFrames = frames.slice(0, 12);
+  const relevantSessions = sessions.slice(0, 8);
+  const apps = Array.from(new Set([
+    ...relevantFrames.map((frame) => frame.app).filter(Boolean),
+    ...relevantSessions.map((session) => session.primary_app).filter(Boolean),
+  ] as string[])).slice(0, 8);
+  const entities = Array.from(new Set([
+    ...relevantFrames.map((frame) => frame.entity_path).filter(Boolean),
+    ...relevantSessions.map((session) => session.primary_entity_path).filter(Boolean),
+  ] as string[])).slice(0, 8);
+  const activeMs = relevantSessions.reduce((sum, session) => sum + Math.max(0, session.active_ms), 0);
+  return {
+    frameIds: relevantFrames.map((frame) => frame.id),
+    sessionIds: relevantSessions.map((session) => session.id),
+    apps,
+    entities,
+    metrics: {
+      matchedFrames: relevantFrames.length,
+      sessions: relevantSessions.length,
+      activeMinutes: Math.round(activeMs / 60_000),
+      query: question,
+    },
+    snippets: relevantFrames.slice(0, 6).map((frame) => ({
+      label: frame.app || 'Frame',
+      frameId: frame.id,
+      sessionId: frame.activity_session_id ?? undefined,
+      text: redactPii(
+        [frame.window_title, frame.url, frame.text].filter(Boolean).join(' | '),
+        sensitiveKeywords,
+      ).replace(/\s+/g, ' ').slice(0, 360),
+    })),
+  };
+}
+
+function buildInsightQuestionPrompt(question: string, evidence: InsightEvidence): string {
+  return [
+    `Question: ${question}`,
+    '',
+    'Evidence from local activity data:',
+    JSON.stringify(evidence),
+    '',
+    'Return JSON only with this shape:',
+    '{"answer":"...","suggested_actions":["..."],"generated_insight":{"title":"...","summary":"...","recommendation":"...","severity":"info|low|medium|high","confidence":0.0}}',
+    'If evidence is thin, say so and suggest what data would make the answer stronger.',
+  ].join('\n');
+}
+
+function parseInsightAnswer(
+  question: string,
+  raw: string,
+  evidence: InsightEvidence,
+  createdAt: string,
+): InsightAnswer {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      parsed = value as Record<string, unknown>;
+    }
+  } catch {
+    parsed = {};
+  }
+
+  const answer = typeof parsed.answer === 'string' && parsed.answer.trim()
+    ? parsed.answer.trim()
+    : 'I could not produce a reliable answer from the available evidence.';
+  const suggestedActions = Array.isArray(parsed.suggested_actions)
+    ? parsed.suggested_actions.filter((item): item is string => typeof item === 'string').slice(0, 5)
+    : [];
+  const modelInsight = parsed.generated_insight && typeof parsed.generated_insight === 'object'
+    ? parsed.generated_insight as Record<string, unknown>
+    : null;
+  const generatedInsight = hasEvidence(evidence)
+    ? buildCustomQueryInsight(question, answer, suggestedActions, modelInsight, evidence, createdAt)
+    : undefined;
+
+  return {
+    question,
+    answer,
+    evidence,
+    suggested_actions: suggestedActions,
+    generated_insight: generatedInsight,
+    created_at: createdAt,
+  };
+}
+
+function buildCustomQueryInsight(
+  question: string,
+  answer: string,
+  suggestedActions: string[],
+  modelInsight: Record<string, unknown> | null,
+  evidence: InsightEvidence,
+  createdAt: string,
+): Insight {
+  const title = textField(modelInsight?.title, `Answer: ${question}`, 100);
+  const summary = textField(modelInsight?.summary, answer, 320);
+  const recommendation = textField(
+    modelInsight?.recommendation,
+    suggestedActions[0] ?? 'Review the linked evidence before acting on this answer.',
+    240,
+  );
+  const severity = severityField(modelInsight?.severity);
+  const confidence = numberField(modelInsight?.confidence, evidence.frameIds?.length ? 0.65 : 0.45);
+  const period = {
+    label: 'Custom query',
+    start: createdAt,
+    end: createdAt,
+  };
+  return {
+    id: `ins_${createHash('sha256').update(JSON.stringify({
+      question,
+      frameIds: evidence.frameIds?.slice(0, 8),
+      sessionIds: evidence.sessionIds?.slice(0, 8),
+      createdHour: createdAt.slice(0, 13),
+    })).digest('hex').slice(0, 24)}`,
+    kind: 'custom_query',
+    severity,
+    title,
+    summary,
+    recommendation,
+    confidence,
+    evidence,
+    period,
+    status: 'active',
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+}
+
+function hasEvidence(evidence: InsightEvidence): boolean {
+  return !!(
+    evidence.frameIds?.length ||
+    evidence.sessionIds?.length ||
+    evidence.apps?.length ||
+    evidence.entities?.length
+  );
+}
+
+function textField(value: unknown, fallback: string, max: number): string {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : fallback.slice(0, max);
+}
+
+function numberField(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(1, value));
+}
+
+function severityField(value: unknown): Insight['severity'] {
+  return value === 'info' || value === 'low' || value === 'medium' || value === 'high'
+    ? value
+    : 'info';
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

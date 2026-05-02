@@ -9,6 +9,7 @@ import { ThemeProvider } from '@/lib/theme';
 import { Connect } from '@/screens/Connect';
 import { Dashboard } from '@/screens/Dashboard';
 import { Help } from '@/screens/Help';
+import { Insights } from '@/screens/Insights';
 import { Search } from '@/screens/Search';
 import { Settings } from '@/screens/Settings';
 import { Timeline } from '@/screens/Timeline';
@@ -16,6 +17,8 @@ import { Onboarding } from '@/onboarding/Onboarding';
 import { ONBOARDING_KEY, type Screen } from '@/types';
 import type {
   DoctorCheck,
+  Insight,
+  InsightAnswer,
   JournalDay,
   LoadedConfig,
   ModelBootstrapProgress,
@@ -44,10 +47,15 @@ function AppInner() {
   const [days, setDays] = React.useState<string[]>([]);
   const [selectedDay, setSelectedDay] = React.useState<string | null>(null);
   const [journal, setJournal] = React.useState<JournalDay | null>(null);
+  const [insights, setInsights] = React.useState<Insight[] | null>(null);
   const [config, setConfig] = React.useState<LoadedConfig | null>(null);
   const [logs, setLogs] = React.useState('');
   const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
   const [error, setError] = React.useState<string | null>(null);
+  const [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(
+    null,
+  );
+  const searchRequestId = React.useRef(0);
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => {
     try {
       return localStorage.getItem(ONBOARDING_KEY) !== '1';
@@ -101,6 +109,9 @@ function AppInner() {
         const nextDays = await window.cofounderos.listJournalDays();
         setDays(nextDays);
       }
+      if (next === 'insights') {
+        setInsights(await window.cofounderos.listInsights({ status: 'active', limit: 50 }));
+      }
       if (next === 'connect') {
         setOverview(await window.cofounderos.getOverview());
         setConfig(await window.cofounderos.readConfig());
@@ -128,6 +139,14 @@ function AppInner() {
     const snippet = JSON.stringify({ mcpServers: { cofounderos: { url } } }, null, 2);
     await window.cofounderos.copyText(snippet);
     toast.success('MCP snippet copied', { description: 'Paste it into your AI app settings.' });
+  }
+
+  function runPaletteSearch(query: string) {
+    const q = query.trim();
+    if (!q) return;
+    searchRequestId.current += 1;
+    setSearchRequest({ id: searchRequestId.current, query: q });
+    setScreen('search');
   }
 
   // Capture / index actions with toast feedback. Centralised here so the
@@ -200,6 +219,28 @@ function AppInner() {
           });
         }
       },
+      onRunInsightsNow: async () => {
+        try {
+          setInsights(await window.cofounderos.runInsightsNow());
+          toast.success('Insights refreshed', {
+            description: 'New local patterns are ready to review.',
+          });
+        } catch (err) {
+          toast.error('Could not refresh insights', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onAskInsights: async (question: string): Promise<InsightAnswer> => {
+        const answer = await window.cofounderos.askInsights({ question });
+        setInsights(await window.cofounderos.listInsights({ status: 'active', limit: 50 }));
+        return answer;
+      },
+      onDismissInsight: async (id: string) => {
+        await window.cofounderos.dismissInsight(id);
+        setInsights((prev) => prev?.filter((insight) => insight.id !== id) ?? prev);
+        toast.info('Insight dismissed');
+      },
       onBootstrap: async () => {
         setBootstrapEvents([]);
         try {
@@ -262,7 +303,18 @@ function AppInner() {
       onRefresh={() => loadScreen('timeline')}
     />
   ) : screen === 'search' ? (
-    <Search days={days} />
+    <Search days={days} searchRequest={searchRequest} />
+  ) : screen === 'insights' ? (
+    <Insights
+      insights={insights}
+      onRefresh={actions.onRunInsightsNow}
+      onDismiss={actions.onDismissInsight}
+      onAsk={actions.onAskInsights}
+      onOpenEvidence={(insight) => {
+        setSelectedDay(insight.period.end.slice(0, 10));
+        setScreen('timeline');
+      }}
+    />
   ) : screen === 'connect' ? (
     <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
   ) : screen === 'settings' ? (
@@ -290,8 +342,10 @@ function AppInner() {
       onStop={actions.onStop}
       onPause={actions.onPause}
       onResume={actions.onResume}
+      onSearch={runPaletteSearch}
       onTriggerIndex={actions.onTriggerIndex}
       onTriggerReorganise={actions.onTriggerReorganise}
+      onRunInsightsNow={actions.onRunInsightsNow}
       onBootstrap={actions.onBootstrap}
       onCopyMcpSnippet={copyMcpSnippet}
     >

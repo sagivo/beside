@@ -2,6 +2,7 @@ export type Screen =
   | 'dashboard'
   | 'timeline'
   | 'search'
+  | 'insights'
   | 'connect'
   | 'settings'
   | 'help';

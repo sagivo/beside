@@ -408,6 +408,72 @@ export interface StorageStats {
   eventsByApp: Record<string, number>;
 }
 
+export type InsightKind =
+  | 'time_waste'
+  | 'repeated_task'
+  | 'context_switching'
+  | 'focus_opportunity'
+  | 'trend'
+  | 'custom_query';
+
+export type InsightSeverity = 'info' | 'low' | 'medium' | 'high';
+export type InsightStatus = 'active' | 'dismissed';
+
+export interface InsightPeriod {
+  /** Human label such as "Today", "This week", or "Last 24 hours". */
+  label: string;
+  start: string;
+  end: string;
+}
+
+export interface InsightEvidenceSnippet {
+  label: string;
+  text: string;
+  frameId?: string;
+  sessionId?: string;
+}
+
+export interface InsightEvidence {
+  frameIds?: string[];
+  sessionIds?: string[];
+  apps?: string[];
+  entities?: string[];
+  metrics?: Record<string, number | string>;
+  snippets?: InsightEvidenceSnippet[];
+}
+
+export interface Insight {
+  id: string;
+  kind: InsightKind;
+  severity: InsightSeverity;
+  title: string;
+  summary: string;
+  recommendation: string;
+  confidence: number;
+  evidence: InsightEvidence;
+  period: InsightPeriod;
+  status: InsightStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InsightQuery {
+  status?: InsightStatus;
+  kind?: InsightKind;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+export interface InsightAnswer {
+  question: string;
+  answer: string;
+  evidence: InsightEvidence;
+  suggested_actions: string[];
+  generated_insight?: Insight;
+  created_at: string;
+}
+
 export interface IStorage {
   init(): Promise<void>;
   write(event: RawEvent): Promise<void>;
@@ -663,6 +729,22 @@ export interface IStorage {
    * `get_session` MCP tool and to render session-grouped journals.
    */
   getSessionFrames(sessionId: string): Promise<Frame[]>;
+
+  // -------------------------------------------------------------------------
+  // Insights — persisted local-AI rollups over frames and sessions.
+  // -------------------------------------------------------------------------
+
+  /** List generated insights, newest first by default. */
+  listInsights(query?: InsightQuery): Promise<Insight[]>;
+
+  /** Read a single insight by id. */
+  getInsight(id: string): Promise<Insight | null>;
+
+  /** Insert or update an insight row. Deterministic IDs let workers refresh cards. */
+  upsertInsight(insight: Insight): Promise<void>;
+
+  /** Hide an insight without deleting it so reruns do not resurface dismissed cards. */
+  dismissInsight(id: string): Promise<void>;
 
   /**
    * Clear every session row + null out `frames.activity_session_id`.

@@ -51,7 +51,13 @@ function writeRecent(items: string[]): void {
   }
 }
 
-export function Search({ days }: { days: string[] }) {
+export function Search({
+  days,
+  searchRequest,
+}: {
+  days: string[];
+  searchRequest?: { id: number; query: string } | null;
+}) {
   const [query, setQuery] = React.useState('');
   const [appFilter, setAppFilter] = React.useState<string>('__all__');
   const [dayFilter, setDayFilter] = React.useState<string>('__all__');
@@ -60,6 +66,7 @@ export function Search({ days }: { days: string[] }) {
   const [searched, setSearched] = React.useState(false);
   const [knownApps, setKnownApps] = React.useState<string[]>([]);
   const [recent, setRecent] = React.useState<string[]>(() => readRecent());
+  const handledSearchRequestRef = React.useRef<number | null>(null);
 
   useListKeyboardNav();
 
@@ -83,7 +90,7 @@ export function Search({ days }: { days: string[] }) {
     };
   }, [days]);
 
-  async function runSearch(text?: string) {
+  const runSearch = React.useCallback(async (text?: string) => {
     const q = (text ?? query).trim();
     if (!q) {
       setResults(null);
@@ -113,7 +120,13 @@ export function Search({ days }: { days: string[] }) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [appFilter, dayFilter, query]);
+
+  React.useEffect(() => {
+    if (!searchRequest || handledSearchRequestRef.current === searchRequest.id) return;
+    handledSearchRequestRef.current = searchRequest.id;
+    void runSearch(searchRequest.query);
+  }, [runSearch, searchRequest]);
 
   function clearRecent() {
     setRecent([]);

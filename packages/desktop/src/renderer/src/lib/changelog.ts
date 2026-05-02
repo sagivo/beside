@@ -28,7 +28,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       'New look powered by shadcn — cleaner cards, better spacing, proper dark mode toggle in Settings.',
       'Dashboard shows a live "just captured" strip and a per-app activity breakdown.',
       'Timeline and Search results now open a detail dialog with the full screenshot and metadata.',
-      'Command palette (⌘K) plus keyboard shortcuts: ⌘1–6 jump screens, ⌘. toggles capture, j/k walks Timeline & Search results.',
+      'Command palette (⌘K) plus keyboard shortcuts: ⌘1–7 jump screens, ⌘. toggles capture, j/k walks Timeline & Search results.',
       'Collapsible sidebar, toast notifications, and skeleton loaders.',
       'Settings has a new "Save & restart" button so config changes apply immediately.',
       'Window remembers its size and position across launches.',

@@ -15,8 +15,10 @@ export function AppShell({
   onStop,
   onPause,
   onResume,
+  onSearch,
   onTriggerIndex,
   onTriggerReorganise,
+  onRunInsightsNow,
   onBootstrap,
   onCopyMcpSnippet,
 }: {
@@ -28,8 +30,10 @@ export function AppShell({
   onStop: () => Promise<void> | void;
   onPause: () => Promise<void> | void;
   onResume: () => Promise<void> | void;
+  onSearch: (query: string) => void;
   onTriggerIndex: () => Promise<void> | void;
   onTriggerReorganise: () => Promise<void> | void;
+  onRunInsightsNow: () => Promise<void> | void;
   onBootstrap: () => Promise<void> | void;
   onCopyMcpSnippet?: () => Promise<void> | void;
 }) {
@@ -61,9 +65,10 @@ export function AppShell({
       '1': 'dashboard',
       '2': 'timeline',
       '3': 'search',
-      '4': 'connect',
-      '5': 'settings',
-      '6': 'help',
+      '4': 'insights',
+      '5': 'connect',
+      '6': 'settings',
+      '7': 'help',
     };
 
     function onKey(e: KeyboardEvent) {
@@ -80,7 +85,7 @@ export function AppShell({
       // so the user can still type "1" inside Search / Settings inputs.
       if (isInsideEditableField(e.target)) return;
 
-      // Cmd+1..6: jump screens
+      // Cmd+1..7: jump screens
       if (mod && SCREEN_KEYS[e.key]) {
         e.preventDefault();
         stateRef.current.onChange(SCREEN_KEYS[e.key]!);
@@ -131,6 +136,7 @@ export function AppShell({
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
         onJump={onChange}
+        onSearch={onSearch}
         overview={overview}
         onStart={onStart}
         onStop={onStop}
@@ -138,6 +144,7 @@ export function AppShell({
         onResume={onResume}
         onTriggerIndex={onTriggerIndex}
         onTriggerReorganise={onTriggerReorganise}
+        onRunInsightsNow={onRunInsightsNow}
         onBootstrap={onBootstrap}
         onCopyMcpSnippet={onCopyMcpSnippet}
       />

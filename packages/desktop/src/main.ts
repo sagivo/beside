@@ -708,6 +708,18 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('searchFrames', query);
   });
+  ipcMain.handle('cofounderos:list-insights', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('listInsights', query);
+  });
+  ipcMain.handle('cofounderos:run-insights-now', async () => {
+    return await (await getRuntimeForRequest()).call('runInsightsNow');
+  });
+  ipcMain.handle('cofounderos:ask-insights', async (_event, input: unknown) => {
+    return await (await getRuntimeForRequest()).call('askInsights', input);
+  });
+  ipcMain.handle('cofounderos:dismiss-insight', async (_event, id: string) => {
+    return await (await getRuntimeForRequest()).call('dismissInsight', id);
+  });
   ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
     const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
     return new Uint8Array(Buffer.from(result.base64, 'base64'));

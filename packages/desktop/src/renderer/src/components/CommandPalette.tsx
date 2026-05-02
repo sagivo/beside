@@ -1,9 +1,11 @@
+import * as React from 'react';
 import {
   Calendar,
   CircleStop,
   FolderOpen,
   HelpCircle,
   LayoutDashboard,
+  Lightbulb,
   Pause,
   Play,
   Plug,
@@ -29,6 +31,7 @@ export function CommandPalette({
   open,
   onOpenChange,
   onJump,
+  onSearch,
   overview,
   onStart,
   onStop,
@@ -36,12 +39,14 @@ export function CommandPalette({
   onResume,
   onTriggerIndex,
   onTriggerReorganise,
+  onRunInsightsNow,
   onBootstrap,
   onCopyMcpSnippet,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onJump: (screen: Screen) => void;
+  onSearch: (query: string) => void;
   overview: RuntimeOverview | null;
   onStart: () => Promise<void> | void;
   onStop: () => Promise<void> | void;
@@ -49,12 +54,19 @@ export function CommandPalette({
   onResume: () => Promise<void> | void;
   onTriggerIndex: () => Promise<void> | void;
   onTriggerReorganise: () => Promise<void> | void;
+  onRunInsightsNow: () => Promise<void> | void;
   onBootstrap: () => Promise<void> | void;
   onCopyMcpSnippet?: () => Promise<void> | void;
 }) {
+  const [query, setQuery] = React.useState('');
   const running = overview?.status === 'running';
   const captureLive = !!overview?.capture.running && !overview.capture.paused;
   const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
+  const trimmedQuery = query.trim();
+
+  React.useEffect(() => {
+    if (!open) setQuery('');
+  }, [open]);
 
   function run(fn: () => unknown) {
     onOpenChange(false);
@@ -65,7 +77,11 @@ export function CommandPalette({
 
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
-      <CommandInput placeholder="Type a command or search…" />
+      <CommandInput
+        placeholder="Type a command or search…"
+        value={query}
+        onValueChange={setQuery}
+      />
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
         <CommandGroup heading="Jump to">
@@ -77,6 +93,9 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onJump('insights'))}>
+            <Lightbulb /> Insights
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('connect'))}>
             <Plug /> Connect AI
@@ -116,6 +135,9 @@ export function CommandPalette({
           <CommandItem onSelect={() => run(onTriggerReorganise)}>
             <Wand2 /> Rebuild summaries
           </CommandItem>
+          <CommandItem onSelect={() => run(onRunInsightsNow)}>
+            <Lightbulb /> Refresh insights
+          </CommandItem>
           {!overview?.model.ready && (
             <CommandItem onSelect={() => run(onBootstrap)}>
               <Sparkles /> Set up local AI
@@ -133,6 +155,19 @@ export function CommandPalette({
             <FolderOpen /> Open data folder
           </CommandItem>
         </CommandGroup>
+        {trimmedQuery && (
+          <>
+            <CommandSeparator />
+            <CommandGroup heading="Search memory">
+              <CommandItem
+                value={`search memory ${trimmedQuery}`}
+                onSelect={() => run(() => onSearch(trimmedQuery))}
+              >
+                <Search /> Search for "{trimmedQuery}"
+              </CommandItem>
+            </CommandGroup>
+          </>
+        )}
       </CommandList>
     </CommandDialog>
   );

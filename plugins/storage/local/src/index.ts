@@ -24,6 +24,10 @@ import type {
   EntityCoOccurrence,
   EntityTimelineBucket,
   EntityTimelineQuery,
+  Insight,
+  InsightEvidence,
+  InsightQuery,
+  InsightStatus,
   ActivitySession,
   ListSessionsQuery,
   PluginFactory,
@@ -288,13 +292,14 @@ class LocalStorage implements IStorage {
       this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frame.id);
       this.db
         .prepare(
-          'INSERT INTO frame_text (frame_id, text, window_title, app) VALUES (?, ?, ?, ?)',
+          'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
         )
         .run(
           frame.id,
           frame.text ?? '',
           frame.window_title ?? '',
           frame.app ?? '',
+          entityToFtsText(frame.entity_path, frame.entity_kind),
         );
     });
     tx();
@@ -355,14 +360,17 @@ class LocalStorage implements IStorage {
         sql.push('AND frames.text_source = @text_source');
         params.text_source = query.textSource;
       }
-      // Weighted BM25: window-title hits are far more diagnostic than
-      // body-text or app-name hits ("README.md — cofounderos" tells
-      // you exactly what the user was looking at). Body still
-      // contributes; bare app-name hits are downweighted because every
-      // Slack frame contains the word "Slack".
-      // Column order = (text, window_title, app); FTS5 weights are
-      // multipliers — higher weight = stronger preference.
-      sql.push('ORDER BY bm25(frame_text, 1.0, 2.0, 0.3) ASC');
+      // Weighted BM25 over the four indexed columns of frame_text.
+      // Column order: (text, window_title, app, entity_search).
+      //   - title hits dominate ("README.md — cofounderos" is a
+      //     near-perfect signal of what the user was looking at)
+      //   - entity_search hits are nearly as strong (they mean the
+      //     resolver tied this frame to the entity even when the
+      //     screenshot doesn't show the name)
+      //   - body text still contributes
+      //   - bare app-name hits are downweighted because every Slack
+      //     frame technically contains the word "Slack"
+      sql.push('ORDER BY bm25(frame_text, 1.0, 2.0, 0.3, 1.8) ASC');
       sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 25))}`);
       if (query.offset) sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
       return (this.db.prepare(sql.join(' ')).all(params) as RawFrameRow[]).map(rowToFrame);
@@ -481,17 +489,30 @@ class LocalStorage implements IStorage {
         .run(text, source, frameId);
       // Refresh FTS row so the new text is immediately searchable.
       const row = this.db
-        .prepare('SELECT window_title, app FROM frames WHERE id = ?')
+        .prepare(
+          'SELECT window_title, app, entity_path, entity_kind FROM frames WHERE id = ?',
+        )
         .get(frameId) as
-        | { window_title: string | null; app: string | null }
+        | {
+            window_title: string | null;
+            app: string | null;
+            entity_path: string | null;
+            entity_kind: string | null;
+          }
         | undefined;
       if (row) {
         this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
         this.db
           .prepare(
-            'INSERT INTO frame_text (frame_id, text, window_title, app) VALUES (?, ?, ?, ?)',
+            'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
           )
-          .run(frameId, text, row.window_title ?? '', row.app ?? '');
+          .run(
+            frameId,
+            text,
+            row.window_title ?? '',
+            row.app ?? '',
+            entityToFtsText(row.entity_path, row.entity_kind),
+          );
       }
     });
     tx();
@@ -718,8 +739,50 @@ class LocalStorage implements IStorage {
              frame_count = entities.frame_count + 1`,
         )
         .run(entity.path, entity.kind, entity.title, ts, ts, dur);
+
+      // 4. Refresh the frame's FTS row so a search like "milan" or
+      //    "cofounderos" actually matches all the frames now attributed
+      //    to that entity, not just the ones that literally typed it.
+      this.refreshFrameFtsEntity(frameId, entity.path, entity.kind);
     });
     tx();
+  }
+
+  /**
+   * Update the entity_search column on the FTS row for one frame.
+   * Used after the per-frame resolver attaches an entity, after
+   * SessionBuilder lifts a frame to a different entity, and after
+   * any other path that mutates frames.entity_path.
+   *
+   * Implemented as DELETE + INSERT against frame_text -- FTS5 supports
+   * UPDATE in modern SQLite, but the codebase already standardises
+   * on delete+insert for FTS row mutations, so we stay consistent.
+   */
+  private refreshFrameFtsEntity(
+    frameId: string,
+    entityPath: string | null,
+    entityKind: string | null,
+  ): void {
+    const row = this.db
+      .prepare(
+        'SELECT text, window_title, app FROM frames WHERE id = ?',
+      )
+      .get(frameId) as
+      | { text: string | null; window_title: string | null; app: string | null }
+      | undefined;
+    if (!row) return;
+    this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
+    this.db
+      .prepare(
+        'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(
+        frameId,
+        row.text ?? '',
+        row.window_title ?? '',
+        row.app ?? '',
+        entityToFtsText(entityPath, entityKind),
+      );
   }
 
   async rebuildEntityCounts(): Promise<void> {
@@ -981,8 +1044,25 @@ class LocalStorage implements IStorage {
     //    `affectedPaths` is the deduped set we'll re-aggregate at the end.
     const affectedPaths = new Set<string>([targetPath, ...input.fromAppPaths]);
 
-    // 2. Move the frames in one statement. We exclude frames already
-    //    on the target so re-running this is a no-op.
+    // 2. Identify the exact frame ids that will move (so we can
+    //    refresh their FTS rows after the bulk UPDATE). Same predicate
+    //    as the UPDATE that follows.
+    const movedIds = (
+      this.db
+        .prepare(
+          `SELECT id FROM frames
+             WHERE id IN (${idPlaceholders})
+               AND entity_path IN (${fromPlaceholders})
+               AND entity_path != ?`,
+        )
+        .all(...input.frameIds, ...input.fromAppPaths, targetPath) as Array<{
+        id: string;
+      }>
+    ).map((r) => r.id);
+
+    if (movedIds.length === 0) return { moved: 0, refreshedEntities: [] };
+
+    // 3. Move the frames in one statement.
     const updateStmt = this.db.prepare(
       `UPDATE frames
          SET entity_path = ?, entity_kind = ?
@@ -1000,7 +1080,13 @@ class LocalStorage implements IStorage {
 
     if (moved === 0) return { moved: 0, refreshedEntities: [] };
 
-    // 3. Recompute the entities table for only the affected rows. This
+    // 4. Refresh the FTS entity_search for every moved frame so a
+    //    search for the new target's tokens reaches them.
+    for (const id of movedIds) {
+      this.refreshFrameFtsEntity(id, targetPath, input.target.kind);
+    }
+
+    // 5. Recompute the entities table for only the affected rows. This
     //    is much cheaper than the global rebuildEntityCounts() — we only
     //    touch the few entities that actually changed shape.
     const refreshed: string[] = [];
@@ -1290,6 +1376,102 @@ class LocalStorage implements IStorage {
   }
 
   // -------------------------------------------------------------------------
+  // Insights
+  // -------------------------------------------------------------------------
+
+  async listInsights(query: InsightQuery = {}): Promise<Insight[]> {
+    const where: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.status) {
+      where.push('status = @status');
+      params.status = query.status;
+    }
+    if (query.kind) {
+      where.push('kind = @kind');
+      params.kind = query.kind;
+    }
+    if (query.from) {
+      where.push('period_end >= @from');
+      params.from = query.from;
+    }
+    if (query.to) {
+      where.push('period_start <= @to');
+      params.to = query.to;
+    }
+    const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 50)));
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM insights
+         WHERE ${where.join(' AND ')}
+         ORDER BY updated_at DESC
+         LIMIT @limit`,
+      )
+      .all({ ...params, limit }) as RawInsightRow[];
+    return rows.map(rowToInsight);
+  }
+
+  async getInsight(id: string): Promise<Insight | null> {
+    const row = this.db
+      .prepare('SELECT * FROM insights WHERE id = ?')
+      .get(id) as RawInsightRow | undefined;
+    return row ? rowToInsight(row) : null;
+  }
+
+  async upsertInsight(insight: Insight): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO insights (
+          id, kind, severity, title, summary, recommendation, confidence,
+          evidence_json, period_label, period_start, period_end,
+          status, created_at, updated_at
+        ) VALUES (
+          @id, @kind, @severity, @title, @summary, @recommendation, @confidence,
+          @evidence_json, @period_label, @period_start, @period_end,
+          @status, @created_at, @updated_at
+        )
+        ON CONFLICT(id) DO UPDATE SET
+          kind = excluded.kind,
+          severity = excluded.severity,
+          title = excluded.title,
+          summary = excluded.summary,
+          recommendation = excluded.recommendation,
+          confidence = excluded.confidence,
+          evidence_json = excluded.evidence_json,
+          period_label = excluded.period_label,
+          period_start = excluded.period_start,
+          period_end = excluded.period_end,
+          status = CASE
+            WHEN insights.status = 'dismissed' AND excluded.status = 'active'
+              THEN insights.status
+            ELSE excluded.status
+          END,
+          updated_at = excluded.updated_at`,
+      )
+      .run({
+        id: insight.id,
+        kind: insight.kind,
+        severity: insight.severity,
+        title: insight.title,
+        summary: insight.summary,
+        recommendation: insight.recommendation,
+        confidence: insight.confidence,
+        evidence_json: JSON.stringify(insight.evidence),
+        period_label: insight.period.label,
+        period_start: insight.period.start,
+        period_end: insight.period.end,
+        status: insight.status,
+        created_at: insight.created_at,
+        updated_at: insight.updated_at,
+      });
+  }
+
+  async dismissInsight(id: string): Promise<void> {
+    this.db
+      .prepare("UPDATE insights SET status = 'dismissed', updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
+  }
+
+  // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
@@ -1394,17 +1576,28 @@ class LocalStorage implements IStorage {
       );
 
       -- frame_text: free-text search over a frame's body + window
-      -- title + app. URL is intentionally excluded -- it lives in the
-      -- indexed frames.url_host column where it can be exact-matched
-      -- without polluting the porter stemmer (which mangled hostnames
-      -- like "developer.mozilla.org" into "develop"). Search uses
-      -- weighted BM25 (see searchFrames) to prefer window-title hits
-      -- over body hits over bare app-name hits.
+      -- title + app + the entity it was attributed to. URL is
+      -- intentionally excluded -- it lives in the indexed
+      -- frames.url_host column where it can be exact-matched without
+      -- polluting the porter stemmer.
+      --
+      -- entity_search holds a tokenised projection of the frame's
+      -- entity_path + entity_kind (e.g. "cofounderos project" for
+      -- projects/cofounderos). Without this column, searching
+      -- "cofounderos" only matches frames that literally type the word
+      -- in their title or OCR text, missing the hundreds of frames
+      -- attributed to the entity by the resolver. With it, a query
+      -- like "milan" returns frames in milan-lazic's sessions even
+      -- when the screenshot doesn't show the name on screen.
+      --
+      -- Search uses weighted BM25 (see searchFrames): window-title and
+      -- entity hits dominate, body next, app-name downweighted.
       CREATE VIRTUAL TABLE IF NOT EXISTS frame_text USING fts5(
         frame_id UNINDEXED,
         text,
         window_title,
         app,
+        entity_search,
         tokenize='porter unicode61 remove_diacritics 2'
       );
 
@@ -1504,6 +1697,29 @@ class LocalStorage implements IStorage {
         entities_json       TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS insights (
+        id              TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL,
+        severity        TEXT NOT NULL,
+        title           TEXT NOT NULL,
+        summary         TEXT NOT NULL,
+        recommendation  TEXT NOT NULL,
+        confidence      REAL NOT NULL,
+        evidence_json   TEXT NOT NULL DEFAULT '{}',
+        period_label    TEXT NOT NULL,
+        period_start    TEXT NOT NULL,
+        period_end      TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'active',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_insights_status_updated
+        ON insights(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_insights_kind
+        ON insights(kind);
+      CREATE INDEX IF NOT EXISTS idx_insights_period
+        ON insights(period_start, period_end);
     `);
 
     this.runSchemaMigrations();
@@ -1751,7 +1967,7 @@ class LocalStorage implements IStorage {
       | { user_version: number }
       | undefined;
     const currentVersion = versionRow?.user_version ?? 0;
-    const TARGET_VERSION = 5;
+    const TARGET_VERSION = 6;
     if (currentVersion < TARGET_VERSION) {
       try {
         this.db.exec('VACUUM');
@@ -1870,18 +2086,22 @@ class LocalStorage implements IStorage {
    * the storage adapter writes. FTS5 virtual tables don't support
    * `ALTER TABLE`, so we DROP + CREATE + repopulate from the canonical
    * `frames` table. Idempotent: a no-op once `frame_text` has the
-   * expected columns.
+   * expected columns. Currently triggers when:
+   *   - the legacy `url` column is still present, or
+   *   - the `entity_search` column is missing (added later).
    */
   private maybeRebuildFrameTextFts(): void {
     const cols = this.db
       .prepare('PRAGMA table_info(frame_text)')
       .all() as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
-    // The new shape lacks `url`. If it's still there, we're on the old
-    // schema and need to rebuild.
-    if (!names.has('url')) return;
+    const hasUrl = names.has('url');
+    const hasEntitySearch = names.has('entity_search');
+    if (!hasUrl && hasEntitySearch) return;
 
-    this.logger.info('migrating: rebuilding frame_text FTS without url column');
+    this.logger.info(
+      `migrating: rebuilding frame_text FTS (had url=${hasUrl}, had entity_search=${hasEntitySearch})`,
+    );
     const start = Date.now();
     this.db.exec(`
       DROP TABLE IF EXISTS frame_text;
@@ -1890,19 +2110,42 @@ class LocalStorage implements IStorage {
         text,
         window_title,
         app,
+        entity_search,
         tokenize='porter unicode61 remove_diacritics 2'
       );
-      INSERT INTO frame_text(frame_id, text, window_title, app)
-        SELECT id, COALESCE(text, ''), COALESCE(window_title, ''), COALESCE(app, '')
-        FROM frames;
     `);
-    const populated = (
-      this.db
-        .prepare('SELECT COUNT(*) AS n FROM frame_text')
-        .get() as { n: number }
-    ).n;
+    // Backfill with entity_search built per-row so existing
+    // resolver-attached frames are immediately searchable by entity
+    // name without waiting for the indexer to touch them again.
+    const rows = this.db
+      .prepare(
+        `SELECT id, text, window_title, app, entity_path, entity_kind FROM frames`,
+      )
+      .all() as Array<{
+      id: string;
+      text: string | null;
+      window_title: string | null;
+      app: string | null;
+      entity_path: string | null;
+      entity_kind: string | null;
+    }>;
+    const insert = this.db.prepare(
+      'INSERT INTO frame_text(frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const r of rows) {
+        insert.run(
+          r.id,
+          r.text ?? '',
+          r.window_title ?? '',
+          r.app ?? '',
+          entityToFtsText(r.entity_path, r.entity_kind),
+        );
+      }
+    });
+    tx();
     this.logger.info(
-      `migrated: rebuilt frame_text with ${populated} row(s) in ${Date.now() - start}ms`,
+      `migrated: rebuilt frame_text with ${rows.length} row(s) in ${Date.now() - start}ms`,
     );
   }
 
@@ -2411,6 +2654,77 @@ function rowToSession(r: RawSessionRow): ActivitySession {
     primary_app: r.primary_app,
     entities,
   };
+}
+
+interface RawInsightRow {
+  id: string;
+  kind: string;
+  severity: string;
+  title: string;
+  summary: string;
+  recommendation: string;
+  confidence: number;
+  evidence_json: string;
+  period_label: string;
+  period_start: string;
+  period_end: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToInsight(r: RawInsightRow): Insight {
+  let evidence: InsightEvidence = {};
+  try {
+    const parsed = JSON.parse(r.evidence_json) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      evidence = parsed as InsightEvidence;
+    }
+  } catch {
+    evidence = {};
+  }
+  return {
+    id: r.id,
+    kind: r.kind as Insight['kind'],
+    severity: r.severity as Insight['severity'],
+    title: r.title,
+    summary: r.summary,
+    recommendation: r.recommendation,
+    confidence: Number.isFinite(r.confidence) ? r.confidence : 0,
+    evidence,
+    period: {
+      label: r.period_label,
+      start: r.period_start,
+      end: r.period_end,
+    },
+    status: r.status as InsightStatus,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
+
+/**
+ * Tokenise an entity path + kind into a string suitable for FTS.
+ * Strips the kind-prefix segment (`projects/`, `apps/`, ...) so the
+ * meaningful slug is what gets indexed; replaces `-` and `_` with
+ * spaces so "milan-lazic" matches a search for "milan" or "lazic";
+ * appends the kind so a query like "project" narrows correctly.
+ * Returns empty string when the frame has no resolved entity yet.
+ *
+ * Examples:
+ *   ("projects/cofounderos", "project")   -> "cofounderos project"
+ *   ("contacts/milan-lazic", "contact")   -> "milan lazic contact"
+ *   ("channels/postman-liblab-prs", ...)  -> "postman liblab prs channel"
+ *   (null, null)                          -> ""
+ */
+function entityToFtsText(
+  path: string | null | undefined,
+  kind: string | null | undefined,
+): string {
+  if (!path) return '';
+  const tail = path.split('/').slice(-1)[0] ?? path;
+  const tokens = tail.replace(/[-_/]+/g, ' ').trim();
+  return kind ? `${tokens} ${kind}` : tokens;
 }
 
 /**

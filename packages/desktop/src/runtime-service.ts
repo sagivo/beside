@@ -154,6 +154,15 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.getJournalDay(String(req.params));
     case 'searchFrames':
       return await runtime.searchFrames(req.params as never);
+    case 'listInsights':
+      return await runtime.listInsights(req.params as never);
+    case 'runInsightsNow':
+      return await runtime.runInsightsNow();
+    case 'askInsights':
+      return await runtime.askInsights(req.params as { question: string; from?: string; to?: string });
+    case 'dismissInsight':
+      await runtime.dismissInsight(String(req.params));
+      return { dismissed: true };
     case 'readAsset': {
       const buf = await runtime.readAsset(String(req.params));
       return { base64: buf.toString('base64') };
