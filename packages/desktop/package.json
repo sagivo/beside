@@ -12,15 +12,34 @@
     "package": "pnpm run build && pnpm run prepare:package && electron-builder --dir",
     "dist": "pnpm run build && pnpm run prepare:package && electron-builder",
     "clean": "rimraf dist *.tsbuildinfo",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json",
     "start": "pnpm run build && electron dist/main.js",
     "dev": "pnpm run start"
   },
   "dependencies": {
     "@cofounderos/core": "workspace:*",
     "@cofounderos/runtime": "workspace:*",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-progress": "^1.1.8",
+    "@radix-ui/react-radio-group": "^1.3.8",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-tabs": "^1.1.13",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "@tailwindcss/vite": "^4.2.4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "lucide-react": "^1.14.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
@@ -49,16 +68,22 @@
       }
     ],
     "mac": {
-      "target": ["dir"],
+      "target": [
+        "dir"
+      ],
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity"
     },
     "win": {
-      "target": ["dir"],
+      "target": [
+        "dir"
+      ],
       "icon": "build/icon.png"
     },
     "linux": {
-      "target": ["dir"],
+      "target": [
+        "dir"
+      ],
       "icon": "build/icon.png",
       "category": "Utility"
     }

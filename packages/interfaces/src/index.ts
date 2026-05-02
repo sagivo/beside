@@ -124,8 +124,6 @@ export interface StorageQuery {
   offset?: number;
   /** Return all events with id strictly greater than this checkpoint. */
   since_checkpoint?: string;
-  /** Free-text search against `content`, `app`, `window_title`. */
-  text?: string;
   /** Filter to events not yet indexed by the named strategy. */
   unindexed_for_strategy?: string;
   /** Filter to events not yet materialised into a frame. */

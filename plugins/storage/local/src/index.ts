@@ -120,13 +120,6 @@ class LocalStorage implements IStorage {
       sql.push('AND id > @cp');
       params.cp = query.since_checkpoint;
     }
-    if (query.text) {
-      // Use FTS table for free-text search.
-      sql.push(
-        'AND id IN (SELECT event_id FROM events_fts WHERE events_fts MATCH @text)',
-      );
-      params.text = query.text;
-    }
     if (query.unindexed_for_strategy) {
       sql.push(
         'AND id NOT IN (SELECT event_id FROM index_marks WHERE strategy = @strat)',
@@ -237,11 +230,11 @@ class LocalStorage implements IStorage {
   async upsertFrame(frame: Frame): Promise<void> {
     const upsert = this.db.prepare(`
       INSERT INTO frames (
-        id, timestamp, day, monitor, app, app_bundle_id, window_title, url,
+        id, timestamp, day, monitor, app, app_bundle_id, window_title, url, url_host,
         text, text_source, asset_path, perceptual_hash, trigger, session_id,
         duration_ms, source_event_ids, created_at
       ) VALUES (
-        @id, @timestamp, @day, @monitor, @app, @app_bundle_id, @window_title, @url,
+        @id, @timestamp, @day, @monitor, @app, @app_bundle_id, @window_title, @url, @url_host,
         @text, @text_source, @asset_path, @perceptual_hash, @trigger, @session_id,
         @duration_ms, @source_event_ids, @created_at
       )
@@ -249,6 +242,7 @@ class LocalStorage implements IStorage {
         text = COALESCE(excluded.text, frames.text),
         text_source = COALESCE(excluded.text_source, frames.text_source),
         url = COALESCE(excluded.url, frames.url),
+        url_host = COALESCE(excluded.url_host, frames.url_host),
         duration_ms = COALESCE(excluded.duration_ms, frames.duration_ms),
         source_event_ids = excluded.source_event_ids
     `);
@@ -262,6 +256,7 @@ class LocalStorage implements IStorage {
         app_bundle_id: frame.app_bundle_id ?? null,
         window_title: frame.window_title ?? null,
         url: frame.url,
+        url_host: extractUrlHost(frame.url),
         text: frame.text,
         text_source: frame.text_source,
         asset_path: frame.asset_path,
@@ -331,8 +326,14 @@ class LocalStorage implements IStorage {
         params.activity_session_id = query.activitySessionId;
       }
       if (query.urlDomain) {
-        sql.push('AND frames.url LIKE @url_domain');
-        params.url_domain = `%${query.urlDomain}%`;
+        // Indexed exact-host match plus a single-pass subdomain LIKE.
+        // The OR combines as a small UNION — first half hits
+        // idx_frames_url_host, second half scans only rows already
+        // narrowed by the other AND predicates.
+        sql.push('AND (frames.url_host = @url_host OR frames.url_host LIKE @url_host_sub)');
+        const host = normaliseHostFilter(query.urlDomain);
+        params.url_host = host;
+        params.url_host_sub = `%.${host}`;
       }
       if (query.textSource) {
         sql.push('AND frames.text_source = @text_source');
@@ -374,8 +375,10 @@ class LocalStorage implements IStorage {
       params.activity_session_id = query.activitySessionId;
     }
     if (query.urlDomain) {
-      sql.push('AND url LIKE @url_domain');
-      params.url_domain = `%${query.urlDomain}%`;
+      sql.push('AND (url_host = @url_host OR url_host LIKE @url_host_sub)');
+      const host = normaliseHostFilter(query.urlDomain);
+      params.url_host = host;
+      params.url_host_sub = `%.${host}`;
     }
     if (query.textSource) {
       sql.push('AND text_source = @text_source');
@@ -531,14 +534,15 @@ class LocalStorage implements IStorage {
   ): Promise<void> {
     const cleaned = normaliseVector(vector);
     if (cleaned.length === 0) return;
+    const blob = packFloat32(cleaned);
     this.db
       .prepare(
         `INSERT INTO frame_embeddings
-          (frame_id, model, content_hash, vector_json, dims, created_at)
+          (frame_id, model, content_hash, vector, dims, created_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(frame_id, model) DO UPDATE SET
            content_hash = excluded.content_hash,
-           vector_json = excluded.vector_json,
+           vector = excluded.vector,
            dims = excluded.dims,
            created_at = excluded.created_at`,
       )
@@ -546,7 +550,7 @@ class LocalStorage implements IStorage {
         frameId,
         model,
         contentHash,
-        JSON.stringify(cleaned),
+        blob,
         cleaned.length,
         new Date().toISOString(),
       );
@@ -596,8 +600,10 @@ class LocalStorage implements IStorage {
       params.activity_session_id = query.activitySessionId;
     }
     if (query.urlDomain) {
-      where.push('frames.url LIKE @url_domain');
-      params.url_domain = `%${query.urlDomain}%`;
+      where.push('(frames.url_host = @url_host OR frames.url_host LIKE @url_host_sub)');
+      const host = normaliseHostFilter(query.urlDomain);
+      params.url_host = host;
+      params.url_host_sub = `%.${host}`;
     }
     if (query.textSource) {
       where.push('frames.text_source = @text_source');
@@ -606,16 +612,16 @@ class LocalStorage implements IStorage {
 
     const rows = this.db
       .prepare(
-        `SELECT frames.*, frame_embeddings.vector_json
+        `SELECT frames.*, frame_embeddings.vector AS vector_blob
          FROM frame_embeddings
          JOIN frames ON frames.id = frame_embeddings.frame_id
          WHERE ${where.join(' AND ')}`,
       )
-      .all(params) as Array<RawFrameRow & { vector_json: string }>;
+      .all(params) as Array<RawFrameRow & { vector_blob: Buffer }>;
 
     const matches: FrameSemanticMatch[] = [];
     for (const row of rows) {
-      const candidate = parseVector(row.vector_json);
+      const candidate = unpackFloat32(row.vector_blob);
       if (candidate.length !== target.length) continue;
       const score = dot(target, candidate);
       if (!Number.isFinite(score)) continue;
@@ -1002,6 +1008,12 @@ class LocalStorage implements IStorage {
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
 
+    // ---------------------------------------------------------------------
+    // Base schema. Everything is `IF NOT EXISTS` so this runs cleanly on
+    // both fresh installs and existing DBs. The `runSchemaMigrations`
+    // call below handles backfills for older shapes (added columns,
+    // dropped tables, vector format change).
+    // ---------------------------------------------------------------------
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id           TEXT PRIMARY KEY,
@@ -1030,46 +1042,30 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_marks_strategy ON index_marks(strategy);
 
-      CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-        event_id UNINDEXED,
-        content,
-        app,
-        window_title
-      );
-
       CREATE TABLE IF NOT EXISTS frames (
-        id               TEXT PRIMARY KEY,
-        timestamp        TEXT NOT NULL,
-        day              TEXT NOT NULL,
-        monitor          INTEGER NOT NULL DEFAULT 0,
-        app              TEXT,
-        app_bundle_id    TEXT,
-        window_title     TEXT,
-        url              TEXT,
-        text             TEXT,
-        text_source      TEXT,
-        asset_path       TEXT,
-        perceptual_hash  TEXT,
-        trigger          TEXT,
-        session_id       TEXT,
-        duration_ms      INTEGER,
-        entity_path      TEXT,
-        entity_kind      TEXT,
-        source_event_ids TEXT NOT NULL,
-        created_at       TEXT NOT NULL
+        id                  TEXT PRIMARY KEY,
+        timestamp           TEXT NOT NULL,
+        day                 TEXT NOT NULL,
+        monitor             INTEGER NOT NULL DEFAULT 0,
+        app                 TEXT,
+        app_bundle_id       TEXT,
+        window_title        TEXT,
+        url                 TEXT,
+        url_host            TEXT,
+        text                TEXT,
+        text_source         TEXT,
+        asset_path          TEXT,
+        perceptual_hash     TEXT,
+        trigger             TEXT,
+        session_id          TEXT,
+        duration_ms         INTEGER,
+        entity_path         TEXT,
+        entity_kind         TEXT,
+        vacuum_tier         TEXT,
+        activity_session_id TEXT,
+        source_event_ids    TEXT NOT NULL,
+        created_at          TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_frames_day ON frames(day);
-      CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_frames_app ON frames(app);
-      CREATE INDEX IF NOT EXISTS idx_frames_url ON frames(url);
-      CREATE INDEX IF NOT EXISTS idx_frames_session ON frames(session_id);
-      -- Workers find frames that still need visual OCR. Pure AX text is
-      -- queued too because browser accessibility trees often expose chrome
-      -- labels before page content; OCR supplements that with visible text.
-      CREATE INDEX IF NOT EXISTS idx_frames_pending_ocr
-        ON frames(timestamp DESC)
-        WHERE asset_path IS NOT NULL
-          AND (text_source IS NULL OR text_source = 'accessibility');
 
       CREATE VIRTUAL TABLE IF NOT EXISTS frame_text USING fts5(
         frame_id UNINDEXED,
@@ -1080,11 +1076,14 @@ class LocalStorage implements IStorage {
         tokenize='porter unicode61 remove_diacritics 2'
       );
 
+      -- Embeddings: vector stored as packed Float32 BLOB (4 bytes/dim).
+      -- ~5x smaller than the previous JSON representation and decodes
+      -- without JSON.parse on every search.
       CREATE TABLE IF NOT EXISTS frame_embeddings (
         frame_id     TEXT NOT NULL,
         model        TEXT NOT NULL,
         content_hash TEXT NOT NULL,
-        vector_json  TEXT NOT NULL,
+        vector       BLOB NOT NULL,
         dims         INTEGER NOT NULL,
         created_at   TEXT NOT NULL,
         PRIMARY KEY (frame_id, model)
@@ -1121,38 +1120,253 @@ class LocalStorage implements IStorage {
         primary_app         TEXT,
         entities_json       TEXT NOT NULL DEFAULT '[]'
       );
-      CREATE INDEX IF NOT EXISTS idx_sessions_day ON sessions(day);
       CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
     `);
 
-    // Migrate older databases that predate the framed_at column. Must
-    // happen *before* we create indexes that reference it.
+    this.runSchemaMigrations();
+  }
+
+  /**
+   * Idempotent schema migrations for older databases. Safe to run on
+   * every startup — each step is gated on a `PRAGMA table_info` check
+   * or `IF EXISTS` so a fresh DB pays effectively nothing.
+   *
+   * Each step is logged so the migration trail is visible in `cli logs`.
+   */
+  private runSchemaMigrations(): void {
+    // 1. Column backfills for shape changes that landed after the first
+    //    public release. ALL of these no-op on a fresh install where the
+    //    base CREATE TABLE already declares the column.
     this.maybeAddColumn('events', 'framed_at', 'TEXT');
     this.maybeAddColumn('frames', 'entity_path', 'TEXT');
     this.maybeAddColumn('frames', 'entity_kind', 'TEXT');
-    // Vacuum retention tier — null means "original" so existing rows
-    // are correctly classified without a backfill UPDATE.
     this.maybeAddColumn('frames', 'vacuum_tier', 'TEXT');
-    // Activity-session FK on frames. Null on existing rows; the
-    // SessionBuilder backfills incrementally on its next tick.
     this.maybeAddColumn('frames', 'activity_session_id', 'TEXT');
-    this.db.exec(
-      `CREATE INDEX IF NOT EXISTS idx_events_framed ON events(framed_at) WHERE framed_at IS NULL;
-       CREATE INDEX IF NOT EXISTS idx_frames_entity ON frames(entity_path);
-       DROP INDEX IF EXISTS idx_frames_pending_ocr;
-       CREATE INDEX idx_frames_pending_ocr
-         ON frames(timestamp DESC)
-         WHERE asset_path IS NOT NULL
-           AND (text_source IS NULL OR text_source = 'accessibility');
-       CREATE INDEX IF NOT EXISTS idx_frames_pending_entity
-         ON frames(timestamp DESC) WHERE entity_path IS NULL;
-       CREATE INDEX IF NOT EXISTS idx_frames_vacuum
-         ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;
-       CREATE INDEX IF NOT EXISTS idx_frames_activity_session
-         ON frames(activity_session_id);
-       CREATE INDEX IF NOT EXISTS idx_frames_pending_session
-         ON frames(timestamp ASC) WHERE activity_session_id IS NULL;`,
-    );
+    this.maybeAddColumn('frames', 'url_host', 'TEXT');
+
+    // 2. Drop the dead `events_fts` virtual table. The free-text search
+    //    path moved to `frames` / `frame_text` long ago; the FTS table
+    //    here was never populated (events.content is always empty) but
+    //    its 5 shadow tables still cost write amplification on every
+    //    event insert. Safe to drop unconditionally.
+    if (this.tableExists('events_fts')) {
+      this.db.exec('DROP TABLE IF EXISTS events_fts;');
+      this.logger.info('migrated: dropped dead events_fts virtual table');
+    }
+
+    // 3. frame_embeddings.vector_json (TEXT) -> vector (BLOB Float32).
+    //    Migrate row-by-row, then drop the old column. Requires SQLite
+    //    >= 3.35 for DROP COLUMN (better-sqlite3 11.x ships with that).
+    this.migrateEmbeddingsToBlob();
+
+    // 4. Backfill `frames.url_host` for existing rows that have a URL
+    //    but no extracted host (everything pre-migration).
+    const needBackfill = (
+      this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM frames WHERE url IS NOT NULL AND url != '' AND url_host IS NULL",
+        )
+        .get() as { n: number }
+    ).n;
+    if (needBackfill > 0) {
+      const rows = this.db
+        .prepare("SELECT id, url FROM frames WHERE url IS NOT NULL AND url != '' AND url_host IS NULL")
+        .all() as Array<{ id: string; url: string }>;
+      const upd = this.db.prepare('UPDATE frames SET url_host = ? WHERE id = ?');
+      const tx = this.db.transaction(() => {
+        for (const r of rows) {
+          const host = extractUrlHost(r.url);
+          if (host) upd.run(host, r.id);
+        }
+      });
+      tx();
+      this.logger.info(`migrated: backfilled url_host for ${rows.length} frames`);
+    }
+
+    // 5. Indexes — composite & partial. Replace single-column indexes
+    //    that are strictly subsumed by the new composites so we don't
+    //    pay double on writes.
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_events_framed
+        ON events(framed_at) WHERE framed_at IS NULL;
+
+      -- Composite (entity_path, timestamp) — kills the temp B-TREE on
+      -- the indexer's hottest query: "all frames for entity X in time
+      -- order".
+      CREATE INDEX IF NOT EXISTS idx_frames_entity_ts
+        ON frames(entity_path, timestamp);
+
+      -- Composite (day, timestamp) — drops temp B-TREE on the journal
+      -- query and on session-needing-assignment scans.
+      CREATE INDEX IF NOT EXISTS idx_frames_day_ts
+        ON frames(day, timestamp);
+
+      -- Composite (app, timestamp DESC) — covers "what was I doing in
+      -- app X recently" without an in-memory sort.
+      CREATE INDEX IF NOT EXISTS idx_frames_app_ts
+        ON frames(app, timestamp DESC);
+
+      -- Composite (day, started_at DESC) for the sessions query that
+      -- previously needed a temp B-TREE.
+      CREATE INDEX IF NOT EXISTS idx_sessions_day_started
+        ON sessions(day, started_at DESC);
+
+      -- Indexed url_host enables exact-domain filtering without the old
+      -- '%domain%' LIKE that could never use an index.
+      CREATE INDEX IF NOT EXISTS idx_frames_url_host
+        ON frames(url_host) WHERE url_host IS NOT NULL;
+
+      -- Worker partials. These are tiny (cover only currently-pending
+      -- rows) and let the workers iterate without scanning the full
+      -- frames table.
+      CREATE INDEX IF NOT EXISTS idx_frames_pending_ocr
+        ON frames(timestamp DESC)
+        WHERE asset_path IS NOT NULL
+          AND (text_source IS NULL OR text_source = 'accessibility');
+      CREATE INDEX IF NOT EXISTS idx_frames_pending_entity
+        ON frames(timestamp DESC) WHERE entity_path IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_frames_pending_session
+        ON frames(timestamp ASC) WHERE activity_session_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_frames_vacuum
+        ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_frames_activity_session
+        ON frames(activity_session_id);
+      CREATE INDEX IF NOT EXISTS idx_frames_session
+        ON frames(session_id);
+    `);
+
+    // 6. Drop redundant single-column indexes now subsumed by the new
+    //    composites. Leading-column queries on the composites are just
+    //    as fast, and we get smaller writes + smaller DB.
+    this.db.exec(`
+      DROP INDEX IF EXISTS idx_frames_app;       -- subsumed by idx_frames_app_ts
+      DROP INDEX IF EXISTS idx_frames_day;       -- subsumed by idx_frames_day_ts
+      DROP INDEX IF EXISTS idx_frames_entity;    -- subsumed by idx_frames_entity_ts
+      DROP INDEX IF EXISTS idx_frames_url;       -- replaced by idx_frames_url_host
+      DROP INDEX IF EXISTS idx_sessions_day;     -- subsumed by idx_sessions_day_started
+      DROP INDEX IF EXISTS idx_frames_ts;        -- frames are practically always filtered by day/entity/app first
+    `);
+
+    // 7. One-shot reclaim & re-stats. Driven by PRAGMA user_version so
+    //    we only pay the VACUUM cost once across all installs that
+    //    upgrade through this migration. ANALYZE is cheap and updates
+    //    the planner's stat1 tables for the new composite indexes.
+    const versionRow = this.db.prepare('PRAGMA user_version').get() as
+      | { user_version: number }
+      | undefined;
+    const currentVersion = versionRow?.user_version ?? 0;
+    const TARGET_VERSION = 1;
+    if (currentVersion < TARGET_VERSION) {
+      try {
+        this.db.exec('VACUUM');
+        this.logger.info('migrated: VACUUM reclaimed freed pages');
+      } catch (err) {
+        // VACUUM can fail if there are open prepared statements held
+        // outside our control. Non-fatal — pages will be reused on
+        // their own over time.
+        this.logger.warn('VACUUM failed, leaving freed pages in place', {
+          err: String(err),
+        });
+      }
+      try {
+        this.db.exec('ANALYZE');
+      } catch (err) {
+        this.logger.debug('ANALYZE failed', { err: String(err) });
+      }
+      this.db.pragma(`user_version = ${TARGET_VERSION}`);
+    }
+  }
+
+  /**
+   * Migrate `frame_embeddings.vector_json` (TEXT) into `vector` (BLOB).
+   * No-op if the table already has the new shape. Done in one
+   * transaction so a crash mid-migration leaves the DB in a consistent
+   * state.
+   */
+  private migrateEmbeddingsToBlob(): void {
+    const cols = this.db
+      .prepare("PRAGMA table_info(frame_embeddings)")
+      .all() as Array<{ name: string; type: string }>;
+    const hasJson = cols.some((c) => c.name === 'vector_json');
+    const hasBlob = cols.some((c) => c.name === 'vector');
+
+    if (!hasJson) return; // already migrated (or fresh install)
+
+    if (!hasBlob) {
+      // Older DBs only have vector_json — add the BLOB column first.
+      this.db.exec('ALTER TABLE frame_embeddings ADD COLUMN vector BLOB');
+    }
+
+    const pending = (
+      this.db
+        .prepare('SELECT COUNT(*) AS n FROM frame_embeddings WHERE vector IS NULL')
+        .get() as { n: number }
+    ).n;
+
+    if (pending > 0) {
+      const rows = this.db
+        .prepare(
+          'SELECT frame_id, model, vector_json FROM frame_embeddings WHERE vector IS NULL',
+        )
+        .all() as Array<{ frame_id: string; model: string; vector_json: string }>;
+      const upd = this.db.prepare(
+        'UPDATE frame_embeddings SET vector = ? WHERE frame_id = ? AND model = ?',
+      );
+      const tx = this.db.transaction(() => {
+        for (const r of rows) {
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(r.vector_json);
+          } catch {
+            continue;
+          }
+          if (!Array.isArray(parsed)) continue;
+          const buf = packFloat32(parsed);
+          if (buf.byteLength === 0) continue;
+          upd.run(buf, r.frame_id, r.model);
+        }
+      });
+      tx();
+      this.logger.info(`migrated: packed ${rows.length} embedding(s) into BLOB`);
+    }
+
+    // Now safe to drop the legacy column.
+    try {
+      this.db.exec('ALTER TABLE frame_embeddings DROP COLUMN vector_json');
+      this.logger.info('migrated: dropped frame_embeddings.vector_json');
+    } catch (err) {
+      // SQLite < 3.35 fallback: copy table. Should never hit on
+      // better-sqlite3 11.x, but defensive in case the user has bundled
+      // an older runtime.
+      this.logger.warn('DROP COLUMN failed, falling back to table rebuild', {
+        err: String(err),
+      });
+      this.db.exec(`
+        CREATE TABLE frame_embeddings_new (
+          frame_id     TEXT NOT NULL,
+          model        TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          vector       BLOB NOT NULL,
+          dims         INTEGER NOT NULL,
+          created_at   TEXT NOT NULL,
+          PRIMARY KEY (frame_id, model)
+        );
+        INSERT INTO frame_embeddings_new
+          SELECT frame_id, model, content_hash, vector, dims, created_at
+          FROM frame_embeddings WHERE vector IS NOT NULL;
+        DROP TABLE frame_embeddings;
+        ALTER TABLE frame_embeddings_new RENAME TO frame_embeddings;
+        CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model
+          ON frame_embeddings(model);
+      `);
+    }
+  }
+
+  private tableExists(name: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE name = ? AND type IN ('table','view')")
+      .get(name) as { 1: number } | undefined;
+    return Boolean(row);
   }
 
   private maybeAddColumn(table: string, column: string, ddl: string): void {
@@ -1166,6 +1380,9 @@ class LocalStorage implements IStorage {
   }
 
   private upsertEventRow(event: RawEvent, day: string): void {
+    // NOTE: free-text search on events was removed in favour of `frames` /
+    // `frame_text`. Frames carry the full OCR + accessibility text, joined
+    // with app/window/url; events are kept as the raw audit log only.
     const upsert = this.db.prepare(`
       INSERT INTO events
         (id, timestamp, type, app, window_title, url, content,
@@ -1188,14 +1405,6 @@ class LocalStorage implements IStorage {
       day,
       raw: JSON.stringify(event),
     });
-
-    if (event.content && event.content.length > 0) {
-      this.db
-        .prepare(
-          'INSERT INTO events_fts (event_id, content, app, window_title) VALUES (?, ?, ?, ?)',
-        )
-        .run(event.id, event.content, event.app ?? '', event.window_title ?? '');
-    }
   }
 
   private async measureAssetBytes(): Promise<number> {
@@ -1300,16 +1509,6 @@ function sha256(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
-function parseVector(json: string): number[] {
-  try {
-    const parsed = JSON.parse(json) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return normaliseVector(parsed);
-  } catch {
-    return [];
-  }
-}
-
 function normaliseVector(values: unknown[]): number[] {
   const nums = values
     .map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : null))
@@ -1319,11 +1518,62 @@ function normaliseVector(values: unknown[]): number[] {
   return nums.map((v) => v / norm);
 }
 
-function dot(a: number[], b: number[]): number {
+/**
+ * Pack a numeric vector into a Float32 Buffer suitable for storage as
+ * a SQLite BLOB. Empty input -> empty Buffer (caller should treat as
+ * "skip write"). Caller is expected to pre-normalise.
+ */
+function packFloat32(values: ArrayLike<number>): Buffer {
+  if (!values || values.length === 0) return Buffer.alloc(0);
+  const out = Buffer.allocUnsafe(values.length * 4);
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    out.writeFloatLE(typeof v === 'number' && Number.isFinite(v) ? v : 0, i * 4);
+  }
+  return out;
+}
+
+/**
+ * Inverse of `packFloat32`. Returns a typed Float32Array view backed by
+ * a copy of `buf` (we copy because better-sqlite3 buffers are pooled
+ * and may be reused across `.all()` rows).
+ */
+function unpackFloat32(buf: Buffer | null | undefined): Float32Array {
+  if (!buf || buf.byteLength === 0) return new Float32Array(0);
+  const dims = Math.floor(buf.byteLength / 4);
+  const out = new Float32Array(dims);
+  for (let i = 0; i < dims; i++) out[i] = buf.readFloatLE(i * 4);
+  return out;
+}
+
+function dot(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  const len = Math.min(a.length, b.length);
   let out = 0;
-  for (let i = 0; i < a.length; i++) out += a[i]! * b[i]!;
+  for (let i = 0; i < len; i++) out += (a[i] ?? 0) * (b[i] ?? 0);
   // Convert cosine [-1, 1] into a friendlier [0, 1] score.
   return (out + 1) / 2;
+}
+
+/**
+ * Extract a normalised lower-case hostname from a URL string. Returns
+ * null for non-URL inputs. The leading `www.` is stripped so `www.x.com`
+ * and `x.com` collapse to one host (matches user expectations for
+ * domain filters).
+ */
+function extractUrlHost(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase().replace(/^www\./, '');
+    return host || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalise a user-supplied domain filter to match `extractUrlHost`. */
+function normaliseHostFilter(domain: string): string {
+  return domain.toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]!;
 }
 
 interface RawEntityRow {
