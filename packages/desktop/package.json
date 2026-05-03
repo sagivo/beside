@@ -7,14 +7,15 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build": "pnpm --filter @cofounderos/runtime run build && tsc -p tsconfig.json && node scripts/copy-preload.mjs && vite build && bash scripts/build-native.sh",
+    "build:main": "pnpm --filter @cofounderos/runtime run build && tsc -p tsconfig.json && node scripts/copy-preload.mjs && bash scripts/build-native.sh",
+    "build": "pnpm run build:main && vite build",
     "prepare:package": "node scripts/build-icons.mjs && pnpm --dir ../.. build:plugins && node scripts/prepare-package-resources.mjs",
     "package": "pnpm run build && pnpm run prepare:package && electron-builder --dir",
     "dist": "pnpm run build && pnpm run prepare:package && electron-builder",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json",
     "start": "pnpm run build && electron dist/main.js",
-    "dev": "pnpm run start"
+    "dev": "node scripts/dev.mjs"
   },
   "dependencies": {
     "@cofounderos/core": "workspace:*",

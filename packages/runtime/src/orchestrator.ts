@@ -28,7 +28,6 @@ import { EmbeddingWorker } from './embedding-worker.js';
 import { AudioTranscriptWorker } from './audio-transcript-worker.js';
 import { OcrWorker } from './ocr-worker.js';
 import { EntityResolverWorker } from './entity-resolver.js';
-import { InsightsWorker } from './insights-worker.js';
 import { StorageVacuum } from './storage-vacuum.js';
 import { OfflineFallbackAdapter } from './offline-model.js';
 
@@ -60,7 +59,6 @@ export interface OrchestratorHandles {
   entityResolver: EntityResolverWorker;
   sessionBuilder: SessionBuilder;
   embeddingWorker: EmbeddingWorker;
-  insightsWorker: InsightsWorker;
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
 }
@@ -77,7 +75,6 @@ const ENTITY_RESOLVER_INTERVAL_MS = 90_000;
 const SESSION_BUILDER_JOB = 'session-builder';
 const SESSION_BUILDER_INTERVAL_MS = 120_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
-const INSIGHTS_WORKER_JOB = 'insights-worker';
 const VACUUM_JOB = 'storage-vacuum';
 
 export async function buildOrchestrator(
@@ -217,14 +214,6 @@ export async function buildOrchestrator(
     batchSize: embeddingsCfg.batch_size,
     modelName: getEmbeddingModelName(config),
   });
-  const insightsCfg = config.index.insights;
-  const insightsWorker = new InsightsWorker(storage, model, logger, {
-    enabled: insightsCfg.enabled,
-    lookbackHours: insightsCfg.lookback_hours,
-    maxSessionsPerBatch: insightsCfg.max_sessions_per_batch,
-    minConfidence: insightsCfg.min_confidence,
-    sensitiveKeywords,
-  });
   const vacuumCfg = config.storage.local.vacuum;
   // Resolve the effective window in ms. `*_minutes` (when set) wins
   // over `*_days` so users can dial in tight retention for testing or
@@ -261,7 +250,6 @@ export async function buildOrchestrator(
     entityResolver,
     sessionBuilder,
     embeddingWorker,
-    insightsWorker,
     vacuum,
     loadGuard,
   };
@@ -472,7 +460,7 @@ export async function runFullReindex(
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, embeddingWorker, insightsWorker, vacuum, logger, loadGuard } =
+  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, embeddingWorker, vacuum, logger, loadGuard } =
     handles;
 
   // Wrap a heavy job so it skips when the machine is busy. Cheap jobs
@@ -554,17 +542,6 @@ export function scheduleAll(handles: OrchestratorHandles): void {
         logger.child('embedding-worker').warn('tick failed', { err: String(err) });
       }
     },
-  );
-  scheduler.every(
-    INSIGHTS_WORKER_JOB,
-    Math.max(60_000, config.index.insights.tick_interval_min * 60_000),
-    guarded(INSIGHTS_WORKER_JOB, async () => {
-      try {
-        await insightsWorker.tick();
-      } catch (err) {
-        logger.child('insights-worker').warn('tick failed', { err: String(err) });
-      }
-    }),
   );
   // Vacuum runs on a slow tick (default hourly). Each tick processes a
   // small batch so it never starves capture.

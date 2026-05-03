@@ -14,11 +14,7 @@ declare global {
       listJournalDays: () => Promise<string[]>;
       getJournalDay: (day: string) => Promise<JournalDay>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
-      listInsights: (query?: InsightQuery) => Promise<Insight[]>;
-      runInsightsNow: () => Promise<Insight[]>;
-      askInsights: (input: { question: string; from?: string; to?: string }) => Promise<InsightAnswer>;
-      dismissInsight: (id: string) => Promise<{ dismissed: true }>;
-      chatInsights: (input: ChatTurnInput) => Promise<ChatTurnResult>;
+      explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
@@ -37,9 +33,6 @@ declare global {
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
-      onAgentStep?: (
-        callback: (payload: { turnId: string; step: AgentTraceStep }) => void,
-      ) => (() => void) | void;
     };
   }
 }
@@ -135,13 +128,6 @@ export interface CofounderConfig {
         auto_install?: boolean;
       };
     };
-    insights?: {
-      enabled: boolean;
-      tick_interval_min: number;
-      lookback_hours: number;
-      max_sessions_per_batch: number;
-      min_confidence: number;
-    };
   };
   export: {
     plugins: Array<Record<string, unknown> & {
@@ -173,6 +159,11 @@ export interface Frame {
   entity_path?: string | null;
 }
 
+export interface SearchResultExplanation {
+  frameId: string;
+  explanation: string;
+}
+
 export interface ActivitySession {
   id?: string;
   started_at?: string;
@@ -181,105 +172,4 @@ export interface ActivitySession {
   primary_app?: string | null;
   active_ms?: number;
   frame_count?: number;
-}
-
-export type InsightKind =
-  | 'time_waste'
-  | 'repeated_task'
-  | 'context_switching'
-  | 'focus_opportunity'
-  | 'trend'
-  | 'custom_query';
-
-export type InsightSeverity = 'info' | 'low' | 'medium' | 'high';
-export type InsightStatus = 'active' | 'dismissed';
-
-export interface InsightPeriod {
-  label: string;
-  start: string;
-  end: string;
-}
-
-export interface InsightEvidenceSnippet {
-  label: string;
-  text: string;
-  frameId?: string;
-  sessionId?: string;
-}
-
-export interface InsightEvidence {
-  frameIds?: string[];
-  sessionIds?: string[];
-  apps?: string[];
-  entities?: string[];
-  metrics?: Record<string, number | string>;
-  snippets?: InsightEvidenceSnippet[];
-}
-
-export interface Insight {
-  id: string;
-  kind: InsightKind;
-  severity: InsightSeverity;
-  title: string;
-  summary: string;
-  recommendation: string;
-  confidence: number;
-  evidence: InsightEvidence;
-  period: InsightPeriod;
-  status: InsightStatus;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface InsightQuery {
-  status?: InsightStatus;
-  kind?: InsightKind;
-  from?: string;
-  to?: string;
-  limit?: number;
-}
-
-export interface InsightAnswer {
-  question: string;
-  answer: string;
-  evidence: InsightEvidence;
-  suggested_actions: string[];
-  generated_insight?: Insight;
-  created_at: string;
-}
-
-export type ChatRole = 'system' | 'user' | 'assistant';
-
-export type AgentTraceStep =
-  | { id: string; kind: 'thought'; text: string }
-  | {
-      id: string;
-      kind: 'tool';
-      tool: string;
-      args: Record<string, unknown>;
-      source: 'mcp' | 'agent';
-      status: 'running' | 'done' | 'error';
-      summary?: string;
-      observation?: string;
-    };
-
-export interface ChatMessage {
-  role: ChatRole;
-  content: string;
-  createdAt?: string;
-  trace?: AgentTraceStep[];
-}
-
-export interface ChatTurnInput {
-  messages: ChatMessage[];
-  insightId?: string;
-  refreshEvidence?: boolean;
-  from?: string;
-  to?: string;
-  turnId?: string;
-}
-
-export interface ChatTurnResult {
-  message: ChatMessage;
-  evidence: InsightEvidence;
 }

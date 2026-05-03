@@ -9,11 +9,7 @@ const api = {
   listJournalDays: () => ipcRenderer.invoke('cofounderos:list-journal-days'),
   getJournalDay: (day: string) => ipcRenderer.invoke('cofounderos:get-journal-day', day),
   searchFrames: (query: unknown) => ipcRenderer.invoke('cofounderos:search-frames', query),
-  listInsights: (query?: unknown) => ipcRenderer.invoke('cofounderos:list-insights', query),
-  runInsightsNow: () => ipcRenderer.invoke('cofounderos:run-insights-now'),
-  askInsights: (input: unknown) => ipcRenderer.invoke('cofounderos:ask-insights', input),
-  dismissInsight: (id: string) => ipcRenderer.invoke('cofounderos:dismiss-insight', id),
-  chatInsights: (input: unknown) => ipcRenderer.invoke('cofounderos:chat-insights', input),
+  explainSearchResults: (query: unknown) => ipcRenderer.invoke('cofounderos:explain-search-results', query),
   readAsset: (assetPath: string) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -37,11 +33,6 @@ const api = {
   },
   onOverview: (callback: (overview: unknown) => void) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview: unknown) => callback(overview));
-  },
-  onAgentStep: (callback: (payload: unknown) => void) => {
-    const handler = (_event: unknown, payload: unknown) => callback(payload);
-    ipcRenderer.on('cofounderos:agent-step', handler);
-    return () => ipcRenderer.removeListener('cofounderos:agent-step', handler);
   },
 };
 

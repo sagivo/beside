@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "pnpm --filter @cofounderos/core run build && tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "echo \"(no tests)\""

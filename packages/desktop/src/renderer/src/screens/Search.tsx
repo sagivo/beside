@@ -21,6 +21,7 @@ import type { Frame } from '@/global';
 
 const RECENT_KEY = 'cofounderos:recent-searches';
 const RECENT_LIMIT = 6;
+const EXPLANATION_CONCURRENCY = 3;
 
 const SUGGESTIONS: string[] = [
   'design doc',
@@ -62,11 +63,15 @@ export function Search({
   const [appFilter, setAppFilter] = React.useState<string>('__all__');
   const [dayFilter, setDayFilter] = React.useState<string>('__all__');
   const [results, setResults] = React.useState<Frame[] | null>(null);
+  const [activeSearchQuery, setActiveSearchQuery] = React.useState('');
+  const [explanations, setExplanations] = React.useState<Record<string, string>>({});
+  const [explaining, setExplaining] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [searched, setSearched] = React.useState(false);
   const [knownApps, setKnownApps] = React.useState<string[]>([]);
   const [recent, setRecent] = React.useState<string[]>(() => readRecent());
   const handledSearchRequestRef = React.useRef<number | null>(null);
+  const searchRunRef = React.useRef(0);
 
   useListKeyboardNav();
 
@@ -93,12 +98,21 @@ export function Search({
   const runSearch = React.useCallback(async (text?: string) => {
     const q = (text ?? query).trim();
     if (!q) {
+      searchRunRef.current += 1;
       setResults(null);
+      setActiveSearchQuery('');
+      setExplanations({});
+      setExplaining(false);
       setSearched(false);
       return;
     }
+    const runId = searchRunRef.current + 1;
+    searchRunRef.current = runId;
     if (text !== undefined) setQuery(text);
     setLoading(true);
+    setExplaining(false);
+    setExplanations({});
+    setActiveSearchQuery(q);
     setSearched(true);
     try {
       const found = await window.cofounderos.searchFrames({
@@ -107,7 +121,47 @@ export function Search({
         apps: appFilter !== '__all__' ? [appFilter] : undefined,
         limit: 80,
       });
+      if (searchRunRef.current !== runId) return;
       setResults(found);
+      if (found.length > 0) {
+        setExplaining(true);
+        void (async () => {
+          let nextIndex = 0;
+          const explainNext = async (): Promise<void> => {
+            while (searchRunRef.current === runId && nextIndex < found.length) {
+              const frame = found[nextIndex];
+              nextIndex += 1;
+              try {
+                const explained = await window.cofounderos.explainSearchResults({
+                  text: q,
+                  frames: [frame],
+                });
+                const item = explained[0];
+                if (searchRunRef.current !== runId || !item) continue;
+                setExplanations((prev) => ({
+                  ...prev,
+                  [item.frameId]: item.explanation,
+                }));
+              } catch {
+                /* Keep the result visible even if one explanation fails. */
+              }
+            }
+          };
+
+          try {
+            await Promise.all(
+              Array.from(
+                { length: Math.min(EXPLANATION_CONCURRENCY, found.length) },
+                () => explainNext(),
+              ),
+            );
+          } catch {
+            if (searchRunRef.current === runId) setExplanations({});
+          } finally {
+            if (searchRunRef.current === runId) setExplaining(false);
+          }
+        })();
+      }
       // Update recent searches: dedupe (case-insensitive) and prepend.
       setRecent((prev) => {
         const lower = q.toLowerCase();
@@ -116,9 +170,10 @@ export function Search({
         return next;
       });
     } catch {
+      if (searchRunRef.current !== runId) return;
       setResults([]);
     } finally {
-      setLoading(false);
+      if (searchRunRef.current === runId) setLoading(false);
     }
   }, [appFilter, dayFilter, query]);
 
@@ -198,8 +253,12 @@ export function Search({
             <Button
               variant="ghost"
               onClick={() => {
+                searchRunRef.current += 1;
                 setQuery('');
                 setResults(null);
+                setActiveSearchQuery('');
+                setExplanations({});
+                setExplaining(false);
                 setSearched(false);
               }}
             >
@@ -221,6 +280,9 @@ export function Search({
                   <ResultCard
                     key={i}
                     frame={frame}
+                    searchQuery={activeSearchQuery}
+                    explanation={frame.id ? explanations[frame.id] : undefined}
+                    explaining={explaining}
                     onDeleted={(deleted) =>
                       setResults((prev) => (prev ? prev.filter((f) => f.id !== deleted.id) : prev))
                     }
@@ -335,9 +397,15 @@ function ChipSection({
 
 function ResultCard({
   frame,
+  searchQuery,
+  explanation,
+  explaining,
   onDeleted,
 }: {
   frame: Frame;
+  searchQuery: string;
+  explanation?: string;
+  explaining?: boolean;
   onDeleted?: (frame: Frame) => void;
 }) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
@@ -378,6 +446,12 @@ function ResultCard({
       onClick={() =>
         detail.open(frame, {
           onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
+          searchContext: searchQuery
+            ? {
+                query: searchQuery,
+                explanation,
+              }
+            : undefined,
         })
       }
       {...listItemProps}
@@ -409,6 +483,14 @@ function ResultCard({
             frame.url ||
             (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}
         </div>
+        {(explanation || explaining) && (
+          <div className="mt-1 flex items-start gap-1.5 rounded-lg bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
+            <Sparkles className="mt-0.5 size-3 shrink-0" />
+            <span className="line-clamp-3">
+              {explanation || 'Reading context from this result…'}
+            </span>
+          </div>
+        )}
       </div>
     </button>
   );

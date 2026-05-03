@@ -24,10 +24,6 @@ import type {
   EntityCoOccurrence,
   EntityTimelineBucket,
   EntityTimelineQuery,
-  Insight,
-  InsightEvidence,
-  InsightQuery,
-  InsightStatus,
   ActivitySession,
   ListSessionsQuery,
   PluginFactory,
@@ -1506,7 +1502,6 @@ class LocalStorage implements IStorage {
       'frames',
       'sessions',
       'entities',
-      'insights',
       'events',
       'index_state',
       'index_marks',
@@ -1563,102 +1558,6 @@ class LocalStorage implements IStorage {
         this.logger.warn('asset unlink failed', { assetPath, err: String(err) });
       }
     }
-  }
-
-  // -------------------------------------------------------------------------
-  // Insights
-  // -------------------------------------------------------------------------
-
-  async listInsights(query: InsightQuery = {}): Promise<Insight[]> {
-    const where: string[] = ['1=1'];
-    const params: Record<string, unknown> = {};
-    if (query.status) {
-      where.push('status = @status');
-      params.status = query.status;
-    }
-    if (query.kind) {
-      where.push('kind = @kind');
-      params.kind = query.kind;
-    }
-    if (query.from) {
-      where.push('period_end >= @from');
-      params.from = query.from;
-    }
-    if (query.to) {
-      where.push('period_start <= @to');
-      params.to = query.to;
-    }
-    const limit = Math.max(1, Math.min(200, Math.floor(query.limit ?? 50)));
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM insights
-         WHERE ${where.join(' AND ')}
-         ORDER BY updated_at DESC
-         LIMIT @limit`,
-      )
-      .all({ ...params, limit }) as RawInsightRow[];
-    return rows.map(rowToInsight);
-  }
-
-  async getInsight(id: string): Promise<Insight | null> {
-    const row = this.db
-      .prepare('SELECT * FROM insights WHERE id = ?')
-      .get(id) as RawInsightRow | undefined;
-    return row ? rowToInsight(row) : null;
-  }
-
-  async upsertInsight(insight: Insight): Promise<void> {
-    this.db
-      .prepare(
-        `INSERT INTO insights (
-          id, kind, severity, title, summary, recommendation, confidence,
-          evidence_json, period_label, period_start, period_end,
-          status, created_at, updated_at
-        ) VALUES (
-          @id, @kind, @severity, @title, @summary, @recommendation, @confidence,
-          @evidence_json, @period_label, @period_start, @period_end,
-          @status, @created_at, @updated_at
-        )
-        ON CONFLICT(id) DO UPDATE SET
-          kind = excluded.kind,
-          severity = excluded.severity,
-          title = excluded.title,
-          summary = excluded.summary,
-          recommendation = excluded.recommendation,
-          confidence = excluded.confidence,
-          evidence_json = excluded.evidence_json,
-          period_label = excluded.period_label,
-          period_start = excluded.period_start,
-          period_end = excluded.period_end,
-          status = CASE
-            WHEN insights.status = 'dismissed' AND excluded.status = 'active'
-              THEN insights.status
-            ELSE excluded.status
-          END,
-          updated_at = excluded.updated_at`,
-      )
-      .run({
-        id: insight.id,
-        kind: insight.kind,
-        severity: insight.severity,
-        title: insight.title,
-        summary: insight.summary,
-        recommendation: insight.recommendation,
-        confidence: insight.confidence,
-        evidence_json: JSON.stringify(insight.evidence),
-        period_label: insight.period.label,
-        period_start: insight.period.start,
-        period_end: insight.period.end,
-        status: insight.status,
-        created_at: insight.created_at,
-        updated_at: insight.updated_at,
-      });
-  }
-
-  async dismissInsight(id: string): Promise<void> {
-    this.db
-      .prepare("UPDATE insights SET status = 'dismissed', updated_at = ? WHERE id = ?")
-      .run(new Date().toISOString(), id);
   }
 
   // -------------------------------------------------------------------------
@@ -1887,29 +1786,6 @@ class LocalStorage implements IStorage {
         entities_json       TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
-
-      CREATE TABLE IF NOT EXISTS insights (
-        id              TEXT PRIMARY KEY,
-        kind            TEXT NOT NULL,
-        severity        TEXT NOT NULL,
-        title           TEXT NOT NULL,
-        summary         TEXT NOT NULL,
-        recommendation  TEXT NOT NULL,
-        confidence      REAL NOT NULL,
-        evidence_json   TEXT NOT NULL DEFAULT '{}',
-        period_label    TEXT NOT NULL,
-        period_start    TEXT NOT NULL,
-        period_end      TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'active',
-        created_at      TEXT NOT NULL,
-        updated_at      TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_insights_status_updated
-        ON insights(status, updated_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_insights_kind
-        ON insights(kind);
-      CREATE INDEX IF NOT EXISTS idx_insights_period
-        ON insights(period_start, period_end);
     `);
 
     this.runSchemaMigrations();
@@ -2843,53 +2719,6 @@ function rowToSession(r: RawSessionRow): ActivitySession {
     primary_entity_kind: r.primary_entity_kind as EntityKind | null,
     primary_app: r.primary_app,
     entities,
-  };
-}
-
-interface RawInsightRow {
-  id: string;
-  kind: string;
-  severity: string;
-  title: string;
-  summary: string;
-  recommendation: string;
-  confidence: number;
-  evidence_json: string;
-  period_label: string;
-  period_start: string;
-  period_end: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
-
-function rowToInsight(r: RawInsightRow): Insight {
-  let evidence: InsightEvidence = {};
-  try {
-    const parsed = JSON.parse(r.evidence_json) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      evidence = parsed as InsightEvidence;
-    }
-  } catch {
-    evidence = {};
-  }
-  return {
-    id: r.id,
-    kind: r.kind as Insight['kind'],
-    severity: r.severity as Insight['severity'],
-    title: r.title,
-    summary: r.summary,
-    recommendation: r.recommendation,
-    confidence: Number.isFinite(r.confidence) ? r.confidence : 0,
-    evidence,
-    period: {
-      label: r.period_label,
-      start: r.period_start,
-      end: r.period_end,
-    },
-    status: r.status as InsightStatus,
-    created_at: r.created_at,
-    updated_at: r.updated_at,
   };
 }
 

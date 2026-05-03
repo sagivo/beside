@@ -9,11 +9,7 @@ const api = {
   listJournalDays: () => ipcRenderer.invoke('cofounderos:list-journal-days'),
   getJournalDay: (day) => ipcRenderer.invoke('cofounderos:get-journal-day', day),
   searchFrames: (query) => ipcRenderer.invoke('cofounderos:search-frames', query),
-  listInsights: (query) => ipcRenderer.invoke('cofounderos:list-insights', query),
-  runInsightsNow: () => ipcRenderer.invoke('cofounderos:run-insights-now'),
-  askInsights: (input) => ipcRenderer.invoke('cofounderos:ask-insights', input),
-  dismissInsight: (id) => ipcRenderer.invoke('cofounderos:dismiss-insight', id),
-  chatInsights: (input) => ipcRenderer.invoke('cofounderos:chat-insights', input),
+  explainSearchResults: (query) => ipcRenderer.invoke('cofounderos:explain-search-results', query),
   readAsset: (assetPath) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -37,11 +33,6 @@ const api = {
   },
   onOverview: (callback) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview) => callback(overview));
-  },
-  onAgentStep: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('cofounderos:agent-step', handler);
-    return () => ipcRenderer.removeListener('cofounderos:agent-step', handler);
   },
 };
 

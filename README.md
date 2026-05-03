@@ -257,8 +257,7 @@ can tell which monitor a frame came from. If you preferred the previous
 
 ## Development
 
-`pnpm cli ...` runs the **compiled** output at `packages/cli/dist/cli.js`, so
-edits aren't picked up until you rebuild. For live development, just run:
+For desktop UI development, run:
 
 ```bash
 pnpm dev
@@ -266,23 +265,31 @@ pnpm dev
 
 This does an initial build, then in parallel:
 
-- Watches the 3 workspace packages (`interfaces`, `core`, `app`) with
-  `tsc --watch` — any change to a `packages/**/src/**/*.ts` file triggers
-  an incremental recompile of that package's `dist/`.
-- Runs the CLI's `start` command via `tsx watch`, which restarts the process
-  whenever any imported source or rebuilt `dist/` file changes.
+- Serves the Electron renderer with Vite, so React edits hot-reload in the
+  desktop window.
+- Watches the workspace packages (`interfaces`, `core`, `runtime`) plus the
+  Electron main/preload sources with `tsc --watch`, then restarts Electron when
+  compiled main-process inputs change.
+- Watches plugin sources and native helper sources, rebuilding plugin `dist/`
+  output and Swift helpers when they change.
 
-It also schedules a **full re-index 60 seconds after the dev process becomes
-stable** — i.e. once you stop editing files for a minute. Each file edit
-restarts `tsx` and cancels the pending timer, so the re-index only fires
-when you've stopped iterating. A marker file in the data dir suppresses
-re-runs for 24 h after a successful dev re-index, so an idle `pnpm dev`
+The old CLI live-development loop is still available as:
+
+```bash
+pnpm dev:cli
+```
+
+`pnpm dev:cli` also schedules a **full re-index 60 seconds after the dev
+process becomes stable** - i.e. once you stop editing files for a minute. Each
+file edit restarts `tsx` and cancels the pending timer, so the re-index only
+fires when you've stopped iterating. A marker file in the data dir suppresses
+re-runs for 24 h after a successful dev re-index, so an idle `pnpm dev:cli`
 doesn't re-index repeatedly.
 
-For plugin sources under `plugins/<layer>/<name>/src/`, rerun
-`pnpm build:plugins` after edits. (Plugins are loaded from their `dist/`
-output at runtime, not the workspace's TS watcher graph, so they need an
-explicit rebuild.)
+For plugin sources under `plugins/<layer>/<name>/src/`, `pnpm dev` rebuilds
+them automatically. If you are not running the desktop dev loop, rerun
+`pnpm build:plugins` after plugin edits because plugins are loaded from their
+`dist/` output.
 
 For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 

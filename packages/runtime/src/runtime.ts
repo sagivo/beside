@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import {
   createLogger,
   defaultDataDir,
@@ -15,12 +14,6 @@ import type {
   ExportStatus,
   Frame,
   FrameQuery,
-  ChatTurnInput,
-  ChatTurnResult,
-  Insight,
-  InsightAnswer,
-  InsightEvidence,
-  InsightQuery,
   IndexState,
   Logger,
   StorageStats,
@@ -36,9 +29,6 @@ import {
   type OrchestratorHandles,
   type OrchestratorOptions,
 } from './orchestrator.js';
-import { McpChatAgent, type AgentProgressHandler } from './mcp-agent.js';
-import { redactPii } from './pii.js';
-
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -107,6 +97,16 @@ export interface RuntimeJournalDay {
   sessions: ActivitySession[];
 }
 
+export interface SearchResultExplanation {
+  frameId: string;
+  explanation: string;
+}
+
+export interface ExplainSearchResultsQuery {
+  text: string;
+  frames: Frame[];
+}
+
 export type ConfigPatch = Record<string, unknown>;
 
 export class CofounderRuntime {
@@ -114,7 +114,6 @@ export class CofounderRuntime {
   private readonly opts: OrchestratorOptions;
   private handles: OrchestratorHandles | null = null;
   private status: RuntimeStatus = 'not_started';
-  private mcpAgent: McpChatAgent | null = null;
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -144,10 +143,6 @@ export class CofounderRuntime {
   }
 
   async stop(): Promise<void> {
-    if (this.mcpAgent) {
-      await this.mcpAgent.close().catch(() => undefined);
-      this.mcpAgent = null;
-    }
     if (!this.handles) {
       this.status = 'stopped';
       return;
@@ -358,6 +353,45 @@ export class CofounderRuntime {
     return await this.withHandles((handles) => handles.storage.searchFrames(query));
   }
 
+  async explainSearchResults(query: ExplainSearchResultsQuery): Promise<SearchResultExplanation[]> {
+    const text = query.text.trim();
+    if (!text || query.frames.length === 0) return [];
+
+    return await this.withHandles(async (handles) => {
+      if (!(await handles.model.isAvailable().catch(() => false))) return [];
+
+      const modelInfo = handles.model.getModelInfo();
+      const explanations: SearchResultExplanation[] = [];
+      for (const frame of query.frames) {
+        try {
+          const image = modelInfo.supportsVision && frame.asset_path
+            ? await readFrameAssetForModel(handles, frame.asset_path)
+            : null;
+          const prompt = buildSearchResultExplanationPrompt(text, frame, image != null);
+          const raw = image
+            ? await handles.model.completeWithVision(prompt, [image], {
+                maxTokens: 120,
+                temperature: 0.2,
+              })
+            : await handles.model.complete(prompt, {
+                maxTokens: 120,
+                temperature: 0.2,
+              });
+          const explanation = cleanSearchExplanation(raw);
+          if (explanation) {
+            explanations.push({ frameId: frame.id, explanation });
+          }
+        } catch (err) {
+          handles.logger.debug('search result explanation failed', {
+            frameId: frame.id,
+            err: String(err),
+          });
+        }
+      }
+      return explanations;
+    });
+  }
+
   async deleteFrame(frameId: string): Promise<{ assetPath: string | null }> {
     return await this.withHandles((handles) => handles.storage.deleteFrame(frameId));
   }
@@ -372,122 +406,6 @@ export class CofounderRuntime {
     assetBytes: number;
   }> {
     return await this.withHandles((handles) => handles.storage.deleteAllMemory());
-  }
-
-  async listInsights(query: InsightQuery = {}): Promise<Insight[]> {
-    return await this.withHandles((handles) => handles.storage.listInsights(query));
-  }
-
-  async runInsightsNow(): Promise<Insight[]> {
-    return await this.withHandles(async (handles) => {
-      await handles.insightsWorker.tick();
-      return await handles.storage.listInsights({ status: 'active', limit: 50 });
-    });
-  }
-
-  async askInsights(input: { question: string; from?: string; to?: string }): Promise<InsightAnswer> {
-    const question = input.question.trim();
-    if (!question) throw new Error('Question is required');
-    return await this.withHandles(async (handles) => {
-      const ready = await handles.model.isAvailable().catch(() => false);
-      if (!ready) {
-        throw new Error('Local AI is unavailable. Set up local AI before asking Insights.');
-      }
-
-      const now = new Date().toISOString();
-      const from = input.from ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const to = input.to ?? now;
-      const frames = await handles.storage.searchFrames({
-        text: question,
-        from,
-        to,
-        limit: 30,
-      }).catch(() => [] as Frame[]);
-      const sessions = await handles.storage.listSessions({
-        from,
-        to,
-        order: 'recent',
-        limit: 25,
-      });
-      const evidence = buildInsightAnswerEvidence(
-        question,
-        frames,
-        sessions,
-        handles.config.capture.privacy.sensitive_keywords ?? [],
-      );
-      const raw = await handles.model.complete(buildInsightQuestionPrompt(question, evidence), {
-        responseFormat: 'json',
-        temperature: 0.2,
-        maxTokens: 1200,
-        systemPrompt: 'You answer questions about local activity data. Use only the provided evidence.',
-      });
-      const answer = parseInsightAnswer(question, raw, evidence, now);
-      if (answer.generated_insight && hasEvidence(answer.generated_insight.evidence)) {
-        await handles.storage.upsertInsight(answer.generated_insight);
-      }
-      return answer;
-    });
-  }
-
-  async dismissInsight(id: string): Promise<void> {
-    await this.withHandles((handles) => handles.storage.dismissInsight(id));
-  }
-
-  async chatInsights(
-    input: ChatTurnInput,
-    onStep?: AgentProgressHandler,
-  ): Promise<ChatTurnResult> {
-    if (!Array.isArray(input.messages) || input.messages.length === 0) {
-      throw new Error('At least one message is required');
-    }
-    const lastUser = [...input.messages].reverse().find((message) => message.role === 'user');
-    if (!lastUser) {
-      throw new Error('Conversation must include a user message');
-    }
-    if (!lastUser.content.trim()) {
-      throw new Error('Latest user message is empty');
-    }
-    return await this.withHandles(async (handles) => {
-      const ready = await handles.model.isAvailable().catch(() => false);
-      if (!ready) {
-        throw new Error('Local AI is unavailable. Set up local AI before chatting with Insights.');
-      }
-      let seed: Insight | null = null;
-      if (input.insightId) {
-        seed = await handles.storage.getInsight(input.insightId).catch(() => null);
-      }
-      const agent = this.getMcpAgent(handles);
-      return await agent.chat(input, seed, { onStep });
-    });
-  }
-
-  private getMcpAgent(handles: OrchestratorHandles): McpChatAgent {
-    if (this.mcpAgent) return this.mcpAgent;
-    const mcpExport = handles.exports.find((exp) => exp.name === 'mcp');
-    if (!mcpExport) {
-      throw new Error(
-        'The local MCP export is not enabled in config.yaml — add it to export.plugins to chat with Insights.',
-      );
-    }
-    const endpointConfig = readMcpEndpointFromConfig(handles);
-    this.mcpAgent = new McpChatAgent({
-      logger: handles.logger,
-      model: handles.model,
-      resolveEndpoint: async () => endpointConfig.url,
-      ensureServer: async () => {
-        if (mcpExport.getStatus().running) return;
-        await mcpExport.start();
-      },
-      fetchAsset: async (assetPath: string) => {
-        const storageRoot = path.resolve(handles.storage.getRoot());
-        const resolved = path.resolve(storageRoot, assetPath);
-        if (!resolved.startsWith(`${storageRoot}${path.sep}`) && resolved !== storageRoot) {
-          throw new Error('asset path escapes storage root');
-        }
-        return await handles.storage.readAsset(assetPath);
-      },
-    });
-    return this.mcpAgent;
   }
 
   async readAsset(assetPath: string): Promise<Buffer> {
@@ -562,180 +480,52 @@ function latestIso(values: Array<string | null>): string | null {
   return latest;
 }
 
-function buildInsightAnswerEvidence(
-  question: string,
-  frames: Frame[],
-  sessions: ActivitySession[],
-  sensitiveKeywords: string[],
-): InsightEvidence {
-  const relevantFrames = frames.slice(0, 12);
-  const relevantSessions = sessions.slice(0, 8);
-  const apps = Array.from(new Set([
-    ...relevantFrames.map((frame) => frame.app).filter(Boolean),
-    ...relevantSessions.map((session) => session.primary_app).filter(Boolean),
-  ] as string[])).slice(0, 8);
-  const entities = Array.from(new Set([
-    ...relevantFrames.map((frame) => frame.entity_path).filter(Boolean),
-    ...relevantSessions.map((session) => session.primary_entity_path).filter(Boolean),
-  ] as string[])).slice(0, 8);
-  const activeMs = relevantSessions.reduce((sum, session) => sum + Math.max(0, session.active_ms), 0);
-  return {
-    frameIds: relevantFrames.map((frame) => frame.id),
-    sessionIds: relevantSessions.map((session) => session.id),
-    apps,
-    entities,
-    metrics: {
-      matchedFrames: relevantFrames.length,
-      sessions: relevantSessions.length,
-      activeMinutes: Math.round(activeMs / 60_000),
-      query: question,
-    },
-    snippets: relevantFrames.slice(0, 6).map((frame) => ({
-      label: frame.app || 'Frame',
-      frameId: frame.id,
-      sessionId: frame.activity_session_id ?? undefined,
-      text: redactPii(
-        [frame.window_title, frame.url, frame.text].filter(Boolean).join(' | '),
-        sensitiveKeywords,
-      ).replace(/\s+/g, ' ').slice(0, 360),
-    })),
-  };
-}
+function buildSearchResultExplanationPrompt(
+  query: string,
+  frame: Frame,
+  includesImage: boolean,
+): string {
+  const metadata = [
+    frame.app ? `App: ${frame.app}` : null,
+    frame.window_title ? `Window title: ${frame.window_title}` : null,
+    frame.url ? `URL: ${frame.url}` : null,
+    frame.timestamp ? `Timestamp: ${frame.timestamp}` : null,
+    frame.text ? `Searchable text: ${frame.text.replace(/\s+/g, ' ').slice(0, 1200)}` : null,
+  ].filter(Boolean).join('\n');
 
-function buildInsightQuestionPrompt(question: string, evidence: InsightEvidence): string {
   return [
-    `Question: ${question}`,
+    'Look at the screenshot and add context about the part related to the search term.',
+    `Search term for your reference only: ${query}`,
+    includesImage
+      ? 'Do not repeat the search term. Add context for the search term based on the image, using the metadata only for clarification.'
+      : 'No screenshot is available. Do not repeat the search term; summarize the relevant context from the metadata.',
+    metadata || 'No metadata was extracted for this frame.',
     '',
-    'Evidence from local activity data:',
-    JSON.stringify(evidence),
-    '',
-    'Return JSON only with this shape:',
-    '{"answer":"...","suggested_actions":["..."],"generated_insight":{"title":"...","summary":"...","recommendation":"...","severity":"info|low|medium|high","confidence":0.0}}',
-    'If evidence is thin, say so and suggest what data would make the answer stronger.',
+    'Return one concise sentence under 40 words. Do not explain why this result matched or mention that you are an AI.',
   ].join('\n');
 }
 
-function parseInsightAnswer(
-  question: string,
-  raw: string,
-  evidence: InsightEvidence,
-  createdAt: string,
-): InsightAnswer {
-  let parsed: Record<string, unknown> = {};
+async function readFrameAssetForModel(
+  handles: OrchestratorHandles,
+  assetPath: string,
+): Promise<Buffer | null> {
   try {
-    const value = JSON.parse(raw) as unknown;
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      parsed = value as Record<string, unknown>;
+    const storageRoot = path.resolve(handles.storage.getRoot());
+    const resolved = path.resolve(storageRoot, assetPath);
+    if (!resolved.startsWith(`${storageRoot}${path.sep}`) && resolved !== storageRoot) {
+      throw new Error('asset path escapes storage root');
     }
+    return await handles.storage.readAsset(assetPath);
   } catch {
-    parsed = {};
+    return null;
   }
-
-  const answer = typeof parsed.answer === 'string' && parsed.answer.trim()
-    ? parsed.answer.trim()
-    : 'I could not produce a reliable answer from the available evidence.';
-  const suggestedActions = Array.isArray(parsed.suggested_actions)
-    ? parsed.suggested_actions.filter((item): item is string => typeof item === 'string').slice(0, 5)
-    : [];
-  const modelInsight = parsed.generated_insight && typeof parsed.generated_insight === 'object'
-    ? parsed.generated_insight as Record<string, unknown>
-    : null;
-  const generatedInsight = hasEvidence(evidence)
-    ? buildCustomQueryInsight(question, answer, suggestedActions, modelInsight, evidence, createdAt)
-    : undefined;
-
-  return {
-    question,
-    answer,
-    evidence,
-    suggested_actions: suggestedActions,
-    generated_insight: generatedInsight,
-    created_at: createdAt,
-  };
 }
 
-function buildCustomQueryInsight(
-  question: string,
-  answer: string,
-  suggestedActions: string[],
-  modelInsight: Record<string, unknown> | null,
-  evidence: InsightEvidence,
-  createdAt: string,
-): Insight {
-  const title = textField(modelInsight?.title, `Answer: ${question}`, 100);
-  const summary = textField(modelInsight?.summary, answer, 320);
-  const recommendation = textField(
-    modelInsight?.recommendation,
-    suggestedActions[0] ?? 'Review the linked evidence before acting on this answer.',
-    240,
-  );
-  const severity = severityField(modelInsight?.severity);
-  const confidence = numberField(modelInsight?.confidence, evidence.frameIds?.length ? 0.65 : 0.45);
-  const period = {
-    label: 'Custom query',
-    start: createdAt,
-    end: createdAt,
-  };
-  return {
-    id: `ins_${createHash('sha256').update(JSON.stringify({
-      question,
-      frameIds: evidence.frameIds?.slice(0, 8),
-      sessionIds: evidence.sessionIds?.slice(0, 8),
-      createdHour: createdAt.slice(0, 13),
-    })).digest('hex').slice(0, 24)}`,
-    kind: 'custom_query',
-    severity,
-    title,
-    summary,
-    recommendation,
-    confidence,
-    evidence,
-    period,
-    status: 'active',
-    created_at: createdAt,
-    updated_at: createdAt,
-  };
-}
-
-function hasEvidence(evidence: InsightEvidence): boolean {
-  return !!(
-    evidence.frameIds?.length ||
-    evidence.sessionIds?.length ||
-    evidence.apps?.length ||
-    evidence.entities?.length
-  );
-}
-
-function textField(value: unknown, fallback: string, max: number): string {
-  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : fallback.slice(0, max);
-}
-
-function numberField(value: unknown, fallback: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.max(0, Math.min(1, value));
-}
-
-function severityField(value: unknown): Insight['severity'] {
-  return value === 'info' || value === 'low' || value === 'medium' || value === 'high'
-    ? value
-    : 'info';
-}
-
-function readMcpEndpointFromConfig(handles: OrchestratorHandles): { url: string } {
-  const configured = handles.config.export.plugins.find(
-    (plugin) => plugin.name === 'mcp',
-  ) as Record<string, unknown> | undefined;
-  const transport = typeof configured?.transport === 'string' ? configured.transport : 'http';
-  if (transport !== 'http') {
-    throw new Error(
-      `The MCP export is configured with transport=${transport}, but the in-app chat agent needs the http transport. Update config.yaml export.plugins entry "mcp" to transport: http.`,
-    );
-  }
-  const host = typeof configured?.host === 'string' && configured.host ? configured.host : '127.0.0.1';
-  const port = typeof configured?.port === 'number' && Number.isFinite(configured.port)
-    ? configured.port
-    : 3456;
-  return { url: `http://${host}:${port}` };
+function cleanSearchExplanation(raw: string): string {
+  return raw
+    .replace(/^["'\s]+|["'\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 260);
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

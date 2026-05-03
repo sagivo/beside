@@ -5,7 +5,6 @@ import {
   FolderOpen,
   HelpCircle,
   LayoutDashboard,
-  Lightbulb,
   Pause,
   Play,
   Plug,
@@ -39,7 +38,6 @@ export function CommandPalette({
   onResume,
   onTriggerIndex,
   onTriggerReorganise,
-  onRunInsightsNow,
   onBootstrap,
   onCopyMcpSnippet,
 }: {
@@ -54,7 +52,6 @@ export function CommandPalette({
   onResume: () => Promise<void> | void;
   onTriggerIndex: () => Promise<void> | void;
   onTriggerReorganise: () => Promise<void> | void;
-  onRunInsightsNow: () => Promise<void> | void;
   onBootstrap: () => Promise<void> | void;
   onCopyMcpSnippet?: () => Promise<void> | void;
 }) {
@@ -94,9 +91,6 @@ export function CommandPalette({
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search
           </CommandItem>
-          <CommandItem onSelect={() => run(() => onJump('insights'))}>
-            <Lightbulb /> Insights
-          </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('connect'))}>
             <Plug /> Connect AI
           </CommandItem>
@@ -134,9 +128,6 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(onTriggerReorganise)}>
             <Wand2 /> Rebuild summaries
-          </CommandItem>
-          <CommandItem onSelect={() => run(onRunInsightsNow)}>
-            <Lightbulb /> Refresh insights
           </CommandItem>
           {!overview?.model.ready && (
             <CommandItem onSelect={() => run(onBootstrap)}>

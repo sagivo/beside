@@ -94,7 +94,7 @@ class OpenAIAdapter implements IModelAdapter {
         ...images.map((image) => ({
           type: 'image_url' as const,
           image_url: {
-            url: `data:image/png;base64,${image.toString('base64')}`,
+            url: `data:${detectImageMime(image)};base64,${image.toString('base64')}`,
           },
         })),
       ],
@@ -177,6 +177,19 @@ function parseEmbedding(value: unknown): number[] {
   });
   if (out.length === 0) throw new Error('embedding response was empty');
   return out;
+}
+
+function detectImageMime(image: Buffer): string {
+  if (image.length >= 12 && image.subarray(0, 4).toString('hex') === '52494646' && image.subarray(8, 12).toString() === 'WEBP') {
+    return 'image/webp';
+  }
+  if (image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (image.length >= 8 && image.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') {
+    return 'image/png';
+  }
+  return 'image/png';
 }
 
 const factory: PluginFactory<IModelAdapter> = (ctx) => {

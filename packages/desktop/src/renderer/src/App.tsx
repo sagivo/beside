@@ -15,9 +15,6 @@ const Dashboard = React.lazy(() =>
   import('@/screens/Dashboard').then((mod) => ({ default: mod.Dashboard })),
 );
 const Help = React.lazy(() => import('@/screens/Help').then((mod) => ({ default: mod.Help })));
-const Insights = React.lazy(() =>
-  import('@/screens/Insights').then((mod) => ({ default: mod.Insights })),
-);
 const Search = React.lazy(() =>
   import('@/screens/Search').then((mod) => ({ default: mod.Search })),
 );
@@ -37,7 +34,6 @@ const Onboarding = React.lazy(() =>
 );
 import type {
   DoctorCheck,
-  Insight,
   JournalDay,
   LoadedConfig,
   ModelBootstrapProgress,
@@ -66,7 +62,6 @@ function AppInner() {
   const [days, setDays] = React.useState<string[]>([]);
   const [selectedDay, setSelectedDay] = React.useState<string | null>(null);
   const [journal, setJournal] = React.useState<JournalDay | null>(null);
-  const [insights, setInsights] = React.useState<Insight[] | null>(null);
   const [config, setConfig] = React.useState<LoadedConfig | null>(null);
   const [logs, setLogs] = React.useState('');
   const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
@@ -131,9 +126,6 @@ function AppInner() {
       if (next === 'search') {
         const nextDays = await window.cofounderos.listJournalDays();
         setDays(nextDays);
-      }
-      if (next === 'insights') {
-        setInsights(await window.cofounderos.listInsights({ status: 'active', limit: 50 }));
       }
       if (next === 'connect') {
         setOverview(await window.cofounderos.getOverview());
@@ -242,23 +234,6 @@ function AppInner() {
           });
         }
       },
-      onRunInsightsNow: async () => {
-        try {
-          setInsights(await window.cofounderos.runInsightsNow());
-          toast.success('Insights refreshed', {
-            description: 'New local patterns are ready to review.',
-          });
-        } catch (err) {
-          toast.error('Could not refresh insights', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onDismissInsight: async (id: string) => {
-        await window.cofounderos.dismissInsight(id);
-        setInsights((prev) => prev?.filter((insight) => insight.id !== id) ?? prev);
-        toast.info('Insight dismissed');
-      },
       onBootstrap: async () => {
         setBootstrapEvents([]);
         try {
@@ -324,16 +299,6 @@ function AppInner() {
     />
   ) : screen === 'search' ? (
     <Search days={days} searchRequest={searchRequest} />
-  ) : screen === 'insights' ? (
-    <Insights
-      insights={insights}
-      onRefresh={actions.onRunInsightsNow}
-      onDismiss={actions.onDismissInsight}
-      onOpenEvidence={(insight) => {
-        setSelectedDay(insight.period.end.slice(0, 10));
-        setScreen('timeline');
-      }}
-    />
   ) : screen === 'connect' ? (
     <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
   ) : screen === 'settings' ? (
@@ -364,7 +329,6 @@ function AppInner() {
       onSearch={runPaletteSearch}
       onTriggerIndex={actions.onTriggerIndex}
       onTriggerReorganise={actions.onTriggerReorganise}
-      onRunInsightsNow={actions.onRunInsightsNow}
       onBootstrap={actions.onBootstrap}
       onCopyMcpSnippet={copyMcpSnippet}
     >

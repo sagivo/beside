@@ -6,6 +6,7 @@ import {
   FileText,
   ImageOff,
   Layers,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import {
@@ -35,8 +36,13 @@ import type { Frame } from '@/global';
 
 type DeleteHandler = (frame: Frame) => void | Promise<void>;
 
+interface FrameSearchContext {
+  query: string;
+  explanation?: string;
+}
+
 interface FrameDetailContextValue {
-  open: (frame: Frame, opts?: { onDeleted?: DeleteHandler }) => void;
+  open: (frame: Frame, opts?: { onDeleted?: DeleteHandler; searchContext?: FrameSearchContext }) => void;
   close: () => void;
 }
 
@@ -44,6 +50,7 @@ const FrameDetailContext = React.createContext<FrameDetailContextValue | null>(n
 
 export function FrameDetailProvider({ children }: { children: React.ReactNode }) {
   const [frame, setFrame] = React.useState<Frame | null>(null);
+  const [searchContext, setSearchContext] = React.useState<FrameSearchContext | null>(null);
   // Per-open `onDeleted` callback so screens can refresh their lists when
   // a frame opened from them gets deleted. Stored in a ref so re-renders
   // don't reset the binding.
@@ -53,9 +60,13 @@ export function FrameDetailProvider({ children }: { children: React.ReactNode })
     () => ({
       open: (next, opts) => {
         onDeletedRef.current = opts?.onDeleted ?? null;
+        setSearchContext(opts?.searchContext ?? null);
         setFrame(next);
       },
-      close: () => setFrame(null),
+      close: () => {
+        setFrame(null);
+        setSearchContext(null);
+      },
     }),
     [],
   );
@@ -65,9 +76,11 @@ export function FrameDetailProvider({ children }: { children: React.ReactNode })
       {children}
       <FrameDetailDialog
         frame={frame}
+        searchContext={searchContext}
         onOpenChange={(open) => {
           if (!open) {
             setFrame(null);
+            setSearchContext(null);
             onDeletedRef.current = null;
           }
         }}
@@ -75,6 +88,7 @@ export function FrameDetailProvider({ children }: { children: React.ReactNode })
           const cb = onDeletedRef.current;
           onDeletedRef.current = null;
           setFrame(null);
+          setSearchContext(null);
           if (cb) void cb(deleted);
         }}
       />
@@ -90,10 +104,12 @@ export function useFrameDetail(): FrameDetailContextValue {
 
 function FrameDetailDialog({
   frame,
+  searchContext,
   onOpenChange,
   onDeleted,
 }: {
   frame: Frame | null;
+  searchContext: FrameSearchContext | null;
   onOpenChange: (open: boolean) => void;
   onDeleted: (frame: Frame) => void;
 }) {
@@ -101,15 +117,31 @@ function FrameDetailDialog({
     <Dialog open={frame !== null} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl gap-0 overflow-hidden p-0">
         {frame ? (
-          <FrameDetailBody frame={frame} onDeleted={() => onDeleted(frame)} />
+          <FrameDetailBody
+            frame={frame}
+            searchContext={searchContext}
+            onDeleted={() => onDeleted(frame)}
+          />
         ) : null}
       </DialogContent>
     </Dialog>
   );
 }
 
-function FrameDetailBody({ frame, onDeleted }: { frame: Frame; onDeleted: () => void }) {
+function FrameDetailBody({
+  frame,
+  searchContext,
+  onDeleted,
+}: {
+  frame: Frame;
+  searchContext: FrameSearchContext | null;
+  onDeleted: () => void;
+}) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
+  const [detailExplanation, setDetailExplanation] = React.useState<string | null>(
+    searchContext?.explanation ?? null,
+  );
+  const [explanationLoading, setExplanationLoading] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -143,6 +175,35 @@ function FrameDetailBody({ frame, onDeleted }: { frame: Frame; onDeleted: () => 
       cancelled = true;
     };
   }, [frame.asset_path]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const query = searchContext?.query.trim();
+    setDetailExplanation(searchContext?.explanation ?? null);
+    if (!query || searchContext?.explanation || !frame.id) {
+      setExplanationLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setExplanationLoading(true);
+    void (async () => {
+      try {
+        const explained = await window.cofounderos.explainSearchResults({
+          text: query,
+          frames: [frame],
+        });
+        if (!cancelled) setDetailExplanation(explained[0]?.explanation ?? null);
+      } catch {
+        if (!cancelled) setDetailExplanation(null);
+      } finally {
+        if (!cancelled) setExplanationLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [frame, searchContext?.explanation, searchContext?.query]);
 
   const title =
     frame.window_title ||
@@ -208,6 +269,17 @@ function FrameDetailBody({ frame, onDeleted }: { frame: Frame; onDeleted: () => 
                 label="Entity"
                 value={<span className="font-mono text-xs break-all">{frame.entity_path}</span>}
               />
+            ) : null}
+            {searchContext ? (
+              <div>
+                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
+                  <Sparkles className="size-3.5" />
+                  <span>Search context</span>
+                </div>
+                <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
+                  {detailExplanation || (explanationLoading ? 'Reading context from this result…' : 'No AI context available for this result yet.')}
+                </div>
+              </div>
             ) : null}
             {frame.text ? (
               <div>

@@ -26,6 +26,7 @@ const dataDir = defaultDataDir();
 const configPath = path.join(dataDir, 'config.yaml');
 const markdownExportDir = path.join(dataDir, 'export/markdown');
 const windowStatePath = path.join(dataDir, 'desktop-window.json');
+const rendererDevUrl = process.env.COFOUNDEROS_RENDERER_URL;
 
 interface WindowState {
   width: number;
@@ -173,9 +174,6 @@ class RuntimeServiceClient {
     this.on('overview', (payload) => {
       lastOverview = payload as RuntimeOverview;
       statusWindow?.webContents.send('cofounderos:overview', payload);
-    });
-    this.on('agent-step', (payload) => {
-      statusWindow?.webContents.send('cofounderos:agent-step', payload);
     });
 
     const rl = readline.createInterface({
@@ -532,14 +530,40 @@ function enterMacStatusWindowMode(): void {
 }
 
 async function renderStatusWindow(): Promise<void> {
-  if (!statusWindow) return;
-  await statusWindow.loadFile(path.join(here, 'renderer', 'index.html'));
-  statusWindow.webContents.once('did-finish-load', () => {
-    statusWindow?.webContents.send('cofounderos:desktop-logs', lastLogs.slice(-120).join('\n'));
+  const win = statusWindow;
+  if (!win || win.isDestroyed()) return;
+  const sendInitialState = () => {
+    if (win.isDestroyed()) return;
+    win.webContents.send('cofounderos:desktop-logs', lastLogs.slice(-120).join('\n'));
     if (lastOverview) {
-      statusWindow?.webContents.send('cofounderos:overview', lastOverview);
+      win.webContents.send('cofounderos:overview', lastOverview);
     }
-  });
+  };
+  win.webContents.once('did-finish-load', sendInitialState);
+  try {
+    if (rendererDevUrl) {
+      await win.loadURL(rendererDevUrl);
+    } else {
+      await win.loadFile(path.join(here, 'renderer', 'index.html'));
+    }
+  } catch (err) {
+    win.webContents.removeListener('did-finish-load', sendInitialState);
+    if (isExpectedDevRendererLoadFailure(err)) {
+      appendLog(`Dev renderer navigation interrupted: ${String(err)}`);
+      return;
+    }
+    throw err;
+  }
+}
+
+function isExpectedDevRendererLoadFailure(err: unknown): boolean {
+  if (!rendererDevUrl) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes('ERR_ABORTED') ||
+    message.includes('ERR_FAILED') ||
+    message.includes('ERR_CONNECTION_REFUSED')
+  );
 }
 
 async function startRuntime(): Promise<void> {
@@ -689,7 +713,7 @@ async function getRuntimeDoctorText(): Promise<string> {
 
 function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:overview', async () => {
-    return await (await getRuntimeForRequest()).call('overview');
+    return await getOverviewForRequest();
   });
   ipcMain.handle('cofounderos:doctor', async () => {
     return await (await getRuntimeForRequest()).call('doctor');
@@ -712,20 +736,8 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('searchFrames', query);
   });
-  ipcMain.handle('cofounderos:list-insights', async (_event, query: unknown) => {
-    return await (await getRuntimeForRequest()).call('listInsights', query);
-  });
-  ipcMain.handle('cofounderos:run-insights-now', async () => {
-    return await (await getRuntimeForRequest()).call('runInsightsNow');
-  });
-  ipcMain.handle('cofounderos:ask-insights', async (_event, input: unknown) => {
-    return await (await getRuntimeForRequest()).call('askInsights', input);
-  });
-  ipcMain.handle('cofounderos:dismiss-insight', async (_event, id: string) => {
-    return await (await getRuntimeForRequest()).call('dismissInsight', id);
-  });
-  ipcMain.handle('cofounderos:chat-insights', async (_event, input: unknown) => {
-    return await (await getRuntimeForRequest()).call('chatInsights', input);
+  ipcMain.handle('cofounderos:explain-search-results', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('explainSearchResults', query);
   });
   ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
     const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
@@ -787,6 +799,23 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:delete-all-memory', async () => {
     return await (await getRuntimeForRequest()).call('deleteAllMemory');
   });
+}
+
+async function getOverviewForRequest(): Promise<RuntimeOverview | null> {
+  try {
+    return await (await getRuntimeForRequest()).call<RuntimeOverview>('overview');
+  } catch (err) {
+    if (isExpectedRuntimeServiceClosure(err)) {
+      appendLog(`Overview request skipped while runtime service is restarting: ${String(err)}`);
+      return lastOverview;
+    }
+    throw err;
+  }
+}
+
+function isExpectedRuntimeServiceClosure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes('runtime service closed') || message.includes('runtime service exited');
 }
 
 async function getRuntimeForRequest(): Promise<RuntimeServiceClient> {

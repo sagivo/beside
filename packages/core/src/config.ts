@@ -223,19 +223,6 @@ const IndexSchema = z.object({
     tick_interval_min: 5,
     search_weight: 0.35,
   }),
-  insights: z.object({
-    enabled: z.boolean().default(true),
-    tick_interval_min: z.number().int().positive().default(30),
-    lookback_hours: z.number().int().positive().default(24),
-    max_sessions_per_batch: z.number().int().positive().default(80),
-    min_confidence: z.number().min(0).max(1).default(0.55),
-  }).default({
-    enabled: true,
-    tick_interval_min: 30,
-    lookback_hours: 24,
-    max_sessions_per_batch: 80,
-    min_confidence: 0.55,
-  }),
   model: z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({

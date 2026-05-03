@@ -56,12 +56,11 @@ class OllamaAdapter implements IModelAdapter {
   }
 
   getModelInfo(): ModelInfo {
-    const family = this.model.split(':')[0]?.toLowerCase() ?? '';
     return {
       name: `ollama:${this.model}`,
       contextWindowTokens: 8192,
       isLocal: true,
-      supportsVision: PULL_FAMILIES_VISION_OK.some((p) => family.startsWith(p)),
+      supportsVision: isVisionModelName(this.visionModel),
       costPerMillionTokens: 0,
     };
   }
@@ -89,6 +88,66 @@ class OllamaAdapter implements IModelAdapter {
       },
     });
     return res.message.content;
+  }
+
+  /**
+   * Streaming variant of {@link complete}. Emits each chunk as it arrives
+   * via `onChunk` (used by the chat agent to surface live "typing"
+   * progress in the UI) and returns the concatenated full text.
+   */
+  async completeStream(
+    prompt: string,
+    options: CompletionOptions,
+    onChunk: (chunk: string) => void,
+  ): Promise<string> {
+    const messages: { role: 'system' | 'user'; content: string }[] = [];
+    if (options.systemPrompt) {
+      messages.push({ role: 'system', content: options.systemPrompt });
+    }
+    messages.push({ role: 'user', content: prompt });
+
+    const stream = await this.client.chat({
+      model: this.model,
+      messages,
+      stream: true,
+      format: options.responseFormat === 'json' ? 'json' : undefined,
+      options: {
+        temperature: options.temperature ?? 0.2,
+        num_predict: options.maxTokens ?? 1024,
+      },
+    });
+
+    let full = '';
+    try {
+      for await (const part of stream) {
+        const text = part.message?.content ?? '';
+        if (!text) continue;
+        full += text;
+        try {
+          onChunk(text);
+        } catch (err) {
+          this.logger.debug('completeStream onChunk handler threw', { err: String(err) });
+        }
+      }
+    } catch (err) {
+      // Ollama's client throws "Did not receive done or success response
+      // in stream." when the NDJSON body ends without a {done:true} chunk
+      // — typically a daemon restart, dropped connection, or a model that
+      // hit num_predict mid-token. If we already streamed *some* content,
+      // surfacing that partial answer is far more useful than failing the
+      // whole chat turn. Empty-stream cases still propagate so the caller
+      // can fall back to a non-streaming retry or surface a real error.
+      const message = err instanceof Error ? err.message : String(err);
+      if (full.length > 0) {
+        this.logger.warn('ollama stream ended without done; using partial response', {
+          err: message,
+          chars: full.length,
+        });
+        return full;
+      }
+      throw err;
+    }
+    return full;
   }
 
   async completeWithVision(
@@ -345,6 +404,11 @@ function parseEmbedding(value: unknown): number[] {
   });
   if (out.length === 0) throw new Error('embedding response was empty');
   return out;
+}
+
+function isVisionModelName(model: string): boolean {
+  const family = model.split(':')[0]?.toLowerCase() ?? '';
+  return PULL_FAMILIES_VISION_OK.some((p) => family.startsWith(p));
 }
 
 export default factory;

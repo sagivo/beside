@@ -415,137 +415,6 @@ export interface StorageStats {
   eventsByApp: Record<string, number>;
 }
 
-export type InsightKind =
-  | 'time_waste'
-  | 'repeated_task'
-  | 'context_switching'
-  | 'focus_opportunity'
-  | 'trend'
-  | 'custom_query';
-
-export type InsightSeverity = 'info' | 'low' | 'medium' | 'high';
-export type InsightStatus = 'active' | 'dismissed';
-
-export interface InsightPeriod {
-  /** Human label such as "Today", "This week", or "Last 24 hours". */
-  label: string;
-  start: string;
-  end: string;
-}
-
-export interface InsightEvidenceSnippet {
-  label: string;
-  text: string;
-  frameId?: string;
-  sessionId?: string;
-}
-
-export interface InsightEvidence {
-  frameIds?: string[];
-  sessionIds?: string[];
-  apps?: string[];
-  entities?: string[];
-  metrics?: Record<string, number | string>;
-  snippets?: InsightEvidenceSnippet[];
-}
-
-export interface Insight {
-  id: string;
-  kind: InsightKind;
-  severity: InsightSeverity;
-  title: string;
-  summary: string;
-  recommendation: string;
-  confidence: number;
-  evidence: InsightEvidence;
-  period: InsightPeriod;
-  status: InsightStatus;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface InsightQuery {
-  status?: InsightStatus;
-  kind?: InsightKind;
-  from?: string;
-  to?: string;
-  limit?: number;
-}
-
-export interface InsightAnswer {
-  question: string;
-  answer: string;
-  evidence: InsightEvidence;
-  suggested_actions: string[];
-  generated_insight?: Insight;
-  created_at: string;
-}
-
-export type ChatRole = 'system' | 'user' | 'assistant';
-
-/**
- * Single visible step in the agent's reasoning trace. Streamed live to
- * the chat UI (Claude-Desktop-style) and persisted on the assistant
- * message so the trace is available when the conversation is reopened.
- *
- * - `thought`: free-text rationale produced by the model before acting.
- * - `tool`:    one MCP (or local pseudo-tool) invocation. The same step
- *              id is emitted twice — first with `status: 'running'`
- *              when the call begins, then again with `status: 'done'`
- *              or `'error'` once the result lands.
- */
-export type AgentTraceStep =
-  | {
-      id: string;
-      kind: 'thought';
-      text: string;
-    }
-  | {
-      id: string;
-      kind: 'tool';
-      tool: string;
-      args: Record<string, unknown>;
-      /** `mcp` for tools served by the MCP server, `agent` for host-side helpers like view_frame. */
-      source: 'mcp' | 'agent';
-      status: 'running' | 'done' | 'error';
-      /** Compact human summary of the result (e.g. "5 frames, 2 pages"). */
-      summary?: string;
-      /** Truncated raw observation, for the expanded view. */
-      observation?: string;
-    };
-
-export interface ChatMessage {
-  role: ChatRole;
-  content: string;
-  createdAt?: string;
-  /** Reasoning + tool-call trace for the assistant turn that produced this message. */
-  trace?: AgentTraceStep[];
-}
-
-export interface ChatTurnInput {
-  /** Full conversation history. Last entry must have role === 'user'. */
-  messages: ChatMessage[];
-  /** Optional Insight to ground the conversation in (used on the first turn). */
-  insightId?: string;
-  /** When true (or on the first user turn) re-collect evidence from the last user message. */
-  refreshEvidence?: boolean;
-  from?: string;
-  to?: string;
-  /**
-   * Client-generated correlation id for this user turn. When set, the
-   * runtime emits `agent-step` events tagged with this id so the UI can
-   * stream the assistant's reasoning and tool calls in real time.
-   */
-  turnId?: string;
-}
-
-export interface ChatTurnResult {
-  /** Assistant reply for this turn. Includes the final reasoning trace. */
-  message: ChatMessage;
-  /** Evidence pack the model was grounded against. */
-  evidence: InsightEvidence;
-}
-
 export interface IStorage {
   init(): Promise<void>;
   write(event: RawEvent): Promise<void>;
@@ -809,22 +678,6 @@ export interface IStorage {
    */
   getSessionFrames(sessionId: string): Promise<Frame[]>;
 
-  // -------------------------------------------------------------------------
-  // Insights — persisted local-AI rollups over frames and sessions.
-  // -------------------------------------------------------------------------
-
-  /** List generated insights, newest first by default. */
-  listInsights(query?: InsightQuery): Promise<Insight[]>;
-
-  /** Read a single insight by id. */
-  getInsight(id: string): Promise<Insight | null>;
-
-  /** Insert or update an insight row. Deterministic IDs let workers refresh cards. */
-  upsertInsight(insight: Insight): Promise<void>;
-
-  /** Hide an insight without deleting it so reruns do not resurface dismissed cards. */
-  dismissInsight(id: string): Promise<void>;
-
   /**
    * Clear every session row + null out `frames.activity_session_id`.
    * Called from `--full-reindex` so a changed idle threshold can
@@ -918,6 +771,18 @@ export interface IModelAdapter {
     prompt: string,
     images: Buffer[],
     options?: CompletionOptions,
+  ): Promise<string>;
+  /**
+   * Optional streaming variant. Adapters that support token streaming
+   * (Ollama, OpenAI) implement this and emit chunks via `onChunk` as
+   * they arrive. The returned promise resolves with the full text once
+   * streaming finishes. The host falls back to `complete` when this is
+   * unavailable.
+   */
+  completeStream?(
+    prompt: string,
+    options: CompletionOptions,
+    onChunk: (chunk: string) => void,
   ): Promise<string>;
   /**
    * Optional embedding endpoint. Adapters that implement this return one
