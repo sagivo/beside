@@ -15,7 +15,6 @@ import type {
   ExportStatus,
   Frame,
   FrameQuery,
-  ChatMessage,
   ChatTurnInput,
   ChatTurnResult,
   Insight,
@@ -37,6 +36,7 @@ import {
   type OrchestratorHandles,
   type OrchestratorOptions,
 } from './orchestrator.js';
+import { McpChatAgent, type AgentProgressHandler } from './mcp-agent.js';
 import { redactPii } from './pii.js';
 
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
@@ -114,6 +114,7 @@ export class CofounderRuntime {
   private readonly opts: OrchestratorOptions;
   private handles: OrchestratorHandles | null = null;
   private status: RuntimeStatus = 'not_started';
+  private mcpAgent: McpChatAgent | null = null;
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -143,6 +144,10 @@ export class CofounderRuntime {
   }
 
   async stop(): Promise<void> {
+    if (this.mcpAgent) {
+      await this.mcpAgent.close().catch(() => undefined);
+      this.mcpAgent = null;
+    }
     if (!this.handles) {
       this.status = 'stopped';
       return;
@@ -333,12 +338,13 @@ export class CofounderRuntime {
 
   async getJournalDay(day: string): Promise<RuntimeJournalDay> {
     return await this.withHandles(async (handles) => {
-      const frames = await handles.storage.getJournal(day);
+      const frames = (await handles.storage.getJournal(day))
+        .slice()
+        .sort((a, b) => Date.parse(b.timestamp ?? '') - Date.parse(a.timestamp ?? ''));
       let sessions: ActivitySession[] = [];
       try {
         sessions = await handles.storage.listSessions({
           day,
-          order: 'chronological',
           limit: 500,
         });
       } catch {
@@ -427,7 +433,10 @@ export class CofounderRuntime {
     await this.withHandles((handles) => handles.storage.dismissInsight(id));
   }
 
-  async chatInsights(input: ChatTurnInput): Promise<ChatTurnResult> {
+  async chatInsights(
+    input: ChatTurnInput,
+    onStep?: AgentProgressHandler,
+  ): Promise<ChatTurnResult> {
     if (!Array.isArray(input.messages) || input.messages.length === 0) {
       throw new Error('At least one message is required');
     }
@@ -435,8 +444,7 @@ export class CofounderRuntime {
     if (!lastUser) {
       throw new Error('Conversation must include a user message');
     }
-    const question = lastUser.content.trim();
-    if (!question) {
+    if (!lastUser.content.trim()) {
       throw new Error('Latest user message is empty');
     }
     return await this.withHandles(async (handles) => {
@@ -444,41 +452,42 @@ export class CofounderRuntime {
       if (!ready) {
         throw new Error('Local AI is unavailable. Set up local AI before chatting with Insights.');
       }
-
-      const now = new Date().toISOString();
-      const from = input.from ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const to = input.to ?? now;
-      const sensitiveKeywords = handles.config.capture.privacy.sensitive_keywords ?? [];
-
       let seed: Insight | null = null;
       if (input.insightId) {
         seed = await handles.storage.getInsight(input.insightId).catch(() => null);
       }
-
-      const turnIndex = input.messages.filter((message) => message.role === 'user').length;
-      const shouldRefresh = input.refreshEvidence ?? turnIndex <= 1;
-      let evidence: InsightEvidence;
-      if (seed && turnIndex <= 1) {
-        evidence = mergeEvidence(seed.evidence, await collectEvidence(
-          handles, question, from, to, sensitiveKeywords, shouldRefresh,
-        ));
-      } else {
-        evidence = await collectEvidence(handles, question, from, to, sensitiveKeywords, shouldRefresh);
-      }
-
-      const prompt = buildChatPrompt(input.messages, evidence, seed);
-      const raw = await handles.model.complete(prompt, {
-        temperature: 0.3,
-        maxTokens: 1100,
-        systemPrompt: chatSystemPrompt(seed),
-      });
-      const reply: ChatMessage = {
-        role: 'assistant',
-        content: raw.trim() || 'I could not produce a confident answer from the local evidence.',
-        createdAt: now,
-      };
-      return { message: reply, evidence };
+      const agent = this.getMcpAgent(handles);
+      return await agent.chat(input, seed, { onStep });
     });
+  }
+
+  private getMcpAgent(handles: OrchestratorHandles): McpChatAgent {
+    if (this.mcpAgent) return this.mcpAgent;
+    const mcpExport = handles.exports.find((exp) => exp.name === 'mcp');
+    if (!mcpExport) {
+      throw new Error(
+        'The local MCP export is not enabled in config.yaml — add it to export.plugins to chat with Insights.',
+      );
+    }
+    const endpointConfig = readMcpEndpointFromConfig(handles);
+    this.mcpAgent = new McpChatAgent({
+      logger: handles.logger,
+      model: handles.model,
+      resolveEndpoint: async () => endpointConfig.url,
+      ensureServer: async () => {
+        if (mcpExport.getStatus().running) return;
+        await mcpExport.start();
+      },
+      fetchAsset: async (assetPath: string) => {
+        const storageRoot = path.resolve(handles.storage.getRoot());
+        const resolved = path.resolve(storageRoot, assetPath);
+        if (!resolved.startsWith(`${storageRoot}${path.sep}`) && resolved !== storageRoot) {
+          throw new Error('asset path escapes storage root');
+        }
+        return await handles.storage.readAsset(assetPath);
+      },
+    });
+    return this.mcpAgent;
   }
 
   async readAsset(assetPath: string): Promise<Buffer> {
@@ -712,86 +721,21 @@ function severityField(value: unknown): Insight['severity'] {
     : 'info';
 }
 
-async function collectEvidence(
-  handles: OrchestratorHandles,
-  question: string,
-  from: string,
-  to: string,
-  sensitiveKeywords: string[],
-  refresh: boolean,
-): Promise<InsightEvidence> {
-  if (!refresh) return {};
-  const frames = await handles.storage.searchFrames({
-    text: question,
-    from,
-    to,
-    limit: 30,
-  }).catch(() => [] as Frame[]);
-  const sessions = await handles.storage.listSessions({
-    from,
-    to,
-    order: 'recent',
-    limit: 25,
-  }).catch(() => [] as ActivitySession[]);
-  return buildInsightAnswerEvidence(question, frames, sessions, sensitiveKeywords);
-}
-
-function mergeEvidence(a: InsightEvidence, b: InsightEvidence): InsightEvidence {
-  const merge = <T>(left: T[] | undefined, right: T[] | undefined): T[] | undefined => {
-    if (!left && !right) return undefined;
-    return Array.from(new Set([...(left ?? []), ...(right ?? [])]));
-  };
-  return {
-    frameIds: merge(a.frameIds, b.frameIds),
-    sessionIds: merge(a.sessionIds, b.sessionIds),
-    apps: merge(a.apps, b.apps),
-    entities: merge(a.entities, b.entities),
-    metrics: { ...(a.metrics ?? {}), ...(b.metrics ?? {}) },
-    snippets: [...(a.snippets ?? []), ...(b.snippets ?? [])].slice(0, 8),
-  };
-}
-
-function chatSystemPrompt(seed: Insight | null): string {
-  const intro = 'You are CofounderOS, a private second-brain that chats with the user about their local activity data.';
-  const rules = 'Use only the supplied evidence. Be concise, conversational, and propose concrete next actions. If evidence is missing, say so plainly and ask a clarifying question.';
-  if (!seed) return `${intro} ${rules}`;
-  return `${intro} The user opened this chat to discuss the insight "${seed.title}". ${rules}`;
-}
-
-function buildChatPrompt(
-  messages: ChatMessage[],
-  evidence: InsightEvidence,
-  seed: Insight | null,
-): string {
-  const lines: string[] = [];
-  if (seed) {
-    lines.push('Insight context:');
-    lines.push(JSON.stringify({
-      kind: seed.kind,
-      severity: seed.severity,
-      title: seed.title,
-      summary: seed.summary,
-      recommendation: seed.recommendation,
-      period: seed.period,
-    }));
-    lines.push('');
+function readMcpEndpointFromConfig(handles: OrchestratorHandles): { url: string } {
+  const configured = handles.config.export.plugins.find(
+    (plugin) => plugin.name === 'mcp',
+  ) as Record<string, unknown> | undefined;
+  const transport = typeof configured?.transport === 'string' ? configured.transport : 'http';
+  if (transport !== 'http') {
+    throw new Error(
+      `The MCP export is configured with transport=${transport}, but the in-app chat agent needs the http transport. Update config.yaml export.plugins entry "mcp" to transport: http.`,
+    );
   }
-  if (hasEvidence(evidence)) {
-    lines.push('Evidence pulled from local memory:');
-    lines.push(JSON.stringify(evidence));
-    lines.push('');
-  } else {
-    lines.push('No supporting evidence was retrieved for this turn.');
-    lines.push('');
-  }
-  lines.push('Conversation so far:');
-  for (const message of messages) {
-    const role = message.role === 'assistant' ? 'Assistant' : message.role === 'user' ? 'User' : 'System';
-    lines.push(`${role}: ${message.content}`.trim());
-  }
-  lines.push('');
-  lines.push('Reply as the assistant. Keep it under ~180 words unless the user explicitly asks for more.');
-  return lines.join('\n');
+  const host = typeof configured?.host === 'string' && configured.host ? configured.host : '127.0.0.1';
+  const port = typeof configured?.port === 'number' && Number.isFinite(configured.port)
+    ? configured.port
+    : 3456;
+  return { url: `http://${host}:${port}` };
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

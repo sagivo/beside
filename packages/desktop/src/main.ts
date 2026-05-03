@@ -174,6 +174,9 @@ class RuntimeServiceClient {
       lastOverview = payload as RuntimeOverview;
       statusWindow?.webContents.send('cofounderos:overview', payload);
     });
+    this.on('agent-step', (payload) => {
+      statusWindow?.webContents.send('cofounderos:agent-step', payload);
+    });
 
     const rl = readline.createInterface({
       input: this.child.stdout!,

@@ -1,7 +1,12 @@
 import * as React from 'react';
 import {
+  AlertTriangle,
   ArrowUp,
   Bot,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  CheckCircle2,
   Compass,
   Lightbulb,
   Loader2,
@@ -12,6 +17,7 @@ import {
   Sparkles,
   Trash2,
   User,
+  Wrench,
   X,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -21,7 +27,7 @@ import { Markdown } from '@/components/Markdown';
 import { formatLocalDateTime } from '@/lib/format';
 import { useInsightChats, type InsightChatSession } from '@/lib/insights-chat';
 import { cn } from '@/lib/utils';
-import type { ChatMessage, Insight, InsightEvidence } from '@/global';
+import type { AgentTraceStep, ChatMessage, Insight, InsightEvidence } from '@/global';
 
 const SUGGESTIONS: Array<{ icon: React.ReactNode; label: string; prompt: string }> = [
   {
@@ -62,6 +68,26 @@ export function Insights({
   const [error, setError] = React.useState<string | null>(null);
   const [refreshing, setRefreshing] = React.useState(false);
   const [evidenceOpen, setEvidenceOpen] = React.useState(false);
+  const [liveTrace, setLiveTrace] = React.useState<AgentTraceStep[]>([]);
+  const activeTurnRef = React.useRef<{ sessionId: string; turnId: string } | null>(null);
+
+  React.useEffect(() => {
+    const unsubscribe = window.cofounderos.onAgentStep?.((payload) => {
+      const active = activeTurnRef.current;
+      if (!active || payload?.turnId !== active.turnId || !payload?.step) return;
+      const incoming = payload.step;
+      setLiveTrace((prev) => {
+        const idx = prev.findIndex((existing) => existing.id === incoming.id);
+        if (idx === -1) return [...prev, incoming];
+        const merged = [...prev];
+        merged[idx] = incoming;
+        return merged;
+      });
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, []);
 
   const runTurn = React.useCallback(
     async (sessionId: string) => {
@@ -69,19 +95,30 @@ export function Insights({
       if (!target || target.messages.length === 0) return;
       const last = target.messages[target.messages.length - 1];
       if (last && last.role !== 'user') return;
+      const turnId =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `turn_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      activeTurnRef.current = { sessionId, turnId };
       setPendingTurn(sessionId);
+      setLiveTrace([]);
       setError(null);
       try {
         const result = await window.cofounderos.chatInsights({
           messages: target.messages,
           insightId: target.insightId,
           refreshEvidence: target.messages.filter((message) => message.role === 'user').length <= 1,
+          turnId,
         });
         chats.appendMessage(sessionId, result.message, result.evidence);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
+        if (activeTurnRef.current?.turnId === turnId) {
+          activeTurnRef.current = null;
+        }
         setPendingTurn((prev) => (prev === sessionId ? null : prev));
+        setLiveTrace([]);
       }
     },
     [chats],
@@ -132,7 +169,12 @@ export function Insights({
       startBlankChat(content);
       return;
     }
-    chats.appendMessage(chats.activeSession.id, {
+    const session = chats.activeSession;
+    const isFirstUserMessage = !session.messages.some((message) => message.role === 'user');
+    if (isFirstUserMessage && session.title === 'New chat') {
+      chats.renameSession(session.id, truncateTitle(content));
+    }
+    chats.appendMessage(session.id, {
       role: 'user',
       content,
       createdAt: new Date().toISOString(),
@@ -155,6 +197,7 @@ export function Insights({
         <ChatCanvas
           session={chats.activeSession}
           isThinking={chats.activeSession ? pendingTurn === chats.activeSession.id : false}
+          liveTrace={chats.activeSession && pendingTurn === chats.activeSession.id ? liveTrace : []}
           error={error}
           onSend={sendInActiveChat}
           onPickSuggestion={(prompt) => startBlankChat(prompt)}
@@ -395,6 +438,7 @@ function InsightRailRow({
 function ChatCanvas({
   session,
   isThinking,
+  liveTrace,
   error,
   onSend,
   onPickSuggestion,
@@ -404,6 +448,7 @@ function ChatCanvas({
 }: {
   session: InsightChatSession | null;
   isThinking: boolean;
+  liveTrace: AgentTraceStep[];
   error: string | null;
   onSend: (content: string) => void;
   onPickSuggestion: (prompt: string) => void;
@@ -420,6 +465,10 @@ function ChatCanvas({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [session?.id, session?.messages.length, isThinking]);
+
+  React.useEffect(() => {
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [session?.id]);
 
   function submit() {
     const value = draft.trim();
@@ -466,7 +515,9 @@ function ChatCanvas({
             {session.messages.map((message, index) => (
               <ChatBubble key={`${session.id}:${index}`} message={message} />
             ))}
-            {isThinking && <ThinkingBubble />}
+            {isThinking && (
+              <AssistantTrace steps={liveTrace} streaming pendingThought={liveTrace.length === 0} />
+            )}
           </div>
         )}
       </div>
@@ -543,46 +594,210 @@ function EmptyChatHero({ onPickSuggestion }: { onPickSuggestion: (prompt: string
 
 function ChatBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
-  return (
-    <div className={cn('flex w-full gap-3', isUser ? 'flex-row-reverse' : 'flex-row')}>
-      <div
-        className={cn(
-          'flex size-8 shrink-0 items-center justify-center rounded-full border',
-          isUser ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border bg-muted text-foreground',
-        )}
-      >
-        {isUser ? <User className="size-4" /> : <Bot className="size-4" />}
-      </div>
-      <div
-        className={cn(
-          'max-w-[75ch] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm',
-          isUser
-            ? 'rounded-tr-sm bg-primary text-primary-foreground'
-            : 'rounded-tl-sm bg-card text-foreground border border-border/60',
-        )}
-      >
-        {isUser ? (
+  const hasToolTrace = message.trace?.some((step) => step.kind === 'tool') ?? false;
+  if (isUser) {
+    return (
+      <div className="flex w-full gap-3 flex-row-reverse">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/10 text-primary">
+          <User className="size-4" />
+        </div>
+        <div className="max-w-[75ch] rounded-2xl rounded-tr-sm bg-primary px-4 py-3 text-sm leading-relaxed text-primary-foreground shadow-sm">
           <div className="whitespace-pre-wrap">{message.content}</div>
-        ) : (
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="flex w-full flex-col gap-2">
+      {message.trace && hasToolTrace ? (
+        <AssistantTrace steps={message.trace} streaming={false} pendingThought={false} />
+      ) : null}
+      <div className="flex w-full gap-3">
+        <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-foreground">
+          <Bot className="size-4" />
+        </div>
+        <div className="max-w-[75ch] rounded-2xl rounded-tl-sm border border-border/60 bg-card px-4 py-3 text-sm leading-relaxed text-foreground shadow-sm">
           <Markdown content={message.content} />
-        )}
+        </div>
       </div>
     </div>
   );
 }
 
-function ThinkingBubble() {
+function AssistantTrace({
+  steps,
+  streaming,
+  pendingThought,
+}: {
+  steps: AgentTraceStep[];
+  streaming: boolean;
+  pendingThought: boolean;
+}) {
+  const [open, setOpen] = React.useState(streaming);
+  React.useEffect(() => {
+    if (streaming) setOpen(true);
+  }, [streaming]);
+
+  const visibleSteps = coalesceTraceSteps(steps).filter((step) => step.kind === 'tool');
+  const toolSteps = visibleSteps.filter((step) => step.kind === 'tool');
+  const runningTool = toolSteps.find((step) => step.kind === 'tool' && step.status === 'running') as
+    | (AgentTraceStep & { kind: 'tool' })
+    | undefined;
+  const completedTools = toolSteps.filter(
+    (step) => step.kind === 'tool' && step.status !== 'running',
+  ).length;
+  const totalTools = toolSteps.length;
+
+  const headline = streaming
+    ? runningTool
+      ? `Calling \`${runningTool.tool}\``
+      : pendingThought
+        ? 'Thinking…'
+        : totalTools > 0
+          ? `Used ${totalTools} ${totalTools === 1 ? 'tool' : 'tools'}`
+          : 'Thinking…'
+    : totalTools > 0
+      ? `Used ${totalTools} ${totalTools === 1 ? 'tool' : 'tools'}`
+      : 'Reasoning';
+
   return (
-    <div className="flex w-full gap-3">
-      <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-muted text-foreground">
-        <Bot className="size-4" />
-      </div>
-      <div className="flex items-center gap-1 rounded-2xl rounded-tl-sm border border-border/60 bg-card px-4 py-3 text-sm text-muted-foreground shadow-sm">
-        <Dot delay="0ms" />
-        <Dot delay="150ms" />
-        <Dot delay="300ms" />
-      </div>
+    <div className="ml-11 max-w-[75ch] rounded-xl border border-border/60 bg-muted/30">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/60"
+        aria-expanded={open}
+      >
+        {streaming ? (
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+        ) : (
+          <Brain className="size-3.5 shrink-0 text-primary" />
+        )}
+        <span className="flex-1 truncate font-medium text-foreground/80">{headline}</span>
+        {totalTools > 0 && (
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            {completedTools}/{totalTools}
+          </span>
+        )}
+        {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 border-t border-border/60 px-3 py-3">
+          {visibleSteps.length === 0 ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Dots />
+              <span>Planning the next step…</span>
+            </div>
+          ) : (
+            visibleSteps.map((step) => (
+              <ToolStepCard key={`${step.id}:${step.status}`} step={step} />
+            ))
+          )}
+          {streaming && visibleSteps.length > 0 && !runningTool && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Dots />
+              <span>Planning the next step…</span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+function ToolStepCard({
+  step,
+}: {
+  step: Extract<AgentTraceStep, { kind: 'tool' }>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const StatusIcon =
+    step.status === 'running'
+      ? Loader2
+      : step.status === 'error'
+        ? AlertTriangle
+        : CheckCircle2;
+  const statusClass =
+    step.status === 'running'
+      ? 'text-primary animate-spin'
+      : step.status === 'error'
+        ? 'text-destructive'
+        : 'text-success';
+  const argsString = compactArgs(step.args);
+  return (
+    <div className="rounded-md border border-border/70 bg-background/60">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40"
+        aria-expanded={open}
+      >
+        <Wrench className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="font-mono text-[11px] font-medium text-foreground">{step.tool}</span>
+        {step.source === 'agent' && (
+          <Badge variant="outline" className="px-1 py-0 text-[9px] uppercase">
+            local
+          </Badge>
+        )}
+        <span className="ml-1 truncate text-muted-foreground">{argsString}</span>
+        <span className="ml-auto flex items-center gap-1 text-muted-foreground">
+          {step.summary && step.status !== 'running' ? (
+            <span className="text-[10px]">{step.summary}</span>
+          ) : null}
+          <StatusIcon className={cn('size-3.5 shrink-0', statusClass)} />
+          {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-border/60 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Arguments</div>
+          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground">
+            {JSON.stringify(step.args ?? {}, null, 2)}
+          </pre>
+          {step.observation && (
+            <>
+              <div className="mt-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                Result
+              </div>
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground">
+                {step.observation}
+              </pre>
+            </>
+          )}
+          {step.status === 'running' && (
+            <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+              <Loader2 className="size-3 animate-spin" />
+              <span>Running…</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function coalesceTraceSteps(steps: AgentTraceStep[]): AgentTraceStep[] {
+  const coalesced: AgentTraceStep[] = [];
+  const indexById = new Map<string, number>();
+  for (const step of steps) {
+    const existingIdx = indexById.get(step.id);
+    if (existingIdx === undefined) {
+      indexById.set(step.id, coalesced.length);
+      coalesced.push(step);
+    } else {
+      coalesced[existingIdx] = step;
+    }
+  }
+  return coalesced;
+}
+
+function Dots() {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <Dot delay="0ms" />
+      <Dot delay="150ms" />
+      <Dot delay="300ms" />
+    </span>
   );
 }
 
@@ -593,6 +808,17 @@ function Dot({ delay }: { delay: string }) {
       style={{ animationDelay: delay }}
     />
   );
+}
+
+function compactArgs(args: Record<string, unknown> | undefined): string {
+  if (!args) return '';
+  try {
+    const json = JSON.stringify(args);
+    if (json === '{}') return '';
+    return json.length > 60 ? `${json.slice(0, 57)}…` : json;
+  } catch {
+    return '';
+  }
 }
 
 function EvidencePanel({

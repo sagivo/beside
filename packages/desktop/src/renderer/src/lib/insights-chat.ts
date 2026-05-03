@@ -149,6 +149,22 @@ export function useInsightChats() {
     [],
   );
 
+  const updateLastMessage = React.useCallback(
+    (sessionId: string, patch: Partial<ChatMessage>) => {
+      setSessions((prev) => prev.map((session) => {
+        if (session.id !== sessionId || session.messages.length === 0) return session;
+        const last = session.messages[session.messages.length - 1]!;
+        const updated: ChatMessage = { ...last, ...patch };
+        return {
+          ...session,
+          messages: [...session.messages.slice(0, -1), updated],
+          updatedAt: new Date().toISOString(),
+        };
+      }));
+    },
+    [],
+  );
+
   const renameSession = React.useCallback((id: string, title: string) => {
     setSessions((prev) => prev.map((session) => (
       session.id === id ? { ...session, title: title.slice(0, 80) } : session
@@ -167,6 +183,7 @@ export function useInsightChats() {
     setActiveId,
     upsertSession,
     appendMessage,
+    updateLastMessage,
     removeSession,
     renameSession,
     clearAll,

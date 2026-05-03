@@ -13,6 +13,7 @@
   "dependencies": {
     "@cofounderos/core": "workspace:*",
     "@cofounderos/interfaces": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "sharp": "^0.33.5",
     "tesseract.js": "^7.0.0"
   },

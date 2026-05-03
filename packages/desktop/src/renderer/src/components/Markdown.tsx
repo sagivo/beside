@@ -1,6 +1,7 @@
 import * as React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
 
 export function Markdown({
@@ -98,10 +99,88 @@ export function Markdown({
             );
           },
           pre: ({ children }) => <>{children}</>,
+          img: ({ node: _node, src, alt, ...props }) => (
+            <AssetImage src={String(src ?? '')} alt={typeof alt === 'string' ? alt : ''} {...props} />
+          ),
         }}
       >
         {content}
       </ReactMarkdown>
     </div>
+  );
+}
+
+/**
+ * Renders an `<img>` from a chat-bubble markdown body. When the source
+ * looks like an in-app capture asset path (relative path under the
+ * storage root, e.g. `raw/2026-...`) the bytes are loaded over IPC and
+ * shown inline so the local AI agent can effectively "open" a
+ * screenshot in its answer the way Claude Desktop renders MCP images.
+ */
+function AssetImage({
+  src,
+  alt,
+  ...rest
+}: React.ImgHTMLAttributes<HTMLImageElement> & { src: string }) {
+  const [resolved, setResolved] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!src) {
+      setResolved(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (/^(?:https?:|data:|blob:|file:)/i.test(src)) {
+      setResolved(src);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const cleaned = src.replace(/^\.\//, '');
+    const cached = thumbnailCache.get(cleaned);
+    if (cached) {
+      setResolved(cached);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void (async () => {
+      try {
+        const bytes = await window.cofounderos.readAsset(cleaned);
+        if (cancelled) return;
+        const ext = cleaned.split('.').pop()?.toLowerCase() ?? '';
+        const type =
+          ext === 'png'
+            ? 'image/png'
+            : ext === 'jpg' || ext === 'jpeg'
+              ? 'image/jpeg'
+              : 'image/webp';
+        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+        cacheThumbnail(cleaned, url);
+        setResolved(url);
+      } catch {
+        if (!cancelled) setResolved(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+
+  if (!resolved) {
+    return (
+      <span className="my-2 inline-block rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
+        {alt || 'Screenshot unavailable'}
+      </span>
+    );
+  }
+  return (
+    <img
+      {...rest}
+      src={resolved}
+      alt={alt}
+      className="my-2 max-h-72 w-full rounded-md border border-border object-contain"
+    />
   );
 }

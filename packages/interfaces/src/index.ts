@@ -483,10 +483,43 @@ export interface InsightAnswer {
 
 export type ChatRole = 'system' | 'user' | 'assistant';
 
+/**
+ * Single visible step in the agent's reasoning trace. Streamed live to
+ * the chat UI (Claude-Desktop-style) and persisted on the assistant
+ * message so the trace is available when the conversation is reopened.
+ *
+ * - `thought`: free-text rationale produced by the model before acting.
+ * - `tool`:    one MCP (or local pseudo-tool) invocation. The same step
+ *              id is emitted twice — first with `status: 'running'`
+ *              when the call begins, then again with `status: 'done'`
+ *              or `'error'` once the result lands.
+ */
+export type AgentTraceStep =
+  | {
+      id: string;
+      kind: 'thought';
+      text: string;
+    }
+  | {
+      id: string;
+      kind: 'tool';
+      tool: string;
+      args: Record<string, unknown>;
+      /** `mcp` for tools served by the MCP server, `agent` for host-side helpers like view_frame. */
+      source: 'mcp' | 'agent';
+      status: 'running' | 'done' | 'error';
+      /** Compact human summary of the result (e.g. "5 frames, 2 pages"). */
+      summary?: string;
+      /** Truncated raw observation, for the expanded view. */
+      observation?: string;
+    };
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   createdAt?: string;
+  /** Reasoning + tool-call trace for the assistant turn that produced this message. */
+  trace?: AgentTraceStep[];
 }
 
 export interface ChatTurnInput {
@@ -498,10 +531,16 @@ export interface ChatTurnInput {
   refreshEvidence?: boolean;
   from?: string;
   to?: string;
+  /**
+   * Client-generated correlation id for this user turn. When set, the
+   * runtime emits `agent-step` events tagged with this id so the UI can
+   * stream the assistant's reasoning and tool calls in real time.
+   */
+  turnId?: string;
 }
 
 export interface ChatTurnResult {
-  /** Assistant reply for this turn. */
+  /** Assistant reply for this turn. Includes the final reasoning trace. */
   message: ChatMessage;
   /** Evidence pack the model was grounded against. */
   evidence: InsightEvidence;

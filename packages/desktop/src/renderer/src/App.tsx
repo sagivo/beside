@@ -6,14 +6,27 @@ import { FrameDetailProvider } from '@/components/FrameDetailDialog';
 import { Toaster, toast } from '@/components/ui/sonner';
 import { SidebarStateProvider } from '@/lib/sidebar-state';
 import { ThemeProvider } from '@/lib/theme';
-import { Connect } from '@/screens/Connect';
-import { Dashboard } from '@/screens/Dashboard';
-import { Help } from '@/screens/Help';
-import { Insights } from '@/screens/Insights';
-import { Search } from '@/screens/Search';
-import { Settings } from '@/screens/Settings';
-import { Timeline } from '@/screens/Timeline';
 import { ONBOARDING_KEY, type Screen } from '@/types';
+
+const Connect = React.lazy(() =>
+  import('@/screens/Connect').then((mod) => ({ default: mod.Connect })),
+);
+const Dashboard = React.lazy(() =>
+  import('@/screens/Dashboard').then((mod) => ({ default: mod.Dashboard })),
+);
+const Help = React.lazy(() => import('@/screens/Help').then((mod) => ({ default: mod.Help })));
+const Insights = React.lazy(() =>
+  import('@/screens/Insights').then((mod) => ({ default: mod.Insights })),
+);
+const Search = React.lazy(() =>
+  import('@/screens/Search').then((mod) => ({ default: mod.Search })),
+);
+const Settings = React.lazy(() =>
+  import('@/screens/Settings').then((mod) => ({ default: mod.Settings })),
+);
+const Timeline = React.lazy(() =>
+  import('@/screens/Timeline').then((mod) => ({ default: mod.Timeline })),
+);
 
 // Onboarding is a sizeable flow (~33KB source, ~6 step components)
 // that 99% of the time only runs once per install. Lazy-loading it keeps
@@ -355,8 +368,18 @@ function AppInner() {
       onBootstrap={actions.onBootstrap}
       onCopyMcpSnippet={copyMcpSnippet}
     >
-      <ErrorBoundary resetKey={screen}>{screenContent}</ErrorBoundary>
+      <ErrorBoundary resetKey={screen}>
+        <React.Suspense fallback={<ScreenLoading />}>{screenContent}</React.Suspense>
+      </ErrorBoundary>
     </AppShell>
+  );
+}
+
+function ScreenLoading() {
+  return (
+    <div className="grid min-h-[50vh] place-items-center text-muted-foreground text-sm">
+      Loading…
+    </div>
   );
 }
 

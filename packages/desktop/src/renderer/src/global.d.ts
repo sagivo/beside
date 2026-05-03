@@ -37,6 +37,9 @@ declare global {
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
+      onAgentStep?: (
+        callback: (payload: { turnId: string; step: AgentTraceStep }) => void,
+      ) => (() => void) | void;
     };
   }
 }
@@ -247,10 +250,24 @@ export interface InsightAnswer {
 
 export type ChatRole = 'system' | 'user' | 'assistant';
 
+export type AgentTraceStep =
+  | { id: string; kind: 'thought'; text: string }
+  | {
+      id: string;
+      kind: 'tool';
+      tool: string;
+      args: Record<string, unknown>;
+      source: 'mcp' | 'agent';
+      status: 'running' | 'done' | 'error';
+      summary?: string;
+      observation?: string;
+    };
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
   createdAt?: string;
+  trace?: AgentTraceStep[];
 }
 
 export interface ChatTurnInput {
@@ -259,6 +276,7 @@ export interface ChatTurnInput {
   refreshEvidence?: boolean;
   from?: string;
   to?: string;
+  turnId?: string;
 }
 
 export interface ChatTurnResult {

@@ -163,8 +163,14 @@ async function handle(req: Request): Promise<unknown> {
     case 'dismissInsight':
       await runtime.dismissInsight(String(req.params));
       return { dismissed: true };
-    case 'chatInsights':
-      return await runtime.chatInsights(req.params as never);
+    case 'chatInsights': {
+      const params = (req.params ?? {}) as Record<string, unknown>;
+      const turnId = typeof params.turnId === 'string' ? params.turnId : null;
+      return await runtime.chatInsights(params as never, (step) => {
+        if (!turnId) return;
+        sendEvent('agent-step', { turnId, step });
+      });
+    }
     case 'readAsset': {
       const buf = await runtime.readAsset(String(req.params));
       return { base64: buf.toString('base64') };

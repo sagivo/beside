@@ -38,6 +38,11 @@ const api = {
   onOverview: (callback: (overview: unknown) => void) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview: unknown) => callback(overview));
   },
+  onAgentStep: (callback: (payload: unknown) => void) => {
+    const handler = (_event: unknown, payload: unknown) => callback(payload);
+    ipcRenderer.on('cofounderos:agent-step', handler);
+    return () => ipcRenderer.removeListener('cofounderos:agent-step', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('cofounderos', api);

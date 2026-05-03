@@ -402,17 +402,7 @@ class LocalStorage implements IStorage {
         sql.push('AND frames.text_source = @text_source');
         params.text_source = query.textSource;
       }
-      // Weighted BM25 over the four indexed columns of frame_text.
-      // Column order: (text, window_title, app, entity_search).
-      //   - title hits dominate ("README.md — cofounderos" is a
-      //     near-perfect signal of what the user was looking at)
-      //   - entity_search hits are nearly as strong (they mean the
-      //     resolver tied this frame to the entity even when the
-      //     screenshot doesn't show the name)
-      //   - body text still contributes
-      //   - bare app-name hits are downweighted because every Slack
-      //     frame technically contains the word "Slack"
-      sql.push('ORDER BY bm25(frame_text, 1.0, 2.0, 0.3, 1.8) ASC');
+      sql.push('ORDER BY frames.timestamp DESC');
       sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 25))}`);
       if (query.offset) sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
       return (this.db.prepare(sql.join(' ')).all(params) as RawFrameRow[]).map(rowToFrame);
