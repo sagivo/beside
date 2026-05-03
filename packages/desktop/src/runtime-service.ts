@@ -163,9 +163,28 @@ async function handle(req: Request): Promise<unknown> {
     case 'dismissInsight':
       await runtime.dismissInsight(String(req.params));
       return { dismissed: true };
+    case 'chatInsights':
+      return await runtime.chatInsights(req.params as never);
     case 'readAsset': {
       const buf = await runtime.readAsset(String(req.params));
       return { base64: buf.toString('base64') };
+    }
+    case 'deleteFrame': {
+      const result = await runtime.deleteFrame(String(req.params));
+      // Re-emit overview so KPIs / live strip update without waiting for
+      // the 2s heartbeat after a destructive action.
+      void pushOverview();
+      return result;
+    }
+    case 'deleteFramesByDay': {
+      const result = await runtime.deleteFramesByDay(String(req.params));
+      void pushOverview();
+      return result;
+    }
+    case 'deleteAllMemory': {
+      const result = await runtime.deleteAllMemory();
+      void pushOverview();
+      return result;
     }
     default:
       throw new Error(`Unknown runtime method: ${req.method}`);

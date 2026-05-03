@@ -218,7 +218,13 @@ export function Search({
               </h3>
               <div className="grid gap-3 sm:grid-cols-2">
                 {results.map((frame, i) => (
-                  <ResultCard key={i} frame={frame} />
+                  <ResultCard
+                    key={i}
+                    frame={frame}
+                    onDeleted={(deleted) =>
+                      setResults((prev) => (prev ? prev.filter((f) => f.id !== deleted.id) : prev))
+                    }
+                  />
                 ))}
               </div>
             </>
@@ -327,7 +333,13 @@ function ChipSection({
   );
 }
 
-function ResultCard({ frame }: { frame: Frame }) {
+function ResultCard({
+  frame,
+  onDeleted,
+}: {
+  frame: Frame;
+  onDeleted?: (frame: Frame) => void;
+}) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const detail = useFrameDetail();
   React.useEffect(() => {
@@ -363,7 +375,11 @@ function ResultCard({ frame }: { frame: Frame }) {
   return (
     <button
       type="button"
-      onClick={() => detail.open(frame)}
+      onClick={() =>
+        detail.open(frame, {
+          onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
+        })
+      }
       {...listItemProps}
       className="group rounded-xl border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
     >

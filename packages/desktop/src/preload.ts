@@ -13,6 +13,7 @@ const api = {
   runInsightsNow: () => ipcRenderer.invoke('cofounderos:run-insights-now'),
   askInsights: (input: unknown) => ipcRenderer.invoke('cofounderos:ask-insights', input),
   dismissInsight: (id: string) => ipcRenderer.invoke('cofounderos:dismiss-insight', id),
+  chatInsights: (input: unknown) => ipcRenderer.invoke('cofounderos:chat-insights', input),
   readAsset: (assetPath: string) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -25,6 +26,9 @@ const api = {
   setStartAtLogin: (enabled: boolean) => ipcRenderer.invoke('cofounderos:set-start-at-login', enabled),
   openPath: (target: 'config' | 'data' | 'markdown') => ipcRenderer.invoke('cofounderos:open-path', target),
   copyText: (text: string) => ipcRenderer.invoke('cofounderos:copy-text', text),
+  deleteFrame: (frameId: string) => ipcRenderer.invoke('cofounderos:delete-frame', frameId),
+  deleteFramesByDay: (day: string) => ipcRenderer.invoke('cofounderos:delete-frames-by-day', day),
+  deleteAllMemory: () => ipcRenderer.invoke('cofounderos:delete-all-memory'),
   onDesktopLogs: (callback: (logs: string) => void) => {
     ipcRenderer.on('cofounderos:desktop-logs', (_event, logs: string) => callback(logs));
   },

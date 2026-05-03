@@ -127,9 +127,15 @@ export function AppShell({
         helpHasUnread={helpHasUnread}
       />
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="app-drag h-8" aria-hidden />
-        <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
+      <main className="flex flex-1 flex-col overflow-hidden">
+        <div className="app-drag h-8 shrink-0" aria-hidden />
+        {screen === 'insights' ? (
+          <div className="app-no-drag flex-1 overflow-hidden">{children}</div>
+        ) : (
+          <div className="flex-1 overflow-y-auto">
+            <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
+          </div>
+        )}
       </main>
 
       <CommandPalette

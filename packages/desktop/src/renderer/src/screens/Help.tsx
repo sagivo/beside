@@ -1,6 +1,16 @@
 import * as React from 'react';
-import { Copy, FolderOpen, RefreshCcw, Sparkles } from 'lucide-react';
+import {
+  Code2,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  Heart,
+  Lock,
+  RefreshCcw,
+  Sparkles,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { BrandMark } from '@/components/BrandMark';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -169,6 +179,87 @@ export function Help({
           </CardContent>
         </Card>
       </section>
+
+      <AboutCard />
+    </div>
+  );
+}
+
+function AboutCard() {
+  const [platform, setPlatform] = React.useState<string>('');
+
+  React.useEffect(() => {
+    // Surface a friendly platform string. Reads navigator (always
+    // available in Electron renderer) so we don't need a new IPC channel
+    // just for this.
+    const ua = navigator.userAgent;
+    const platformLabel = navigator.platform || '';
+    let arch = '';
+    const archMatch = ua.match(/(Mac OS X|Windows NT|Linux)\s+([^);]+)/);
+    if (archMatch) arch = archMatch[2]!.trim();
+    setPlatform([platformLabel, arch].filter(Boolean).join(' · '));
+  }, []);
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-5">
+        <div className="flex items-start gap-4">
+          <BrandMark className="size-10" />
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <h3 className="text-lg font-semibold tracking-tight">CofounderOS</h3>
+              <Badge variant="muted" className="font-mono">
+                v{__APP_VERSION__}
+              </Badge>
+            </div>
+            <p className="text-sm text-muted-foreground mt-1">
+              Your local memory, on this device. Open source — every line is yours to read.
+            </p>
+            {platform ? (
+              <p className="text-xs text-muted-foreground/80 mt-2 font-mono">{platform}</p>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-3">
+          <AboutPill icon={<Lock />} label="100% local" />
+          <AboutPill icon={<Heart />} label="No subscription" />
+          <AboutPill icon={<Sparkles />} label="No telemetry" />
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" asChild>
+            <a
+              href="https://github.com/cofounderos/cofounderos"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <Code2 />
+              Source code
+              <ExternalLink className="size-3 opacity-60" />
+            </a>
+          </Button>
+          <Button variant="outline" size="sm" asChild>
+            <a
+              href="https://github.com/cofounderos/cofounderos/blob/main/README.md"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Read the docs
+              <ExternalLink className="size-3 opacity-60" />
+            </a>
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AboutPill({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+      <span className="text-primary [&>svg]:size-4">{icon}</span>
+      <span>{label}</span>
     </div>
   );
 }

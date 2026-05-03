@@ -13,6 +13,7 @@ const api = {
   runInsightsNow: () => ipcRenderer.invoke('cofounderos:run-insights-now'),
   askInsights: (input) => ipcRenderer.invoke('cofounderos:ask-insights', input),
   dismissInsight: (id) => ipcRenderer.invoke('cofounderos:dismiss-insight', id),
+  chatInsights: (input) => ipcRenderer.invoke('cofounderos:chat-insights', input),
   readAsset: (assetPath) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -25,6 +26,9 @@ const api = {
   setStartAtLogin: (enabled) => ipcRenderer.invoke('cofounderos:set-start-at-login', enabled),
   openPath: (target) => ipcRenderer.invoke('cofounderos:open-path', target),
   copyText: (text) => ipcRenderer.invoke('cofounderos:copy-text', text),
+  deleteFrame: (frameId) => ipcRenderer.invoke('cofounderos:delete-frame', frameId),
+  deleteFramesByDay: (day) => ipcRenderer.invoke('cofounderos:delete-frames-by-day', day),
+  deleteAllMemory: () => ipcRenderer.invoke('cofounderos:delete-all-memory'),
   onDesktopLogs: (callback) => {
     ipcRenderer.on('cofounderos:desktop-logs', (_event, logs) => callback(logs));
   },

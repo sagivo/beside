@@ -57,7 +57,14 @@ export interface RawEvent {
 export interface CaptureStatus {
   running: boolean;
   paused: boolean;
+  /**
+   * Events captured since local-day midnight. The runtime overrides
+   * this with an accurate storage-backed count; capture plugins only
+   * provide an in-memory tally that resets when the plugin restarts.
+   */
   eventsToday: number;
+  /** Events captured in the trailing 60 minutes (storage-backed). */
+  eventsLastHour?: number;
   storageBytesToday: number;
   cpuPercent: number;
   memoryMB: number;
@@ -474,11 +481,44 @@ export interface InsightAnswer {
   created_at: string;
 }
 
+export type ChatRole = 'system' | 'user' | 'assistant';
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+  createdAt?: string;
+}
+
+export interface ChatTurnInput {
+  /** Full conversation history. Last entry must have role === 'user'. */
+  messages: ChatMessage[];
+  /** Optional Insight to ground the conversation in (used on the first turn). */
+  insightId?: string;
+  /** When true (or on the first user turn) re-collect evidence from the last user message. */
+  refreshEvidence?: boolean;
+  from?: string;
+  to?: string;
+}
+
+export interface ChatTurnResult {
+  /** Assistant reply for this turn. */
+  message: ChatMessage;
+  /** Evidence pack the model was grounded against. */
+  evidence: InsightEvidence;
+}
+
 export interface IStorage {
   init(): Promise<void>;
   write(event: RawEvent): Promise<void>;
   writeAsset(assetPath: string, data: Buffer): Promise<void>;
   readEvents(query: StorageQuery): Promise<RawEvent[]>;
+  /**
+   * Count events matching `query` without loading them. Used by the
+   * runtime overview to report accurate "today" / "last hour" capture
+   * counts, since `CaptureStatus.eventsToday` is only an in-memory
+   * counter that resets on plugin restart.
+   */
+  countEvents(query: StorageQuery): Promise<number>;
   readAsset(assetPath: string): Promise<Buffer>;
   listDays(): Promise<string[]>;
   getStats(): Promise<StorageStats>;
@@ -752,6 +792,38 @@ export interface IStorage {
    * regroup history cleanly.
    */
   clearAllSessions(): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Deletion (privacy-driven). Implementations MUST also remove on-disk
+  // assets referenced by deleted frames so the user-visible promise that
+  // "delete actually deletes" holds. Storage adapters that don't track
+  // assets at all may leave the asset side as a no-op.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Permanently delete a single frame and any derived rows
+   * (text / embeddings / session attribution) plus the screenshot on
+   * disk. Returns the asset path that was removed (or null if none was
+   * stored) so callers can surface byte counts in UI confirmations.
+   */
+  deleteFrame(frameId: string): Promise<{ assetPath: string | null }>;
+
+  /**
+   * Permanently delete every frame, raw event, and session for a given
+   * day (YYYY-MM-DD) along with all their assets on disk. Returns the
+   * count of deleted frames and the list of asset paths removed for
+   * UI feedback.
+   */
+  deleteFramesByDay(day: string): Promise<{ frames: number; assetPaths: string[] }>;
+
+  /**
+   * Wipe ALL memory — every frame, event, session, entity, embedding,
+   * page, and asset on disk. The DB schema and the storage root remain
+   * intact so the runtime can keep capturing fresh data immediately
+   * after. Returns aggregate counts so the UI can confirm the scope of
+   * the action ("deleted N moments, ~M GB on disk").
+   */
+  deleteAllMemory(): Promise<{ frames: number; events: number; assetBytes: number }>;
 }
 
 // ---------------------------------------------------------------------------

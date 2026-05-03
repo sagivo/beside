@@ -12,15 +12,14 @@ import {
   XCircle,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { AppBreakdown } from '@/components/AppBreakdown';
+import { ActivityCard } from '@/components/ActivityCard';
 import { LiveCaptureStrip } from '@/components/LiveCaptureStrip';
 import { PageHeader } from '@/components/PageHeader';
-import { bootstrapMessage, formatBytes, formatNumber, indexingStatusText } from '@/lib/format';
+import { bootstrapMessage, formatNumber, indexingStatusText } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type {
   DoctorCheck,
@@ -212,45 +211,7 @@ export function Dashboard({
         </Alert>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <button type="button" onClick={onGoTimeline} className="text-left group">
-          <Card className="h-full transition-colors group-hover:border-primary/40">
-            <CardHeader>
-              <CardDescription>Captured today</CardDescription>
-              <CardTitle className="text-3xl">{formatNumber(overview.capture.eventsToday)}</CardTitle>
-            </CardHeader>
-            <CardContent className="text-xs text-muted-foreground">moments saved</CardContent>
-          </Card>
-        </button>
-        <Card>
-          <CardHeader>
-            <CardDescription>Total memories</CardDescription>
-            <CardTitle className="text-3xl">{formatNumber(overview.storage.totalEvents)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            {formatBytes(overview.storage.totalAssetBytes)} stored locally
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardDescription className="flex items-center gap-2">
-              Organized pages
-              {overview.indexing.running ? (
-                <Badge variant="secondary" className="text-[10px]">
-                  <Loader2 className="size-3 animate-spin" />
-                  Indexing
-                </Badge>
-              ) : null}
-            </CardDescription>
-            <CardTitle className="text-3xl">{formatNumber(overview.index.pageCount)}</CardTitle>
-          </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            {formatNumber(overview.index.eventsCovered)} memories grouped
-          </CardContent>
-        </Card>
-      </div>
-
-      <AppBreakdown overview={overview} />
+      <ActivityCard overview={overview} onGoTimeline={onGoTimeline} />
 
       <section>
         <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">

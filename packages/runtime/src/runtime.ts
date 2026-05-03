@@ -15,6 +15,9 @@ import type {
   ExportStatus,
   Frame,
   FrameQuery,
+  ChatMessage,
+  ChatTurnInput,
+  ChatTurnResult,
   Insight,
   InsightAnswer,
   InsightEvidence,
@@ -172,6 +175,25 @@ export class CofounderRuntime {
   async getOverview(): Promise<RuntimeOverview> {
     return await this.withHandles(async (handles) => {
       const capture = handles.capture.getStatus();
+      // Replace the capture plugin's in-memory tally (which resets on
+      // restart and only counts what flowed through the plugin during
+      // this process lifetime) with a storage-backed count since local
+      // midnight. Also expose a trailing-hour count for the UI.
+      try {
+        const now = new Date();
+        const midnight = new Date(now);
+        midnight.setHours(0, 0, 0, 0);
+        const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+        const [todayCount, lastHourCount] = await Promise.all([
+          handles.storage.countEvents({ from: midnight.toISOString() }),
+          handles.storage.countEvents({ from: hourAgo.toISOString() }),
+        ]);
+        capture.eventsToday = todayCount;
+        capture.eventsLastHour = lastHourCount;
+      } catch {
+        // Storage backend may not implement countEvents; fall back to
+        // the plugin tally already on `capture`.
+      }
       const storage = await handles.storage.getStats();
       const index = await handles.strategy.getState();
       const indexing = getIndexingStatus(handles);
@@ -330,6 +352,22 @@ export class CofounderRuntime {
     return await this.withHandles((handles) => handles.storage.searchFrames(query));
   }
 
+  async deleteFrame(frameId: string): Promise<{ assetPath: string | null }> {
+    return await this.withHandles((handles) => handles.storage.deleteFrame(frameId));
+  }
+
+  async deleteFramesByDay(day: string): Promise<{ frames: number; assetPaths: string[] }> {
+    return await this.withHandles((handles) => handles.storage.deleteFramesByDay(day));
+  }
+
+  async deleteAllMemory(): Promise<{
+    frames: number;
+    events: number;
+    assetBytes: number;
+  }> {
+    return await this.withHandles((handles) => handles.storage.deleteAllMemory());
+  }
+
   async listInsights(query: InsightQuery = {}): Promise<Insight[]> {
     return await this.withHandles((handles) => handles.storage.listInsights(query));
   }
@@ -387,6 +425,60 @@ export class CofounderRuntime {
 
   async dismissInsight(id: string): Promise<void> {
     await this.withHandles((handles) => handles.storage.dismissInsight(id));
+  }
+
+  async chatInsights(input: ChatTurnInput): Promise<ChatTurnResult> {
+    if (!Array.isArray(input.messages) || input.messages.length === 0) {
+      throw new Error('At least one message is required');
+    }
+    const lastUser = [...input.messages].reverse().find((message) => message.role === 'user');
+    if (!lastUser) {
+      throw new Error('Conversation must include a user message');
+    }
+    const question = lastUser.content.trim();
+    if (!question) {
+      throw new Error('Latest user message is empty');
+    }
+    return await this.withHandles(async (handles) => {
+      const ready = await handles.model.isAvailable().catch(() => false);
+      if (!ready) {
+        throw new Error('Local AI is unavailable. Set up local AI before chatting with Insights.');
+      }
+
+      const now = new Date().toISOString();
+      const from = input.from ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const to = input.to ?? now;
+      const sensitiveKeywords = handles.config.capture.privacy.sensitive_keywords ?? [];
+
+      let seed: Insight | null = null;
+      if (input.insightId) {
+        seed = await handles.storage.getInsight(input.insightId).catch(() => null);
+      }
+
+      const turnIndex = input.messages.filter((message) => message.role === 'user').length;
+      const shouldRefresh = input.refreshEvidence ?? turnIndex <= 1;
+      let evidence: InsightEvidence;
+      if (seed && turnIndex <= 1) {
+        evidence = mergeEvidence(seed.evidence, await collectEvidence(
+          handles, question, from, to, sensitiveKeywords, shouldRefresh,
+        ));
+      } else {
+        evidence = await collectEvidence(handles, question, from, to, sensitiveKeywords, shouldRefresh);
+      }
+
+      const prompt = buildChatPrompt(input.messages, evidence, seed);
+      const raw = await handles.model.complete(prompt, {
+        temperature: 0.3,
+        maxTokens: 1100,
+        systemPrompt: chatSystemPrompt(seed),
+      });
+      const reply: ChatMessage = {
+        role: 'assistant',
+        content: raw.trim() || 'I could not produce a confident answer from the local evidence.',
+        createdAt: now,
+      };
+      return { message: reply, evidence };
+    });
   }
 
   async readAsset(assetPath: string): Promise<Buffer> {
@@ -618,6 +710,88 @@ function severityField(value: unknown): Insight['severity'] {
   return value === 'info' || value === 'low' || value === 'medium' || value === 'high'
     ? value
     : 'info';
+}
+
+async function collectEvidence(
+  handles: OrchestratorHandles,
+  question: string,
+  from: string,
+  to: string,
+  sensitiveKeywords: string[],
+  refresh: boolean,
+): Promise<InsightEvidence> {
+  if (!refresh) return {};
+  const frames = await handles.storage.searchFrames({
+    text: question,
+    from,
+    to,
+    limit: 30,
+  }).catch(() => [] as Frame[]);
+  const sessions = await handles.storage.listSessions({
+    from,
+    to,
+    order: 'recent',
+    limit: 25,
+  }).catch(() => [] as ActivitySession[]);
+  return buildInsightAnswerEvidence(question, frames, sessions, sensitiveKeywords);
+}
+
+function mergeEvidence(a: InsightEvidence, b: InsightEvidence): InsightEvidence {
+  const merge = <T>(left: T[] | undefined, right: T[] | undefined): T[] | undefined => {
+    if (!left && !right) return undefined;
+    return Array.from(new Set([...(left ?? []), ...(right ?? [])]));
+  };
+  return {
+    frameIds: merge(a.frameIds, b.frameIds),
+    sessionIds: merge(a.sessionIds, b.sessionIds),
+    apps: merge(a.apps, b.apps),
+    entities: merge(a.entities, b.entities),
+    metrics: { ...(a.metrics ?? {}), ...(b.metrics ?? {}) },
+    snippets: [...(a.snippets ?? []), ...(b.snippets ?? [])].slice(0, 8),
+  };
+}
+
+function chatSystemPrompt(seed: Insight | null): string {
+  const intro = 'You are CofounderOS, a private second-brain that chats with the user about their local activity data.';
+  const rules = 'Use only the supplied evidence. Be concise, conversational, and propose concrete next actions. If evidence is missing, say so plainly and ask a clarifying question.';
+  if (!seed) return `${intro} ${rules}`;
+  return `${intro} The user opened this chat to discuss the insight "${seed.title}". ${rules}`;
+}
+
+function buildChatPrompt(
+  messages: ChatMessage[],
+  evidence: InsightEvidence,
+  seed: Insight | null,
+): string {
+  const lines: string[] = [];
+  if (seed) {
+    lines.push('Insight context:');
+    lines.push(JSON.stringify({
+      kind: seed.kind,
+      severity: seed.severity,
+      title: seed.title,
+      summary: seed.summary,
+      recommendation: seed.recommendation,
+      period: seed.period,
+    }));
+    lines.push('');
+  }
+  if (hasEvidence(evidence)) {
+    lines.push('Evidence pulled from local memory:');
+    lines.push(JSON.stringify(evidence));
+    lines.push('');
+  } else {
+    lines.push('No supporting evidence was retrieved for this turn.');
+    lines.push('');
+  }
+  lines.push('Conversation so far:');
+  for (const message of messages) {
+    const role = message.role === 'assistant' ? 'Assistant' : message.role === 'user' ? 'User' : 'System';
+    lines.push(`${role}: ${message.content}`.trim());
+  }
+  lines.push('');
+  lines.push('Reply as the assistant. Keep it under ~180 words unless the user explicitly asks for more.');
+  return lines.join('\n');
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

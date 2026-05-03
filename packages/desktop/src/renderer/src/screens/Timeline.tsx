@@ -1,8 +1,19 @@
 import * as React from 'react';
-import { Copy, FolderOpen, ImageOff, Inbox, RefreshCcw } from 'lucide-react';
+import { Copy, FolderOpen, ImageOff, Inbox, RefreshCcw, Trash2 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/sonner';
@@ -77,62 +88,65 @@ export function Timeline({
           description="Start capturing on the Dashboard and they'll show up here."
         />
       ) : (
-        <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
-          <Card className="lg:sticky lg:top-6 lg:self-start">
-            <CardHeader>
-              <CardTitle className="text-sm">Days</CardTitle>
-              <CardDescription>{days.length} captured</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[420px] pr-2">
-                <div className="flex flex-col gap-1">
-                  {days
-                    .slice()
-                    .reverse()
-                    .map((day) => (
-                      <button
-                        key={day}
-                        type="button"
-                        onClick={() => {
-                          setSelectedSessionId(null);
-                          onChooseDay(day);
-                        }}
-                        className={cn(
-                          'flex items-center justify-between rounded-md px-3 py-2 text-sm transition-colors',
-                          day === selectedDay
-                            ? 'bg-accent text-accent-foreground font-medium'
-                            : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
-                        )}
-                      >
-                        <span>{prettyDay(day)}</span>
-                        <span className="text-xs text-muted-foreground/80 font-mono">
-                          {day.slice(5)}
-                        </span>
-                      </button>
-                    ))}
-                </div>
-              </ScrollArea>
-            </CardContent>
-          </Card>
+        <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
+          <aside className="lg:sticky lg:top-6 lg:self-start">
+            <div className="flex items-baseline justify-between px-1 mb-2">
+              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Days
+              </h3>
+              <span className="text-xs text-muted-foreground/70">{days.length}</span>
+            </div>
+            <ScrollArea className="max-h-[60vh]">
+              <div className="flex flex-col gap-0.5 pr-1">
+                {days
+                  .slice()
+                  .reverse()
+                  .map((day) => (
+                    <button
+                      key={day}
+                      type="button"
+                      onClick={() => {
+                        setSelectedSessionId(null);
+                        onChooseDay(day);
+                      }}
+                      className={cn(
+                        'flex items-center justify-between rounded-md px-3 py-1.5 text-sm transition-colors',
+                        day === selectedDay
+                          ? 'bg-accent text-accent-foreground font-medium'
+                          : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+                      )}
+                    >
+                      <span>{prettyDay(day)}</span>
+                      <span className="text-xs text-muted-foreground/70 font-mono">
+                        {day.slice(5)}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+            </ScrollArea>
+          </aside>
 
           <div className="flex flex-col gap-6 min-w-0">
             {journal ? (
-              <Card>
-                <CardHeader>
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <CardTitle>{prettyDay(journal.day)}</CardTitle>
-                      <CardDescription>
-                        {frames.length} moments · {sessions.length} work sessions
-                      </CardDescription>
-                    </div>
-                    <Button variant="outline" size="sm" onClick={() => void copyDaySummary()}>
-                      <Copy />
-                      Copy summary
-                    </Button>
-                  </div>
-                </CardHeader>
-              </Card>
+              <div className="flex flex-wrap items-baseline justify-between gap-3 border-b pb-4">
+                <div>
+                  <h2 className="text-xl font-semibold">{prettyDay(journal.day)}</h2>
+                  <p className="text-sm text-muted-foreground">
+                    {frames.length} moments · {sessions.length} work sessions
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={() => void copyDaySummary()}>
+                    <Copy />
+                    Copy summary
+                  </Button>
+                  <DeleteDayButton
+                    day={journal.day}
+                    frameCount={frames.length}
+                    onDeleted={onRefresh}
+                  />
+                </div>
+              </div>
             ) : null}
 
             {sessions.length > 0 && (
@@ -179,7 +193,7 @@ export function Timeline({
               ) : (
                 <div className="grid gap-3 sm:grid-cols-2">
                   {visibleFrames.slice(0, 60).map((frame, i) => (
-                    <MomentCard key={i} frame={frame} />
+                    <MomentCard key={i} frame={frame} onDeleted={onRefresh} />
                   ))}
                 </div>
               )}
@@ -188,6 +202,77 @@ export function Timeline({
         </div>
       )}
     </div>
+  );
+}
+
+function DeleteDayButton({
+  day,
+  frameCount,
+  onDeleted,
+}: {
+  day: string;
+  frameCount: number;
+  onDeleted: () => void;
+}) {
+  const [pending, setPending] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+
+  async function handleDelete() {
+    setPending(true);
+    try {
+      const result = await window.cofounderos.deleteFramesByDay(day);
+      toast.success(`Deleted ${prettyDay(day)}`, {
+        description: `Removed ${result.frames.toLocaleString()} moment${result.frames === 1 ? '' : 's'}.`,
+      });
+      setOpen(false);
+      onDeleted();
+    } catch (err) {
+      toast.error('Could not delete day', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  if (frameCount === 0) return null;
+
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-destructive hover:bg-destructive/10"
+        >
+          <Trash2 />
+          Delete day
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete {prettyDay(day)}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            All {frameCount.toLocaleString()} moment{frameCount === 1 ? '' : 's'} captured on
+            this day, plus their screenshots and any work-session rollups, will be removed
+            permanently from this device. This can't be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => {
+              e.preventDefault();
+              if (!pending) void handleDelete();
+            }}
+            disabled={pending}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {pending ? 'Deleting…' : `Delete ${frameCount.toLocaleString()} moments`}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -248,7 +333,13 @@ function SessionRow({
   );
 }
 
-function MomentCard({ frame }: { frame: Frame }) {
+function MomentCard({
+  frame,
+  onDeleted,
+}: {
+  frame: Frame;
+  onDeleted?: () => void;
+}) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const detail = useFrameDetail();
   React.useEffect(() => {
@@ -287,7 +378,7 @@ function MomentCard({ frame }: { frame: Frame }) {
   return (
     <button
       type="button"
-      onClick={() => detail.open(frame)}
+      onClick={() => detail.open(frame, { onDeleted: onDeleted ? () => onDeleted() : undefined })}
       {...listItemProps}
       className="group flex flex-col gap-2 rounded-lg border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
     >

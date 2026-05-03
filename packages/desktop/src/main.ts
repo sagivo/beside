@@ -88,6 +88,7 @@ type RuntimeOverview = {
     running: boolean;
     paused: boolean;
     eventsToday: number;
+    eventsLastHour?: number;
   };
   storage: {
     totalEvents: number;
@@ -720,6 +721,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:dismiss-insight', async (_event, id: string) => {
     return await (await getRuntimeForRequest()).call('dismissInsight', id);
   });
+  ipcMain.handle('cofounderos:chat-insights', async (_event, input: unknown) => {
+    return await (await getRuntimeForRequest()).call('chatInsights', input);
+  });
   ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
     const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
     return new Uint8Array(Buffer.from(result.base64, 'base64'));
@@ -770,6 +774,15 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:copy-text', async (_event, text: string) => {
     clipboard.writeText(text);
     return { copied: true };
+  });
+  ipcMain.handle('cofounderos:delete-frame', async (_event, frameId: string) => {
+    return await (await getRuntimeForRequest()).call('deleteFrame', frameId);
+  });
+  ipcMain.handle('cofounderos:delete-frames-by-day', async (_event, day: string) => {
+    return await (await getRuntimeForRequest()).call('deleteFramesByDay', day);
+  });
+  ipcMain.handle('cofounderos:delete-all-memory', async () => {
+    return await (await getRuntimeForRequest()).call('deleteAllMemory');
   });
 }
 

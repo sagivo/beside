@@ -1,5 +1,24 @@
 import * as React from 'react';
-import { Calendar, Clock, ExternalLink, FileText, ImageOff, Layers } from 'lucide-react';
+import {
+  Calendar,
+  Clock,
+  ExternalLink,
+  FileText,
+  ImageOff,
+  Layers,
+  Trash2,
+} from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import {
   Dialog,
   DialogContent,
@@ -7,13 +26,17 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { toast } from '@/components/ui/sonner';
 import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
 import { formatLocalTime, localDayKey, prettyDay } from '@/lib/format';
 import type { Frame } from '@/global';
 
+type DeleteHandler = (frame: Frame) => void | Promise<void>;
+
 interface FrameDetailContextValue {
-  open: (frame: Frame) => void;
+  open: (frame: Frame, opts?: { onDeleted?: DeleteHandler }) => void;
   close: () => void;
 }
 
@@ -21,20 +44,38 @@ const FrameDetailContext = React.createContext<FrameDetailContextValue | null>(n
 
 export function FrameDetailProvider({ children }: { children: React.ReactNode }) {
   const [frame, setFrame] = React.useState<Frame | null>(null);
+  // Per-open `onDeleted` callback so screens can refresh their lists when
+  // a frame opened from them gets deleted. Stored in a ref so re-renders
+  // don't reset the binding.
+  const onDeletedRef = React.useRef<DeleteHandler | null>(null);
+
   const value = React.useMemo<FrameDetailContextValue>(
     () => ({
-      open: (next) => setFrame(next),
+      open: (next, opts) => {
+        onDeletedRef.current = opts?.onDeleted ?? null;
+        setFrame(next);
+      },
       close: () => setFrame(null),
     }),
     [],
   );
+
   return (
     <FrameDetailContext.Provider value={value}>
       {children}
       <FrameDetailDialog
         frame={frame}
         onOpenChange={(open) => {
-          if (!open) setFrame(null);
+          if (!open) {
+            setFrame(null);
+            onDeletedRef.current = null;
+          }
+        }}
+        onDeleted={(deleted) => {
+          const cb = onDeletedRef.current;
+          onDeletedRef.current = null;
+          setFrame(null);
+          if (cb) void cb(deleted);
         }}
       />
     </FrameDetailContext.Provider>
@@ -50,20 +91,24 @@ export function useFrameDetail(): FrameDetailContextValue {
 function FrameDetailDialog({
   frame,
   onOpenChange,
+  onDeleted,
 }: {
   frame: Frame | null;
   onOpenChange: (open: boolean) => void;
+  onDeleted: (frame: Frame) => void;
 }) {
   return (
     <Dialog open={frame !== null} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl gap-0 overflow-hidden p-0">
-        {frame ? <FrameDetailBody frame={frame} /> : null}
+        {frame ? (
+          <FrameDetailBody frame={frame} onDeleted={() => onDeleted(frame)} />
+        ) : null}
       </DialogContent>
     </Dialog>
   );
 }
 
-function FrameDetailBody({ frame }: { frame: Frame }) {
+function FrameDetailBody({ frame, onDeleted }: { frame: Frame; onDeleted: () => void }) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -187,8 +232,73 @@ function FrameDetailBody({ frame }: { frame: Frame }) {
             ) : null}
           </div>
         </ScrollArea>
+
+        <div className="border-t border-border px-6 py-3 flex items-center justify-end">
+          <DeleteFrameButton frame={frame} onDeleted={onDeleted} />
+        </div>
       </div>
     </div>
+  );
+}
+
+function DeleteFrameButton({
+  frame,
+  onDeleted,
+}: {
+  frame: Frame;
+  onDeleted: () => void;
+}) {
+  const [pending, setPending] = React.useState(false);
+
+  async function handleDelete() {
+    if (!frame.id) {
+      toast.error('Cannot delete this moment', { description: 'Missing frame id.' });
+      return;
+    }
+    setPending(true);
+    try {
+      await window.cofounderos.deleteFrame(frame.id);
+      toast.success('Moment deleted', {
+        description: 'Removed from your memory and disk.',
+      });
+      onDeleted();
+    } catch (err) {
+      toast.error('Could not delete moment', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10">
+          <Trash2 />
+          Delete
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this moment?</AlertDialogTitle>
+          <AlertDialogDescription>
+            The screenshot and any captured text for this frame will be removed
+            permanently from this device. This can't be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={() => void handleDelete()}
+            disabled={pending}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {pending ? 'Deleting…' : 'Delete moment'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

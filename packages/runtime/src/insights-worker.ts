@@ -126,11 +126,23 @@ export class InsightsWorker {
       return { candidates: 0, generated: 0, skippedReason: 'no_candidates' };
     }
 
-    const polished = await this.polishCandidates(candidates, period).catch((err) => {
-      this.logger.warn('local model failed to polish insights; using deterministic cards', {
+    // Augment each candidate with the entity neighbourhood the storage
+    // layer learned from session co-occurrence. Cheap (one query per
+    // primary entity) and turns generic cards into "X happens alongside
+    // Y, Z" — the kind of contextual signal that makes insights
+    // actionable instead of obvious.
+    const enriched = await this.enrichWithCoOccurrence(candidates).catch((err) => {
+      this.logger.warn('co-occurrence enrichment failed; using bare candidates', {
         err: String(err),
       });
       return candidates;
+    });
+
+    const polished = await this.polishCandidates(enriched, period).catch((err) => {
+      this.logger.warn('local model failed to polish insights; using deterministic cards', {
+        err: String(err),
+      });
+      return enriched;
     });
 
     let generated = 0;
@@ -311,6 +323,83 @@ export class InsightsWorker {
     return candidates.slice(0, 6);
   }
 
+  /**
+   * For each candidate that has a meaningful "subject" entity (a
+   * project / repo / channel / contact / meeting / doc — not a bare
+   * `apps/*` row), attach the top co-occurring entities pulled from
+   * the storage layer's session-derived knowledge graph. Falls back
+   * gracefully if the co-occurrence query fails for any candidate so
+   * a single bad lookup never wipes the rest.
+   *
+   * What changes:
+   *   - `evidence.entities` grows to include up-to-3 contextual
+   *     partners (deduped, capped at 8 total).
+   *   - For `focus_opportunity` / `trend`, the human-readable summary
+   *     gains a "(alongside X, Y)" tail when partners are present, so
+   *     the deterministic card already reads well even when the
+   *     local model is offline and skips polishing.
+   */
+  private async enrichWithCoOccurrence(
+    candidates: InsightCandidate[],
+  ): Promise<InsightCandidate[]> {
+    const out: InsightCandidate[] = [];
+    for (const candidate of candidates) {
+      const subject = pickSubjectEntity(candidate);
+      if (!subject) {
+        out.push(candidate);
+        continue;
+      }
+      let neighbours: Awaited<ReturnType<IStorage['listEntityCoOccurrences']>>;
+      try {
+        neighbours = await this.storage.listEntityCoOccurrences(subject, 6);
+      } catch {
+        out.push(candidate);
+        continue;
+      }
+      // Filter out apps/* (transient tools dilute the signal) and the
+      // subject itself. Keep partners that share at least 2 sessions
+      // OR carry meaningful focused time (≥30s) so we don't surface
+      // spurious one-frame overlaps.
+      const partners = neighbours
+        .filter((n) => !n.path.startsWith('apps/'))
+        .filter((n) => n.path !== subject)
+        .filter((n) => n.sharedSessions >= 2 || n.sharedFocusedMs >= 30_000)
+        .slice(0, 4);
+      if (partners.length === 0) {
+        out.push(candidate);
+        continue;
+      }
+      const merged = Array.from(
+        new Set([
+          subject,
+          ...partners.map((p) => p.path),
+          ...(candidate.evidence.entities ?? []),
+        ]),
+      ).slice(0, 8);
+
+      let summary = candidate.summary;
+      if (
+        (candidate.kind === 'focus_opportunity' || candidate.kind === 'trend') &&
+        partners.length > 0
+      ) {
+        const names = partners.slice(0, 2).map((p) => humaniseEntityName(p.path));
+        if (names.length > 0) {
+          summary = `${candidate.summary.replace(/\.$/, '')} (alongside ${names.join(' and ')}).`;
+        }
+      }
+
+      out.push({
+        ...candidate,
+        evidence: {
+          ...candidate.evidence,
+          entities: merged,
+        },
+        summary,
+      });
+    }
+    return out;
+  }
+
   private async polishCandidates(
     candidates: InsightCandidate[],
     period: Insight['period'],
@@ -320,6 +409,11 @@ export class InsightsWorker {
       'Return JSON only with this shape:',
       '{"insights":[{"index":0,"title":"...","summary":"...","recommendation":"...","severity":"info|low|medium|high","confidence":0.0}]}',
       'Do not invent evidence. Keep recommendations specific and non-judgmental.',
+      'When `evidence.entities` lists more than the primary subject, the extra',
+      'paths are co-occurring entities the user touched in the same activity',
+      'sessions (e.g. teammates, channels, related projects). Mention them by',
+      'name when they make the recommendation more useful — e.g. "your work on',
+      'cofounderos consistently involves the postman-liblab-prs channel".',
       '',
       JSON.stringify({
         period,
@@ -532,4 +626,43 @@ function severityOr(fallback: InsightSeverity, value: unknown): InsightSeverity 
   return value === 'info' || value === 'low' || value === 'medium' || value === 'high'
     ? value
     : fallback;
+}
+
+/**
+ * Pick the entity the candidate is "about", for co-occurrence
+ * enrichment. We prefer the first non-app entity in evidence.entities
+ * because that's where buildCandidates puts the resolved subject for
+ * focus_opportunity / context_switching. Returns null when only
+ * `apps/*` paths are present (no useful neighbourhood to surface) or
+ * when no entity evidence exists at all.
+ */
+function pickSubjectEntity(candidate: InsightCandidate): string | null {
+  const list = candidate.evidence.entities ?? [];
+  for (const path of list) {
+    if (typeof path !== 'string' || !path) continue;
+    if (path.startsWith('apps/')) continue;
+    return path;
+  }
+  return null;
+}
+
+/**
+ * Turn a stable entity path into something a sentence can naturally
+ * include. Drops the kind-prefix segment, replaces dashes/underscores
+ * with spaces, and prefixes channels with `#` so chat references read
+ * the way users say them out loud.
+ *
+ *   projects/cofounderos        -> "cofounderos"
+ *   contacts/milan-lazic        -> "milan lazic"
+ *   channels/postman-liblab-prs -> "#postman-liblab-prs"
+ */
+function humaniseEntityName(path: string): string {
+  const slash = path.indexOf('/');
+  if (slash === -1) return path;
+  const kind = path.slice(0, slash);
+  const tail = path.slice(slash + 1);
+  if (kind === 'channels') {
+    return `#${tail}`;
+  }
+  return tail.replace(/[-_]+/g, ' ');
 }

@@ -1,5 +1,16 @@
 import * as React from 'react';
-import { FolderOpen, Monitor, Moon, Power, Save, Sun } from 'lucide-react';
+import { AlertTriangle, FolderOpen, Monitor, Moon, Power, Save, Sun, Trash2 } from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -12,6 +23,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
+import { formatBytes } from '@/lib/format';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
 import type { LoadedConfig } from '@/global';
@@ -186,7 +198,7 @@ export function Settings({
           </Card>
         </TabsContent>
 
-        <TabsContent value="privacy">
+        <TabsContent value="privacy" className="flex flex-col gap-4">
           <Card>
             <CardContent className="flex flex-col gap-0">
               <ToggleRow
@@ -213,6 +225,8 @@ export function Settings({
               </Field>
             </CardContent>
           </Card>
+
+          <DangerZone />
         </TabsContent>
 
         <TabsContent value="storage">
@@ -335,6 +349,106 @@ export function Settings({
         onReset={resetDraft}
       />
     </div>
+  );
+}
+
+function DangerZone() {
+  const [confirmText, setConfirmText] = React.useState('');
+  const [pending, setPending] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+
+  const requiredPhrase = 'DELETE';
+  const canConfirm = confirmText.trim() === requiredPhrase;
+
+  async function handleDelete() {
+    setPending(true);
+    try {
+      const result = await window.cofounderos.deleteAllMemory();
+      toast.success('All memory deleted', {
+        description: `Removed ${result.frames.toLocaleString()} moments and ${formatBytes(result.assetBytes)} of screenshots.`,
+      });
+      setConfirmText('');
+      setOpen(false);
+    } catch (err) {
+      toast.error('Could not delete memory', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card className="border-destructive/40 bg-destructive/5">
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex items-start gap-3">
+          <div className="size-8 shrink-0 grid place-items-center rounded-md bg-destructive/15 text-destructive">
+            <AlertTriangle className="size-4" />
+          </div>
+          <div>
+            <h4 className="font-medium text-destructive">Delete all my memory</h4>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Removes every captured moment, screenshot, session, and search index from this
+              device. The app keeps running and starts capturing fresh data afterwards. There
+              is no undo.
+            </p>
+          </div>
+        </div>
+        <div>
+          <AlertDialog
+            open={open}
+            onOpenChange={(next) => {
+              setOpen(next);
+              if (!next) setConfirmText('');
+            }}
+          >
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive">
+                <Trash2 />
+                Delete everything…
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete all memory?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This permanently removes every captured moment, screenshot, and the entire
+                  search index from this device. It can't be undone — your data is local, so
+                  there's no copy in the cloud to restore from.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="danger-confirm">
+                  Type <span className="font-mono font-semibold">{requiredPhrase}</span> to
+                  confirm.
+                </Label>
+                <Input
+                  id="danger-confirm"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.currentTarget.value)}
+                  placeholder={requiredPhrase}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={(e) => {
+                    e.preventDefault();
+                    if (canConfirm && !pending) void handleDelete();
+                  }}
+                  disabled={!canConfirm || pending}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                >
+                  {pending ? 'Deleting…' : 'Delete everything'}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -153,6 +153,48 @@ class LocalStorage implements IStorage {
     return rows.map(rowToEvent);
   }
 
+  async countEvents(query: StorageQuery): Promise<number> {
+    const sql: string[] = ['SELECT COUNT(*) AS n FROM events WHERE 1=1'];
+    const params: Record<string, unknown> = {};
+
+    if (query.from) {
+      sql.push('AND timestamp >= @from_ts');
+      params.from_ts = query.from;
+    }
+    if (query.to) {
+      sql.push('AND timestamp <= @to_ts');
+      params.to_ts = query.to;
+    }
+    if (query.types?.length) {
+      sql.push(`AND type IN (${query.types.map((_, i) => `@type_${i}`).join(',')})`);
+      query.types.forEach((t, i) => {
+        params[`type_${i}`] = t;
+      });
+    }
+    if (query.apps?.length) {
+      sql.push(`AND app IN (${query.apps.map((_, i) => `@app_${i}`).join(',')})`);
+      query.apps.forEach((a, i) => {
+        params[`app_${i}`] = a;
+      });
+    }
+    if (query.since_checkpoint) {
+      sql.push('AND id > @cp');
+      params.cp = query.since_checkpoint;
+    }
+    if (query.unindexed_for_strategy) {
+      sql.push(
+        "AND id > COALESCE((SELECT last_event_id FROM index_state WHERE strategy = @strat), '')",
+      );
+      params.strat = query.unindexed_for_strategy;
+    }
+    if (query.unframed_only) {
+      sql.push('AND framed_at IS NULL');
+    }
+
+    const row = this.db.prepare(sql.join(' ')).get(params) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
   async listDays(): Promise<string[]> {
     const rawDir = path.join(this.root, 'raw');
     try {
@@ -1373,6 +1415,164 @@ class LocalStorage implements IStorage {
       this.db.exec(`DELETE FROM sessions`);
     });
     tx();
+  }
+
+  // -------------------------------------------------------------------------
+  // Deletion (privacy-driven)
+  //
+  // We always remove DB rows and disk assets together, in that order, so a
+  // crash mid-delete leaves orphaned files (recoverable by a future
+  // cleanup pass) rather than orphaned DB rows pointing at missing files.
+  // Asset deletes are best-effort: a missing file is logged but not fatal.
+  // -------------------------------------------------------------------------
+
+  async deleteFrame(frameId: string): Promise<{ assetPath: string | null }> {
+    const row = this.db
+      .prepare('SELECT asset_path FROM frames WHERE id = ?')
+      .get(frameId) as { asset_path: string | null } | undefined;
+    if (!row) return { assetPath: null };
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
+      this.db.prepare('DELETE FROM frame_embeddings WHERE frame_id = ?').run(frameId);
+      this.db.prepare('DELETE FROM frames WHERE id = ?').run(frameId);
+    });
+    tx();
+
+    if (row.asset_path) {
+      await this.unlinkAsset(row.asset_path);
+    }
+    return { assetPath: row.asset_path };
+  }
+
+  async deleteFramesByDay(
+    day: string,
+  ): Promise<{ frames: number; assetPaths: string[] }> {
+    const rows = this.db
+      .prepare('SELECT id, asset_path FROM frames WHERE day = ?')
+      .all(day) as Array<{ id: string; asset_path: string | null }>;
+    const ids = rows.map((r) => r.id);
+    const assetPaths = rows
+      .map((r) => r.asset_path)
+      .filter((p): p is string => Boolean(p));
+
+    const tx = this.db.transaction(() => {
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => '?').join(',');
+        this.db
+          .prepare(`DELETE FROM frame_text WHERE frame_id IN (${placeholders})`)
+          .run(...ids);
+        this.db
+          .prepare(`DELETE FROM frame_embeddings WHERE frame_id IN (${placeholders})`)
+          .run(...ids);
+      }
+      this.db.prepare('DELETE FROM frames WHERE day = ?').run(day);
+      // Sessions never span midnight, so a day-scoped delete is well-defined.
+      this.db.prepare('DELETE FROM sessions WHERE day = ?').run(day);
+      // Raw events: events.timestamp + events.day live together; depending on
+      // schema age, `day` may not be a column on events. Filter by ISO prefix
+      // on `timestamp` for portability.
+      this.db
+        .prepare("DELETE FROM events WHERE substr(timestamp, 1, 10) = ?")
+        .run(day);
+    });
+    tx();
+
+    for (const p of assetPaths) {
+      await this.unlinkAsset(p);
+    }
+    // Best-effort: drop the day's raw/<day> directory if it's now empty.
+    try {
+      const dayDir = path.join(this.root, 'raw', day);
+      const entries = await fsp.readdir(dayDir).catch(() => null);
+      if (entries && entries.length === 0) {
+        await fsp.rmdir(dayDir).catch(() => undefined);
+      }
+    } catch {
+      /* ignore */
+    }
+
+    return { frames: ids.length, assetPaths };
+  }
+
+  async deleteAllMemory(): Promise<{
+    frames: number;
+    events: number;
+    assetBytes: number;
+  }> {
+    const stats = await this.getStats();
+    const frames = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM frames').get() as { n: number }
+    ).n;
+    const events = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }
+    ).n;
+
+    // Tables we own. Wrapped in one transaction so a crash leaves the DB
+    // either fully wiped or fully intact.
+    const tablesToWipe = [
+      'frame_text',
+      'frame_embeddings',
+      'frames',
+      'sessions',
+      'entities',
+      'insights',
+      'events',
+      'index_state',
+      'index_marks',
+    ];
+    const tx = this.db.transaction(() => {
+      for (const table of tablesToWipe) {
+        try {
+          this.db.exec(`DELETE FROM ${table}`);
+        } catch {
+          // Table may not exist on older schemas — non-fatal.
+        }
+      }
+    });
+    tx();
+
+    // Reclaim freed pages so on-disk size actually shrinks.
+    try {
+      this.db.exec('VACUUM');
+    } catch (err) {
+      this.logger.warn('VACUUM after deleteAllMemory failed', { err: String(err) });
+    }
+
+    // Wipe asset directories on disk. We keep `raw/` and `checkpoints/`
+    // top-level dirs so the runtime can keep writing without re-init.
+    const rawDir = path.join(this.root, 'raw');
+    try {
+      const entries = await fsp.readdir(rawDir).catch(() => [] as string[]);
+      await Promise.all(
+        entries.map((entry) =>
+          fsp.rm(path.join(rawDir, entry), { recursive: true, force: true }),
+        ),
+      );
+    } catch (err) {
+      this.logger.warn('asset wipe in deleteAllMemory failed', {
+        err: String(err),
+      });
+    }
+
+    return {
+      frames,
+      events,
+      assetBytes: stats.totalAssetBytes,
+    };
+  }
+
+  private async unlinkAsset(assetPath: string): Promise<void> {
+    try {
+      await fsp.unlink(this.absoluteAssetPath(assetPath));
+    } catch (err) {
+      // Missing files (already-vacuumed or never-existed) aren't fatal —
+      // the user-visible deletion succeeded as far as the DB is concerned.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        this.logger.warn('asset unlink failed', { assetPath, err: String(err) });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

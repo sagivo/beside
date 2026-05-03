@@ -20,6 +20,29 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    id: '2026-05-02-trust-touches',
+    version: '0.3.2 — May 2026',
+    date: '2026-05-02',
+    title: 'Small trust-building touches',
+    items: [
+      'Connect AI has a "Test connection" button that pings the local MCP endpoint and reports latency or the actual error.',
+      'Help has a new About card with the running version, your platform, and links to the source code.',
+      'Timeline gained a "Delete day" action so you can prune one bad afternoon without nuking everything.',
+      'Onboarding is now lazy-loaded so the dashboard paints faster after first run.',
+    ],
+  },
+  {
+    id: '2026-05-02-delete-memory',
+    version: '0.3.1 — May 2026',
+    date: '2026-05-02',
+    title: 'Delete what you remember',
+    items: [
+      'Each captured moment now has a Delete button in its detail dialog.',
+      'Settings → Privacy has a "Danger zone" that wipes all memory after a type-to-confirm prompt — frames, screenshots, sessions, search index, the lot.',
+      'Deletes happen locally — no copy ever left this device, so nothing to revoke elsewhere.',
+    ],
+  },
+  {
     id: '2026-05-02-shadcn-redesign',
     version: '0.3 — May 2026',
     date: '2026-05-02',

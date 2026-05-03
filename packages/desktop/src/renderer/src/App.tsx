@@ -13,12 +13,18 @@ import { Insights } from '@/screens/Insights';
 import { Search } from '@/screens/Search';
 import { Settings } from '@/screens/Settings';
 import { Timeline } from '@/screens/Timeline';
-import { Onboarding } from '@/onboarding/Onboarding';
 import { ONBOARDING_KEY, type Screen } from '@/types';
+
+// Onboarding is a sizeable flow (~33KB source, ~6 step components)
+// that 99% of the time only runs once per install. Lazy-loading it keeps
+// it out of the main bundle so the dashboard paints faster on every
+// subsequent launch — Vite emits it as its own chunk.
+const Onboarding = React.lazy(() =>
+  import('@/onboarding/Onboarding').then((mod) => ({ default: mod.Onboarding })),
+);
 import type {
   DoctorCheck,
   Insight,
-  InsightAnswer,
   JournalDay,
   LoadedConfig,
   ModelBootstrapProgress,
@@ -101,7 +107,11 @@ function AppInner() {
       if (next === 'timeline') {
         const nextDays = await window.cofounderos.listJournalDays();
         setDays(nextDays);
-        const day = selectedDay ?? nextDays[nextDays.length - 1] ?? null;
+        // If the previously-selected day no longer exists (e.g. deleted),
+        // fall back to the most recent day so the panel doesn't render
+        // empty pointing at a missing key.
+        const stillThere = selectedDay && nextDays.includes(selectedDay) ? selectedDay : null;
+        const day = stillThere ?? nextDays[nextDays.length - 1] ?? null;
         setSelectedDay(day);
         setJournal(day ? await window.cofounderos.getJournalDay(day) : null);
       }
@@ -231,11 +241,6 @@ function AppInner() {
           });
         }
       },
-      onAskInsights: async (question: string): Promise<InsightAnswer> => {
-        const answer = await window.cofounderos.askInsights({ question });
-        setInsights(await window.cofounderos.listInsights({ status: 'active', limit: 50 }));
-        return answer;
-      },
       onDismissInsight: async (id: string) => {
         await window.cofounderos.dismissInsight(id);
         setInsights((prev) => prev?.filter((insight) => insight.id !== id) ?? prev);
@@ -259,19 +264,21 @@ function AppInner() {
 
   if (showOnboarding) {
     return (
-      <Onboarding
-        bootstrapEvents={bootstrapEvents}
-        onClearBootstrapEvents={() => setBootstrapEvents([])}
-        onComplete={() => {
-          try {
-            localStorage.setItem(ONBOARDING_KEY, '1');
-          } catch {
-            /* ignore */
-          }
-          setShowOnboarding(false);
-          setScreen('dashboard');
-        }}
-      />
+      <React.Suspense fallback={<OnboardingLoadingScrim />}>
+        <Onboarding
+          bootstrapEvents={bootstrapEvents}
+          onClearBootstrapEvents={() => setBootstrapEvents([])}
+          onComplete={() => {
+            try {
+              localStorage.setItem(ONBOARDING_KEY, '1');
+            } catch {
+              /* ignore */
+            }
+            setShowOnboarding(false);
+            setScreen('dashboard');
+          }}
+        />
+      </React.Suspense>
     );
   }
 
@@ -309,7 +316,6 @@ function AppInner() {
       insights={insights}
       onRefresh={actions.onRunInsightsNow}
       onDismiss={actions.onDismissInsight}
-      onAsk={actions.onAskInsights}
       onOpenEvidence={(insight) => {
         setSelectedDay(insight.period.end.slice(0, 10));
         setScreen('timeline');
@@ -351,5 +357,18 @@ function AppInner() {
     >
       <ErrorBoundary resetKey={screen}>{screenContent}</ErrorBoundary>
     </AppShell>
+  );
+}
+
+/**
+ * Briefly visible scrim while the lazy-loaded Onboarding chunk fetches.
+ * In practice this is a couple hundred ms on first install, then never
+ * again — but we still need a fallback so React.Suspense doesn't throw.
+ */
+function OnboardingLoadingScrim() {
+  return (
+    <div className="grid h-screen place-items-center bg-background text-muted-foreground text-sm">
+      Preparing welcome…
+    </div>
   );
 }

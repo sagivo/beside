@@ -4,6 +4,7 @@ import {
   ChevronsRight,
   HelpCircle,
   LayoutDashboard,
+  Lightbulb,
   Plug,
   Search,
   Settings,
@@ -20,9 +21,10 @@ const NAV: Array<{ id: Screen; label: string; icon: LucideIcon; shortcut: string
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, shortcut: '1' },
   { id: 'timeline', label: 'Timeline', icon: Calendar, shortcut: '2' },
   { id: 'search', label: 'Search', icon: Search, shortcut: '3' },
-  { id: 'connect', label: 'Connect AI', icon: Plug, shortcut: '4' },
-  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '5' },
-  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '6' },
+  { id: 'insights', label: 'Insights', icon: Lightbulb, shortcut: '4' },
+  { id: 'connect', label: 'Connect AI', icon: Plug, shortcut: '5' },
+  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '6' },
+  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '7' },
 ];
 
 export function Sidebar({

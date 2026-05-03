@@ -1,6 +1,9 @@
 export {};
 
 declare global {
+  /** App version, injected at build time by Vite from package.json. */
+  const __APP_VERSION__: string;
+
   interface Window {
     cofounderos: {
       getOverview: () => Promise<RuntimeOverview>;
@@ -15,6 +18,7 @@ declare global {
       runInsightsNow: () => Promise<Insight[]>;
       askInsights: (input: { question: string; from?: string; to?: string }) => Promise<InsightAnswer>;
       dismissInsight: (id: string) => Promise<{ dismissed: true }>;
+      chatInsights: (input: ChatTurnInput) => Promise<ChatTurnResult>;
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
@@ -27,6 +31,9 @@ declare global {
       setStartAtLogin: (enabled: boolean) => Promise<boolean>;
       openPath: (target: 'config' | 'data' | 'markdown') => Promise<{ opened: string }>;
       copyText: (text: string) => Promise<{ copied: true }>;
+      deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
+      deleteFramesByDay: (day: string) => Promise<{ frames: number; assetPaths: string[] }>;
+      deleteAllMemory: () => Promise<{ frames: number; events: number; assetBytes: number }>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
@@ -43,6 +50,7 @@ export interface RuntimeOverview {
     running: boolean;
     paused: boolean;
     eventsToday: number;
+    eventsLastHour?: number;
     storageBytesToday?: number;
   };
   storage: {
@@ -235,4 +243,25 @@ export interface InsightAnswer {
   suggested_actions: string[];
   generated_insight?: Insight;
   created_at: string;
+}
+
+export type ChatRole = 'system' | 'user' | 'assistant';
+
+export interface ChatMessage {
+  role: ChatRole;
+  content: string;
+  createdAt?: string;
+}
+
+export interface ChatTurnInput {
+  messages: ChatMessage[];
+  insightId?: string;
+  refreshEvidence?: boolean;
+  from?: string;
+  to?: string;
+}
+
+export interface ChatTurnResult {
+  message: ChatMessage;
+  evidence: InsightEvidence;
 }
