@@ -1,3 +1,4 @@
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type {
   ICapture,
@@ -67,15 +68,31 @@ const INCREMENTAL_JOB = 'index-incremental';
 const REORG_JOB = 'index-reorganise';
 const FRAME_BUILDER_JOB = 'frame-builder';
 const FRAME_BUILDER_INTERVAL_MS = 60_000;
+const FRAME_BUILDER_BATCH_SIZE = 25;
 const OCR_WORKER_JOB = 'ocr-worker';
 const OCR_WORKER_INTERVAL_MS = 30_000;
 const AUDIO_TRANSCRIPT_JOB = 'audio-transcript-worker';
 const ENTITY_RESOLVER_JOB = 'entity-resolver';
 const ENTITY_RESOLVER_INTERVAL_MS = 90_000;
+const ENTITY_RESOLVER_BATCH_SIZE = 25;
 const SESSION_BUILDER_JOB = 'session-builder';
 const SESSION_BUILDER_INTERVAL_MS = 120_000;
+const SESSION_BUILDER_BATCH_SIZE = 100;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
+
+async function startPassiveExports(exports: IExport[], logger: Logger): Promise<void> {
+  for (const exp of exports) {
+    if (exp.name === 'mcp') continue;
+    if (!exp.getStatus().running) {
+      try {
+        await exp.start();
+      } catch (err) {
+        logger.warn(`failed to start export "${exp.name}"`, { err: String(err) });
+      }
+    }
+  }
+}
 
 export async function buildOrchestrator(
   logger: Logger,
@@ -184,6 +201,7 @@ export async function buildOrchestrator(
 
   const sensitiveKeywords = config.capture.privacy.sensitive_keywords ?? [];
   const frameBuilder = new FrameBuilder(storage, logger, {
+    batchSize: FRAME_BUILDER_BATCH_SIZE,
     sensitiveKeywords,
   });
   const ocrWorker = new OcrWorker(storage, logger, {
@@ -201,12 +219,13 @@ export async function buildOrchestrator(
     batchSize: config.capture.audio.batch_size,
     sensitiveKeywords,
   });
-  const entityResolver = new EntityResolverWorker(storage, logger);
+  const entityResolver = new EntityResolverWorker(storage, logger, ENTITY_RESOLVER_BATCH_SIZE);
   const sessionsCfg = config.index.sessions;
   const sessionBuilder = new SessionBuilder(storage, logger, {
     idleThresholdMs: sessionsCfg.idle_threshold_sec * 1000,
     minActiveMs: sessionsCfg.min_active_ms,
     fallbackFrameAttentionMs: sessionsCfg.fallback_frame_attention_ms,
+    batchSize: SESSION_BUILDER_BATCH_SIZE,
   });
   const embeddingsCfg = config.index.embeddings;
   const embeddingWorker = new EmbeddingWorker(storage, model, logger, {
@@ -306,16 +325,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   // / `--full-reindex` runs still propagate. Network-server exports like MCP
   // are skipped — they only start when the user runs `start` or `mcp`
   // explicitly so we never bind a port behind their back.
-  for (const exp of exports) {
-    if (exp.name === 'mcp') continue;
-    if (!exp.getStatus().running) {
-      try {
-        await exp.start();
-      } catch (err) {
-        log.warn(`failed to start export "${exp.name}"`, { err: String(err) });
-      }
-    }
-  }
+  await startPassiveExports(exports, log);
 
   let totalEvents = 0;
   let totalCreated = 0;
@@ -359,6 +369,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
 export async function runReorganisation(handles: OrchestratorHandles): Promise<void> {
   const { strategy, model, exports, logger } = handles;
   const log = logger.child('index-reorg');
+  await startPassiveExports(exports, log);
   const state = await strategy.getState();
   const update = await strategy.reorganise(state, model);
   await strategy.applyUpdate(update);
@@ -386,9 +397,27 @@ export async function runFullReindex(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
+  const release = await acquireIndexMaintenanceLock(handles, 'full-reindex');
+  try {
+    await runFullReindexLocked(handles, opts);
+  } finally {
+    await release();
+  }
+}
+
+async function runFullReindexLocked(
+  handles: OrchestratorHandles,
+  opts: { from?: string; to?: string } = {},
+): Promise<void> {
   const { storage, strategy, model, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, embeddingWorker } = handles;
   const log = logger.child('full-reindex');
-  log.info(`full re-index starting (strategy=${strategy.name})`);
+  const range = [
+    opts.from ? `from=${opts.from}` : null,
+    opts.to ? `to=${opts.to}` : null,
+  ].filter(Boolean).join(', ');
+  log.info(
+    `full re-index starting (strategy=${strategy.name}${range ? `, ${range}` : ''})`,
+  );
 
   await strategy.reset();
   await storage.clearIndexCheckpoint(strategy.name);
@@ -428,10 +457,20 @@ export async function runFullReindex(
     log.info(`rebuilt ${emb.processed} frame embedding(s)`);
   }
 
-  // Walk all events in chronological order, batched.
+  await startPassiveExports(exports, log);
+
+  // KarpathyStrategy captures the storage handle when getUnindexedEvents()
+  // is called. Full reindex walks explicit date ranges instead, so bind once
+  // up front before calling indexBatch directly.
+  await strategy.getUnindexedEvents(storage);
+
+  // Collect the requested raw event range, then render entity pages once.
+  // The strategy builds pages from the materialised entity/frame tables, not
+  // from individual raw events, so invoking it once avoids re-rendering the
+  // same active entities for every historical event batch.
   const batchSize = config.index.batch_size;
   let offset = 0;
-  let processed = 0;
+  const allEvents: RawEvent[] = [];
 
   while (true) {
     const events = await storage.readEvents({
@@ -442,28 +481,107 @@ export async function runFullReindex(
     });
     if (events.length === 0) break;
 
-    const state = await strategy.getState();
-    const update = await strategy.indexBatch(events, state, model);
-    await strategy.applyUpdate(update);
-    for (const exp of exports) {
-      for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
-      for (const p of update.pagesToUpdate) await exp.onPageUpdate(p);
-    }
-    await storage.markIndexed(strategy.name, events.map((e) => e.id));
-
-    processed += events.length;
+    allEvents.push(...events);
     offset += events.length;
     if (events.length < batchSize) break;
   }
 
-  log.info(`full re-index complete — ${processed} events processed`);
+  if (allEvents.length > 0) {
+    const state = await strategy.getState();
+    const update = await strategy.indexBatch(allEvents, state, model);
+    await strategy.applyUpdate(update);
+    for (const exp of exports) {
+      for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
+      for (const p of update.pagesToUpdate) await exp.onPageUpdate(p);
+      for (const d of update.pagesToDelete) await exp.onPageDelete(d);
+    }
+    await storage.markIndexed(strategy.name, allEvents.map((e) => e.id));
+  }
+
+  const finalState = await strategy.getState();
+  for (const exp of exports) {
+    if (exp.name === 'mcp') continue;
+    await exp.fullSync(finalState, strategy);
+  }
+
+  log.info(`full re-index complete — ${allEvents.length} events processed`);
+}
+
+const INDEX_MAINTENANCE_LOCK = '.index-maintenance.lock';
+const INDEX_MAINTENANCE_LOCK_STALE_MS = 4 * 60 * 60_000;
+
+async function acquireIndexMaintenanceLock(
+  handles: OrchestratorHandles,
+  job: string,
+): Promise<() => Promise<void>> {
+  const lockPath = indexMaintenanceLockPath(handles.loaded.dataDir);
+  const payload = JSON.stringify({
+    job,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  });
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await fsp.writeFile(lockPath, payload, { flag: 'wx' });
+      return async () => {
+        await fsp.unlink(lockPath).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') {
+            handles.logger.child(job).debug('failed to remove index maintenance lock', {
+              err: String(err),
+            });
+          }
+        });
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+      if (!(await clearStaleIndexMaintenanceLock(lockPath))) {
+        throw new Error(`another index maintenance job is already running (${lockPath})`);
+      }
+    }
+  }
+
+  throw new Error(`could not acquire index maintenance lock (${lockPath})`);
+}
+
+async function hasActiveIndexMaintenanceLock(dataDir: string): Promise<boolean> {
+  const lockPath = indexMaintenanceLockPath(dataDir);
+  try {
+    const stat = await fsp.stat(lockPath);
+    if (Date.now() - stat.mtimeMs > INDEX_MAINTENANCE_LOCK_STALE_MS) {
+      await fsp.unlink(lockPath).catch(() => undefined);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return false;
+  }
+}
+
+async function clearStaleIndexMaintenanceLock(lockPath: string): Promise<boolean> {
+  try {
+    const stat = await fsp.stat(lockPath);
+    if (Date.now() - stat.mtimeMs <= INDEX_MAINTENANCE_LOCK_STALE_MS) {
+      return false;
+    }
+    await fsp.unlink(lockPath);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+function indexMaintenanceLockPath(dataDir: string): string {
+  return path.join(dataDir, INDEX_MAINTENANCE_LOCK);
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
   const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, embeddingWorker, vacuum, logger, loadGuard } =
     handles;
 
-  // Wrap a heavy job so it skips when the machine is busy. Cheap jobs
+  // Wrap heavier jobs so they skip when the machine is busy. Cheap jobs
   // (frame builder, OCR, entity resolver) are intentionally not gated —
   // they're small and keep search results fresh on the order of seconds.
   const guarded = (jobName: string, run: () => Promise<unknown>) => async () => {
@@ -482,66 +600,76 @@ export function scheduleAll(handles: OrchestratorHandles): void {
     }
     await run();
   };
+  const skipDuringIndexMaintenance = (
+    jobName: string,
+    run: () => Promise<unknown>,
+  ) => async () => {
+    if (await hasActiveIndexMaintenanceLock(handles.loaded.dataDir)) {
+      logger.child(jobName).debug('skipped — index maintenance lock active');
+      return;
+    }
+    await run();
+  };
   // Frame builder runs frequently and cheaply so search results stay
   // close to real-time even when a full index pass hasn't fired yet.
-  scheduler.every(FRAME_BUILDER_JOB, FRAME_BUILDER_INTERVAL_MS, async () => {
+  scheduler.every(FRAME_BUILDER_JOB, FRAME_BUILDER_INTERVAL_MS, skipDuringIndexMaintenance(FRAME_BUILDER_JOB, async () => {
     try {
       await frameBuilder.tick();
     } catch (err) {
       logger.child('frame-builder').warn('tick failed', { err: String(err) });
     }
-  });
+  }));
   // OCR worker runs slightly faster than the frame builder so a frame
   // built at second 0 typically has searchable text by second 60-90.
-  scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, async () => {
+  scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, skipDuringIndexMaintenance(OCR_WORKER_JOB, async () => {
     try {
       await ocrWorker.tick();
     } catch (err) {
       logger.child('ocr-worker').warn('tick failed', { err: String(err) });
     }
-  });
+  }));
   scheduler.every(
     AUDIO_TRANSCRIPT_JOB,
     Math.max(15_000, config.capture.audio.tick_interval_sec * 1000),
-    async () => {
+    skipDuringIndexMaintenance(AUDIO_TRANSCRIPT_JOB, async () => {
       try {
         await audioTranscriptWorker.tick();
       } catch (err) {
         logger.child('audio-transcript-worker').warn('tick failed', { err: String(err) });
       }
-    },
+    }),
   );
   // Entity resolver runs after the frame builder so freshly built frames
   // become resolvable in the next ~30s.
-  scheduler.every(ENTITY_RESOLVER_JOB, ENTITY_RESOLVER_INTERVAL_MS, async () => {
+  scheduler.every(ENTITY_RESOLVER_JOB, ENTITY_RESOLVER_INTERVAL_MS, skipDuringIndexMaintenance(ENTITY_RESOLVER_JOB, async () => {
     try {
       await entityResolver.tick();
     } catch (err) {
       logger.child('entity-resolver').warn('tick failed', { err: String(err) });
     }
-  });
+  }));
   // Session builder runs slightly slower than the resolver — sessions
   // benefit from frames that already have entity assignments, so we
   // don't want to assign frames to sessions before entity resolution
   // catches up. A 2-minute cadence keeps journals current to roughly
   // the last activity-session boundary at any moment.
-  scheduler.every(SESSION_BUILDER_JOB, SESSION_BUILDER_INTERVAL_MS, async () => {
+  scheduler.every(SESSION_BUILDER_JOB, SESSION_BUILDER_INTERVAL_MS, skipDuringIndexMaintenance(SESSION_BUILDER_JOB, async () => {
     try {
       await sessionBuilder.tick();
     } catch (err) {
       logger.child('session-builder').warn('tick failed', { err: String(err) });
     }
-  });
+  }));
   scheduler.every(
     EMBEDDING_WORKER_JOB,
     Math.max(60_000, config.index.embeddings.tick_interval_min * 60_000),
-    async () => {
+    skipDuringIndexMaintenance(EMBEDDING_WORKER_JOB, guarded(EMBEDDING_WORKER_JOB, async () => {
       try {
         await embeddingWorker.tick();
       } catch (err) {
         logger.child('embedding-worker').warn('tick failed', { err: String(err) });
       }
-    },
+    })),
   );
   // Vacuum runs on a slow tick (default hourly). Each tick processes a
   // small batch so it never starves capture.
@@ -549,23 +677,23 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   scheduler.every(
     VACUUM_JOB,
     vacuumIntervalMs,
-    guarded(VACUUM_JOB, async () => {
+    skipDuringIndexMaintenance(VACUUM_JOB, guarded(VACUUM_JOB, async () => {
       try {
         await vacuum.tick();
       } catch (err) {
         logger.child('storage-vacuum').warn('tick failed', { err: String(err) });
       }
-    }),
+    })),
   );
   scheduler.every(
     INCREMENTAL_JOB,
     config.index.incremental_interval_min * 60 * 1000,
-    guarded(INCREMENTAL_JOB, () => runIncremental(handles).then(() => undefined)),
+    skipDuringIndexMaintenance(INCREMENTAL_JOB, guarded(INCREMENTAL_JOB, () => runIncremental(handles).then(() => undefined))),
   );
   scheduler.cron(
     REORG_JOB,
     config.index.reorganise_schedule,
-    guarded(REORG_JOB, () => runReorganisation(handles)),
+    skipDuringIndexMaintenance(REORG_JOB, guarded(REORG_JOB, () => runReorganisation(handles))),
   );
 }
 
@@ -584,6 +712,10 @@ export async function stopAll(handles: OrchestratorHandles): Promise<void> {
   }
   await handles.capture.stop();
   await handles.ocrWorker.stop();
+  const unloadModel = (handles.model as IModelAdapter & { unload?: () => Promise<void> }).unload;
+  await unloadModel?.().catch((err: unknown) => {
+    handles.logger.child('model').debug('model unload failed during runtime stop', { err: String(err) });
+  });
 }
 
 export function exportRoot(dataDir: string): string {

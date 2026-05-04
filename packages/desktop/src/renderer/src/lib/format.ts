@@ -19,6 +19,7 @@ export function formatNumber(n: number): string {
 }
 
 export function indexingStatusText(indexing: RuntimeIndexingStatus): string {
+  if (indexing.currentJob === 'index-full-reindex') return 'Re-indexing memory from raw captures';
   if (indexing.currentJob === 'index-reorganise') return 'Reorganizing memory index';
   return 'Indexing new memories';
 }

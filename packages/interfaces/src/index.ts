@@ -637,6 +637,13 @@ export interface IStorage {
   ): Promise<void>;
 
   /**
+   * Best-effort asset unlink that storage adapters can make reference-aware.
+   * Vacuum uses this after nulling a frame's asset_path so content-addressed
+   * assets are only removed once no remaining frame points at them.
+   */
+  deleteAssetIfUnreferenced(assetPath: string): Promise<void>;
+
+  /**
    * Aggregate counts of frames by current vacuum tier — feeds the
    * `cofounderos status` command and the vacuum scheduler's no-op
    * fast-path.
@@ -792,6 +799,12 @@ export interface IModelAdapter {
   embed?(texts: string[]): Promise<number[][]>;
   isAvailable(): Promise<boolean>;
   getModelInfo(): ModelInfo;
+  /**
+   * Optional memory-pressure hook. Local model adapters can use this to
+   * unload resident model weights after an idle period or when the runtime
+   * stops. Remote adapters can omit it.
+   */
+  unload?(): Promise<void>;
 
   /**
    * Optional first-run bootstrap. Adapters that need to install a runtime
@@ -1044,6 +1057,8 @@ export function renderJournalMarkdown(
   }
   lines.push(`_${summaryParts.join(', ')}._`);
   lines.push('');
+  renderDayOverview(frames, sessions, lines);
+  renderCrossSessionReport(frames, sessions, lines);
 
   // -------------------------------------------------------------------------
   // Session-grouped path. We preserve the legacy app-grouped output for
@@ -1061,6 +1076,9 @@ export function renderJournalMarkdown(
     const ordered = [...sessions].sort((a, b) =>
       a.started_at.localeCompare(b.started_at),
     );
+
+    lines.push('## Timeline');
+    lines.push('');
 
     let prevEnded: string | null = null;
     for (const session of ordered) {
@@ -1082,7 +1100,7 @@ export function renderJournalMarkdown(
     const loose = framesBySession.get('__loose__') ?? [];
     if (loose.length > 0) {
       lines.push(`---`);
-      lines.push(`## Loose frames`);
+      lines.push(`### Loose frames`);
       lines.push(`_${loose.length} frame(s) not yet assigned to a session._`);
       lines.push('');
       renderFrameList(loose, lines, assetUrlPrefix);
@@ -1093,10 +1111,12 @@ export function renderJournalMarkdown(
   // -------------------------------------------------------------------------
   // Legacy app-grouped path.
   // -------------------------------------------------------------------------
+  lines.push('## Timeline');
+  lines.push('');
   let lastApp: string | null = null;
   for (const f of frames) {
     if (f.app !== lastApp) {
-      lines.push(`## ${f.app || '(unknown)'}`);
+      lines.push(`### ${f.app || '(unknown)'}`);
       lastApp = f.app;
     }
     renderFrame(f, lines, assetUrlPrefix);
@@ -1123,7 +1143,7 @@ function renderSession(
   if (frames.length > 0) {
     headerBits.push(`${frames.length} frame${frames.length === 1 ? '' : 's'}`);
   }
-  lines.push(`## ${startTime} – ${endTime} · ${headerBits.join(' · ')}`);
+  lines.push(`### ${startTime} – ${endTime} · ${headerBits.join(' · ')}`);
   if (session.entities.length > 1) {
     const tail = session.entities
       .slice(1, 4)
@@ -1137,6 +1157,19 @@ function renderSession(
     lines.push('');
     return;
   }
+  const context = describeSessionContext(frames);
+  if (context) {
+    lines.push(`_Context: ${context}_`);
+    lines.push('');
+  }
+  const phases = summarizeSessionPhases(frames);
+  if (phases.length > 1) {
+    lines.push('_Phase summary:_');
+    for (const phase of phases) {
+      lines.push(`- ${phase}`);
+    }
+    lines.push('');
+  }
   renderFrameList(frames, lines, assetUrlPrefix);
 }
 
@@ -1148,7 +1181,7 @@ function renderFrameList(
   let lastApp: string | null = null;
   for (const f of frames) {
     if (f.app !== lastApp) {
-      lines.push(`### ${f.app || '(unknown)'}`);
+      lines.push(`#### ${f.app || '(unknown)'}`);
       lastApp = f.app;
     }
     renderFrame(f, lines, assetUrlPrefix);
@@ -1172,19 +1205,982 @@ function renderFrame(f: Frame, lines: string[], assetUrlPrefix: string): void {
   if (
     f.text &&
     (
-      f.text_source === 'ocr' ||
       f.text_source === 'accessibility' ||
-      f.text_source === 'ocr_accessibility' ||
       f.text_source === 'audio'
     ) &&
     f.text.trim()
   ) {
-    const snippet = f.text.replace(/\s+/g, ' ').trim().slice(0, 200);
-    lines.push(`  > ${snippet}${snippet.length === 200 ? '…' : ''}`);
+    const snippet = readableFrameText(f);
+    if (snippet) lines.push(`  > ${snippet}`);
   }
   if (f.asset_path) {
     lines.push(`  ![](${assetUrlPrefix}${f.asset_path})`);
   }
+}
+
+interface SessionPhase {
+  key: string;
+  frames: Frame[];
+}
+
+function summarizeSessionPhases(frames: Frame[]): string[] {
+  const sorted = frames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  if (sorted.length < 6) return [];
+  const phases: SessionPhase[] = [];
+  for (const frame of sorted) {
+    const key = phaseKey(frame);
+    const last = phases[phases.length - 1];
+    const lastFrame = last?.frames[last.frames.length - 1];
+    const gapMs = lastFrame
+      ? Date.parse(frame.timestamp) - Date.parse(lastFrame.timestamp)
+      : 0;
+    if (!last || last.key !== key || gapMs > 3 * 60_000) {
+      phases.push({ key, frames: [frame] });
+    } else {
+      last.frames.push(frame);
+    }
+  }
+
+  const meaningful = phases.filter(isMeaningfulPhase);
+  if (meaningful.length <= 1) return [];
+  return selectRepresentativePhases(meaningful, 8).map(renderSessionPhase);
+}
+
+function phaseKey(frame: Frame): string {
+  if (frame.entity_path?.startsWith('contacts/')) return 'communication';
+  if (frame.entity_path?.startsWith('channels/')) return 'communication';
+  if (frame.app === 'Mail') return 'communication';
+  const domain = domainFromUrl(frame.url);
+  if (domain) return `web:${domain}`;
+  if (frame.entity_path) return `entity:${frame.entity_path}`;
+  return `app:${frame.app || 'unknown'}`;
+}
+
+function isMeaningfulPhase(phase: SessionPhase): boolean {
+  const durationMs = phaseDurationMs(phase);
+  const first = phase.frames[0];
+  const isCommunication = phase.key === 'communication';
+  const isNoise = first ? isNoisePhaseFrame(first) : false;
+  if (isNoise && durationMs < 60_000) return false;
+  if (isCommunication) return phase.frames.length >= 2 || durationMs >= 15_000;
+  return phase.frames.length >= 3 || durationMs >= 30_000;
+}
+
+function phaseDurationMs(phase: SessionPhase): number {
+  const first = phase.frames[0];
+  const last = phase.frames[phase.frames.length - 1];
+  if (!first || !last) return 0;
+  return Math.max(
+    last.duration_ms ?? 0,
+    Date.parse(last.timestamp) - Date.parse(first.timestamp),
+  );
+}
+
+function isNoisePhaseFrame(frame: Frame): boolean {
+  const app = frame.app.toLowerCase();
+  return [
+    'loginwindow',
+    'captive network assistant',
+    'cloudflare warp',
+    'activity monitor',
+    'system settings',
+  ].includes(app);
+}
+
+function selectRepresentativePhases(phases: SessionPhase[], limit: number): SessionPhase[] {
+  if (phases.length <= limit) return phases;
+  const selected = new Set<SessionPhase>();
+  selected.add(phases[0]!);
+  selected.add(phases[phases.length - 1]!);
+  const ranked = phases
+    .slice(1, -1)
+    .sort((a, b) => phaseImportance(b) - phaseImportance(a));
+  for (const phase of ranked) {
+    if (selected.size >= limit) break;
+    selected.add(phase);
+  }
+  return phases.filter((phase) => selected.has(phase));
+}
+
+function phaseImportance(phase: SessionPhase): number {
+  const frames = phase.frames;
+  const durationMin = phaseDurationMs(phase) / 60_000;
+  const hasCommunication = phase.key === 'communication' ? 4 : 0;
+  const hasFiles = extractFilesFromFrames(frames, 1).length > 0 ? 2 : 0;
+  const hasDomains = topValues(frames, (frame) => domainFromUrl(frame.url), 1).length > 0 ? 2 : 0;
+  const nonNoise = frames[0] && !isNoisePhaseFrame(frames[0]) ? 1 : 0;
+  return durationMin + frames.length * 0.35 + hasCommunication + hasFiles + hasDomains + nonNoise;
+}
+
+function renderSessionPhase(phase: SessionPhase): string {
+  const frames = phase.frames;
+  const first = frames[0]!;
+  const last = frames[frames.length - 1]!;
+  const timeRange = phaseTimeRange(first, last);
+  const duration = phaseDurationMs(phase);
+  const action = inferSessionAction(frames) ?? describePhaseFallback(frames);
+  const primaryEntity = phase.key === 'communication'
+    ? topValues(
+        frames,
+        (frame) =>
+          frame.entity_path?.startsWith('contacts/') || frame.entity_path?.startsWith('channels/')
+            ? frame.entity_path
+            : null,
+        1,
+      )[0]?.value
+    : topValues(frames, (frame) => frame.entity_path, 1)[0]?.value;
+  const primaryApp = topValues(frames, (frame) => frame.app, 1)[0]?.value;
+  const target = primaryEntity ? `[[${primaryEntity}]]` : primaryApp ?? '(unknown)';
+  const evidence = compactEvidence([
+    extractFilesFromFrames(frames, 2).length
+      ? `files ${extractFilesFromFrames(frames, 2).map((file) => `\`${file}\``).join(', ')}`
+      : null,
+    topValues(frames, (frame) => domainFromUrl(frame.url), 2).length
+      ? `domains ${topValues(frames, (frame) => domainFromUrl(frame.url), 2).map((x) => x.value).join(', ')}`
+      : null,
+    representativeTitles(frames, 2).length
+      ? `windows ${representativeTitles(frames, 2).map((title) => `"${title}"`).join(', ')}`
+      : null,
+  ]);
+  return `**${timeRange}** ${action} via ${target}` +
+    `${duration >= 30_000 ? ` _(${humaniseDuration(duration)})_` : ''}` +
+    `${evidence ? ` (${evidence})` : ''}.`;
+}
+
+function phaseTimeRange(first: Frame, last: Frame): string {
+  const start = first.timestamp.slice(11, 16);
+  const end = last.timestamp.slice(11, 16);
+  if (start !== end) return `${start}-${end}`;
+  return `${first.timestamp.slice(11, 19)}-${last.timestamp.slice(11, 19)}`;
+}
+
+function describePhaseFallback(frames: Frame[]): string {
+  const entity = topValues(frames, (frame) => frame.entity_path, 1)[0]?.value;
+  const app = topValues(frames, (frame) => frame.app, 1)[0]?.value;
+  const communication = topValues(
+    frames,
+    (frame) =>
+      frame.entity_path?.startsWith('contacts/') || frame.entity_path?.startsWith('channels/')
+        ? frame.entity_path
+        : frame.app === 'Mail'
+          ? 'apps/mail'
+          : null,
+    1,
+  )[0]?.value;
+  if (communication) return `communicating via ${titleFromPath(communication)}`;
+  if (entity?.startsWith('contacts/')) return `messaging ${titleFromPath(entity)}`;
+  if (entity?.startsWith('channels/')) return `reviewing ${titleFromPath(entity)}`;
+  if (app === 'Mail') return 'triaging email';
+  if (app === 'Firefox' || app === 'firefox') return 'browsing web pages';
+  if (app === 'Warp') return 'running terminal commands';
+  if (app === 'Finder') return 'browsing files';
+  return app ? `using ${app}` : 'working';
+}
+
+function renderDayOverview(
+  frames: Frame[],
+  sessions: ActivitySession[],
+  lines: string[],
+): void {
+  const topEntities = topValues(frames, (f) => f.entity_path, 5)
+    .map((x) => `[[${x.value}]]`);
+  const topApps = topValues(frames, (f) => f.app, 5)
+    .map((x) => `${x.value} (${x.count})`);
+  const orderedSessions = sessions
+    .slice()
+    .sort((a, b) => b.active_ms - a.active_ms)
+    .slice(0, 5);
+
+  lines.push('## Day overview');
+  if (topEntities.length > 0) {
+    lines.push(`- Main entities: ${topEntities.join(', ')}.`);
+  }
+  if (topApps.length > 0) {
+    lines.push(`- App mix: ${topApps.join(', ')}.`);
+  }
+  const focusMix = renderFocusMix(frames);
+  if (focusMix.length > 0) {
+    lines.push(`- Focus mix: ${focusMix.join(', ')}.`);
+  }
+  const topFiles = extractFilesFromFrames(frames, 8);
+  if (topFiles.length > 0) {
+    lines.push(`- Artifacts: ${topFiles.map((file) => `\`${file}\``).join(', ')}.`);
+  }
+  const topCommunications = topValues(
+    frames,
+    (frame) => {
+      if (frame.entity_path?.startsWith('contacts/') || frame.entity_path?.startsWith('channels/')) {
+        return frame.entity_path;
+      }
+      if (frame.app === 'Mail') return 'apps/mail';
+      return null;
+    },
+    6,
+  ).map((x) => `[[${x.value}]] (${x.count})`);
+  if (topCommunications.length > 0) {
+    lines.push(`- Communication surfaces: ${topCommunications.join(', ')}.`);
+  }
+  const topDomains = topValues(frames, (frame) => domainFromUrl(frame.url), 5)
+    .map((x) => `${x.value} (${x.count})`);
+  if (topDomains.length > 0) {
+    lines.push(`- Web domains: ${topDomains.join(', ')}.`);
+  }
+  if (orderedSessions.length > 0) {
+    const sessionBits = orderedSessions.map((session) => {
+      const target = session.primary_entity_path
+        ? `[[${session.primary_entity_path}]]`
+        : session.primary_app ?? '(unknown)';
+      return `${session.started_at.slice(11, 16)} ${target} (${humaniseDuration(session.active_ms)})`;
+    });
+    lines.push(`- Longest active sessions: ${sessionBits.join('; ')}.`);
+    const inferred = orderedSessions
+      .map((session) => {
+        const sessionFrames = frames.filter((frame) => frame.activity_session_id === session.id);
+        const action = inferSessionAction(sessionFrames);
+        return action
+          ? `${session.started_at.slice(11, 16)} ${action} (${humaniseDuration(session.active_ms)})`
+          : null;
+      })
+      .filter((x): x is string => Boolean(x));
+    if (inferred.length > 0) lines.push(`- Likely activity: ${inferred.join('; ')}.`);
+  } else {
+    const action = inferSessionAction(frames);
+    if (action) lines.push(`- Likely activity: ${action}.`);
+  }
+  const readable = firstReadableExcerpt(frames);
+  if (readable) {
+    lines.push(`- Representative readable signal: "${readable}"`);
+  }
+  if (topEntities.length === 0 && topApps.length === 0 && orderedSessions.length === 0) {
+    lines.push('- No strong activity clusters were available; use the frame evidence below.');
+  }
+  lines.push('');
+}
+
+interface SessionInsight {
+  session: ActivitySession;
+  frames: Frame[];
+  action: string | null;
+  confidence: 'high' | 'medium' | 'low';
+  basis: string[];
+  primaryTarget: string;
+  communicationTargets: string[];
+  files: string[];
+  domains: string[];
+}
+
+function renderCrossSessionReport(
+  frames: Frame[],
+  sessions: ActivitySession[],
+  lines: string[],
+): void {
+  if (sessions.length === 0) return;
+  const framesBySession = groupFramesByActivitySession(frames);
+  const insights = sessions
+    .slice()
+    .sort((a, b) => a.started_at.localeCompare(b.started_at))
+    .map((session) => buildSessionInsight(session, framesBySession.get(session.id) ?? []))
+    .filter((insight) => insight.frames.length > 0);
+  if (insights.length === 0) return;
+
+  lines.push('## Narrative');
+  const brief = renderBrief(insights);
+  if (brief.length > 0) {
+    lines.push(...brief);
+    lines.push('');
+  }
+  lines.push(...renderWorkArc(insights));
+
+  const workstreams = renderWorkstreams(insights);
+  if (workstreams.length > 0) {
+    lines.push('');
+    lines.push('### Workstreams');
+    lines.push(...workstreams);
+  }
+  const transitions = renderTransitions(insights);
+  if (transitions.length > 0) {
+    lines.push('');
+    lines.push('### Handoffs');
+    lines.push(...transitions);
+  }
+  const followUps = renderFollowUpCandidates(insights);
+  if (followUps.length > 0) {
+    lines.push('');
+    lines.push('### Follow-up candidates');
+    lines.push(...followUps);
+  }
+  lines.push('');
+}
+
+function renderFocusMix(frames: Frame[]): string[] {
+  const counts = new Map<string, number>();
+  for (const frame of frames) {
+    const category = focusCategory(frame);
+    counts.set(category, (counts.get(category) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([category, count]) => `${category} ${Math.round((count / Math.max(1, frames.length)) * 100)}%`);
+}
+
+function renderBrief(insights: SessionInsight[]): string[] {
+  const workstreams = summarizeWorkstreams(insights)
+    .filter((item) => item.activeMs >= 5 * 60_000 || item.files.length > 0 || item.communications.length > 0)
+    .sort((a, b) => b.activeMs - a.activeMs);
+  if (workstreams.length === 0) return [];
+  const primary = workstreams[0]!;
+  const comms = [...new Set(workstreams.flatMap((item) => item.communications))].slice(0, 5);
+  const artifacts = [...new Set(workstreams.flatMap((item) => item.files))].slice(0, 5);
+  const lines = [
+    `- Primary workstream: ${primary.target} (${humaniseDuration(primary.activeMs)} across ${primary.sessions} session${primary.sessions === 1 ? '' : 's'}).`,
+  ];
+  if (artifacts.length > 0) {
+    lines.push(`- Key artifacts: ${artifacts.map((file) => `\`${file}\``).join(', ')}.`);
+  }
+  if (comms.length > 0) {
+    lines.push(`- Communication touched: ${comms.map((target) => `[[${target}]]`).join(', ')}.`);
+  }
+  return lines;
+}
+
+interface WorkstreamSummary {
+  target: string;
+  activeMs: number;
+  sessions: number;
+  actions: string[];
+  files: string[];
+  domains: string[];
+  communications: string[];
+}
+
+function renderWorkstreams(insights: SessionInsight[]): string[] {
+  return summarizeWorkstreams(insights)
+    .filter((item) => item.activeMs >= 5 * 60_000 || item.files.length > 0 || item.communications.length > 0)
+    .sort((a, b) => b.activeMs - a.activeMs)
+    .slice(0, 6)
+    .map((item) => {
+      const details = compactEvidence([
+        item.actions.length ? `actions ${item.actions.slice(0, 3).join('; ')}` : null,
+        item.files.length ? `artifacts ${item.files.slice(0, 4).map((file) => `\`${file}\``).join(', ')}` : null,
+        item.communications.length ? `comms ${item.communications.slice(0, 4).map((target) => `[[${target}]]`).join(', ')}` : null,
+        item.domains.length ? `domains ${item.domains.slice(0, 3).join(', ')}` : null,
+      ]);
+      return `- ${item.target}: ${humaniseDuration(item.activeMs)} across ${item.sessions} session${item.sessions === 1 ? '' : 's'}` +
+        `${details ? ` (${details})` : ''}.`;
+    });
+}
+
+function summarizeWorkstreams(insights: SessionInsight[]): WorkstreamSummary[] {
+  const grouped = new Map<string, WorkstreamSummary>();
+  for (const insight of insights) {
+    const current = grouped.get(insight.primaryTarget) ?? {
+      target: insight.primaryTarget,
+      activeMs: 0,
+      sessions: 0,
+      actions: [],
+      files: [],
+      domains: [],
+      communications: [],
+    };
+    current.activeMs += insight.session.active_ms;
+    current.sessions += 1;
+    addUniqueString(current.actions, insight.action);
+    for (const file of insight.files) addUniqueString(current.files, file);
+    for (const domain of insight.domains) addUniqueString(current.domains, domain);
+    for (const target of insight.communicationTargets) addUniqueString(current.communications, target);
+    grouped.set(insight.primaryTarget, current);
+  }
+  return [...grouped.values()];
+}
+
+function addUniqueString(target: string[], value: string | null | undefined): void {
+  if (!value || target.includes(value)) return;
+  target.push(value);
+}
+
+function focusCategory(frame: Frame): string {
+  const app = frame.app.toLowerCase();
+  if (frame.entity_path?.startsWith('contacts/') || frame.entity_path?.startsWith('channels/')) {
+    return 'communication';
+  }
+  if (app === 'mail' || app === 'slack' || app.includes('whatsapp')) return 'communication';
+  if (app === 'cursor' || app === 'warp' || app === 'electron') return 'development';
+  if (app === 'firefox' || app === 'google chrome' || app === 'safari') return 'web/research';
+  if (app === 'finder') return 'files';
+  if (app === 'claude') return 'assistant';
+  return 'other';
+}
+
+function groupFramesByActivitySession(frames: Frame[]): Map<string, Frame[]> {
+  const bySession = new Map<string, Frame[]>();
+  for (const frame of frames) {
+    const key = frame.activity_session_id ?? '__loose__';
+    const existing = bySession.get(key);
+    if (existing) existing.push(frame);
+    else bySession.set(key, [frame]);
+  }
+  return bySession;
+}
+
+function buildSessionInsight(session: ActivitySession, frames: Frame[]): SessionInsight {
+  const communicationTargets = topValues(
+    frames,
+    (frame) => {
+      if (!frame.entity_path) return null;
+      if (frame.entity_path.startsWith('contacts/') || frame.entity_path.startsWith('channels/')) {
+        return frame.entity_path;
+      }
+      if (frame.app === 'Mail') return 'apps/mail';
+      return null;
+    },
+    3,
+  ).map((x) => x.value);
+
+  const domains = topValues(frames, (frame) => domainFromUrl(frame.url), 3).map((x) => x.value);
+  const target = sessionTarget(session, frames);
+  const inference = inferSessionInference(frames);
+
+  return {
+    session,
+    frames,
+    action: inferSessionAction(frames),
+    confidence: inference?.confidence ?? fallbackConfidence(frames),
+    basis: inference?.basis ?? fallbackBasis(frames),
+    primaryTarget: target,
+    communicationTargets,
+    files: extractFilesFromFrames(frames, 3),
+    domains,
+  };
+}
+
+function sessionTarget(session: ActivitySession, frames: Frame[]): string {
+  if (!session.primary_entity_path) {
+    return session.primary_app ? appTarget(session.primary_app) : '(unknown)';
+  }
+  if (session.primary_entity_kind === 'app') {
+    const topApp = topValues(frames, (frame) => frame.app, 1)[0];
+    const appEntityTail = session.primary_entity_path.split('/').pop()?.toLowerCase();
+    const topAppNormalised = topApp?.value.toLowerCase().replace(/\s+/g, '-');
+    if (topApp && appEntityTail && topAppNormalised && appEntityTail !== topAppNormalised) {
+      return appTarget(topApp.value);
+    }
+  }
+  return `[[${session.primary_entity_path}]]`;
+}
+
+function appTarget(app: string): string {
+  return `[[apps/${slugifyForPath(app)}]]`;
+}
+
+function slugifyForPath(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'unknown';
+}
+
+function renderWorkArc(insights: SessionInsight[]): string[] {
+  const important = insights
+    .filter((insight) => insight.action || insight.session.active_ms >= 5 * 60_000)
+    .slice(0, 8);
+  const selected = important.length > 0 ? important : insights.slice(0, 5);
+  return selected.map((insight) => {
+    const window = `${insight.session.started_at.slice(11, 16)}-${insight.session.ended_at.slice(11, 16)}`;
+    const artifacts = compactEvidence([
+      insight.files.length ? `files ${insight.files.map((file) => `\`${file}\``).join(', ')}` : null,
+      insight.domains.length ? `domains ${insight.domains.join(', ')}` : null,
+    ]);
+    const communications = insight.communicationTargets.length
+      ? insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')
+      : null;
+    return `- **${window}**: goal ${formatActionTarget(insight.action, insight.primaryTarget)}` +
+      ` _(confidence: ${insight.confidence}; basis: ${insight.basis.join(', ')})_` +
+      `${artifacts ? ` Artifacts: ${artifacts}.` : ''}` +
+      `${communications ? ` Communications: ${communications}.` : ''}`;
+  });
+}
+
+function formatActionTarget(action: string | null, target: string): string {
+  const fallback = `focused on ${target}`;
+  if (!action) return fallback;
+  const normalizedAction = action.toLowerCase();
+  const normalizedTarget = target
+    .replace(/^\[\[/, '')
+    .replace(/\]\]$/, '')
+    .split('/')
+    .pop()
+    ?.replace(/-/g, ' ')
+    .toLowerCase();
+  if (normalizedTarget && normalizedAction.includes(normalizedTarget)) return action;
+  return `${action} on ${target}`;
+}
+
+function renderTransitions(insights: SessionInsight[]): string[] {
+  const out: string[] = [];
+  for (let i = 1; i < insights.length; i++) {
+    const prev = insights[i - 1]!;
+    const next = insights[i]!;
+    const gapMs = Date.parse(next.session.started_at) - Date.parse(prev.session.ended_at);
+    const handoff = inferTransition(prev, next, gapMs);
+    if (handoff) out.push(`- ${handoff}`);
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
+function renderFollowUpCandidates(insights: SessionInsight[]): string[] {
+  const out: string[] = [];
+  for (let i = 1; i < insights.length; i++) {
+    const prev = insights[i - 1]!;
+    const next = insights[i]!;
+    if (next.communicationTargets.length === 0) continue;
+    const prevAction = prev.action ?? `focused on ${prev.primaryTarget}`;
+    if (!isWorkAction(prevAction)) continue;
+    const targets = next.communicationTargets.slice(0, 4).map((target) => `[[${target}]]`).join(', ');
+    const files = next.files.length ? `; artifacts nearby: ${next.files.map((file) => `\`${file}\``).join(', ')}` : '';
+    out.push(`- ${next.session.started_at.slice(11, 16)}: communication with ${targets} followed ${prevAction}${files}.`);
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
+function inferTransition(
+  prev: SessionInsight,
+  next: SessionInsight,
+  gapMs: number,
+): string | null {
+  const prevAction = prev.action ?? `focused on ${prev.primaryTarget}`;
+  const nextAction = next.action ?? `focused on ${next.primaryTarget}`;
+  const gap = gapMs >= 2 * 60_000 ? ` after ${humaniseDuration(gapMs)} idle` : '';
+
+  if (next.communicationTargets.length > 0 && isWorkAction(prevAction)) {
+    const targets = next.communicationTargets.map((target) => `[[${target}]]`).join(', ');
+    return `${next.session.started_at.slice(11, 16)}${gap}: after ${formatActionTarget(prev.action, prev.primaryTarget)}, shifted into communication with ${targets}; likely follow-up or coordination around the previous work.`;
+  }
+
+  if (isBuildAction(prevAction) && isReviewAction(nextAction)) {
+    return `${next.session.started_at.slice(11, 16)}${gap}: moved from building/running the app to reviewing or auditing the resulting work.`;
+  }
+
+  if (isReviewAction(prevAction) && isBuildAction(nextAction)) {
+    return `${next.session.started_at.slice(11, 16)}${gap}: moved from review back into implementation/testing.`;
+  }
+
+  if (prev.primaryTarget !== next.primaryTarget && prev.action && next.action) {
+    return `${next.session.started_at.slice(11, 16)}${gap}: switched from ${formatActionTarget(prev.action, prev.primaryTarget)} to ${formatActionTarget(next.action, next.primaryTarget)}.`;
+  }
+
+  return null;
+}
+
+function compactEvidence(parts: Array<string | null>): string {
+  return parts.filter((part): part is string => Boolean(part)).join('; ');
+}
+
+function isWorkAction(action: string): boolean {
+  return /working|building|running|designing|reviewing|auditing|improving|implementation|testing/i.test(action);
+}
+
+function isBuildAction(action: string): boolean {
+  return /building|running|implementation|testing|terminal/i.test(action);
+}
+
+function isReviewAction(action: string): boolean {
+  return /reviewing|auditing|proposal|export|mcp|wiki/i.test(action);
+}
+
+function describeSessionContext(frames: Frame[]): string | null {
+  const parts: string[] = [];
+  const action = inferSessionAction(frames);
+  if (action) parts.push(`likely doing: ${action}`);
+
+  const apps = topValues(frames, (f) => f.app, 3).map((x) => x.value);
+  if (apps.length) parts.push(`mostly ${apps.join(', ')}`);
+
+  const entities = topValues(frames, (f) => f.entity_path, 3).map((x) => `[[${x.value}]]`);
+  if (entities.length) parts.push(`centered on ${entities.join(', ')}`);
+
+  const titles = representativeTitles(frames, 3);
+  if (titles.length) parts.push(`windows: ${titles.map((t) => `"${t}"`).join(', ')}`);
+
+  const readable = firstReadableExcerpt(frames);
+  if (readable) parts.push(`signal: "${readable}"`);
+
+  const metadata = inferMetadataEvidence(frames);
+  if (metadata.length) parts.push(`evidence: ${metadata.join(', ')}`);
+
+  return parts.length ? parts.join('; ') : null;
+}
+
+function inferSessionAction(frames: Frame[]): string | null {
+  return inferSessionInference(frames)?.label ?? inferFallbackAction(frames);
+}
+
+interface SessionInference {
+  label: string;
+  confidence: 'high' | 'medium' | 'low';
+  basis: string[];
+}
+
+function inferSessionInference(frames: Frame[]): SessionInference | null {
+  if (frames.length === 0) return null;
+  const scored = INFERENCE_RULES
+    .map((rule) => scoreRule(frames, rule))
+    .filter((score): score is RuleScore => Boolean(score))
+    .sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (!best) return null;
+  return {
+    label: best.rule.label,
+    confidence: best.confidence,
+    basis: best.basis,
+  };
+}
+
+function inferFallbackAction(frames: Frame[]): string | null {
+  if (frames.length === 0) return null;
+  const primaryEntity = topValues(frames, (f) => f.entity_path, 1)[0]?.value;
+  const primaryApp = topValues(frames, (f) => f.app, 1)[0]?.value;
+  const files = extractFilesFromFrames(frames, 2);
+
+  if (primaryEntity?.startsWith('projects/')) {
+    const project = titleFromPath(primaryEntity);
+    return files.length
+      ? `working on ${project} files (${files.map((f) => `\`${f}\``).join(', ')})`
+      : `working on ${project}`;
+  }
+  if (primaryEntity?.startsWith('channels/')) {
+    return `reviewing Slack channel ${titleFromPath(primaryEntity)}`;
+  }
+  if (primaryEntity?.startsWith('contacts/')) {
+    return `reviewing or messaging ${titleFromPath(primaryEntity)} in Slack`;
+  }
+  if (primaryEntity?.startsWith('apps/')) {
+    return `using ${titleFromPath(primaryEntity)}`;
+  }
+  if (primaryApp === 'Mail') return 'triaging email';
+  if (primaryApp === 'Cursor') return files.length ? `working in Cursor on ${files.map((f) => `\`${f}\``).join(', ')}` : 'working in Cursor';
+  if (primaryApp === 'Warp') return 'running terminal commands';
+  if (primaryApp === 'Finder') return 'browsing files in Finder';
+  if (primaryApp === 'Claude') return 'using Claude for assistant work';
+  const domains = topValues(frames, (f) => domainFromUrl(f.url), 2).map((x) => x.value);
+  if (domains.length && isBrowserApp(primaryApp)) return `browsing ${domains.join(' and ')}`;
+  if (primaryApp) return `using ${primaryApp}`;
+  return null;
+}
+
+function isBrowserApp(app: string | null | undefined): boolean {
+  return app === 'Firefox' || app === 'firefox' || app === 'Google Chrome' || app === 'Safari';
+}
+
+function fallbackConfidence(frames: Frame[]): 'high' | 'medium' | 'low' {
+  if (frames.length >= 10 && representativeTitles(frames, 1).length > 0) return 'medium';
+  return 'low';
+}
+
+function fallbackBasis(frames: Frame[]): string[] {
+  const basis = [
+    representativeTitles(frames, 1)[0] ? 'window titles' : null,
+    topValues(frames, (frame) => frame.entity_path, 1)[0] ? 'entity attribution' : null,
+    topValues(frames, (frame) => frame.app, 1)[0] ? 'app focus' : null,
+  ].filter((x): x is string => Boolean(x));
+  return basis.length ? basis : ['activity timing'];
+}
+
+interface InferenceRule {
+  test: string[];
+  label: string;
+  minRatio?: number;
+  primaryApps?: string[];
+  primaryEntityPrefixes?: string[];
+}
+
+interface RuleScore {
+  rule: InferenceRule;
+  score: number;
+  confidence: 'high' | 'medium' | 'low';
+  basis: string[];
+}
+
+const INFERENCE_RULES: InferenceRule[] = [
+  {
+    test: ['karpathy wiki proposal', 'llm wiki'],
+    label: 'reviewing the Karpathy/wiki indexing proposal',
+    minRatio: 0.18,
+  },
+  {
+    test: ['mcp server', 'llm tools'],
+    label: 'auditing MCP tools for agent access',
+    minRatio: 0.18,
+  },
+  {
+    test: ['ask-first home', 'home redesign', 'user experience optimization'],
+    label: 'working on the app user experience',
+    minRatio: 0.18,
+  },
+  {
+    test: ['desktop app design', 'desktop-app-design'],
+    label: 'designing the CofounderOS desktop app',
+    minRatio: 0.12,
+    primaryEntityPrefixes: ['projects/cofounderos'],
+  },
+  {
+    test: ['promotion nomination template', 'copy of promotion nomination'],
+    label: 'working on a promotion nomination document',
+    minRatio: 0.15,
+  },
+  {
+    test: ['config.yaml', 'cofounderos/config.yaml'],
+    label: 'editing CofounderOS configuration',
+    minRatio: 0.25,
+    primaryEntityPrefixes: ['projects/config-yaml'],
+  },
+  {
+    test: ['export/markdown', 'output /export/markdown', 'actually useful export'],
+    label: 'auditing and improving the Markdown export',
+    minRatio: 0.18,
+  },
+  {
+    test: ['pnpm build', 'pnpm start', 'pnpm run'],
+    label: 'building and running the app from the terminal',
+    minRatio: 0.12,
+    primaryApps: ['Warp', 'Electron'],
+  },
+  {
+    test: ['all inboxes', 'unread messages'],
+    label: 'triaging email inboxes',
+    minRatio: 0.35,
+    primaryApps: ['Mail'],
+    primaryEntityPrefixes: ['apps/mail'],
+  },
+  {
+    test: ['calendar.google.com', 'google meet'],
+    label: 'checking calendar and meeting context',
+    minRatio: 0.25,
+  },
+  {
+    test: ['youtube.com', 'youtube'],
+    label: 'watching or searching YouTube',
+    minRatio: 0.35,
+    primaryApps: ['Firefox', 'firefox', 'Google Chrome'],
+  },
+  {
+    test: ['booking.com', 'bankrate.com', 'trust.docx'],
+    label: 'browsing web research pages',
+    minRatio: 0.25,
+    primaryApps: ['Firefox', 'firefox', 'Google Chrome'],
+  },
+];
+
+function scoreRule(frames: Frame[], rule: InferenceRule): RuleScore | null {
+  const frameMatches = frames
+    .map((frame) => ({
+      frame,
+      matches: rule.test.filter((needle) => buildFrameInferenceText(frame).includes(needle)),
+    }))
+    .filter((entry) => entry.matches.length > 0);
+  if (frameMatches.length === 0) return null;
+
+  const ratio = frameMatches.length / Math.max(1, frames.length);
+  const primaryApp = topValues(frames, (frame) => frame.app, 1)[0]?.value;
+  const primaryEntity = topValues(frames, (frame) => frame.entity_path, 1)[0]?.value;
+  const appPrimary = Boolean(primaryApp && rule.primaryApps?.includes(primaryApp));
+  const entityPrimary = Boolean(
+    primaryEntity && rule.primaryEntityPrefixes?.some((prefix) => primaryEntity.startsWith(prefix)),
+  );
+  const minRatio = rule.minRatio ?? 0.18;
+  if (!appPrimary && !entityPrimary && ratio < minRatio) return null;
+
+  const basis = [...new Set(frameMatches.flatMap((entry) => entry.matches))].slice(0, 3);
+  const titleHits = frameMatches.filter((entry) =>
+    basis.some((needle) => (entry.frame.window_title ?? '').toLowerCase().includes(needle)),
+  ).length;
+  const urlHits = frameMatches.filter((entry) =>
+    basis.some((needle) => (entry.frame.url ?? '').toLowerCase().includes(needle)),
+  ).length;
+  const confidence = ratio >= 0.45 || titleHits >= 8
+    ? 'high'
+    : ratio >= minRatio || appPrimary || entityPrimary || titleHits > 0 || urlHits > 0
+      ? 'medium'
+      : 'low';
+  const score = frameMatches.length + ratio * 10 + (appPrimary ? 4 : 0) + (entityPrimary ? 4 : 0) + titleHits * 0.5 + urlHits * 0.5;
+  return { rule, score, confidence, basis };
+}
+
+function buildInferenceText(frames: Frame[]): string {
+  return frames.map(buildFrameInferenceText).join(' ');
+}
+
+function buildFrameInferenceText(frame: Frame): string {
+  return [
+    frame.app,
+    frame.window_title,
+    frame.url,
+    frame.entity_path,
+    frame.text_source === 'accessibility' || frame.text_source === 'audio'
+      ? frame.text
+      : null,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function inferMetadataEvidence(frames: Frame[]): string[] {
+  const evidence: string[] = [];
+  const files = extractFilesFromFrames(frames, 3);
+  const domains = topValues(frames, (f) => domainFromUrl(f.url), 3).map((x) => x.value);
+  const triggers = topValues(frames, (f) => f.trigger, 2).map((x) => x.value);
+  const textSources = topValues(frames, (f) => f.text_source, 2).map((x) => x.value);
+  if (files.length) evidence.push(`files ${files.map((f) => `\`${f}\``).join(', ')}`);
+  if (domains.length) evidence.push(`domains ${domains.join(', ')}`);
+  if (triggers.length) evidence.push(`capture triggers ${triggers.join(', ')}`);
+  if (textSources.length) evidence.push(`text sources ${textSources.join(', ')}`);
+  return evidence;
+}
+
+function extractFilesFromFrames(frames: Frame[], limit: number): string[] {
+  const files: string[] = [];
+  const seen = new Set<string>();
+  for (const frame of frames) {
+    const match = frame.window_title?.match(/(?:^|[\s●○•])([A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8})\b/);
+    const file = match?.[1];
+    if (!file || !looksLikeRealFile(file) || seen.has(file)) continue;
+    seen.add(file);
+    files.push(file);
+    if (files.length >= limit) break;
+  }
+  return files;
+}
+
+const JOURNAL_FILE_EXTENSIONS = new Set([
+  'md',
+  'mdx',
+  'txt',
+  'json',
+  'jsonl',
+  'yaml',
+  'yml',
+  'toml',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'css',
+  'html',
+  'htm',
+  'rs',
+  'go',
+  'py',
+  'rb',
+  'java',
+  'swift',
+  'kt',
+  'sql',
+  'sh',
+  'zsh',
+  'env',
+  'webp',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'pdf',
+  'doc',
+  'docx',
+  'xls',
+  'xlsx',
+  'csv',
+]);
+
+function looksLikeRealFile(name: string): boolean {
+  if (/^\d+\.\d+/.test(name)) return false;
+  const ext = name.split('.').pop()?.toLowerCase();
+  if (!ext || !JOURNAL_FILE_EXTENSIONS.has(ext)) return false;
+  if (/^[a-z]+\.com$/i.test(name)) return false;
+  if (/^[a-z]+\.io$/i.test(name)) return false;
+  return true;
+}
+
+function domainFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
+
+function titleFromPath(entityPath: string): string {
+  const tail = entityPath.split('/').pop() ?? entityPath;
+  return tail
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function representativeTitles(frames: Frame[], limit: number): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const f of frames) {
+    const title = f.window_title?.replace(/\s+/g, ' ').trim();
+    if (!title || seen.has(title)) continue;
+    seen.add(title);
+    out.push(truncateText(title, 70));
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function firstReadableExcerpt(frames: Frame[]): string | null {
+  for (const f of frames) {
+    const text = readableFrameText(f);
+    if (text) return truncateText(text, 180);
+  }
+  return null;
+}
+
+function readableFrameText(frame: Frame): string | null {
+  if (frame.text_source !== 'accessibility' && frame.text_source !== 'audio') return null;
+  if (!frame.text) return null;
+  const cleaned = frame.text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length < 30) return null;
+  const chars = cleaned.replace(/\s/g, '');
+  if (!chars) return null;
+  const readable = chars.match(/[\p{L}\p{N}]/gu)?.length ?? 0;
+  if (readable / chars.length < 0.55) return null;
+  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  const usefulWords = cleaned.match(/[\p{L}\p{N}][\p{L}\p{N}'._/-]{2,}/gu) ?? [];
+  if (usefulWords.length < 5) return null;
+  const shortTokens = tokens.filter((token) => token.replace(/[^\p{L}\p{N}]/gu, '').length <= 2);
+  if (tokens.length > 0 && shortTokens.length / tokens.length > 0.45) return null;
+  return truncateText(cleaned, 200);
+}
+
+function topValues(
+  frames: Frame[],
+  picker: (frame: Frame) => string | null | undefined,
+  limit: number,
+): Array<{ value: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const frame of frames) {
+    const value = picker(frame);
+    if (!value) continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([value, count]) => ({ value, count }));
+}
+
+function truncateText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
 }
 
 function humaniseDuration(ms: number): string {

@@ -13,6 +13,7 @@ declare global {
       saveConfigPatch: (patch: unknown) => Promise<LoadedConfig>;
       listJournalDays: () => Promise<string[]>;
       getJournalDay: (day: string) => Promise<JournalDay>;
+      getIndexedJournalDay: (day: string) => Promise<IndexedJournalDay>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       readAsset: (assetPath: string) => Promise<Uint8Array>;
@@ -22,10 +23,11 @@ declare global {
       resumeCapture: () => Promise<RuntimeOverview>;
       triggerIndex: () => Promise<RuntimeOverview>;
       triggerReorganise: () => Promise<RuntimeOverview>;
+      triggerFullReindex: (range: { from?: string; to?: string }) => Promise<RuntimeOverview>;
       bootstrapModel: () => Promise<{ ready: true }>;
       getStartAtLogin: () => Promise<boolean>;
       setStartAtLogin: (enabled: boolean) => Promise<boolean>;
-      openPath: (target: 'config' | 'data' | 'markdown') => Promise<{ opened: string }>;
+      openPath: (target: OpenPathTarget) => Promise<{ opened: string }>;
       copyText: (text: string) => Promise<{ copied: true }>;
       deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
       deleteFramesByDay: (day: string) => Promise<{ frames: number; assetPaths: string[] }>;
@@ -54,8 +56,11 @@ export interface RuntimeOverview {
     totalAssetBytes: number;
   };
   index: {
+    strategy?: string;
+    rootPath?: string;
     pageCount: number;
     eventsCovered: number;
+    categories?: RuntimeIndexCategory[];
   };
   indexing: RuntimeIndexingStatus;
   model: {
@@ -65,7 +70,44 @@ export interface RuntimeOverview {
   exports: Array<{
     name: string;
     running: boolean;
+    lastSync?: string | null;
+    pendingUpdates?: number;
+    errorCount?: number;
   }>;
+  backgroundJobs?: RuntimeBackgroundJobStatus[];
+  system?: {
+    load?: number | null;
+    loadGuardEnabled?: boolean;
+    overviewGeneratedAt?: string;
+    overviewDurationMs?: number;
+    overviewCacheTtlMs?: number;
+    overviewMode?: 'full' | 'fast';
+    overviewTimings?: Record<string, number>;
+  };
+}
+
+export type OpenPathTarget =
+  | 'config'
+  | 'data'
+  | 'markdown'
+  | {
+      target: 'markdown';
+      category?: string;
+    };
+
+export interface RuntimeIndexCategory {
+  name: string;
+  pageCount: number;
+  summaryPath?: string;
+  lastUpdated: string | null;
+  recentPages?: RuntimeIndexCategoryPage[];
+}
+
+export interface RuntimeIndexCategoryPage {
+  path: string;
+  title: string;
+  summary: string | null;
+  lastUpdated: string;
 }
 
 export interface RuntimeIndexingStatus {
@@ -73,6 +115,18 @@ export interface RuntimeIndexingStatus {
   currentJob: string | null;
   startedAt: string | null;
   lastCompletedAt: string | null;
+}
+
+export interface RuntimeBackgroundJobStatus {
+  name: string;
+  kind: 'interval' | 'cron';
+  running: boolean;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  runCount: number;
+  skippedCount: number;
 }
 
 export interface DoctorCheck {
@@ -125,6 +179,8 @@ export interface CofounderConfig {
         model: string;
         embedding_model: string;
         host: string;
+        keep_alive?: string | number;
+        unload_after_idle_min?: number;
         auto_install?: boolean;
       };
     };
@@ -144,6 +200,11 @@ export interface JournalDay {
   day: string;
   frames: Frame[];
   sessions: ActivitySession[];
+}
+
+export interface IndexedJournalDay {
+  day: string;
+  markdown: string;
 }
 
 export interface Frame {

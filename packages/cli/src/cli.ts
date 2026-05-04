@@ -77,7 +77,10 @@ Commands:
   index --once               Run an incremental indexing pass against unindexed events.
   index --reorganise         Run a reorganisation pass (merges, splits, archives, summaries).
   index --full-reindex       Wipe the index and rebuild it from raw data.
-                             Optional: --strategy <name>  --from <iso>  --to <iso>
+                             Optional: --strategy <name>  --from <date|iso>  --to <date|iso>
+  index --reindex-from <date>
+                             Shortcut for --full-reindex --from <date>. Date-only
+                             values use the local day's start; --to uses day end.
   mcp [--stdio]              Run only the MCP server (HTTP by default; stdio for AI clients).
   plugin list                List discovered plugins by layer.
   reset [--yes] [--keep-config]
@@ -1334,14 +1337,21 @@ async function cmdCaptureOnce(
 }
 
 async function cmdIndex(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {
+  let reindex: ParsedReindexArgs;
+  try {
+    reindex = parseReindexArgs(args);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error((err as Error).message);
+    process.exitCode = 1;
+    return;
+  }
+
   const handles = await buildOrchestrator(logger, configFromArgs(args));
   try {
     await ensureModelOrFallback(handles, args);
-    if (args.flags['full-reindex']) {
-      await runFullReindex(handles, {
-        from: typeof args.flags.from === 'string' ? args.flags.from : undefined,
-        to: typeof args.flags.to === 'string' ? args.flags.to : undefined,
-      });
+    if (reindex.full) {
+      await runFullReindex(handles, reindex.range);
     } else if (args.flags.reorganise || args.flags.reorg) {
       await runReorganisation(handles);
     } else {
@@ -1352,6 +1362,83 @@ async function cmdIndex(logger: ReturnType<typeof createLogger>, args: ParsedArg
   } finally {
     await stopAll(handles);
   }
+}
+
+interface ParsedReindexArgs {
+  full: boolean;
+  range: { from?: string; to?: string };
+}
+
+function parseReindexArgs(args: ParsedArgs): ParsedReindexArgs {
+  const full = Boolean(args.flags['full-reindex']);
+  const reindexFrom = dateFlag(args, 'reindex-from');
+  const since = dateFlag(args, 'since');
+  const from = dateFlag(args, 'from');
+  const to = dateFlag(args, 'to');
+  const until = dateFlag(args, 'until');
+
+  const fromValues = [
+    ['--reindex-from', reindexFrom],
+    ['--since', since],
+    ['--from', from],
+  ].filter(([, value]) => typeof value === 'string') as Array<[string, string]>;
+  if (fromValues.length > 1) {
+    throw new Error(
+      `Use only one lower-bound flag, got ${fromValues.map(([name]) => name).join(', ')}.`,
+    );
+  }
+
+  const toValues = [
+    ['--to', to],
+    ['--until', until],
+  ].filter(([, value]) => typeof value === 'string') as Array<[string, string]>;
+  if (toValues.length > 1) {
+    throw new Error('Use only one upper-bound flag, got --to and --until.');
+  }
+
+  const hasShortcut = Boolean(reindexFrom || since);
+  const hasRange = fromValues.length > 0 || toValues.length > 0;
+  if (hasRange && !full && !hasShortcut) {
+    throw new Error(
+      'Date bounds only apply to full re-indexing. Use `index --reindex-from <date>` ' +
+        'or `index --full-reindex --from <date>`.',
+    );
+  }
+
+  const fromValue = fromValues[0]?.[1];
+  const toValue = toValues[0]?.[1];
+  return {
+    full: full || hasShortcut,
+    range: {
+      from: normaliseDateBound(fromValue, 'from'),
+      to: normaliseDateBound(toValue, 'to'),
+    },
+  };
+}
+
+function dateFlag(args: ParsedArgs, name: string): string | undefined {
+  const value = args.flags[name];
+  if (value === undefined || value === false) return undefined;
+  if (typeof value !== 'string') {
+    throw new Error(`Missing value for --${name}. Expected YYYY-MM-DD or an ISO timestamp.`);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Missing value for --${name}. Expected YYYY-MM-DD or an ISO timestamp.`);
+  }
+  return trimmed;
+}
+
+function normaliseDateBound(value: string | undefined, side: 'from' | 'to'): string | undefined {
+  if (!value) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return side === 'from' ? `${value}T00:00:00.000` : `${value}T23:59:59.999`;
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid --${side} value "${value}". Expected YYYY-MM-DD or an ISO timestamp.`);
+  }
+  return value;
 }
 
 async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {

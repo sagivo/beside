@@ -38,12 +38,28 @@ interface LocalStorageConfig {
 }
 
 const MAX_EMBEDDING_TEXT_CHARS = 3000;
+const CACHEABLE_SCREENSHOT_EXTENSIONS = new Set(['.webp']);
+const FLAT_INTERNED_SCREENSHOT_RE =
+  /^raw\/\d{4}-\d{2}-\d{2}\/screenshots\/[a-f0-9]{64}\.webp$/i;
+const LEGACY_INTERNED_SCREENSHOT_MARKER = '/screenshots/_cache/sha256/';
+
+interface FrameFtsFrameRow {
+  text: string | null;
+  text_source: string | null;
+  window_title: string | null;
+  app: string | null;
+  entity_path: string | null;
+  entity_kind: string | null;
+}
 
 class LocalStorage implements IStorage {
   private readonly root: string;
   private readonly logger: Logger;
   private db!: Database.Database;
   private readonly writeStreams = new Map<string, fs.WriteStream>();
+  private frameFtsDeleteStmt: Database.Statement | null = null;
+  private frameFtsInsertStmt: Database.Statement | null = null;
+  private frameFtsFrameSelectStmt: Database.Statement | null = null;
 
   constructor(root: string, logger: Logger) {
     this.root = root;
@@ -71,19 +87,26 @@ class LocalStorage implements IStorage {
   }
 
   async write(event: RawEvent): Promise<void> {
-    const day = dayKey(new Date(event.timestamp));
+    const storedEvent = await this.internScreenshotAsset(event);
+    if (storedEvent !== event) {
+      // The orchestrator publishes the same object after storage.write().
+      // Keep it in sync so downstream workers see the canonical asset path.
+      Object.assign(event, storedEvent);
+    }
+
+    const day = dayKey(new Date(storedEvent.timestamp));
     const dayDir = path.join(this.root, 'raw', day);
     await ensureDir(dayDir);
     const jsonlPath = path.join(dayDir, 'events.jsonl');
     const stream = this.getStream(jsonlPath);
 
     await new Promise<void>((resolve, reject) => {
-      stream.write(JSON.stringify(event) + '\n', (err) =>
+      stream.write(JSON.stringify(storedEvent) + '\n', (err) =>
         err ? reject(err) : resolve(),
       );
     });
 
-    this.upsertEventRow(event, day);
+    this.upsertEventRow(storedEvent, day);
   }
 
   async writeAsset(assetPath: string, data: Buffer): Promise<void> {
@@ -326,19 +349,13 @@ class LocalStorage implements IStorage {
         source_event_ids: JSON.stringify(frame.source_event_ids),
         created_at: new Date().toISOString(),
       });
-      // Re-index the FTS row. FTS5 doesn't support upsert; we delete-then-insert.
-      this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frame.id);
-      this.db
-        .prepare(
-          'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
-        )
-        .run(
-          frame.id,
-          frame.text ?? '',
-          frame.window_title ?? '',
-          frame.app ?? '',
-          entityToFtsText(frame.entity_path, frame.entity_kind),
-        );
+      this.refreshFrameFtsRow({
+        frameId: frame.id,
+        text: frame.text ?? '',
+        windowTitle: frame.window_title ?? '',
+        app: frame.app ?? '',
+        entitySearch: entityToFtsText(frame.entity_path, frame.entity_kind),
+      });
     });
     tx();
   }
@@ -512,36 +529,26 @@ class LocalStorage implements IStorage {
     source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>,
   ): Promise<void> {
     const tx = this.db.transaction(() => {
+      const row = this.getFrameFtsFrameSelectStmt().get(frameId) as
+        | FrameFtsFrameRow
+        | undefined;
+      if (!row) return;
+
+      const currentText = row.text ?? '';
+      const changed = currentText !== text || row.text_source !== source;
+      if (!changed) return;
+
       this.db
         .prepare('UPDATE frames SET text = ?, text_source = ? WHERE id = ?')
         .run(text, source, frameId);
-      // Refresh FTS row so the new text is immediately searchable.
-      const row = this.db
-        .prepare(
-          'SELECT window_title, app, entity_path, entity_kind FROM frames WHERE id = ?',
-        )
-        .get(frameId) as
-        | {
-            window_title: string | null;
-            app: string | null;
-            entity_path: string | null;
-            entity_kind: string | null;
-          }
-        | undefined;
-      if (row) {
-        this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
-        this.db
-          .prepare(
-            'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
-          )
-          .run(
-            frameId,
-            text,
-            row.window_title ?? '',
-            row.app ?? '',
-            entityToFtsText(row.entity_path, row.entity_kind),
-          );
-      }
+
+      this.refreshFrameFtsRow({
+        frameId,
+        text,
+        windowTitle: row.window_title ?? '',
+        app: row.app ?? '',
+        entitySearch: entityToFtsText(row.entity_path, row.entity_kind),
+      });
     });
     tx();
   }
@@ -742,10 +749,16 @@ class LocalStorage implements IStorage {
       // 2. Pull the frame's contribution to the entity stats.
       const frameRow = this.db
         .prepare(
-          'SELECT timestamp, duration_ms FROM frames WHERE id = ?',
+          'SELECT timestamp, duration_ms, text, window_title, app FROM frames WHERE id = ?',
         )
         .get(frameId) as
-        | { timestamp: string; duration_ms: number | null }
+        | {
+            timestamp: string;
+            duration_ms: number | null;
+            text: string | null;
+            window_title: string | null;
+            app: string | null;
+          }
         | undefined;
       if (!frameRow) return;
       const ts = frameRow.timestamp;
@@ -771,7 +784,13 @@ class LocalStorage implements IStorage {
       // 4. Refresh the frame's FTS row so a search like "milan" or
       //    "cofounderos" actually matches all the frames now attributed
       //    to that entity, not just the ones that literally typed it.
-      this.refreshFrameFtsEntity(frameId, entity.path, entity.kind);
+      this.refreshFrameFtsRow({
+        frameId,
+        text: frameRow.text ?? '',
+        windowTitle: frameRow.window_title ?? '',
+        app: frameRow.app ?? '',
+        entitySearch: entityToFtsText(entity.path, entity.kind),
+      });
     });
     tx();
   }
@@ -791,26 +810,56 @@ class LocalStorage implements IStorage {
     entityPath: string | null,
     entityKind: string | null,
   ): void {
-    const row = this.db
-      .prepare(
-        'SELECT text, window_title, app FROM frames WHERE id = ?',
-      )
-      .get(frameId) as
-      | { text: string | null; window_title: string | null; app: string | null }
+    const row = this.getFrameFtsFrameSelectStmt().get(frameId) as
+      | FrameFtsFrameRow
       | undefined;
     if (!row) return;
-    this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
-    this.db
-      .prepare(
-        'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
-      )
-      .run(
-        frameId,
-        row.text ?? '',
-        row.window_title ?? '',
-        row.app ?? '',
-        entityToFtsText(entityPath, entityKind),
-      );
+    this.refreshFrameFtsRow({
+      frameId,
+      text: row.text ?? '',
+      windowTitle: row.window_title ?? '',
+      app: row.app ?? '',
+      entitySearch: entityToFtsText(entityPath, entityKind),
+    });
+  }
+
+  private refreshFrameFtsRow(input: {
+    frameId: string;
+    text: string;
+    windowTitle: string;
+    app: string;
+    entitySearch: string;
+  }): boolean {
+    this.getFrameFtsDeleteStmt().run(input.frameId);
+    this.getFrameFtsInsertStmt().run(
+      input.frameId,
+      input.text,
+      input.windowTitle,
+      input.app,
+      input.entitySearch,
+    );
+    return true;
+  }
+
+  private getFrameFtsDeleteStmt(): Database.Statement {
+    this.frameFtsDeleteStmt ??= this.db.prepare(
+      'DELETE FROM frame_text WHERE frame_id = ?',
+    );
+    return this.frameFtsDeleteStmt;
+  }
+
+  private getFrameFtsInsertStmt(): Database.Statement {
+    this.frameFtsInsertStmt ??= this.db.prepare(
+      'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
+    );
+    return this.frameFtsInsertStmt;
+  }
+
+  private getFrameFtsFrameSelectStmt(): Database.Statement {
+    this.frameFtsFrameSelectStmt ??= this.db.prepare(
+      'SELECT text, text_source, window_title, app, entity_path, entity_kind FROM frames WHERE id = ?',
+    );
+    return this.frameFtsFrameSelectStmt;
   }
 
   async rebuildEntityCounts(): Promise<void> {
@@ -1109,10 +1158,14 @@ class LocalStorage implements IStorage {
     if (moved === 0) return { moved: 0, refreshedEntities: [] };
 
     // 4. Refresh the FTS entity_search for every moved frame so a
-    //    search for the new target's tokens reaches them.
-    for (const id of movedIds) {
-      this.refreshFrameFtsEntity(id, targetPath, input.target.kind);
-    }
+    //    search for the new target's tokens reaches them. Keep this in
+    //    one transaction so FTS shadow-table writes are amortised.
+    const refreshMovedFts = this.db.transaction(() => {
+      for (const id of movedIds) {
+        this.refreshFrameFtsEntity(id, targetPath, input.target.kind);
+      }
+    });
+    refreshMovedFts();
 
     // 5. Recompute the entities table for only the affected rows. This
     //    is much cheaper than the global rebuildEntityCounts() — we only
@@ -1284,6 +1337,10 @@ class LocalStorage implements IStorage {
       .get() as { n: number };
     out.deleted = deletedRow.n;
     return out;
+  }
+
+  async deleteAssetIfUnreferenced(assetPath: string): Promise<void> {
+    await this.unlinkAsset(assetPath);
   }
 
   // -------------------------------------------------------------------------
@@ -1548,6 +1605,9 @@ class LocalStorage implements IStorage {
   }
 
   private async unlinkAsset(assetPath: string): Promise<void> {
+    if (this.isInternedScreenshotAsset(assetPath) && this.countFrameAssetReferences(assetPath) > 0) {
+      return;
+    }
     try {
       await fsp.unlink(this.absoluteAssetPath(assetPath));
     } catch (err) {
@@ -1563,6 +1623,77 @@ class LocalStorage implements IStorage {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
+
+  private async internScreenshotAsset(event: RawEvent): Promise<RawEvent> {
+    if (event.type !== 'screenshot' || !event.asset_path) return event;
+    if (this.isInternedScreenshotAsset(event.asset_path)) return event;
+
+    const ext = path.extname(event.asset_path).toLowerCase();
+    if (!CACHEABLE_SCREENSHOT_EXTENSIONS.has(ext)) return event;
+
+    try {
+      const sourceAbs = this.absoluteAssetPath(event.asset_path);
+      const input = await fsp.readFile(sourceAbs);
+      const sha256 = createHash('sha256').update(input).digest('hex');
+      const day = dayKey(new Date(event.timestamp));
+      const cachedRel = path.join(
+        'raw',
+        day,
+        'screenshots',
+        `${sha256}${ext}`,
+      );
+      const cachedAbs = this.absoluteAssetPath(cachedRel);
+
+      if (path.resolve(sourceAbs) !== path.resolve(cachedAbs)) {
+        await ensureDir(path.dirname(cachedAbs));
+        const cachedExists = await fileExists(cachedAbs);
+        if (cachedExists) {
+          await fsp.rm(sourceAbs, { force: true });
+        } else {
+          try {
+            await fsp.rename(sourceAbs, cachedAbs);
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code !== 'EXDEV') throw err;
+            await fsp.copyFile(sourceAbs, cachedAbs);
+            await fsp.rm(sourceAbs, { force: true });
+          }
+        }
+      }
+
+      return {
+        ...event,
+        asset_path: cachedRel,
+        metadata: {
+          ...event.metadata,
+          asset_sha256: sha256,
+          asset_storage: 'content-addressed',
+          asset_original_path: event.asset_path,
+        },
+      };
+    } catch (err) {
+      this.logger.warn('screenshot asset interning failed; keeping original path', {
+        assetPath: event.asset_path,
+        err: String(err),
+      });
+      return event;
+    }
+  }
+
+  private isInternedScreenshotAsset(assetPath: string): boolean {
+    const normalised = assetPath.replace(/\\/g, '/');
+    return (
+      FLAT_INTERNED_SCREENSHOT_RE.test(normalised) ||
+      normalised.includes(LEGACY_INTERNED_SCREENSHOT_MARKER)
+    );
+  }
+
+  private countFrameAssetReferences(assetPath: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM frames WHERE asset_path = ?')
+      .get(assetPath) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
 
   private absoluteAssetPath(assetPath: string): string {
     if (path.isAbsolute(assetPath)) return assetPath;
@@ -2780,6 +2911,15 @@ function sanitiseFtsQuery(input: string): string {
       return i === tokens.length - 1 ? `${quoted}*` : quoted;
     })
     .join(' ');
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fsp.access(filePath, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const factory: PluginFactory<IStorage> = async (ctx) => {

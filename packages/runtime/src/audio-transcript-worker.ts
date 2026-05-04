@@ -58,7 +58,6 @@ export class AudioTranscriptWorker {
   private readonly whisperLanguage: string | undefined;
   private readonly batchSize: number;
   private readonly sensitiveKeywords: string[];
-  private readonly importSessionId = newSessionId();
 
   constructor(
     private readonly storage: IStorage,
@@ -88,6 +87,7 @@ export class AudioTranscriptWorker {
     const entries = await fs.readdir(this.inboxPath, { withFileTypes: true }).catch(() => []);
     const files = entries
       .filter((e) => e.isFile())
+      .filter((e) => !e.name.startsWith('.'))
       .map((e) => path.join(this.inboxPath, e.name))
       .filter((p) => this.isSupported(p))
       .sort()
@@ -201,7 +201,11 @@ export class AudioTranscriptWorker {
     return {
       id: newEventId(new Date(timestamp)),
       timestamp,
-      session_id: this.importSessionId,
+      // Mint a fresh capture session per transcript. The real grouping
+      // happens downstream via SessionBuilder + activity_session_id, so
+      // sharing one id across the worker's lifetime would just collide
+      // with unrelated audio files imported hours apart.
+      session_id: newSessionId(),
       type: 'audio_transcript',
       app: 'Audio',
       app_bundle_id: 'cofounderos.audio',

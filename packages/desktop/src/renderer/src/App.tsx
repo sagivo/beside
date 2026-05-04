@@ -234,6 +234,26 @@ function AppInner() {
           });
         }
       },
+      onTriggerFullReindex: async (fromDate: string) => {
+        const from = normaliseDateStart(fromDate);
+        if (!from) {
+          toast.error('Choose a date to re-index from');
+          return;
+        }
+        toast.info('Re-indexing memory…', {
+          description: `Rebuilding generated pages from ${fromDate}.`,
+        });
+        try {
+          setOverview(await window.cofounderos.triggerFullReindex({ from }));
+          toast.success('Re-index complete', {
+            description: 'Generated pages and summaries were rebuilt from raw captures.',
+          });
+        } catch (err) {
+          toast.error('Could not re-index memory', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
       onBootstrap: async () => {
         setBootstrapEvents([]);
         try {
@@ -242,6 +262,17 @@ function AppInner() {
           toast.success('Local AI is ready');
         } catch (err) {
           toast.error('AI setup failed', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      onOpenMarkdownExport: async (category?: string) => {
+        try {
+          await window.cofounderos.openPath(
+            category ? { target: 'markdown', category } : 'markdown',
+          );
+        } catch (err) {
+          toast.error('Could not open Markdown export', {
             description: err instanceof Error ? err.message : String(err),
           });
         }
@@ -286,7 +317,9 @@ function AppInner() {
       onResume={actions.onResume}
       onTriggerIndex={actions.onTriggerIndex}
       onTriggerReorganise={actions.onTriggerReorganise}
+      onTriggerFullReindex={actions.onTriggerFullReindex}
       onBootstrap={actions.onBootstrap}
+      onOpenMarkdownExport={actions.onOpenMarkdownExport}
       onGoTimeline={() => setScreen('timeline')}
     />
   ) : screen === 'timeline' ? (
@@ -337,6 +370,12 @@ function AppInner() {
       </ErrorBoundary>
     </AppShell>
   );
+}
+
+function normaliseDateStart(date: string): string | undefined {
+  const trimmed = date.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return undefined;
+  return `${trimmed}T00:00:00.000`;
 }
 
 function ScreenLoading() {

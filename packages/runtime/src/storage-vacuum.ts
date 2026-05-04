@@ -156,6 +156,10 @@ export class StorageVacuum {
         this.config.batchSize,
       );
       for (const c of candidates) {
+        await this.storage.updateFrameAsset(c.id, {
+          assetPath: null,
+          tier: 'deleted',
+        });
         try {
           await this.deleteOne(c);
         } catch (err) {
@@ -164,10 +168,6 @@ export class StorageVacuum {
             id: c.id,
           });
         }
-        await this.storage.updateFrameAsset(c.id, {
-          assetPath: null,
-          tier: 'deleted',
-        });
         n += 1;
       }
     }
@@ -230,8 +230,7 @@ export class StorageVacuum {
   }
 
   private async deleteOne(asset: FrameAsset): Promise<void> {
-    const abs = path.join(this.config.storageRoot, asset.asset_path);
-    await fs.unlink(abs);
+    await this.storage.deleteAssetIfUnreferenced(asset.asset_path);
   }
 
   /**

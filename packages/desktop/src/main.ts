@@ -14,7 +14,7 @@ import {
   shell,
   dialog,
 } from 'electron';
-import { defaultDataDir } from '@cofounderos/core';
+import { defaultDataDir, expandPath, loadConfig } from '@cofounderos/core';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
@@ -96,8 +96,22 @@ type RuntimeOverview = {
     totalAssetBytes: number;
   };
   index: {
+    strategy?: string;
+    rootPath?: string;
     pageCount: number;
     eventsCovered: number;
+    categories?: Array<{
+      name: string;
+      pageCount: number;
+      summaryPath?: string;
+      lastUpdated: string | null;
+      recentPages?: Array<{
+        path: string;
+        title: string;
+        summary: string | null;
+        lastUpdated: string;
+      }>;
+    }>;
   };
   indexing: {
     running: boolean;
@@ -112,7 +126,17 @@ type RuntimeOverview = {
   exports: Array<{
     name: string;
     running: boolean;
+    lastSync?: string | null;
+    pendingUpdates?: number;
+    errorCount?: number;
   }>;
+};
+
+type MenuBarCaptureState = 'capturing' | 'paused' | 'stopped';
+
+type MenuBarIndicator = {
+  state: MenuBarCaptureState;
+  label: string;
 };
 
 type RuntimeDoctorCheck = {
@@ -165,6 +189,7 @@ class RuntimeServiceClient {
       const err = new Error(`runtime service exited (code=${code}, signal=${signal})`);
       this.rejectAll(err);
       if (managedRuntime === this) managedRuntime = null;
+      applyMenuBarIndicator({ state: 'stopped', label: 'CofounderOS — stopped' });
       void refreshTray();
       if (statusWindow) void renderStatusWindow();
     });
@@ -173,6 +198,7 @@ class RuntimeServiceClient {
     });
     this.on('overview', (payload) => {
       lastOverview = payload as RuntimeOverview;
+      applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
       statusWindow?.webContents.send('cofounderos:overview', payload);
     });
 
@@ -291,8 +317,7 @@ app.on('before-quit', () => {
 function createElectronTrayFallback(): void {
   try {
     tray = new Tray(makeTrayImage());
-    if (process.platform === 'darwin') tray.setTitle(' CO');
-    tray.setToolTip('CofounderOS — click for status');
+    applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
     appendLog('Electron tray fallback created');
     void refreshTray();
     // Keep the tray menu's "N today" line live without hammering the
@@ -318,7 +343,7 @@ function startNativeStatusItem(): boolean {
   const helperPath = path.resolve(here, 'native/cofounderos-status-item');
   try {
     const helper = spawn(helperPath, [], {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     statusItemHelper = helper;
     helper.stdout?.setEncoding('utf8');
@@ -330,7 +355,10 @@ function startNativeStatusItem(): boolean {
           const msg = JSON.parse(line) as { kind?: string };
           if (msg.kind === 'show-status') void showStatusWindow();
           if (msg.kind === 'quit') app.quit();
-          if (msg.kind === 'ready') appendLog('Native macOS status item ready');
+          if (msg.kind === 'ready') {
+            appendLog('Native macOS status item ready');
+            applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
+          }
         } catch {
           // Non-JSON stdout is just diagnostic output.
         }
@@ -348,11 +376,58 @@ function startNativeStatusItem(): boolean {
       if (statusItemHelper === helper) statusItemHelper = null;
     });
     appendLog(`Starting native macOS status item: ${helperPath}`);
+    applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
     return true;
   } catch (err) {
     appendLog(`Native status item unavailable: ${String(err)}`);
     statusItemHelper = null;
     return false;
+  }
+}
+
+function getMenuBarIndicator(
+  overview: RuntimeOverview | null,
+  healthOk = overview?.status === 'running',
+  labelOverride?: string,
+): MenuBarIndicator {
+  if (!healthOk) {
+    return { state: 'stopped', label: labelOverride ?? 'CofounderOS — stopped' };
+  }
+  if (overview?.capture.running && !overview.capture.paused) {
+    const eventsToday = overview.capture.eventsToday ?? 0;
+    return {
+      state: 'capturing',
+      label: labelOverride ?? `CofounderOS — capturing (${eventsToday} today)`,
+    };
+  }
+  if (overview?.capture.running && overview.capture.paused) {
+    return { state: 'paused', label: labelOverride ?? 'CofounderOS — capture paused' };
+  }
+  return { state: 'stopped', label: labelOverride ?? 'CofounderOS — idle' };
+}
+
+function applyMenuBarIndicator(indicator: MenuBarIndicator): void {
+  if (tray) {
+    if (process.platform === 'darwin') tray.setTitle(makeTrayTitle(indicator.state));
+    tray.setToolTip(indicator.label);
+  }
+  if (!statusItemHelper || statusItemHelper.killed || !statusItemHelper.stdin?.writable) return;
+  statusItemHelper.stdin.write(
+    `${JSON.stringify({ kind: 'set-state', state: indicator.state, label: indicator.label })}\n`,
+    (err) => {
+      if (err) appendLog(`Native status item update failed: ${String(err)}`);
+    },
+  );
+}
+
+function makeTrayTitle(state: MenuBarCaptureState): string {
+  switch (state) {
+    case 'capturing':
+      return ' CO CAP';
+    case 'paused':
+      return ' CO PAUSE';
+    case 'stopped':
+      return ' CO STOP';
   }
 }
 
@@ -367,8 +442,8 @@ async function refreshTray(): Promise<void> {
     (managedRuntime
       ? await managedRuntime.call<RuntimeOverview>('overview').catch(() => null)
       : null);
-  const captureLive = !!overview?.capture.running && !overview.capture.paused;
-  const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
+  const captureLive = health.ok && !!overview?.capture.running && !overview.capture.paused;
+  const capturePaused = health.ok && !!overview?.capture.running && !!overview.capture.paused;
   const eventsToday = overview?.capture.eventsToday ?? 0;
 
   const statusLabel = !health.ok
@@ -378,6 +453,7 @@ async function refreshTray(): Promise<void> {
       : capturePaused
         ? 'CofounderOS — capture paused'
         : 'CofounderOS — idle';
+  applyMenuBarIndicator(getMenuBarIndicator(overview, health.ok, statusLabel));
 
   const captureToggle: Electron.MenuItemConstructorOptions =
     captureLive
@@ -627,6 +703,7 @@ async function stopManagedRuntime(): Promise<void> {
   managedRuntime = null;
   await runtime.call('stop').catch((err) => appendLog(`Runtime stop failed: ${String(err)}`));
   runtime.close();
+  applyMenuBarIndicator({ state: 'stopped', label: 'CofounderOS — stopped' });
   await refreshTray();
   if (statusWindow) await renderStatusWindow();
 }
@@ -733,6 +810,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:get-journal-day', async (_event, day: string) => {
     return await (await getRuntimeForRequest()).call('getJournalDay', day);
   });
+  ipcMain.handle('cofounderos:get-indexed-journal-day', async (_event, day: string) => {
+    return await (await getRuntimeForRequest()).call('getIndexedJournalDay', day);
+  });
   ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('searchFrames', query);
   });
@@ -763,6 +843,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:trigger-reorganise', async () => {
     return await (await getRuntimeForRequest()).call('triggerReorganise');
   });
+  ipcMain.handle('cofounderos:trigger-full-reindex', async (_event, range: unknown) => {
+    return await (await getRuntimeForRequest()).call('triggerFullReindex', range);
+  });
   ipcMain.handle('cofounderos:bootstrap-model', async () => {
     return await (await getRuntimeForRequest()).call('bootstrapModel');
   });
@@ -776,12 +859,8 @@ function registerRuntimeIpc(): void {
     });
     return app.getLoginItemSettings().openAtLogin;
   });
-  ipcMain.handle('cofounderos:open-path', async (_event, target: 'config' | 'data' | 'markdown') => {
-    const targetPath = target === 'config'
-      ? configPath
-      : target === 'data'
-        ? dataDir
-        : markdownExportDir;
+  ipcMain.handle('cofounderos:open-path', async (_event, target: OpenPathTarget) => {
+    const targetPath = await resolveOpenPathTarget(target);
     const error = await shell.openPath(targetPath);
     if (error) throw new Error(error);
     return { opened: targetPath };
@@ -816,6 +895,46 @@ async function getOverviewForRequest(): Promise<RuntimeOverview | null> {
 function isExpectedRuntimeServiceClosure(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return message.includes('runtime service closed') || message.includes('runtime service exited');
+}
+
+type OpenPathTarget =
+  | 'config'
+  | 'data'
+  | 'markdown'
+  | {
+      target: 'markdown';
+      category?: string;
+    };
+
+async function resolveOpenPathTarget(target: OpenPathTarget): Promise<string> {
+  if (target === 'config') return configPath;
+  if (target === 'data') return dataDir;
+  if (target === 'markdown') return await getMarkdownExportDir();
+  if (target && typeof target === 'object' && target.target === 'markdown') {
+    const exportDir = await getMarkdownExportDir();
+    if (!target.category) return exportDir;
+    if (!/^[a-z0-9][a-z0-9_-]*$/i.test(target.category)) {
+      throw new Error('Invalid export category');
+    }
+    return path.join(exportDir, target.category);
+  }
+  throw new Error('Unknown path target');
+}
+
+async function getMarkdownExportDir(): Promise<string> {
+  try {
+    const loaded = await loadConfig(configPath);
+    const markdown = loaded.config.export.plugins.find(
+      (plugin) => plugin.name === 'markdown' && plugin.enabled !== false,
+    );
+    const configuredPath = markdown?.path;
+    if (typeof configuredPath === 'string' && configuredPath.trim()) {
+      return expandPath(configuredPath);
+    }
+  } catch (err) {
+    appendLog(`Could not resolve markdown export path from config: ${String(err)}`);
+  }
+  return markdownExportDir;
 }
 
 async function getRuntimeForRequest(): Promise<RuntimeServiceClient> {

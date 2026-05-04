@@ -859,11 +859,14 @@ func currentMemoryMB() -> Int {
 final class AudioChunker: NSObject, AVAudioRecorderDelegate {
   private let enabled: Bool
   private let inboxPath: String
+  private let partialPath: String
   private let chunkSeconds: TimeInterval
   private let sampleRate: Int
   private let channels: Int
   private var recorder: AVAudioRecorder?
   private var currentStartedAt: Date?
+  private var currentPartialURL: URL?
+  private var currentFinalURL: URL?
   private var chunkIndex = 0
 
   init(config: HelperConfig) {
@@ -872,6 +875,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     self.inboxPath = NSString(
       string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
     ).expandingTildeInPath
+    self.partialPath = (self.inboxPath as NSString).appendingPathComponent(".partial")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
     self.sampleRate = live?.sample_rate ?? 16_000
     self.channels = live?.channels ?? 1
@@ -893,6 +897,11 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
         atPath: inboxPath,
         withIntermediateDirectories: true
       )
+      try FileManager.default.createDirectory(
+        atPath: partialPath,
+        withIntermediateDirectories: true
+      )
+      try reapStalePartials()
       try startNewChunk()
       emit([
         "kind": "log",
@@ -926,12 +935,14 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     recorder?.stop()
     recorder = nil
     currentStartedAt = nil
+    finalizeCurrentChunk()
   }
 
   private func rotate() {
     recorder?.stop()
     recorder = nil
     currentStartedAt = nil
+    finalizeCurrentChunk()
     do {
       try startNewChunk()
     } catch {
@@ -944,10 +955,54 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
+  /// Atomically promote the just-finished partial file into the inbox so
+  /// the Node-side worker only ever sees fully-flushed chunks.
+  private func finalizeCurrentChunk() {
+    guard let partial = currentPartialURL, let final = currentFinalURL else { return }
+    currentPartialURL = nil
+    currentFinalURL = nil
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: partial.path) else { return }
+    do {
+      if fm.fileExists(atPath: final.path) {
+        try fm.removeItem(at: final)
+      }
+      try fm.moveItem(at: partial, to: final)
+    } catch {
+      emit([
+        "kind": "error",
+        "code": "audio_chunk_finalize_failed",
+        "message": String(describing: error),
+        "fatal": false
+      ])
+    }
+  }
+
+  /// Anything in `.partial/` at startup is from a previous helper that
+  /// crashed mid-chunk. AVAudioRecorder writes the m4a moov atom only on
+  /// `.stop()`, so these files are not playable and Whisper would reject
+  /// them. Discard rather than promoting to the inbox.
+  private func reapStalePartials() throws {
+    let fm = FileManager.default
+    let partialURL = URL(fileURLWithPath: partialPath)
+    let entries = (try? fm.contentsOfDirectory(at: partialURL, includingPropertiesForKeys: nil)) ?? []
+    if entries.isEmpty { return }
+    for entry in entries {
+      try? fm.removeItem(at: entry)
+    }
+    emit([
+      "kind": "log",
+      "level": "warn",
+      "message": "discarded stale audio partials from previous run",
+      "data": ["count": entries.count]
+    ])
+  }
+
   private func startNewChunk() throws {
     chunkIndex += 1
     let filename = "native-\(dayString(Date()))-\(timeString(Date()))-\(chunkIndex).m4a"
-    let url = URL(fileURLWithPath: inboxPath).appendingPathComponent(filename)
+    let url = URL(fileURLWithPath: partialPath).appendingPathComponent(filename)
+    let finalURL = URL(fileURLWithPath: inboxPath).appendingPathComponent(filename)
     let settings: [String: Any] = [
       AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
       AVSampleRateKey: sampleRate,
@@ -966,6 +1021,8 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
     self.recorder = recorder
     self.currentStartedAt = Date()
+    self.currentPartialURL = url
+    self.currentFinalURL = finalURL
   }
 
   private func ensureMicrophonePermission() -> Bool {

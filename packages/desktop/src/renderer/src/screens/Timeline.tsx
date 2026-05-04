@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Copy, FolderOpen, ImageOff, Inbox, RefreshCcw, Trash2 } from 'lucide-react';
+import { Copy, FolderOpen, ImageOff, Inbox, Loader2, RefreshCcw, Rows3, ScrollText, Trash2 } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,6 +19,7 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
+import { Markdown } from '@/components/Markdown';
 import { formatLocalTime, prettyDay } from '@/lib/format';
 import { listItemProps, useListKeyboardNav } from '@/lib/list-keys';
 import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
@@ -39,6 +40,9 @@ export function Timeline({
   onRefresh: () => void;
 }) {
   const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
+  const [viewMode, setViewMode] = React.useState<'moments' | 'journal'>('moments');
+  const [indexedJournal, setIndexedJournal] = React.useState<string | null>(null);
+  const [loadingIndexedJournal, setLoadingIndexedJournal] = React.useState(false);
 
   useListKeyboardNav();
 
@@ -48,6 +52,29 @@ export function Timeline({
     ? frames.filter((f) => f.activity_session_id === selectedSessionId)
     : [];
   const visibleFrames = selectedSessionId ? sessionFrames : frames;
+
+  React.useEffect(() => {
+    setIndexedJournal(null);
+    setViewMode('moments');
+  }, [selectedDay]);
+
+  async function showIndexedJournal() {
+    if (!selectedDay) return;
+    setViewMode('journal');
+    if (indexedJournal) return;
+    setLoadingIndexedJournal(true);
+    try {
+      const result = await window.cofounderos.getIndexedJournalDay(selectedDay);
+      setIndexedJournal(result.markdown);
+    } catch (err) {
+      toast.error('Could not load indexed journal', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+      setViewMode('moments');
+    } finally {
+      setLoadingIndexedJournal(false);
+    }
+  }
 
   async function copyDaySummary() {
     if (!journal) return;
@@ -136,6 +163,18 @@ export function Timeline({
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant={viewMode === 'journal' ? 'secondary' : 'outline'}
+                    size="sm"
+                    onClick={() =>
+                      viewMode === 'journal'
+                        ? setViewMode('moments')
+                        : void showIndexedJournal()
+                    }
+                  >
+                    {viewMode === 'journal' ? <Rows3 /> : <ScrollText />}
+                    {viewMode === 'journal' ? 'Show moments' : 'Indexed journal'}
+                  </Button>
                   <Button variant="outline" size="sm" onClick={() => void copyDaySummary()}>
                     <Copy />
                     Copy summary
@@ -149,6 +188,34 @@ export function Timeline({
               </div>
             ) : null}
 
+            {viewMode === 'journal' ? (
+              <section>
+                <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
+                  Indexed journal
+                </h3>
+                <Card>
+                  <CardContent className="p-4">
+                    {loadingIndexedJournal ? (
+                      <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+                        <Loader2 className="size-4 animate-spin" />
+                        Loading indexed journal…
+                      </div>
+                    ) : indexedJournal ? (
+                      <ScrollArea className="max-h-[70vh] pr-4">
+                        <Markdown content={indexedJournal} />
+                      </ScrollArea>
+                    ) : (
+                      <EmptyState
+                        icon={<Inbox className="size-10" />}
+                        title="No indexed journal yet"
+                        description="Refresh the timeline or organize memory, then try again."
+                      />
+                    )}
+                  </CardContent>
+                </Card>
+              </section>
+            ) : (
+              <>
             {sessions.length > 0 && (
               <section>
                 <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
@@ -198,6 +265,8 @@ export function Timeline({
                 </div>
               )}
             </section>
+              </>
+            )}
           </div>
         </div>
       )}

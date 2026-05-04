@@ -51,6 +51,10 @@ const runtime = createRuntime({
   workspaceRoot: process.env.COFOUNDEROS_RESOURCE_ROOT,
 });
 
+const getRuntimeOverview = runtime.getOverview.bind(runtime) as (
+  options?: { forceRefresh?: boolean; mode?: 'full' | 'fast' },
+) => Promise<unknown>;
+
 // ---------------------------------------------------------------------
 // Push-based overview broadcasting.
 //
@@ -59,7 +63,7 @@ const runtime = createRuntime({
 // interval (2-5s). Now the runtime-service is the single source of truth
 // and pushes overview snapshots:
 //
-//   - on a 2s heartbeat while running
+//   - on a 2s lightweight heartbeat while running
 //   - immediately after any state-mutating call (start/stop/pause/
 //     resume/triggerIndex/triggerReorganise/saveConfigPatch)
 //
@@ -69,9 +73,9 @@ const runtime = createRuntime({
 
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 
-async function pushOverview(): Promise<void> {
+async function pushOverview(mode: 'full' | 'fast' = 'full'): Promise<void> {
   try {
-    const overview = await runtime.getOverview();
+    const overview = await getRuntimeOverview({ mode });
     sendEvent('overview', overview);
   } catch {
     // Runtime is mid-restart or not yet started; let the next mutation
@@ -82,7 +86,7 @@ async function pushOverview(): Promise<void> {
 function startHeartbeat(): void {
   if (heartbeat) return;
   heartbeat = setInterval(() => {
-    void pushOverview();
+    void pushOverview('fast');
   }, 2000);
 }
 
@@ -107,11 +111,11 @@ async function handle(req: Request): Promise<unknown> {
       await runtime.bootstrapModel((event) => {
         process.stdout.write(`${JSON.stringify({ id: req.id, event: 'bootstrap-progress', payload: event })}\n`);
       });
-      void pushOverview();
+      void pushOverview('full');
       return { ready: true };
     case 'stop':
       await runtime.stop();
-      void pushOverview();
+      void pushOverview('full');
       return { stopped: true };
     case 'pauseCapture': {
       const ov = await runtime.pauseCapture();
@@ -135,6 +139,16 @@ async function handle(req: Request): Promise<unknown> {
       sendEvent('overview', ov);
       return ov;
     }
+    case 'triggerFullReindex': {
+      const params = (req.params ?? {}) as { from?: string; to?: string };
+      await runtime.triggerFullReindex({
+        from: typeof params.from === 'string' ? params.from : undefined,
+        to: typeof params.to === 'string' ? params.to : undefined,
+      });
+      const ov = await runtime.getOverview();
+      sendEvent('overview', ov);
+      return ov;
+    }
     case 'overview':
       return await runtime.getOverview();
     case 'doctor':
@@ -145,13 +159,15 @@ async function handle(req: Request): Promise<unknown> {
       return runtime.validateConfig(req.params);
     case 'saveConfigPatch': {
       const result = await runtime.saveConfigPatch(req.params as Record<string, unknown>);
-      void pushOverview();
+      void pushOverview('full');
       return result;
     }
     case 'listJournalDays':
       return await runtime.listJournalDays();
     case 'getJournalDay':
       return await runtime.getJournalDay(String(req.params));
+    case 'getIndexedJournalDay':
+      return await runtime.getIndexedJournalDay(String(req.params));
     case 'searchFrames':
       return await runtime.searchFrames(req.params as never);
     case 'explainSearchResults':
@@ -164,17 +180,17 @@ async function handle(req: Request): Promise<unknown> {
       const result = await runtime.deleteFrame(String(req.params));
       // Re-emit overview so KPIs / live strip update without waiting for
       // the 2s heartbeat after a destructive action.
-      void pushOverview();
+      void pushOverview('full');
       return result;
     }
     case 'deleteFramesByDay': {
       const result = await runtime.deleteFramesByDay(String(req.params));
-      void pushOverview();
+      void pushOverview('full');
       return result;
     }
     case 'deleteAllMemory': {
       const result = await runtime.deleteAllMemory();
-      void pushOverview();
+      void pushOverview('full');
       return result;
     }
     default:

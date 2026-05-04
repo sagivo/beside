@@ -132,6 +132,9 @@ pnpm cli index --reorganise
 # Re-index everything from raw data with a different strategy / model
 pnpm cli index --full-reindex --strategy karpathy
 
+# Re-index everything captured from a local date onward
+pnpm cli index --reindex-from 2026-05-01
+
 # Wipe everything (raw capture, sqlite db, index, exports) and start fresh.
 # Preserves config.yaml by default. Prompts for confirmation; pass --yes to skip.
 pnpm cli reset

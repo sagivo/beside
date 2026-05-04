@@ -29,6 +29,7 @@ import {
   type OrchestratorHandles,
   type OrchestratorOptions,
 } from './orchestrator.js';
+import { renderJournalMarkdown } from '@cofounderos/interfaces';
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -47,7 +48,9 @@ export interface RuntimeOverview {
   storageRoot: string;
   capture: CaptureStatus;
   storage: StorageStats;
-  index: IndexState;
+  index: IndexState & {
+    categories: RuntimeIndexCategory[];
+  };
   indexing: RuntimeIndexingStatus;
   model: {
     name: string;
@@ -55,9 +58,15 @@ export interface RuntimeOverview {
     ready: boolean;
   };
   exports: ExportStatus[];
+  backgroundJobs: RuntimeBackgroundJobStatus[];
   system: {
     load: number | null;
     loadGuardEnabled: boolean;
+    overviewGeneratedAt: string;
+    overviewDurationMs: number;
+    overviewCacheTtlMs: number;
+    overviewMode: 'full' | 'fast';
+    overviewTimings: Record<string, number>;
   };
 }
 
@@ -66,6 +75,33 @@ export interface RuntimeIndexingStatus {
   currentJob: string | null;
   startedAt: string | null;
   lastCompletedAt: string | null;
+}
+
+export interface RuntimeBackgroundJobStatus {
+  name: string;
+  kind: 'interval' | 'cron';
+  running: boolean;
+  lastStartedAt: string | null;
+  lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  runCount: number;
+  skippedCount: number;
+}
+
+export interface RuntimeIndexCategory {
+  name: string;
+  pageCount: number;
+  summaryPath?: string;
+  lastUpdated: string | null;
+  recentPages: RuntimeIndexCategoryPage[];
+}
+
+export interface RuntimeIndexCategoryPage {
+  path: string;
+  title: string;
+  summary: string | null;
+  lastUpdated: string;
 }
 
 export interface RuntimeStats {
@@ -97,6 +133,11 @@ export interface RuntimeJournalDay {
   sessions: ActivitySession[];
 }
 
+export interface RuntimeIndexedJournalDay {
+  day: string;
+  markdown: string;
+}
+
 export interface SearchResultExplanation {
   frameId: string;
   explanation: string;
@@ -109,11 +150,18 @@ export interface ExplainSearchResultsQuery {
 
 export type ConfigPatch = Record<string, unknown>;
 
+const OVERVIEW_CACHE_TTL_MS = 10_000;
+const OVERVIEW_SLOW_LOG_MS = 500;
+
 export class CofounderRuntime {
   private readonly logger: Logger;
   private readonly opts: OrchestratorOptions;
   private handles: OrchestratorHandles | null = null;
   private status: RuntimeStatus = 'not_started';
+  private overviewCache: { value: RuntimeOverview; expiresAt: number } | null = null;
+  private overviewInFlight: Promise<RuntimeOverview> | null = null;
+  private manualJob: { name: string; startedAt: string } | null = null;
+  private lastManualJobCompletedAt: string | null = null;
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -136,6 +184,7 @@ export class CofounderRuntime {
     }
     await startAll(handles);
     this.status = 'running';
+    this.invalidateOverview();
   }
 
   async bootstrapModel(onProgress?: Parameters<typeof bootstrapModel>[1]): Promise<void> {
@@ -148,9 +197,11 @@ export class CofounderRuntime {
       return;
     }
     this.status = 'stopping';
+    this.invalidateOverview();
     await stopAll(this.handles);
     this.handles = null;
     this.status = 'stopped';
+    this.invalidateOverview();
   }
 
   async restart(options: { bootstrap?: boolean } = {}): Promise<void> {
@@ -161,19 +212,53 @@ export class CofounderRuntime {
   async pauseCapture(): Promise<RuntimeOverview> {
     return await this.withHandles(async (handles) => {
       await handles.capture.pause();
-      return await this.getOverview();
+      this.invalidateOverview();
+      return await this.getOverview({ forceRefresh: true });
     });
   }
 
   async resumeCapture(): Promise<RuntimeOverview> {
     return await this.withHandles(async (handles) => {
       await handles.capture.resume();
-      return await this.getOverview();
+      this.invalidateOverview();
+      return await this.getOverview({ forceRefresh: true });
     });
   }
 
-  async getOverview(): Promise<RuntimeOverview> {
-    return await this.withHandles(async (handles) => {
+  async getOverview(
+    options: { forceRefresh?: boolean; mode?: 'full' | 'fast' } = {},
+  ): Promise<RuntimeOverview> {
+    if (options.mode === 'fast') {
+      return await this.getFastOverview();
+    }
+
+    const now = Date.now();
+    if (!options.forceRefresh && this.overviewCache && this.overviewCache.expiresAt > now) {
+      return this.overviewCache.value;
+    }
+    if (!options.forceRefresh && this.overviewInFlight) {
+      return await this.overviewInFlight;
+    }
+
+    const buildStartedAt = Date.now();
+    const promise = this.withHandles(async (handles) => {
+      const timings: Record<string, number> = {};
+      const timed = async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
+        const startedAt = Date.now();
+        try {
+          return await fn();
+        } finally {
+          timings[name] = Date.now() - startedAt;
+        }
+      };
+      const timedSync = <T>(name: string, fn: () => T): T => {
+        const startedAt = Date.now();
+        try {
+          return fn();
+        } finally {
+          timings[name] = Date.now() - startedAt;
+        }
+      };
       const capture = handles.capture.getStatus();
       // Replace the capture plugin's in-memory tally (which resets on
       // restart and only counts what flowed through the plugin during
@@ -184,40 +269,113 @@ export class CofounderRuntime {
         const midnight = new Date(now);
         midnight.setHours(0, 0, 0, 0);
         const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-        const [todayCount, lastHourCount] = await Promise.all([
+        const [todayCount, lastHourCount] = await timed('captureCounts', () => Promise.all([
           handles.storage.countEvents({ from: midnight.toISOString() }),
           handles.storage.countEvents({ from: hourAgo.toISOString() }),
-        ]);
+        ]));
         capture.eventsToday = todayCount;
         capture.eventsLastHour = lastHourCount;
       } catch {
         // Storage backend may not implement countEvents; fall back to
         // the plugin tally already on `capture`.
       }
-      const storage = await handles.storage.getStats();
-      const index = await handles.strategy.getState();
-      const indexing = getIndexingStatus(handles);
-      const modelInfo = handles.model.getModelInfo();
-      const ready = await handles.model.isAvailable().catch(() => false);
-      const load = handles.loadGuard.snapshot().normalised;
-      return {
+      const storage = await timed('storageStats', () => handles.storage.getStats());
+      const index = await timed('indexState', () => handles.strategy.getState());
+      const categories = await timed('indexCategories', () => readIndexCategories(index.rootPath).catch(() => []));
+      const indexing = timedSync('indexingStatus', () => getIndexingStatus(
+        handles,
+        this.manualJob,
+        this.lastManualJobCompletedAt,
+      ));
+      const modelInfo = timedSync('modelInfo', () => handles.model.getModelInfo());
+      const ready = await timed('modelAvailability', () => handles.model.isAvailable().catch(() => false));
+      const load = timedSync('loadGuard', () => handles.loadGuard.snapshot().normalised);
+      const exports = timedSync('exports', () => handles.exports.map((exp) => exp.getStatus()));
+      const backgroundJobs = timedSync('backgroundJobs', () => getBackgroundJobs(handles));
+      const overviewDurationMs = Date.now() - buildStartedAt;
+      if (overviewDurationMs >= OVERVIEW_SLOW_LOG_MS) {
+        this.logger.debug('overview generated slowly', { durationMs: overviewDurationMs });
+      }
+      const overview: RuntimeOverview = {
         status: this.status,
         configPath: handles.loaded.sourcePath,
         dataDir: handles.loaded.dataDir,
         storageRoot: handles.storage.getRoot(),
         capture,
         storage,
-        index,
+        index: {
+          ...index,
+          categories,
+        },
         indexing,
         model: {
           name: modelInfo.name,
           isLocal: modelInfo.isLocal,
           ready,
         },
-        exports: handles.exports.map((exp) => exp.getStatus()),
+        exports,
+        backgroundJobs,
         system: {
           load,
           loadGuardEnabled: handles.config.system.load_guard.enabled,
+          overviewGeneratedAt: new Date().toISOString(),
+          overviewDurationMs,
+          overviewCacheTtlMs: OVERVIEW_CACHE_TTL_MS,
+          overviewMode: 'full',
+          overviewTimings: timings,
+        },
+      };
+      return overview;
+    });
+
+    this.overviewInFlight = promise;
+    try {
+      const overview = await promise;
+      this.overviewCache = {
+        value: overview,
+        expiresAt: Date.now() + OVERVIEW_CACHE_TTL_MS,
+      };
+      return overview;
+    } finally {
+      if (this.overviewInFlight === promise) this.overviewInFlight = null;
+    }
+  }
+
+  private async getFastOverview(): Promise<RuntimeOverview> {
+    if (!this.overviewCache) {
+      return await this.getOverview({ forceRefresh: true });
+    }
+    const startedAt = Date.now();
+    return await this.withHandles(async (handles) => {
+      const cached = this.overviewCache!.value;
+      const capture = handles.capture.getStatus();
+      // Heartbeats should stay cheap. Preserve storage-backed counters from
+      // the last full overview instead of querying SQLite every 2 seconds.
+      capture.eventsToday = cached.capture.eventsToday;
+      capture.eventsLastHour = cached.capture.eventsLastHour;
+      capture.storageBytesToday = cached.capture.storageBytesToday;
+
+      const overviewDurationMs = Date.now() - startedAt;
+      return {
+        ...cached,
+        status: this.status,
+        capture,
+        indexing: getIndexingStatus(
+          handles,
+          this.manualJob,
+          this.lastManualJobCompletedAt,
+        ),
+        exports: handles.exports.map((exp) => exp.getStatus()),
+        backgroundJobs: getBackgroundJobs(handles),
+        system: {
+          ...cached.system,
+          load: handles.loadGuard.snapshot().normalised,
+          overviewGeneratedAt: new Date().toISOString(),
+          overviewDurationMs,
+          overviewMode: 'fast',
+          overviewTimings: {
+            fastPatch: overviewDurationMs,
+          },
         },
       };
     });
@@ -349,6 +507,30 @@ export class CofounderRuntime {
     });
   }
 
+  async getIndexedJournalDay(day: string): Promise<RuntimeIndexedJournalDay> {
+    return await this.withHandles(async (handles) => {
+      const frames = (await handles.storage.getJournal(day))
+        .slice()
+        .sort((a, b) => Date.parse(a.timestamp ?? '') - Date.parse(b.timestamp ?? ''));
+      let sessions: ActivitySession[] = [];
+      try {
+        sessions = await handles.storage.listSessions({
+          day,
+          order: 'chronological',
+          limit: 500,
+        });
+      } catch {
+        sessions = [];
+      }
+      return {
+        day,
+        markdown: renderJournalMarkdown(day, frames, {
+          sessions,
+        }),
+      };
+    });
+  }
+
   async searchFrames(query: FrameQuery): Promise<Frame[]> {
     return await this.withHandles((handles) => handles.storage.searchFrames(query));
   }
@@ -420,15 +602,36 @@ export class CofounderRuntime {
   }
 
   async triggerIndex(): Promise<void> {
-    await this.withHandles((handles) => runIncremental(handles).then(() => undefined));
+    await this.runManualJob('index-incremental', async () => {
+      await this.withHandles((handles) => runIncremental(handles).then(() => undefined));
+    });
   }
 
   async triggerReorganise(): Promise<void> {
-    await this.withHandles((handles) => runReorganisation(handles));
+    await this.runManualJob('index-reorganise', async () => {
+      await this.withHandles((handles) => runReorganisation(handles));
+    });
   }
 
   async triggerFullReindex(opts: { from?: string; to?: string } = {}): Promise<void> {
-    await this.withHandles((handles) => runFullReindex(handles, opts));
+    await this.runManualJob('index-full-reindex', async () => {
+      await this.withHandles((handles) => runFullReindex(handles, opts));
+    });
+  }
+
+  private async runManualJob(name: string, fn: () => Promise<void>): Promise<void> {
+    if (this.manualJob) {
+      throw new Error(`Runtime job already running: ${this.manualJob.name}`);
+    }
+    this.manualJob = { name, startedAt: new Date().toISOString() };
+    this.invalidateOverview();
+    try {
+      await fn();
+    } finally {
+      this.lastManualJobCompletedAt = new Date().toISOString();
+      this.manualJob = null;
+      this.invalidateOverview();
+    }
   }
 
   private async getOrCreateHandles(): Promise<OrchestratorHandles> {
@@ -436,6 +639,10 @@ export class CofounderRuntime {
       this.handles = await buildOrchestrator(this.logger, this.opts);
     }
     return this.handles;
+  }
+
+  private invalidateOverview(): void {
+    this.overviewCache = null;
   }
 
   private async withHandles<T>(fn: (handles: OrchestratorHandles) => Promise<T>): Promise<T> {
@@ -459,7 +666,19 @@ export function createRuntime(opts: RuntimeOptions = {}): CofounderRuntime {
   return new CofounderRuntime(opts);
 }
 
-function getIndexingStatus(handles: OrchestratorHandles): RuntimeIndexingStatus {
+function getIndexingStatus(
+  handles: OrchestratorHandles,
+  manualJob: { name: string; startedAt: string } | null,
+  lastManualJobCompletedAt: string | null,
+): RuntimeIndexingStatus {
+  if (manualJob) {
+    return {
+      running: true,
+      currentJob: manualJob.name,
+      startedAt: manualJob.startedAt,
+      lastCompletedAt: lastManualJobCompletedAt,
+    };
+  }
   const jobs = handles.scheduler
     .getJobs()
     .filter((job) => job.name === 'index-incremental' || job.name === 'index-reorganise');
@@ -468,8 +687,36 @@ function getIndexingStatus(handles: OrchestratorHandles): RuntimeIndexingStatus 
     running: runningJob != null,
     currentJob: runningJob?.name ?? null,
     startedAt: runningJob?.lastStartedAt ?? null,
-    lastCompletedAt: latestIso(jobs.map((job) => job.lastCompletedAt)),
+    lastCompletedAt: latestIso([
+      ...jobs.map((job) => job.lastCompletedAt),
+      lastManualJobCompletedAt,
+    ]),
   };
+}
+
+function getBackgroundJobs(handles: OrchestratorHandles): RuntimeBackgroundJobStatus[] {
+  const jobs = handles.scheduler.getJobs() as Array<{
+    name: string;
+    kind: 'interval' | 'cron';
+    running: boolean;
+    lastStartedAt: string | null;
+    lastCompletedAt: string | null;
+    lastDurationMs?: number | null;
+    lastError?: string | null;
+    runCount?: number;
+    skippedCount?: number;
+  }>;
+  return jobs.map((job) => ({
+    name: job.name,
+    kind: job.kind,
+    running: job.running,
+    lastStartedAt: job.lastStartedAt,
+    lastCompletedAt: job.lastCompletedAt,
+    lastDurationMs: job.lastDurationMs ?? null,
+    lastError: job.lastError ?? null,
+    runCount: job.runCount ?? 0,
+    skippedCount: job.skippedCount ?? 0,
+  }));
 }
 
 function latestIso(values: Array<string | null>): string | null {
@@ -478,6 +725,180 @@ function latestIso(values: Array<string | null>): string | null {
     if (value && (!latest || value > latest)) latest = value;
   }
   return latest;
+}
+
+const INDEX_CATEGORY_ORDER = [
+  'projects',
+  'repos',
+  'meetings',
+  'contacts',
+  'channels',
+  'docs',
+  'web',
+  'apps',
+  'tools',
+  'topics',
+  'patterns',
+];
+
+const INDEX_CATEGORY_CACHE_TTL_MS = 30_000;
+const INDEX_CATEGORY_RECENT_PAGE_LIMIT = 3;
+
+let indexCategoryCache:
+  | {
+      rootPath: string;
+      expiresAt: number;
+      categories: RuntimeIndexCategory[];
+    }
+  | null = null;
+
+async function readIndexCategories(rootPath: string): Promise<RuntimeIndexCategory[]> {
+  const now = Date.now();
+  if (
+    indexCategoryCache &&
+    indexCategoryCache.rootPath === rootPath &&
+    indexCategoryCache.expiresAt > now
+  ) {
+    return indexCategoryCache.categories;
+  }
+
+  const entries = await fs.readdir(rootPath, { withFileTypes: true });
+  const categories: RuntimeIndexCategory[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith('.') || entry.name === 'archive') continue;
+
+    const pages = await listMarkdownPages(path.join(rootPath, entry.name), entry.name);
+    const contentPages = pages.filter((page) => path.basename(page.path) !== '_summary.md');
+    if (contentPages.length === 0) continue;
+
+    const summary = pages.find((page) => path.basename(page.path) === '_summary.md');
+    const recentPages = await Promise.all(
+      contentPages
+        .slice()
+        .sort((a, b) => b.mtime.localeCompare(a.mtime))
+        .slice(0, INDEX_CATEGORY_RECENT_PAGE_LIMIT)
+        .map((page) => readIndexPagePreview(rootPath, page)),
+    );
+    categories.push({
+      name: entry.name,
+      pageCount: contentPages.length,
+      summaryPath: summary?.path,
+      lastUpdated: latestIso(contentPages.map((page) => page.mtime)),
+      recentPages,
+    });
+  }
+
+  const sorted = categories.sort((a, b) => {
+    const ai = INDEX_CATEGORY_ORDER.indexOf(a.name);
+    const bi = INDEX_CATEGORY_ORDER.indexOf(b.name);
+    if (ai !== -1 || bi !== -1) {
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  indexCategoryCache = {
+    rootPath,
+    expiresAt: now + INDEX_CATEGORY_CACHE_TTL_MS,
+    categories: sorted,
+  };
+  return sorted;
+}
+
+async function listMarkdownPages(
+  dir: string,
+  relDir: string,
+): Promise<Array<{ path: string; mtime: string }>> {
+  const out: Array<{ path: string; mtime: string }> = [];
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+
+  for (const entry of entries) {
+    const abs = path.join(dir, entry.name);
+    const rel = path.join(relDir, entry.name).replace(/\\/g, '/');
+    if (entry.isDirectory()) {
+      const nested = await listMarkdownPages(abs, rel);
+      out.push(...nested);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    const stat = await fs.stat(abs).catch(() => null);
+    out.push({
+      path: rel,
+      mtime: stat?.mtime.toISOString() ?? new Date(0).toISOString(),
+    });
+  }
+
+  return out;
+}
+
+async function readIndexPagePreview(
+  rootPath: string,
+  page: { path: string; mtime: string },
+): Promise<RuntimeIndexCategoryPage> {
+  let text = '';
+  try {
+    const abs = path.join(rootPath, page.path);
+    text = await fs.readFile(abs, 'utf8');
+  } catch {
+    // The index can change while an overview is being built; keep the
+    // category card useful even if a page disappeared between readdir/read.
+  }
+
+  return {
+    path: page.path,
+    title: extractMarkdownTitle(text) ?? path.basename(page.path, '.md'),
+    summary: extractMarkdownSummary(text),
+    lastUpdated: page.mtime,
+  };
+}
+
+function extractMarkdownTitle(content: string): string | null {
+  const match = content.match(/^#\s+(.+)$/m);
+  return match?.[1]?.trim() || null;
+}
+
+function extractMarkdownSummary(content: string): string | null {
+  const section = extractMarkdownSection(content, 'Summary') ?? extractMarkdownSection(content, 'Overview');
+  const cleaned = stripMarkdownForPreview(section ?? '').trim();
+  return cleaned ? truncateText(cleaned, 180) : null;
+}
+
+function extractMarkdownSection(content: string, heading: string): string | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (start === -1) return null;
+  const out: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^##\s+/.test(line)) break;
+    out.push(line);
+  }
+  const section = out.join('\n').trim();
+  return section || null;
+}
+
+function stripMarkdownForPreview(content: string): string {
+  return content
+    .replace(/^---\n[\s\S]*?\n---\s*/m, '')
+    .split('\n')
+    .filter((line) => !line.startsWith('#'))
+    .filter((line) => !line.startsWith('!['))
+    .filter((line) => !/^\s*[-*]\s+/.test(line))
+    .join(' ')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\s+/g, ' ');
+}
+
+function truncateText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
 }
 
 function buildSearchResultExplanationPrompt(

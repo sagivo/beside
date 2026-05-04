@@ -12,6 +12,10 @@ interface IntervalJob {
   running: boolean;
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  runCount: number;
+  skippedCount: number;
 }
 
 interface CronJob {
@@ -23,6 +27,10 @@ interface CronJob {
   running: boolean;
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  runCount: number;
+  skippedCount: number;
 }
 
 type Job = IntervalJob | CronJob;
@@ -33,6 +41,10 @@ export interface SchedulerJobSnapshot {
   running: boolean;
   lastStartedAt: string | null;
   lastCompletedAt: string | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  runCount: number;
+  skippedCount: number;
 }
 
 /**
@@ -62,6 +74,10 @@ export class Scheduler {
       running: false,
       lastStartedAt: null,
       lastCompletedAt: null,
+      lastDurationMs: null,
+      lastError: null,
+      runCount: 0,
+      skippedCount: 0,
     };
     this.jobs.set(name, job);
     job.timer = setInterval(() => void this.run(job), intervalMs);
@@ -83,6 +99,10 @@ export class Scheduler {
       running: false,
       lastStartedAt: null,
       lastCompletedAt: null,
+      lastDurationMs: null,
+      lastError: null,
+      runCount: 0,
+      skippedCount: 0,
     };
     this.jobs.set(name, job);
     this.scheduleNextCron(job);
@@ -107,6 +127,10 @@ export class Scheduler {
       running: job.running,
       lastStartedAt: job.lastStartedAt,
       lastCompletedAt: job.lastCompletedAt,
+      lastDurationMs: job.lastDurationMs,
+      lastError: job.lastError,
+      runCount: job.runCount,
+      skippedCount: job.skippedCount,
     }));
   }
 
@@ -135,6 +159,7 @@ export class Scheduler {
 
   private async run(job: Job): Promise<void> {
     if (job.running) {
+      job.skippedCount += 1;
       this.logger.debug(`skip "${job.name}" — previous run still in flight`);
       return;
     }
@@ -143,9 +168,21 @@ export class Scheduler {
     const start = Date.now();
     try {
       await job.task();
-      this.logger.debug(`"${job.name}" completed in ${Date.now() - start}ms`);
+      const durationMs = Date.now() - start;
+      job.lastDurationMs = durationMs;
+      job.lastError = null;
+      job.runCount += 1;
+      if (durationMs >= 1000) {
+        this.logger.info(`"${job.name}" completed in ${durationMs}ms`);
+      } else {
+        this.logger.debug(`"${job.name}" completed in ${durationMs}ms`);
+      }
     } catch (err) {
-      this.logger.error(`"${job.name}" failed`, { err: String(err) });
+      const durationMs = Date.now() - start;
+      job.lastDurationMs = durationMs;
+      job.lastError = String(err);
+      job.runCount += 1;
+      this.logger.error(`"${job.name}" failed after ${durationMs}ms`, { err: String(err) });
     } finally {
       job.running = false;
       job.lastCompletedAt = new Date().toISOString();
