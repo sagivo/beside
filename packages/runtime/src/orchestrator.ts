@@ -218,6 +218,8 @@ export async function buildOrchestrator(
     whisperLanguage: config.capture.audio.whisper_language,
     batchSize: config.capture.audio.batch_size,
     sensitiveKeywords,
+    deleteAudioAfterTranscribe: config.capture.audio.delete_audio_after_transcribe,
+    maxAudioBytes: config.capture.audio.max_audio_bytes,
   });
   const entityResolver = new EntityResolverWorker(storage, logger, ENTITY_RESOLVER_BATCH_SIZE);
   const sessionsCfg = config.index.sessions;

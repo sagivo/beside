@@ -30,7 +30,11 @@ const CaptureSchema = z.object({
   screenshot_diff_threshold: z.number().min(0).max(1).default(0.1),
   idle_threshold_sec: z.number().int().positive().default(60),
   capture_audio: z.boolean().default(false),
-  whisper_model: z.string().default('tiny'),
+  // `tiny` is fast but produces noticeably bad transcripts on
+  // conversational audio; `base` is the smallest model that's actually
+  // usable for a "memory of what I did" product. Trade-off vs `tiny`:
+  // ~3× slower, ~5× more RAM, ~150 MB of weights instead of ~75 MB.
+  whisper_model: z.string().default('base'),
   audio: z.object({
     inbox_path: z.string().default('~/.cofounderOS/raw/audio/inbox'),
     processed_path: z.string().default('~/.cofounderOS/raw/audio/processed'),
@@ -39,6 +43,17 @@ const CaptureSchema = z.object({
     batch_size: z.number().int().positive().default(5),
     whisper_command: z.string().default('whisper'),
     whisper_language: z.string().optional(),
+    // Delete the source audio file after a successful transcription.
+    // The transcript is PII-redacted and durable; retaining raw audio
+    // indefinitely would undo that. Set false if you want to keep the
+    // m4a/wav for re-processing or manual review.
+    delete_audio_after_transcribe: z.boolean().default(true),
+    // Reject audio files larger than this before invoking whisper.
+    // A user dropping a long screen recording into the inbox would
+    // otherwise hit the 30-minute whisper timeout and silently fail.
+    // Direct text imports (.txt/.vtt/.srt) are not subject to this cap.
+    // Default 500 MiB. Set 0 to disable.
+    max_audio_bytes: z.number().int().nonnegative().default(500 * 1024 * 1024),
     live_recording: z.object({
       enabled: z.boolean().default(false),
       chunk_seconds: z.number().int().positive().default(300),
@@ -59,6 +74,8 @@ const CaptureSchema = z.object({
     tick_interval_sec: 60,
     batch_size: 5,
     whisper_command: 'whisper',
+    delete_audio_after_transcribe: true,
+    max_audio_bytes: 500 * 1024 * 1024,
     live_recording: {
       enabled: false,
       chunk_seconds: 300,
@@ -353,7 +370,7 @@ capture:
   screenshot_max_dim: 1280        # cap longest edge at capture (0 = native res)
   content_change_min_interval_ms: 20000 # min ms between soft-trigger captures
   capture_audio: false            # V2
-  whisper_model: tiny             # V2
+  whisper_model: base             # V2; tiny is faster but transcripts are noticeably worse
   audio:
     inbox_path: ~/.cofounderOS/raw/audio/inbox
     processed_path: ~/.cofounderOS/raw/audio/processed
@@ -361,6 +378,8 @@ capture:
     tick_interval_sec: 60
     batch_size: 5
     whisper_command: whisper      # OpenAI Whisper CLI; .txt/.vtt/.srt files import without it
+    delete_audio_after_transcribe: true # transcript is durable+redacted; raw audio is not retained by default
+    max_audio_bytes: 524288000    # 500 MiB; reject larger audio files before whisper (0 = unlimited)
     live_recording:
       enabled: false              # native plugin only; records mic/input chunks into inbox
       chunk_seconds: 300

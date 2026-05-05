@@ -107,7 +107,7 @@ class NativeCapture implements ICapture {
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? false,
-      whisper_model: config.whisper_model ?? 'tiny',
+      whisper_model: config.whisper_model ?? 'base',
       audio: {
         inbox_path: expandPath(config.audio?.inbox_path ?? '~/.cofounderOS/raw/audio/inbox'),
         processed_path: expandPath(config.audio?.processed_path ?? '~/.cofounderOS/raw/audio/processed'),

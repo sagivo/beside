@@ -421,7 +421,7 @@ journals, and MCP tools all pick them up.
 ```yaml
 capture:
   capture_audio: true
-  whisper_model: tiny
+  whisper_model: base
   audio:
     inbox_path: ~/.cofounderOS/raw/audio/inbox
     processed_path: ~/.cofounderOS/raw/audio/processed

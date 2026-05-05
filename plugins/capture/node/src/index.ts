@@ -371,7 +371,7 @@ class NodeCapture implements ICapture {
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? false,
-      whisper_model: config.whisper_model ?? 'tiny',
+      whisper_model: config.whisper_model ?? 'base',
       raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
       privacy: config.privacy ?? {
         blur_password_fields: true,
