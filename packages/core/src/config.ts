@@ -230,8 +230,8 @@ const IndexSchema = z.object({
       embedding_model: z.string().default('nomic-embed-text'),
       host: z.string().default('http://127.0.0.1:11434'),
       vision_model: z.string().optional(),
-      keep_alive: z.union([z.string(), z.number()]).default('5m'),
-      unload_after_idle_min: z.number().nonnegative().default(15),
+      keep_alive: z.union([z.string(), z.number()]).default('30s'),
+      unload_after_idle_min: z.number().nonnegative().default(2),
       // First-run UX: auto-install Ollama and auto-pull the model the
       // first time the agent loads. Set to false to require manual setup.
       auto_install: z.boolean().default(true),
@@ -239,8 +239,8 @@ const IndexSchema = z.object({
       model: 'gemma2:2b',
       embedding_model: 'nomic-embed-text',
       host: 'http://127.0.0.1:11434',
-      keep_alive: '5m',
-      unload_after_idle_min: 15,
+      keep_alive: '30s',
+      unload_after_idle_min: 2,
       auto_install: true,
     }),
     claude: z.object({
@@ -458,8 +458,8 @@ index:
       model: gemma2:2b           # swap for gemma4:e4b once your Ollama has it
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
-      keep_alive: 5m             # ask Ollama to unload after short idle windows
-      unload_after_idle_min: 15   # explicit host-side unload timer; 0 disables
+      keep_alive: 30s            # keep local models warm briefly after real work
+      unload_after_idle_min: 2    # explicit host-side unload timer; 0 disables
       auto_install: true         # auto-install Ollama + pull model on first run
     # To use a hosted OpenAI-compatible model instead:
     # plugin: openai

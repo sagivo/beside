@@ -317,6 +317,9 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
     if (embResult.processed > 0) {
       log.info(`embedded ${embResult.processed} frame(s) for semantic search`);
     }
+    await model.unload?.().catch((err: unknown) => {
+      log.debug('model unload after indexing preparation failed', { err: String(err) });
+    });
   } catch (err) {
     log.warn('frame/entity/session preparation failed (continuing)', { err: String(err) });
   }
@@ -359,6 +362,10 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   if (totalEvents === 0) log.debug('no new events to index');
   else log.info(`indexed ${totalEvents} events (${totalCreated} created, ${totalUpdated} updated)`);
 
+  await model.unload?.().catch((err: unknown) => {
+    log.debug('model unload after incremental indexing failed', { err: String(err) });
+  });
+
   return {
     eventsProcessed: totalEvents,
     pagesCreated: totalCreated,
@@ -390,6 +397,9 @@ export async function runReorganisation(handles: OrchestratorHandles): Promise<v
       });
     }
   }
+  await model.unload?.().catch((err: unknown) => {
+    log.debug('model unload after reorganisation failed', { err: String(err) });
+  });
   log.info('reorganisation complete');
 }
 
@@ -456,6 +466,9 @@ async function runFullReindexLocked(
   if (emb.processed > 0) {
     log.info(`rebuilt ${emb.processed} frame embedding(s)`);
   }
+  await model.unload?.().catch((err: unknown) => {
+    log.debug('model unload after full-reindex embeddings failed', { err: String(err) });
+  });
 
   await startPassiveExports(exports, log);
 
@@ -503,6 +516,10 @@ async function runFullReindexLocked(
     if (exp.name === 'mcp') continue;
     await exp.fullSync(finalState, strategy);
   }
+
+  await model.unload?.().catch((err: unknown) => {
+    log.debug('model unload after full re-index failed', { err: String(err) });
+  });
 
   log.info(`full re-index complete — ${allEvents.length} events processed`);
 }

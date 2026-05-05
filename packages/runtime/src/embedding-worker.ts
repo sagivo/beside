@@ -91,6 +91,10 @@ export class EmbeddingWorker {
     } catch (err) {
       this.logger.warn('embedding batch failed', { err: String(err) });
       return { processed: 0, failed: tasks.length, remaining: tasks.length };
+    } finally {
+      await this.model.unload?.().catch((err: unknown) => {
+        this.logger.debug('model unload after embedding batch failed', { err: String(err) });
+      });
     }
   }
 

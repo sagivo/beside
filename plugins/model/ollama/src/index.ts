@@ -34,6 +34,8 @@ interface OllamaModelConfig {
 const DEFAULT_HOST = 'http://127.0.0.1:11434';
 const DEFAULT_MODEL = 'gemma2:2b';
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
+const DEFAULT_KEEP_ALIVE = '30s';
+const DEFAULT_UNLOAD_AFTER_IDLE_MIN = 2;
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const PULL_FAMILIES_VISION_OK = ['gemma3', 'gemma4', 'llava', 'llama4', 'qwen2-vl'];
 
@@ -56,8 +58,11 @@ class OllamaAdapter implements IModelAdapter {
     this.model = config.model ?? DEFAULT_MODEL;
     this.embeddingModel = config.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
     this.visionModel = config.vision_model ?? this.model;
-    this.keepAlive = config.keep_alive ?? '5m';
-    this.unloadAfterIdleMs = Math.max(0, (config.unload_after_idle_min ?? 15) * 60_000);
+    this.keepAlive = config.keep_alive ?? DEFAULT_KEEP_ALIVE;
+    this.unloadAfterIdleMs = Math.max(
+      0,
+      (config.unload_after_idle_min ?? DEFAULT_UNLOAD_AFTER_IDLE_MIN) * 60_000,
+    );
     this.autoInstall = config.auto_install ?? true;
     this.client = new Ollama({ host: this.host });
   }
@@ -248,8 +253,11 @@ class OllamaAdapter implements IModelAdapter {
 
   async unload(): Promise<void> {
     this.clearUnloadTimer();
-    const models = Array.from(new Set([this.model, this.embeddingModel, this.visionModel]));
-    await Promise.all(models.map((model) => this.unloadModel(model)));
+    const generationModels = Array.from(new Set([this.model, this.visionModel]));
+    await Promise.all([
+      ...generationModels.map((model) => this.unloadGenerationModel(model)),
+      this.unloadEmbeddingModel(this.embeddingModel),
+    ]);
   }
 
   /**
@@ -428,13 +436,15 @@ class OllamaAdapter implements IModelAdapter {
     this.unloadTimer = null;
   }
 
-  private async unloadModel(model: string): Promise<void> {
+  private async unloadGenerationModel(model: string): Promise<void> {
     try {
-      const res = await fetch(new URL('/api/generate', this.host), {
+      const res = await fetch(new URL('/api/chat', this.host), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           model,
+          messages: [],
+          stream: false,
           keep_alive: 0,
         }),
       });
@@ -447,6 +457,32 @@ class OllamaAdapter implements IModelAdapter {
       }
     } catch (err) {
       this.logger.debug('ollama model unload request failed', {
+        model,
+        err: String(err),
+      });
+    }
+  }
+
+  private async unloadEmbeddingModel(model: string): Promise<void> {
+    try {
+      const res = await fetch(new URL('/api/embed', this.host), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          input: '',
+          keep_alive: 0,
+        }),
+      });
+      if (!res.ok) {
+        this.logger.debug('ollama embedding model unload returned non-OK status', {
+          model,
+          status: res.status,
+          body: await res.text(),
+        });
+      }
+    } catch (err) {
+      this.logger.debug('ollama embedding model unload request failed', {
         model,
         err: String(err),
       });
