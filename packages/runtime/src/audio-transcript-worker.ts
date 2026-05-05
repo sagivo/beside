@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 import type { IStorage, Logger, RawEvent } from '@cofounderos/interfaces';
 import { ensureDir, expandPath, newEventId, newSessionId } from '@cofounderos/core';
 import { redactPii } from './pii.js';
@@ -221,6 +222,17 @@ export class AudioTranscriptWorker {
     return totals;
   }
 
+  /**
+   * Drain the inbox by calling `tick()` repeatedly until either:
+   *   - the tick reports no progress (inbox is empty or whisper is
+   *     unavailable and we're stuck on audio), or
+   *   - a batch came back partial (fewer than `batchSize` items
+   *     touched), implying the queue is below the floor.
+   *
+   * The per-tick re-entrancy guard already serializes work; no
+   * arbitrary iteration cap is needed beyond the natural termination
+   * conditions above.
+   */
   async drain(): Promise<AudioTranscriptWorkerResult> {
     const total: AudioTranscriptWorkerResult = {
       processed: 0,
@@ -228,7 +240,7 @@ export class AudioTranscriptWorker {
       imported: 0,
       failed: 0,
     };
-    for (let i = 0; i < 10_000; i++) {
+    while (true) {
       const r = await this.tick();
       total.processed += r.processed;
       total.transcribed += r.transcribed;
@@ -294,8 +306,8 @@ export class AudioTranscriptWorker {
   private async readTranscriptFile(filePath: string): Promise<string> {
     const raw = await fs.readFile(filePath, 'utf8');
     const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.vtt') return stripVtt(raw);
-    if (ext === '.srt') return stripSrt(raw);
+    if (ext === '.vtt') return stripSubtitles(raw, 'vtt');
+    if (ext === '.srt') return stripSubtitles(raw, 'srt');
     return raw;
   }
 
@@ -434,22 +446,56 @@ export class AudioTranscriptWorker {
   }
 }
 
-function stripVtt(input: string): string {
-  return input
-    .split(/\r?\n/)
-    .filter((line) => line.trim() && line.trim() !== 'WEBVTT')
-    .filter((line) => !line.includes('-->'))
-    .map((line) => line.replace(/<[^>]+>/g, '').trim())
-    .join('\n');
-}
+/**
+ * Convert a subtitle file (VTT or SRT) to plain text while preserving
+ * cue structure: each cue becomes a paragraph, separated by a blank
+ * line. Speaker tags from VTT (`<v Alice>...`) are surfaced as a
+ * `Alice: ` prefix so embeddings and search can attribute lines.
+ *
+ * The earlier implementation collapsed every line into a single
+ * stream, which destroyed pause/turn information that downstream
+ * search and chunking benefits from.
+ */
+function stripSubtitles(input: string, kind: 'vtt' | 'srt'): string {
+  const cues: string[] = [];
+  let current: string[] = [];
+  let currentSpeaker: string | null = null;
 
-function stripSrt(input: string): string {
-  return input
-    .split(/\r?\n/)
-    .filter((line) => line.trim())
-    .filter((line) => !/^\d+$/.test(line.trim()))
-    .filter((line) => !line.includes('-->'))
-    .join('\n');
+  const flush = () => {
+    if (current.length === 0) return;
+    const body = current.join(' ').replace(/\s+/g, ' ').trim();
+    if (body) {
+      cues.push(currentSpeaker ? `${currentSpeaker}: ${body}` : body);
+    }
+    current = [];
+    currentSpeaker = null;
+  };
+
+  for (const rawLine of input.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    // Blank line ends a cue.
+    if (!line) {
+      flush();
+      continue;
+    }
+    // VTT preamble.
+    if (kind === 'vtt' && (line === 'WEBVTT' || line.startsWith('NOTE') || line.startsWith('STYLE'))) {
+      continue;
+    }
+    // Cue numbers (SRT) and standalone integer cue ids (VTT).
+    if (/^\d+$/.test(line)) continue;
+    // Timing line.
+    if (line.includes('-->')) continue;
+    // Capture the first VTT speaker tag in a cue, then strip all tags.
+    if (kind === 'vtt' && currentSpeaker === null) {
+      const speakerMatch = line.match(/<v(?:\s+[^>]*?)?\s+([^>]+?)>/);
+      if (speakerMatch) currentSpeaker = speakerMatch[1].trim();
+    }
+    const cleaned = line.replace(/<[^>]+>/g, '').trim();
+    if (cleaned) current.push(cleaned);
+  }
+  flush();
+  return cues.join('\n\n');
 }
 
 /**
@@ -485,16 +531,21 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
 }
 
+/**
+ * Pick a path that doesn't currently exist. Try the requested name
+ * first; on collision, append an 8-char random suffix. We deliberately
+ * skip the classic "increment a counter" loop because it's O(n) per
+ * collision and TOCTOU-racy if two ticks pick the same suffix between
+ * `access` and `rename`. A random suffix is collision-free in
+ * practice (1 in 2^32) and removes the loop entirely.
+ */
 async function uniquePath(candidate: string): Promise<string> {
-  const parsed = path.parse(candidate);
-  for (let i = 0; i < 10_000; i++) {
-    const suffix = i === 0 ? '' : `-${i}`;
-    const p = path.join(parsed.dir, `${parsed.name}${suffix}${parsed.ext}`);
-    try {
-      await fs.access(p);
-    } catch {
-      return p;
-    }
+  try {
+    await fs.access(candidate);
+  } catch {
+    return candidate;
   }
-  throw new Error(`could not find unique path for ${candidate}`);
+  const parsed = path.parse(candidate);
+  const suffix = randomBytes(4).toString('hex');
+  return path.join(parsed.dir, `${parsed.name}-${suffix}${parsed.ext}`);
 }
