@@ -5,6 +5,7 @@ import {
   FolderOpen,
   HelpCircle,
   LayoutDashboard,
+  MessageSquare,
   Pause,
   Play,
   Plug,
@@ -90,6 +91,9 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onJump('chat'))}>
+            <MessageSquare /> AI Chat
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('connect'))}>
             <Plug /> Connect AI

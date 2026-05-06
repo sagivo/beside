@@ -16,6 +16,12 @@ import type {
   FrameTextSource,
 } from '@cofounderos/interfaces';
 import { renderJournalMarkdown } from '@cofounderos/interfaces';
+import { isSelfFrame } from './parsers.js';
+import {
+  buildDailySummary,
+  buildEntitySummary,
+  type OpenLoop,
+} from './digest.js';
 
 export interface McpServices {
   storage: IStorage;
@@ -94,14 +100,22 @@ export function createMcpServer(
     'search_memory',
     {
       description:
-        'Blended search: returns the best matching frames (specific moments) and wiki pages (synthesised summaries). Use this as the default entrypoint.',
+        'Blended search: returns the best matching frames (specific moments) and wiki pages (synthesised summaries). Use this as the default entrypoint. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
       inputSchema: {
         query: z.string().describe('Natural-language search query.'),
         limit: z.number().int().min(1).max(50).optional().describe('Max results per category, default 5.'),
+        exclude_self: z
+          .boolean()
+          .optional()
+          .describe('Drop frames captured from the CofounderOS dashboard itself. Default true.'),
       },
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, exclude_self }) => {
       const cap = limit ?? 5;
+      const dropSelf = exclude_self !== false;
+      // Over-fetch when filtering self frames so we still return `cap`
+      // useful results once the dashboard noise has been stripped.
+      const fetchCap = dropSelf ? cap * 2 : cap;
 
       // 1. Frame-level retrieval — the "specific moment" answers.
       // Keyword FTS remains the precision path; semantic search adds
@@ -110,11 +124,15 @@ export function createMcpServer(
       let frames: Frame[] = [];
       let semanticFrames: Array<{ frame: Frame; score: number }> = [];
       try {
-        frames = await services.storage.searchFrames({ text: query, limit: cap });
+        frames = await services.storage.searchFrames({ text: query, limit: fetchCap });
       } catch (err) {
         log.debug('searchFrames unavailable', { err: String(err) });
       }
-      semanticFrames = await semanticFrameSearch(services, query, cap);
+      semanticFrames = await semanticFrameSearch(services, query, fetchCap);
+      if (dropSelf) {
+        frames = frames.filter((f) => !isSelfFrame(f));
+        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
+      }
       const blendedFrames = blendFrameMatches(frames, semanticFrames, cap);
 
       // 2. Wiki page retrieval — the "synthesised summary" answers.
@@ -192,6 +210,10 @@ export function createMcpServer(
           .describe(
             `Approximate maximum JSON response characters, default ${DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS}. Results are packed by relevance.`,
           ),
+        exclude_self: z
+          .boolean()
+          .optional()
+          .describe('Drop frames captured from the CofounderOS dashboard itself. Default true.'),
       },
     },
     async ({
@@ -212,10 +234,15 @@ export function createMcpServer(
       context_before,
       context_after,
       max_response_chars,
+      exclude_self,
     }) => {
       const requestedLimit = limit ?? 25;
       const requestedOffset = offset ?? 0;
+      const dropSelf = exclude_self !== false;
       const candidateLimit = requestedLimit + requestedOffset;
+      // Over-fetch when filtering self frames so the post-filter list
+      // still has enough rows to satisfy the requested page.
+      const fetchLimit = dropSelf ? candidateLimit * 2 : candidateLimit;
       const filters = {
         from,
         to,
@@ -227,14 +254,18 @@ export function createMcpServer(
         urlDomain: url_domain,
         textSource: text_source,
       };
-      const frames = await services.storage.searchFrames({
+      let frames = await services.storage.searchFrames({
         text: query,
         ...filters,
-        limit: candidateLimit,
+        limit: fetchLimit,
       });
-      const semanticFrames = semantic === false
+      let semanticFrames = semantic === false
         ? []
-        : await semanticFrameSearch(services, query, candidateLimit, filters);
+        : await semanticFrameSearch(services, query, fetchLimit, filters);
+      if (dropSelf) {
+        frames = frames.filter((f) => !isSelfFrame(f));
+        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
+      }
       const blended = blendFrameMatches(frames, semanticFrames, candidateLimit)
         .slice(requestedOffset, requestedOffset + requestedLimit);
       if (include_context) {
@@ -755,6 +786,241 @@ export function createMcpServer(
   );
 
   server.registerTool(
+    'get_daily_summary',
+    {
+      description:
+        'One-shot digest for a single day (YYYY-MM-DD): totals, top apps, top entities, top URL hosts, sessions with headlines, calendar events parsed from screenshots, Slack thread observations, code-review queue, and open loops. Frames captured of the CofounderOS dashboard itself are filtered out by default — pass `include_self: true` to include them.',
+      inputSchema: {
+        day: z.string().describe('Day in YYYY-MM-DD format.'),
+        include_self: z
+          .boolean()
+          .optional()
+          .describe('Include CofounderOS dashboard frames in aggregations. Default false.'),
+        open_loops_limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('Cap on the open-loops list. Default 10.'),
+      },
+    },
+    async ({ day, include_self, open_loops_limit }) => {
+      const summary = await buildDailySummary(services.storage, day, {
+        include_self,
+        open_loops_limit,
+      });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_calendar_events',
+    {
+      description:
+        'Extract structured calendar events (title + time label + source frame) from frames captured on a calendar UI for a given day. Heuristic — useful as a fast-path before reading raw OCR. Pair with `get_frame_context` to verify any individual extraction.',
+      inputSchema: {
+        day: z.string().describe('Day in YYYY-MM-DD format.'),
+        include_self: z
+          .boolean()
+          .optional()
+          .describe('Include CofounderOS dashboard frames. Default false.'),
+      },
+    },
+    async ({ day, include_self }) => {
+      const summary = await buildDailySummary(services.storage, day, {
+        include_self,
+        open_loops_limit: 0,
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                day,
+                count: summary.calendar_events.length,
+                events: summary.calendar_events,
+                notes: summary.notes,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_open_loops',
+    {
+      description:
+        '"What\'s still on my plate?" — surfaces unanswered Slack messages (questions, mentions) and open / draft GitHub PRs and issues observed in the requested window. Defaults to today. Heuristic: combine with `search_frames` to inspect the source moment for any item.',
+      inputSchema: {
+        day: z
+          .string()
+          .optional()
+          .describe('Single YYYY-MM-DD. Mutually exclusive with `since`/`until`. Defaults to today (UTC).'),
+        since: z.string().optional().describe('ISO timestamp lower bound.'),
+        until: z.string().optional().describe('ISO timestamp upper bound.'),
+        kinds: z
+          .array(z.enum(['unanswered_chat', 'open_pull_request', 'open_issue']))
+          .optional()
+          .describe('Restrict to a subset of loop kinds.'),
+        limit: z.number().int().min(1).max(50).optional().describe('Max loops returned. Default 15.'),
+        include_self: z
+          .boolean()
+          .optional()
+          .describe('Include CofounderOS dashboard frames. Default false.'),
+      },
+    },
+    async ({ day, since, until, kinds, limit, include_self }) => {
+      const cap = limit ?? 15;
+      const days = resolveDayRange({ day, since, until });
+      const kindsSet = kinds ? new Set(kinds) : null;
+      // Each day's digest is independent, so build them sequentially
+      // and concatenate. Over-fetch per day so we can rank+dedupe
+      // again across all days below.
+      const acc: OpenLoop[] = [];
+      for (const d of days) {
+        const summary = await buildDailySummary(services.storage, d, {
+          include_self,
+          open_loops_limit: cap * 2,
+        });
+        for (const loop of summary.open_loops) {
+          if (kindsSet && !kindsSet.has(loop.kind)) continue;
+          if (since && loop.last_seen < since) continue;
+          if (until && loop.last_seen > until) continue;
+          acc.push(loop);
+        }
+      }
+      // Final dedupe across days on (kind, ref, head-of-description) —
+      // keep the most recent observation for each loop.
+      const byRef = new Map<string, OpenLoop>();
+      for (const loop of acc) {
+        const key = `${loop.kind}|${loop.ref}|${loop.description.slice(0, 50)}`;
+        const prev = byRef.get(key);
+        if (!prev || loop.last_seen > prev.last_seen) byRef.set(key, loop);
+      }
+      const ranked = [...byRef.values()]
+        .sort((a, b) => b.last_seen.localeCompare(a.last_seen))
+        .slice(0, cap);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                window: {
+                  days,
+                  since: since ?? null,
+                  until: until ?? null,
+                },
+                count: ranked.length,
+                open_loops: ranked,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_entity_summary',
+    {
+      description:
+        'Fresh, focused rollup for one remembered entity (project / repo / channel / contact / app) in an optional time window. Returns totals, top window titles, top URL hosts, recent sessions with headlines, calendar events tied to the entity, and any open loops detected in its frames.',
+      inputSchema: {
+        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        since: z.string().optional().describe('Inclusive lower bound (ISO timestamp).'),
+        until: z.string().optional().describe('Inclusive upper bound (ISO timestamp).'),
+        detail_limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe('Cap on each per-section list (top titles, sessions, events). Default 8.'),
+      },
+    },
+    async ({ path, since, until, detail_limit }) => {
+      const summary = await buildEntitySummary(services.storage, path, {
+        since,
+        until,
+        detail_limit,
+      });
+      if (!summary) {
+        return {
+          content: [{ type: 'text', text: `Entity "${path}" not found.` }],
+          isError: true,
+        };
+      }
+      return {
+        content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_slack_activity',
+    {
+      description:
+        'Structured digest of Slack / chat frames observed on a day: per-channel observation count, the last representative message OCR\'d, mentions, and whether the visible message looks unanswered. Heuristic — pair with `get_frame_context` to verify any single conversation. Frames from the CofounderOS dashboard are excluded by default.',
+      inputSchema: {
+        day: z.string().describe('Day in YYYY-MM-DD format.'),
+        channel: z
+          .string()
+          .optional()
+          .describe('Restrict to one Slack channel name (with or without leading "#").'),
+        limit: z.number().int().min(1).max(50).optional().describe('Max threads returned. Default 12.'),
+        include_self: z
+          .boolean()
+          .optional()
+          .describe('Include CofounderOS dashboard frames. Default false.'),
+      },
+    },
+    async ({ day, channel, limit, include_self }) => {
+      const summary = await buildDailySummary(services.storage, day, {
+        include_self,
+        open_loops_limit: 0,
+      });
+      const cap = limit ?? 12;
+      const targetChannel = channel
+        ? `#${channel.replace(/^#/, '').toLowerCase()}`
+        : null;
+      const filtered = targetChannel
+        ? summary.slack_threads.filter(
+            (t) => (t.channel ?? '').toLowerCase() === targetChannel,
+          )
+        : summary.slack_threads;
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                day,
+                channel: targetChannel,
+                count: filtered.length,
+                threads: filtered.slice(0, cap),
+                notes: summary.notes,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
     'trigger_reindex',
     {
       description: 'Trigger an indexing pass. Optionally a full re-index from raw data.',
@@ -781,6 +1047,44 @@ export function createMcpServer(
   );
 
   return server;
+}
+
+/**
+ * Resolve a flexible {day, since, until} input to a list of YYYY-MM-DD
+ * day keys. Used by tools that aggregate per-day digests across a
+ * window. We deliberately cap the range at 14 days so a stray
+ * unbounded query can't fan out to year-long aggregations.
+ */
+const MAX_DAY_RANGE = 14;
+
+function resolveDayRange(input: {
+  day?: string;
+  since?: string;
+  until?: string;
+}): string[] {
+  if (input.day) return [input.day];
+  const today = todayKey();
+  const fromDay = input.since ? input.since.slice(0, 10) : today;
+  const toDay = input.until ? input.until.slice(0, 10) : today;
+  if (toDay < fromDay) return [today];
+  const out: string[] = [];
+  const fromMs = Date.parse(`${fromDay}T00:00:00Z`);
+  const toMs = Date.parse(`${toDay}T00:00:00Z`);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return [today];
+  const days = Math.min(MAX_DAY_RANGE, Math.floor((toMs - fromMs) / 86_400_000) + 1);
+  for (let i = 0; i < days; i++) {
+    const ms = fromMs + i * 86_400_000;
+    out.push(new Date(ms).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+function todayKey(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 async function attachFrameContexts(

@@ -351,17 +351,37 @@ search as first-class tools — agents don't need to read files directly.
 
 | Tool | What it does |
 |------|--------------|
-| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. |
-| `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. |
+| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
+| `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. Same `exclude_self` default. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
+| `get_daily_summary` | One-shot digest for a day: totals, top apps, top entities, top URL hosts, sessions with headlines, calendar events, Slack threads, code-review queue, and open loops. |
+| `get_calendar_events` | Heuristic structured calendar extraction from frames captured on a calendar UI for a given day. Returns `{ time_label, title, source_frame_id }` rows. |
+| `get_open_loops` | Surfaces unanswered Slack messages and open / draft GitHub PRs and issues observed in a day or `since`/`until` window. The "what's still on my plate?" tool. |
+| `get_entity_summary` | Fresh, focused rollup for one entity in an optional time window — totals, top window titles, top URL hosts, recent sessions, calendar events, and open loops tied to that entity. |
+| `get_slack_activity` | Per-channel observations from chat frames on a given day: representative message OCR, mentions, whether the visible message looks unanswered. |
 | `list_sessions` | Recent activity sessions (continuous focus runs) with primary entity, app, and active time. |
 | `get_activity_session` | Drill into one activity session by id; returns metadata + frame timeline. |
+| `list_entities` | Remembered entities (projects, repos, channels, contacts, …) by recent activity or FTS-ranked free-text search. |
+| `get_entity` | Read one entity by stable path; optionally include its earliest frames as evidence. |
+| `get_entity_frames` | Frames belonging to an entity, oldest first. |
+| `list_entity_neighbours` | Entities that recurrently appear in the same activity sessions as the given entity (working knowledge graph). |
+| `get_entity_timeline` | Per-day or per-hour attention buckets for an entity — frame count, focused minutes, distinct sessions per bucket. |
 | `get_page` | Read a wiki page by relative path. |
 | `get_index` | Read the wiki root `index.md`. |
 | `query_raw_events` | Raw event log query (bypasses the index). |
 | `get_session` | Reconstruct events + screenshot paths over a time range (raw-event time slice). |
 | `trigger_reindex` | Queue an incremental or full re-index. |
+
+The digest tools (`get_daily_summary`, `get_calendar_events`, `get_open_loops`,
+`get_slack_activity`, `get_entity_summary`) compose existing storage primitives
+plus heuristic OCR parsers — they do not require a separate indexer pass and
+return fresh data on every call. The calendar / Slack / PR extractors are
+deliberately conservative: they tag candidates with `source_frame_id` so you
+can chase any individual extraction back to its screenshot via
+`get_frame_context`. Frames captured of the CofounderOS dashboard itself are
+excluded by default from every digest tool; pass `include_self: true` to
+include them.
 
 ### Semantic embeddings
 

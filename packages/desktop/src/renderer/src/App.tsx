@@ -4,6 +4,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ErrorView } from '@/components/ErrorView';
 import { FrameDetailProvider } from '@/components/FrameDetailDialog';
 import { Toaster, toast } from '@/components/ui/sonner';
+import { chatStore } from '@/lib/chat-store';
 import { SidebarStateProvider } from '@/lib/sidebar-state';
 import { ThemeProvider } from '@/lib/theme';
 import { ONBOARDING_KEY, type Screen } from '@/types';
@@ -24,6 +25,7 @@ const Settings = React.lazy(() =>
 const Timeline = React.lazy(() =>
   import('@/screens/Timeline').then((mod) => ({ default: mod.Timeline })),
 );
+const Chat = React.lazy(() => import('@/screens/Chat').then((mod) => ({ default: mod.Chat })));
 
 // Onboarding is a sizeable flow (~33KB source, ~6 step components)
 // that 99% of the time only runs once per install. Lazy-loading it keeps
@@ -163,6 +165,23 @@ function AppInner() {
     setSearchRequest({ id: searchRequestId.current, query: q });
     setScreen('search');
   }
+
+  // Navigating into the AI Chat tab from another screen should drop the
+  // user into a fresh conversation rather than re-opening whichever chat
+  // happened to be active last. Clicking the tab while already on chat
+  // is a no-op so we don't churn through empty "New chat" entries.
+  const navigateToScreen = React.useCallback(
+    (next: Screen) => {
+      setScreen((current) => {
+        if (next === 'chat' && current !== 'chat') {
+          const conv = chatStore.create();
+          chatStore.setActiveId(conv.id);
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   // Capture / index actions with toast feedback. Centralised here so the
   // Dashboard, AppShell command palette, and any future surface all get the
@@ -332,6 +351,8 @@ function AppInner() {
     />
   ) : screen === 'search' ? (
     <Search days={days} searchRequest={searchRequest} />
+  ) : screen === 'chat' ? (
+    <Chat />
   ) : screen === 'connect' ? (
     <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
   ) : screen === 'settings' ? (
@@ -353,7 +374,7 @@ function AppInner() {
   return (
     <AppShell
       screen={screen}
-      onChange={setScreen}
+      onChange={navigateToScreen}
       overview={overview}
       onStart={actions.onStart}
       onStop={actions.onStop}

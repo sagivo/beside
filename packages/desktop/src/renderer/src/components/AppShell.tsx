@@ -63,9 +63,10 @@ export function AppShell({
       '1': 'dashboard',
       '2': 'timeline',
       '3': 'search',
-      '4': 'connect',
-      '5': 'settings',
-      '6': 'help',
+      '4': 'chat',
+      '5': 'connect',
+      '6': 'settings',
+      '7': 'help',
     };
 
     function onKey(e: KeyboardEvent) {
@@ -126,9 +127,13 @@ export function AppShell({
 
       <main className="flex flex-1 flex-col overflow-hidden">
         <div className="app-drag h-8 shrink-0" aria-hidden />
-        <div className="flex-1 overflow-y-auto">
-          <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
-        </div>
+        {screen === 'chat' ? (
+          <div className="app-no-drag flex-1 min-h-0 overflow-hidden">{children}</div>
+        ) : (
+          <div className="flex-1 overflow-y-auto">
+            <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
+          </div>
+        )}
       </main>
 
       <CommandPalette

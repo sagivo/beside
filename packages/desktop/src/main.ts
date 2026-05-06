@@ -203,6 +203,13 @@ class RuntimeServiceClient {
       applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
       statusWindow?.webContents.send('cofounderos:overview', payload);
     });
+    this.on('chat-event', (payload) => {
+      // Chat is multiplexed by `payload.turnId`; the renderer routes
+      // each event to the matching message bubble. We just forward
+      // verbatim — no per-window filtering needed since there is one
+      // status window today.
+      statusWindow?.webContents.send('cofounderos:chat-event', payload);
+    });
 
     const rl = readline.createInterface({
       input: this.child.stdout!,
@@ -1259,6 +1266,17 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:request-mic-permission', async () => {
     return await requestMicPermission();
+  });
+  ipcMain.handle('cofounderos:chat-start', async (_event, params: unknown) => {
+    // Fire-and-forget on the IPC side: chat events stream over the
+    // 'cofounderos:chat-event' push channel. The handle() promise
+    // resolves once the harness emits its terminal event, so we await
+    // it here to keep the renderer's request alive (and to surface any
+    // top-level error to the caller).
+    return await (await getRuntimeForRequest()).call('chatStart', params);
+  });
+  ipcMain.handle('cofounderos:chat-cancel', async (_event, turnId: string) => {
+    return await (await getRuntimeForRequest()).call('chatCancel', { turnId });
   });
 }
 

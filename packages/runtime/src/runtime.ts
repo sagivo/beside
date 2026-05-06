@@ -31,6 +31,13 @@ import {
   type OrchestratorOptions,
 } from './orchestrator.js';
 import { renderJournalMarkdown } from '@cofounderos/interfaces';
+import {
+  runChatTurn,
+  type ChatStreamHandler,
+  type ChatTurnInput,
+  type HarnessHandle,
+  type HarnessOptions,
+} from './agent/index.js';
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -170,6 +177,7 @@ export class CofounderRuntime {
   private overviewInFlight: Promise<RuntimeOverview> | null = null;
   private manualJob: { name: string; startedAt: string } | null = null;
   private lastManualJobCompletedAt: string | null = null;
+  private readonly activeChatTurns = new Map<string, HarnessHandle>();
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -632,6 +640,57 @@ export class CofounderRuntime {
     });
   }
 
+  /**
+   * Run one chat turn through the local AI harness. Streams typed
+   * events back through `onEvent`; resolves once the turn completes
+   * (either with a `done` or `error` terminal event). The returned
+   * handle lets callers cancel the in-flight turn.
+   *
+   * The chat method intentionally tracks active turns by `turnId` so
+   * the desktop runtime-service can route a `chatCancel` message to
+   * the right harness instance when the user presses Stop.
+   */
+  chat(
+    input: ChatTurnInput,
+    onEvent: ChatStreamHandler,
+    options?: HarnessOptions,
+  ): { done: Promise<void>; handle: HarnessHandle } {
+    const tracked: HarnessHandle = {
+      cancel: () => {
+        const live = this.activeChatTurns.get(input.turnId);
+        if (live) live.cancel();
+      },
+    };
+    const done = (async (): Promise<void> => {
+      const handles = await this.getOrCreateHandles();
+      const run = runChatTurn(
+        {
+          storage: handles.storage,
+          strategy: handles.strategy,
+          model: handles.model,
+          logger: this.logger.child('chat'),
+        },
+        input,
+        onEvent,
+        options,
+      );
+      this.activeChatTurns.set(input.turnId, run.handle);
+      try {
+        await run.done;
+      } finally {
+        this.activeChatTurns.delete(input.turnId);
+      }
+    })();
+    return { done, handle: tracked };
+  }
+
+  cancelChat(turnId: string): boolean {
+    const live = this.activeChatTurns.get(turnId);
+    if (!live) return false;
+    live.cancel();
+    return true;
+  }
+
   async triggerIndex(): Promise<void> {
     await this.runManualJob('index-incremental', async () => {
       await this.withHandles((handles) => runIncremental(handles).then(() => undefined));
@@ -652,6 +711,15 @@ export class CofounderRuntime {
 
   private async runManualJob(name: string, fn: () => Promise<void>): Promise<void> {
     if (this.manualJob) {
+      if (this.manualJob.name === name) {
+        // Re-triggering the same job (e.g. user double-clicks "Index now")
+        // is a no-op rather than an error: the work is already in flight.
+        this.logger.info('manual job already running; ignoring duplicate trigger', {
+          job: name,
+          startedAt: this.manualJob.startedAt,
+        });
+        return;
+      }
       throw new Error(`Runtime job already running: ${this.manualJob.name}`);
     }
     this.manualJob = { name, startedAt: new Date().toISOString() };
