@@ -8,11 +8,12 @@ import type {
 } from '@cofounderos/interfaces';
 import { Ollama } from 'ollama';
 import {
-  commandExists,
+  installOllamaMacOS,
   installOllamaUnixLike,
   installOllamaWindows,
   isOllamaReachable,
   manualInstallHint,
+  ollamaCommandExists,
   startOllamaDaemon,
   waitForOllama,
 } from './bootstrap.js';
@@ -297,7 +298,7 @@ class OllamaAdapter implements IModelAdapter {
     }
 
     // Need install + start.
-    if (!(await commandExists('ollama'))) {
+    if (!(await ollamaCommandExists())) {
       if (!this.autoInstall) {
         const reason =
           `Ollama is not installed and auto_install is disabled. ${manualInstallHint()}`;
@@ -316,16 +317,19 @@ class OllamaAdapter implements IModelAdapter {
 
   private async installOllama(emit: ModelBootstrapHandler): Promise<void> {
     const tool = 'ollama';
-    const isWindows = process.platform === 'win32';
+    const platform = process.platform;
     emit({
       kind: 'install_started',
       tool,
-      message: isWindows
+      message: platform === 'win32'
         ? `Installing Ollama via winget. A UAC prompt may appear in a separate window.`
+        : platform === 'darwin'
+          ? `Installing Ollama.app without requiring a terminal password prompt.`
         : `Installing Ollama for the first time. You may be prompted for your password.`,
     });
     try {
-      if (isWindows) await installOllamaWindows(emit);
+      if (platform === 'win32') await installOllamaWindows(emit);
+      else if (platform === 'darwin') await installOllamaMacOS(emit);
       else await installOllamaUnixLike(emit);
     } catch (err) {
       const reason = (err as Error).message;

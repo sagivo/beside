@@ -2,12 +2,14 @@ import Foundation
 import AppKit
 import ApplicationServices
 import AVFoundation
+import CoreAudio
 
 struct HelperConfig: Decodable {
   var raw_root: String?
   var capture_audio: Bool?
   var audio: AudioConfig?
   var poll_interval_ms: Int?
+  var focus_settle_delay_ms: Int?
   var idle_threshold_sec: Int?
   var screenshot_format: String?
   var screenshot_quality: Int?
@@ -31,6 +33,8 @@ struct LiveRecordingConfig: Decodable {
   var format: String?
   var sample_rate: Int?
   var channels: Int?
+  var activation: String?
+  var poll_interval_sec: Int?
 }
 
 struct AccessibilityConfig: Decodable {
@@ -218,9 +222,15 @@ struct ActiveWindow {
   }
 }
 
+struct PendingFocusCapture {
+  let window: ActiveWindow
+  let dueAt: Date
+}
+
 func runMacCapture(config: HelperConfig) {
   let sessionId = "sess_" + String(Int(Date().timeIntervalSince1970 * 1000), radix: 36) + "_native"
   let pollInterval = max(0.25, Double(config.poll_interval_ms ?? 1500) / 1000.0)
+  let focusSettleDelay = max(0, Double(config.focus_settle_delay_ms ?? 900) / 1000.0)
   let idleThreshold = Double(config.idle_threshold_sec ?? 60)
   let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 20_000) / 1000.0)
   let displays = enumerateDisplays()
@@ -237,6 +247,7 @@ func runMacCapture(config: HelperConfig) {
       "displays": displays.map { displayJson($0) },
       "selected_displays": selectedDisplays.map { displayJson($0) },
       "poll_interval_sec": pollInterval,
+      "focus_settle_delay_sec": focusSettleDelay,
       "content_change_interval_sec": contentChangeInterval,
       "idle_threshold_sec": idleThreshold
     ]
@@ -262,6 +273,7 @@ func runMacCapture(config: HelperConfig) {
   var lastEnteredAt = Date()
   var lastUrl: String? = nil
   var lastSoftCaptureAt = Date.distantPast
+  var pendingFocusCapture: PendingFocusCapture? = nil
 
   while true {
     while let command = readStdinLineNonBlocking() {
@@ -269,12 +281,16 @@ func runMacCapture(config: HelperConfig) {
         audioChunker.stop()
         return
       }
-      if command.contains("\"kind\":\"pause\"") { paused = true }
+      if command.contains("\"kind\":\"pause\"") {
+        paused = true
+        audioChunker.stop()
+        pendingFocusCapture = nil
+      }
       if command.contains("\"kind\":\"resume\"") { paused = false }
     }
 
     if paused {
-      audioChunker.tick()
+      audioChunker.tick(paused: true)
       Thread.sleep(forTimeInterval: pollInterval)
       continue
     }
@@ -321,7 +337,9 @@ func runMacCapture(config: HelperConfig) {
       }
     }
 
+    var currentWindow: ActiveWindow? = nil
     if let current = queryActiveWindow(displays: displays) {
+      currentWindow = current
       if lastWindow?.focusKey != current.focusKey {
         if let previous = lastWindow {
           emitEvent(
@@ -354,14 +372,10 @@ func runMacCapture(config: HelperConfig) {
           screenIndex: current.screenIndex,
           metadata: windowMetadata(current, displays: displays)
         )
-        captureScreenshots(
-          trigger: "window_focus",
+        pendingFocusCapture = PendingFocusCapture(
           window: current,
-          sessionId: sessionId,
-          displays: selectedDisplays,
-          config: config
+          dueAt: Date().addingTimeInterval(focusSettleDelay)
         )
-        lastSoftCaptureAt = Date()
         lastWindow = current
         lastEnteredAt = Date()
         lastUrl = current.url
@@ -391,8 +405,9 @@ func runMacCapture(config: HelperConfig) {
           config: config
         )
         lastSoftCaptureAt = Date()
+        pendingFocusCapture = nil
         lastUrl = current.url
-      } else if !idle && contentChangeInterval > 0 && Date().timeIntervalSince(lastSoftCaptureAt) >= contentChangeInterval {
+      } else if !idle && pendingFocusCapture == nil && contentChangeInterval > 0 && Date().timeIntervalSince(lastSoftCaptureAt) >= contentChangeInterval {
         captureScreenshots(
           trigger: "content_change",
           window: current,
@@ -404,8 +419,20 @@ func runMacCapture(config: HelperConfig) {
       }
     }
 
+    if !idle, let pending = pendingFocusCapture, Date() >= pending.dueAt {
+      captureScreenshots(
+        trigger: "window_focus",
+        window: currentWindow ?? pending.window,
+        sessionId: sessionId,
+        displays: selectedDisplays,
+        config: config
+      )
+      lastSoftCaptureAt = Date()
+      pendingFocusCapture = nil
+    }
+
     emit(["kind": "status", "cpuPercent": 0, "memoryMB": currentMemoryMB(), "storageBytesToday": 0])
-    audioChunker.tick()
+    audioChunker.tick(paused: false)
     Thread.sleep(forTimeInterval: pollInterval)
   }
 }
@@ -858,40 +885,39 @@ func currentMemoryMB() -> Int {
 
 final class AudioChunker: NSObject, AVAudioRecorderDelegate {
   private let enabled: Bool
+  private let activation: String
   private let inboxPath: String
   private let partialPath: String
   private let chunkSeconds: TimeInterval
+  private let pollInterval: TimeInterval
   private let sampleRate: Int
   private let channels: Int
+  private let inputDetector = OtherProcessAudioInputDetector()
   private var recorder: AVAudioRecorder?
   private var currentStartedAt: Date?
   private var currentPartialURL: URL?
   private var currentFinalURL: URL?
   private var chunkIndex = 0
+  private var prepared = false
+  private var permissionDeniedLogged = false
+  private var nextInputCheckAt = Date.distantPast
 
   init(config: HelperConfig) {
     let live = config.audio?.live_recording
     self.enabled = (config.capture_audio == true) && (live?.enabled == true)
+    self.activation = live?.activation ?? "other_process_input"
     self.inboxPath = NSString(
       string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
     ).expandingTildeInPath
     self.partialPath = (self.inboxPath as NSString).appendingPathComponent(".partial")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
+    self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
     self.sampleRate = live?.sample_rate ?? 16_000
     self.channels = live?.channels ?? 1
   }
 
   func startIfEnabled() {
     guard enabled else { return }
-    guard ensureMicrophonePermission() else {
-      emit([
-        "kind": "error",
-        "code": "audio_permission_denied",
-        "message": "Native live audio recording is enabled but microphone permission is not granted.",
-        "fatal": false
-      ])
-      return
-    }
     do {
       try FileManager.default.createDirectory(
         atPath: inboxPath,
@@ -902,14 +928,16 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
         withIntermediateDirectories: true
       )
       try reapStalePartials()
-      try startNewChunk()
+      prepared = true
       emit([
         "kind": "log",
         "level": "info",
-        "message": "native live audio chunking started",
+        "message": "native live audio chunking armed",
         "data": [
           "inbox_path": inboxPath,
           "chunk_seconds": chunkSeconds,
+          "activation": activation,
+          "poll_interval_sec": pollInterval,
           "sample_rate": sampleRate,
           "channels": channels
         ]
@@ -924,11 +952,27 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
-  func tick() {
-    guard enabled, recorder != nil, let started = currentStartedAt else { return }
-    if Date().timeIntervalSince(started) >= chunkSeconds {
-      rotate()
+  func tick(paused: Bool) {
+    guard enabled, prepared else { return }
+    if paused {
+      stop()
+      return
     }
+    guard Date() >= nextInputCheckAt else {
+      rotateIfNeeded()
+      return
+    }
+    nextInputCheckAt = Date().addingTimeInterval(pollInterval)
+    let shouldRecord = shouldRecordNow()
+    if !shouldRecord {
+      stop()
+      return
+    }
+    if recorder == nil {
+      startRecordingIfPossible()
+      return
+    }
+    rotateIfNeeded()
   }
 
   func stop() {
@@ -936,6 +980,60 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     recorder = nil
     currentStartedAt = nil
     finalizeCurrentChunk()
+  }
+
+  private func rotateIfNeeded() {
+    guard recorder != nil, let started = currentStartedAt else { return }
+    if Date().timeIntervalSince(started) >= chunkSeconds {
+      rotate()
+    }
+  }
+
+  private func shouldRecordNow() -> Bool {
+    if activation != "other_process_input" {
+      emit([
+        "kind": "error",
+        "code": "audio_activation_unsupported",
+        "message": "Unsupported live audio activation mode '\(activation)'; refusing to start microphone recording.",
+        "fatal": false
+      ])
+      return false
+    }
+    return inputDetector.isOtherProcessUsingInput()
+  }
+
+  private func startRecordingIfPossible() {
+    guard ensureMicrophonePermission() else {
+      if !permissionDeniedLogged {
+        permissionDeniedLogged = true
+        emit([
+          "kind": "error",
+          "code": "audio_permission_denied",
+          "message": "Native live audio recording is enabled but microphone permission is not granted.",
+          "fatal": false
+        ])
+      }
+      return
+    }
+    do {
+      try startNewChunk()
+      emit([
+        "kind": "log",
+        "level": "info",
+        "message": "native live audio chunking started",
+        "data": [
+          "activation": activation,
+          "chunk_seconds": chunkSeconds
+        ]
+      ])
+    } catch {
+      emit([
+        "kind": "error",
+        "code": "audio_recording_failed",
+        "message": String(describing: error),
+        "fatal": false
+      ])
+    }
   }
 
   private func rotate() {
@@ -1043,6 +1141,128 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
       return false
     }
   }
+}
+
+final class OtherProcessAudioInputDetector {
+  private let ownPid = getpid()
+  private var unsupportedLogged = false
+
+  func isOtherProcessUsingInput() -> Bool {
+    guard #available(macOS 14.2, *) else {
+      logUnsupported("CoreAudio per-process input activity requires macOS 14.2 or newer.")
+      return false
+    }
+    do {
+      return try isOtherProcessUsingInputModern()
+    } catch {
+      logUnsupported("CoreAudio per-process input activity probe failed: \(error)")
+      return false
+    }
+  }
+
+  @available(macOS 14.2, *)
+  private func isOtherProcessUsingInputModern() throws -> Bool {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyProcessObjectList,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    let sizeStatus = AudioObjectGetPropertyDataSize(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      0,
+      nil,
+      &size
+    )
+    guard sizeStatus == noErr else {
+      throw audioError("process list size", status: sizeStatus)
+    }
+    let count = Int(size) / MemoryLayout<AudioObjectID>.size
+    if count == 0 { return false }
+
+    var processes = Array(repeating: AudioObjectID(0), count: count)
+    let listStatus = processes.withUnsafeMutableBufferPointer { buffer in
+      AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        0,
+        nil,
+        &size,
+        buffer.baseAddress!
+      )
+    }
+    guard listStatus == noErr else {
+      throw audioError("process list", status: listStatus)
+    }
+
+    for process in processes where process != AudioObjectID(0) {
+      guard let pid = processPid(process), pid != ownPid else { continue }
+      if processIsRunningInput(process) {
+        return true
+      }
+    }
+    return false
+  }
+
+  @available(macOS 14.2, *)
+  private func processPid(_ process: AudioObjectID) -> pid_t? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioProcessPropertyPID,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var pid = pid_t(0)
+    var size = UInt32(MemoryLayout<pid_t>.size)
+    let status = AudioObjectGetPropertyData(
+      process,
+      &address,
+      0,
+      nil,
+      &size,
+      &pid
+    )
+    return status == noErr ? pid : nil
+  }
+
+  @available(macOS 14.2, *)
+  private func processIsRunningInput(_ process: AudioObjectID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioProcessPropertyIsRunningInput,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var running: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    let status = AudioObjectGetPropertyData(
+      process,
+      &address,
+      0,
+      nil,
+      &size,
+      &running
+    )
+    return status == noErr && running != 0
+  }
+
+  private func logUnsupported(_ message: String) {
+    guard !unsupportedLogged else { return }
+    unsupportedLogged = true
+    emit([
+      "kind": "error",
+      "code": "audio_activation_unavailable",
+      "message": "\(message) Live microphone recording will stay off.",
+      "fatal": false
+    ])
+  }
+}
+
+func audioError(_ operation: String, status: OSStatus) -> NSError {
+  NSError(
+    domain: "cofounderos.audio.coreaudio",
+    code: Int(status),
+    userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
+  )
 }
 
 func valueAfter(_ flag: String, in args: [String]) -> String? {

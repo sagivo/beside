@@ -12,6 +12,7 @@
       "fixture": { "type": "boolean", "default": false },
       "restart_on_crash": { "type": "boolean", "default": true },
       "poll_interval_ms": { "type": "integer" },
+      "focus_settle_delay_ms": { "type": "integer", "default": 900 },
       "screenshot_diff_threshold": { "type": "number" },
       "idle_threshold_sec": { "type": "integer" },
       "screenshot_format": { "type": "string", "enum": ["webp", "jpeg"] },
@@ -20,6 +21,29 @@
       "content_change_min_interval_ms": { "type": "integer" },
       "excluded_apps": { "type": "array", "items": { "type": "string" } },
       "excluded_url_patterns": { "type": "array", "items": { "type": "string" } },
+      "capture_audio": { "type": "boolean", "default": false },
+      "audio": {
+        "type": "object",
+        "properties": {
+          "inbox_path": { "type": "string" },
+          "live_recording": {
+            "type": "object",
+            "properties": {
+              "enabled": { "type": "boolean", "default": false },
+              "chunk_seconds": { "type": "integer", "default": 300 },
+              "format": { "type": "string", "enum": ["m4a"], "default": "m4a" },
+              "sample_rate": { "type": "integer", "default": 16000 },
+              "channels": { "type": "integer", "default": 1 },
+              "activation": {
+                "type": "string",
+                "enum": ["other_process_input"],
+                "default": "other_process_input"
+              },
+              "poll_interval_sec": { "type": "integer", "default": 3 }
+            }
+          }
+        }
+      },
       "multi_screen": { "type": "boolean", "default": false },
       "screens": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
       "capture_mode": { "type": "string", "enum": ["all", "active"], "default": "active" }

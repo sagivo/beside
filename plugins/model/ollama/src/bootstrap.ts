@@ -3,20 +3,23 @@
  *
  * Responsible for:
  *   1. Detecting whether the `ollama` binary is installed.
- *   2. Auto-installing it on macOS / Linux via the official one-liner.
+ *   2. Auto-installing it on macOS / Linux / Windows.
  *   3. Starting the local daemon when it isn't already serving.
  *   4. Polling until the HTTP API is reachable.
  *
  * All routines emit structured progress events through the supplied
  * handler so the CLI can render a progress bar instead of a wall of logs.
  */
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { constants, existsSync } from 'node:fs';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ModelBootstrapHandler } from '@cofounderos/interfaces';
 
 const OLLAMA_INSTALL_SCRIPT_URL = 'https://ollama.com/install.sh';
+const OLLAMA_MAC_ZIP_URL = 'https://ollama.com/download/Ollama-darwin.zip';
 const OLLAMA_DOWNLOAD_PAGE = 'https://ollama.com/download';
 
 export async function commandExists(cmd: string): Promise<boolean> {
@@ -52,21 +55,163 @@ export async function waitForOllama(host: string, totalMs: number): Promise<bool
   return false;
 }
 
+export async function ollamaCommandExists(): Promise<boolean> {
+  const resolved = resolveOllamaCommand();
+  if (resolved.command !== 'ollama') return true;
+  return await commandExists('ollama');
+}
+
+function attachInstallOutput(
+  child: ChildProcess,
+  onProgress: ModelBootstrapHandler,
+): void {
+  // Installers mix plain \n-terminated lines with \r-overwritten progress
+  // bars. Treat \r as an in-place update marker so renderers can rewrite a
+  // single line instead of receiving every percentage tick as a log entry.
+  let buf = '';
+  const flushSegment = (segment: string, progress: boolean): void => {
+    const trimmed = segment.replace(/\s+$/u, '');
+    if (trimmed.length === 0) return;
+    onProgress({ kind: 'install_log', line: trimmed, progress });
+  };
+  const stream = (chunk: Buffer | string): void => {
+    buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    let start = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const ch = buf[i];
+      if (ch === '\n') {
+        flushSegment(buf.slice(start, i), false);
+        start = i + 1;
+      } else if (ch === '\r') {
+        if (buf[i + 1] === '\n') continue;
+        flushSegment(buf.slice(start, i), true);
+        start = i + 1;
+      }
+    }
+    buf = buf.slice(start);
+  };
+  const flushTail = (): void => {
+    if (buf.length > 0) {
+      flushSegment(buf, false);
+      buf = '';
+    }
+  };
+
+  child.stdout?.on('data', stream);
+  child.stderr?.on('data', stream);
+  child.stdout?.on('end', flushTail);
+  child.stderr?.on('end', flushTail);
+}
+
+async function runInstallerCommand(
+  command: string,
+  args: string[],
+  onProgress: ModelBootstrapHandler,
+  options: { cwd?: string; shell?: boolean } = {},
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      shell: options.shell,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    attachInstallOutput(child, onProgress);
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with code ${code}`));
+    });
+  });
+}
+
+async function pathWritable(dir: string): Promise<boolean> {
+  try {
+    await fs.access(dir, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function macApplicationsInstallDir(): Promise<string> {
+  if (await pathWritable('/Applications')) return '/Applications';
+
+  const userApplications = path.join(os.homedir(), 'Applications');
+  await fs.mkdir(userApplications, { recursive: true });
+  return userApplications;
+}
+
+function macOllamaCommandCandidates(): string[] {
+  return [
+    '/opt/homebrew/bin/ollama',
+    '/usr/local/bin/ollama',
+    path.join('/Applications', 'Ollama.app', 'Contents', 'Resources', 'ollama'),
+    path.join(os.homedir(), 'Applications', 'Ollama.app', 'Contents', 'Resources', 'ollama'),
+  ];
+}
+
+export async function installOllamaMacOS(
+  onProgress: ModelBootstrapHandler,
+): Promise<void> {
+  if (process.platform !== 'darwin') {
+    throw new Error(
+      `installOllamaMacOS called on ${process.platform}. ` +
+        `Use installOllamaUnixLike on linux or installOllamaWindows on win32.`,
+    );
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-ollama-'));
+  try {
+    const zipPath = path.join(tmpDir, 'Ollama-darwin.zip');
+    const extractDir = path.join(tmpDir, 'extract');
+    await fs.mkdir(extractDir, { recursive: true });
+
+    onProgress({ kind: 'install_log', line: 'Downloading Ollama for macOS…' });
+    await runInstallerCommand(
+      'curl',
+      ['-fL', '--progress-bar', OLLAMA_MAC_ZIP_URL, '-o', zipPath],
+      onProgress,
+    );
+
+    onProgress({ kind: 'install_log', line: 'Extracting Ollama.app…' });
+    await runInstallerCommand('ditto', ['-x', '-k', zipPath, extractDir], onProgress);
+
+    const sourceApp = path.join(extractDir, 'Ollama.app');
+    if (!existsSync(sourceApp)) {
+      throw new Error('download did not contain Ollama.app');
+    }
+
+    const applicationsDir = await macApplicationsInstallDir();
+    const targetApp = path.join(applicationsDir, 'Ollama.app');
+    onProgress({ kind: 'install_log', line: `Installing Ollama.app to ${targetApp}…` });
+    await fs.rm(targetApp, { recursive: true, force: true });
+    await fs.cp(sourceApp, targetApp, { recursive: true });
+
+    const commandPath = path.join(targetApp, 'Contents', 'Resources', 'ollama');
+    if (!existsSync(commandPath)) {
+      throw new Error('installed Ollama.app did not contain the ollama command');
+    }
+    await fs.chmod(commandPath, 0o755).catch(() => {});
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
 /**
- * Install Ollama by piping the official install script through `sh`.
- * Inherits the user's TTY so any sudo prompt surfaces directly. The
- * subprocess's stdout/stderr is mirrored to onProgress as `install_log`
- * events.
+ * Install Ollama on Linux by piping the official install script through
+ * `sh`. The subprocess's stdout/stderr is mirrored to onProgress as
+ * `install_log` events.
  *
  * Returns when the script exits 0; rejects otherwise.
  */
 export async function installOllamaUnixLike(
   onProgress: ModelBootstrapHandler,
 ): Promise<void> {
-  if (process.platform !== 'darwin' && process.platform !== 'linux') {
+  if (process.platform !== 'linux') {
     throw new Error(
       `installOllamaUnixLike called on ${process.platform}. ` +
-        `Use installOllamaWindows for win32 hosts.`,
+        `Use installOllamaMacOS on darwin or installOllamaWindows on win32.`,
     );
   }
 
@@ -75,51 +220,12 @@ export async function installOllamaUnixLike(
   const script = `set -e; curl -fsSL ${OLLAMA_INSTALL_SCRIPT_URL} | sh`;
   return await new Promise<void>((resolve, reject) => {
     const child = spawn('bash', ['-c', script], {
-      // Inherit stdin so sudo can prompt; pipe stdout/stderr so we can
-      // surface progress lines to the host.
+      // Inherit stdin for CLI users so sudo can prompt; desktop callers
+      // inherit the runtime-service pipe, which is still non-interactive.
       stdio: ['inherit', 'pipe', 'pipe'],
     });
 
-    // The installer mixes plain \n-terminated lines with \r-overwritten
-    // progress lines (curl's download bar). We treat \r as an in-place
-    // update marker so the renderer can rewrite a single bar line instead
-    // of spamming the terminal with every percentage tick.
-    let buf = '';
-    const flushSegment = (segment: string, progress: boolean): void => {
-      const trimmed = segment.replace(/\s+$/u, '');
-      if (trimmed.length === 0) return;
-      onProgress({ kind: 'install_log', line: trimmed, progress });
-    };
-    const stream = (chunk: Buffer | string): void => {
-      buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      // Walk the buffer, emitting on each \r or \n boundary so we don't
-      // hold a 2MB curl bar line forever.
-      let start = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const ch = buf[i];
-        if (ch === '\n') {
-          flushSegment(buf.slice(start, i), false);
-          start = i + 1;
-        } else if (ch === '\r') {
-          // \r without a following \n is curl rewriting the same line.
-          if (buf[i + 1] === '\n') continue;
-          flushSegment(buf.slice(start, i), true);
-          start = i + 1;
-        }
-      }
-      buf = buf.slice(start);
-    };
-    child.stdout?.on('data', stream);
-    child.stderr?.on('data', stream);
-    const flushTail = (): void => {
-      if (buf.length > 0) {
-        flushSegment(buf, false);
-        buf = '';
-      }
-    };
-    child.stdout?.on('end', flushTail);
-    child.stderr?.on('end', flushTail);
-
+    attachInstallOutput(child, onProgress);
     child.on('error', (err) => reject(err));
     child.on('exit', (code) => {
       if (code === 0) resolve();
@@ -149,7 +255,7 @@ export async function installOllamaWindows(
   if (process.platform !== 'win32') {
     throw new Error(
       `installOllamaWindows called on ${process.platform}. ` +
-        `Use installOllamaUnixLike on darwin/linux.`,
+        `Use installOllamaMacOS on darwin or installOllamaUnixLike on linux.`,
     );
   }
 
@@ -184,39 +290,7 @@ export async function installOllamaWindows(
       },
     );
 
-    let buf = '';
-    const flush = (segment: string, progress: boolean): void => {
-      const trimmed = segment.replace(/\s+$/u, '');
-      if (trimmed.length === 0) return;
-      onProgress({ kind: 'install_log', line: trimmed, progress });
-    };
-    const stream = (chunk: Buffer | string): void => {
-      buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      let start = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const ch = buf[i];
-        if (ch === '\n') {
-          flush(buf.slice(start, i), false);
-          start = i + 1;
-        } else if (ch === '\r') {
-          if (buf[i + 1] === '\n') continue;
-          flush(buf.slice(start, i), true);
-          start = i + 1;
-        }
-      }
-      buf = buf.slice(start);
-    };
-    child.stdout?.on('data', stream);
-    child.stderr?.on('data', stream);
-    const flushTail = (): void => {
-      if (buf.length > 0) {
-        flush(buf, false);
-        buf = '';
-      }
-    };
-    child.stdout?.on('end', flushTail);
-    child.stderr?.on('end', flushTail);
-
+    attachInstallOutput(child, onProgress);
     child.on('error', (err) => reject(err));
     child.on('exit', (code) => {
       if (code === 0) resolve();
@@ -226,6 +300,14 @@ export async function installOllamaWindows(
 }
 
 function resolveOllamaCommand(): { command: string; shell: boolean } {
+  if (process.platform === 'darwin') {
+    const installed = macOllamaCommandCandidates().find((p) => existsSync(p));
+    if (installed) {
+      return { command: installed, shell: false };
+    }
+    return { command: 'ollama', shell: false };
+  }
+
   if (process.platform !== 'win32') {
     return { command: 'ollama', shell: false };
   }
@@ -288,6 +370,12 @@ export function manualInstallHint(): string {
     return (
       `Install Ollama for Windows from ${OLLAMA_DOWNLOAD_PAGE} ` +
       `(or run: winget install --id Ollama.Ollama) and then re-run.`
+    );
+  }
+  if (process.platform === 'darwin') {
+    return (
+      `Install Ollama for macOS from ${OLLAMA_DOWNLOAD_PAGE} ` +
+      `and then re-run.`
     );
   }
   return `If auto-install fails, install manually from ${OLLAMA_DOWNLOAD_PAGE}.`;

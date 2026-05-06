@@ -23,6 +23,7 @@ const AppSchema = z.object({
 const CaptureSchema = z.object({
   plugin: z.string().default('node'),
   poll_interval_ms: z.number().int().positive().default(1500),
+  focus_settle_delay_ms: z.number().int().nonnegative().default(900),
   // Soft-trigger sensitivity. Bumped from 0.05 → 0.10 because at the
   // old threshold even pixel-level noise (e.g. blinking cursor, clock
   // ticking) triggered captures. 0.10 is still well below "human
@@ -60,12 +61,16 @@ const CaptureSchema = z.object({
       format: z.enum(['m4a']).default('m4a'),
       sample_rate: z.number().int().positive().default(16_000),
       channels: z.number().int().positive().max(2).default(1),
+      activation: z.enum(['other_process_input']).default('other_process_input'),
+      poll_interval_sec: z.number().int().positive().default(3),
     }).default({
       enabled: false,
       chunk_seconds: 300,
       format: 'm4a',
       sample_rate: 16_000,
       channels: 1,
+      activation: 'other_process_input',
+      poll_interval_sec: 3,
     }),
   }).default({
     inbox_path: '~/.cofounderOS/raw/audio/inbox',
@@ -82,6 +87,8 @@ const CaptureSchema = z.object({
       format: 'm4a',
       sample_rate: 16_000,
       channels: 1,
+      activation: 'other_process_input',
+      poll_interval_sec: 3,
     },
   }),
   // Output format for screenshots. WebP is ~40% smaller than JPEG at
@@ -363,6 +370,7 @@ app:
 capture:
   plugin: node                    # default Node-based capture; "rust" once available
   poll_interval_ms: 1500          # how often to poll for window/url changes
+  focus_settle_delay_ms: 900      # wait after app switch before screenshot
   screenshot_diff_threshold: 0.10 # skip screenshots with < 10% visual change
   idle_threshold_sec: 60
   screenshot_format: webp         # 'webp' (smaller) or 'jpeg'
@@ -382,6 +390,8 @@ capture:
     max_audio_bytes: 524288000    # 500 MiB; reject larger audio files before whisper (0 = unlimited)
     live_recording:
       enabled: false              # native plugin only; records mic/input chunks into inbox
+      activation: other_process_input # record only while another app is using audio input
+      poll_interval_sec: 3        # how often to check whether another process still has mic input
       chunk_seconds: 300
       format: m4a
       sample_rate: 16000

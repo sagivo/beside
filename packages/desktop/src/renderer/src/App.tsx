@@ -96,7 +96,7 @@ function AppInner() {
 
   // Sparse safety-net poll. We trust the push channel for normal
   // operation, but if the runtime service ever wedges or the IPC
-  // subscription drops, this guarantees we recover within 30s.
+  // listener drops updates, this guarantees we recover within 30s.
   React.useEffect(() => {
     const timer = window.setInterval(() => {
       if (!window.cofounderos) return;

@@ -28,6 +28,7 @@ import { AccessibilityTextReader } from './accessibility-text.js';
 
 interface CaptureNodeConfig {
   poll_interval_ms?: number;
+  focus_settle_delay_ms?: number;
   screenshot_diff_threshold?: number;
   idle_threshold_sec?: number;
   screenshot_format?: 'webp' | 'jpeg';
@@ -292,6 +293,7 @@ class NodeCapture implements ICapture {
   private lastWindow: ActiveWindowInfo | null = null;
   private lastWindowEnteredAt = Date.now();
   private lastInteractionAt = Date.now();
+  private pendingFocusCapture: { dueAt: number } | null = null;
   private idleNotified = false;
   /**
    * Per-display dedupe state. Always contains at least one entry (the
@@ -360,6 +362,7 @@ class NodeCapture implements ICapture {
       explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 55 : 80);
     this.config = {
       poll_interval_ms: config.poll_interval_ms ?? 1500,
+      focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
       screenshot_format: format,
@@ -432,6 +435,7 @@ class NodeCapture implements ICapture {
     return {
       pluginName: 'node',
       poll_interval_ms: this.config.poll_interval_ms,
+      focus_settle_delay_ms: this.config.focus_settle_delay_ms,
       screenshot_diff_threshold: this.config.screenshot_diff_threshold,
       idle_threshold_sec: this.config.idle_threshold_sec,
       screenshot_format: this.config.screenshot_format,
@@ -546,6 +550,7 @@ class NodeCapture implements ICapture {
     if (!win) return;
 
     if (this.isExcluded(win)) {
+      this.pendingFocusCapture = null;
       // Treat excluded apps as fully invisible — but still detect blur from
       // a previous non-excluded window so durations aren't lost.
       if (this.lastWindow && !this.isExcluded(this.lastWindow)) {
@@ -564,7 +569,7 @@ class NodeCapture implements ICapture {
       this.lastWindow.app !== win.app ||
       this.lastWindow.title !== win.title;
     const urlChanged =
-      this.lastWindow && this.lastWindow.url !== win.url && win.url !== null;
+      !focusChanged && this.lastWindow && this.lastWindow.url !== win.url && win.url !== null;
 
     if (focusChanged) {
       if (this.lastWindow) {
@@ -585,7 +590,7 @@ class NodeCapture implements ICapture {
       });
       this.lastWindow = win;
       this.lastWindowEnteredAt = now;
-      trigger = 'window_focus';
+      this.pendingFocusCapture = { dueAt: now + this.config.focus_settle_delay_ms };
       this.lastInteractionAt = now;
     }
 
@@ -604,6 +609,7 @@ class NodeCapture implements ICapture {
         metadata: { session_id: this.sessionId, previous_url: this.lastWindow?.url ?? null },
       });
       trigger = trigger ?? 'url_change';
+      this.pendingFocusCapture = null;
       this.lastInteractionAt = now;
     }
 
@@ -645,7 +651,16 @@ class NodeCapture implements ICapture {
     }
 
     // Skip screenshots while idle.
-    if (this.idleNotified) return;
+    if (this.idleNotified) {
+      this.pendingFocusCapture = null;
+      return;
+    }
+
+    if (!trigger && this.pendingFocusCapture) {
+      if (now < this.pendingFocusCapture.dueAt) return;
+      this.pendingFocusCapture = null;
+      trigger = 'window_focus';
+    }
 
     // Periodically check for content change even when window/url didn't
     // change — e.g. scrolling to new content, modal opens.

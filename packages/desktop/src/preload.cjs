@@ -11,6 +11,7 @@ const api = {
   getIndexedJournalDay: (day) => ipcRenderer.invoke('cofounderos:get-indexed-journal-day', day),
   searchFrames: (query) => ipcRenderer.invoke('cofounderos:search-frames', query),
   explainSearchResults: (query) => ipcRenderer.invoke('cofounderos:explain-search-results', query),
+  getFrameIndexDetails: (frameId) => ipcRenderer.invoke('cofounderos:get-frame-index-details', frameId),
   readAsset: (assetPath) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -27,11 +28,20 @@ const api = {
   deleteFrame: (frameId) => ipcRenderer.invoke('cofounderos:delete-frame', frameId),
   deleteFramesByDay: (day) => ipcRenderer.invoke('cofounderos:delete-frames-by-day', day),
   deleteAllMemory: () => ipcRenderer.invoke('cofounderos:delete-all-memory'),
+  probeWhisper: () => ipcRenderer.invoke('cofounderos:probe-whisper'),
+  detectWhisperInstaller: () => ipcRenderer.invoke('cofounderos:detect-whisper-installer'),
+  installWhisper: () => ipcRenderer.invoke('cofounderos:install-whisper'),
+  probeFfprobe: () => ipcRenderer.invoke('cofounderos:probe-ffprobe'),
+  probeMicPermission: () => ipcRenderer.invoke('cofounderos:probe-mic-permission'),
+  requestMicPermission: () => ipcRenderer.invoke('cofounderos:request-mic-permission'),
   onDesktopLogs: (callback) => {
     ipcRenderer.on('cofounderos:desktop-logs', (_event, logs) => callback(logs));
   },
   onBootstrapProgress: (callback) => {
     ipcRenderer.on('cofounderos:bootstrap-progress', (_event, progress) => callback(progress));
+  },
+  onWhisperInstallProgress: (callback) => {
+    ipcRenderer.on('cofounderos:whisper-install-progress', (_e, event) => callback(event));
   },
   onOverview: (callback) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview) => callback(overview));

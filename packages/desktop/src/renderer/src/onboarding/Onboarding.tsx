@@ -9,12 +9,13 @@ import {
   Layers,
   Loader2,
   Lock,
+  Mic,
+  RefreshCw,
   Rocket,
   Search,
   Shield,
   Sparkles,
   X,
-  Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -31,9 +32,15 @@ import {
   pullPercent,
   type InstallPhase,
 } from '@/lib/bootstrap-phases';
-import { formatBytes, formatLocalTime, formatNumber } from '@/lib/format';
+import { formatBytes } from '@/lib/format';
 import { cn } from '@/lib/utils';
-import type { Frame, ModelBootstrapProgress, RuntimeOverview } from '@/global';
+import type {
+  MicPermission,
+  ModelBootstrapProgress,
+  RuntimeOverview,
+  WhisperInstaller,
+  WhisperProbe,
+} from '@/global';
 
 type OnboardingStep =
   | 'welcome'
@@ -41,8 +48,7 @@ type OnboardingStep =
   | 'privacy'
   | 'choose-model'
   | 'install-model'
-  | 'first-capture'
-  | 'first-search'
+  | 'audio'
   | 'done';
 
 const STEPS: OnboardingStep[] = [
@@ -51,10 +57,19 @@ const STEPS: OnboardingStep[] = [
   'privacy',
   'choose-model',
   'install-model',
-  'first-capture',
-  'first-search',
+  'audio',
   'done',
 ];
+
+const STEP_LABELS: Record<OnboardingStep, string> = {
+  welcome: 'Welcome',
+  'how-it-works': 'How it works',
+  privacy: 'Privacy',
+  'choose-model': 'Local AI',
+  'install-model': 'Install',
+  audio: 'Audio',
+  done: 'Done',
+};
 
 interface ModelChoice {
   id: string;
@@ -152,6 +167,12 @@ export function Onboarding({
 
   const stepIndex = STEPS.indexOf(step);
   const progressPct = Math.round(((stepIndex + 1) / STEPS.length) * 100);
+  const modelReady = overview?.model.ready ?? false;
+
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+  }, [step]);
 
   function go(next: OnboardingStep) {
     setStep(next);
@@ -160,29 +181,55 @@ export function Onboarding({
     const idx = STEPS.indexOf(step);
     if (idx >= 0 && idx < STEPS.length - 1) go(STEPS[idx + 1]!);
   }
+  function goToInstall() {
+    go('install-model');
+  }
   function goBack() {
     const idx = STEPS.indexOf(step);
     if (idx > 0) go(STEPS[idx - 1]!);
   }
 
   async function finish() {
+    let final: RuntimeOverview | null | undefined = null;
     try {
-      const final = await window.cofounderos?.getOverview();
-      if (final?.capture.running && final.capture.paused) {
-        await window.cofounderos.resumeCapture();
+      final = await window.cofounderos?.getOverview();
+      // Onboarding no longer makes the user click "Start capturing" — ensure
+      // the runtime is up and capture is live before we hand off the app.
+      if (!final?.capture.running) {
+        try {
+          await window.cofounderos.startRuntime();
+        } catch {
+          /* ignore */
+        }
       }
+      try {
+        await window.cofounderos.resumeCapture();
+      } catch {
+        /* may already be live */
+      }
+      final = (await window.cofounderos?.getOverview()) ?? final;
     } catch {
       /* ignore */
+    }
+    if (!(final?.model.ready ?? modelReady)) {
+      go('install-model');
+      return;
     }
     onComplete();
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background">
-      <header className="app-drag flex items-center gap-4 border-b border-border px-6 py-3">
+    <div className="flex h-screen flex-col bg-background bg-[radial-gradient(circle_at_top,_rgba(96,165,250,0.16),_transparent_32rem)]">
+      <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur">
         <BrandMark className="size-7" />
         <span className="font-semibold text-sm">CofounderOS</span>
-        <div className="flex-1 mx-6">
+        <div className="flex-1 mx-6 flex flex-col gap-1.5">
+          <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <span>{STEP_LABELS[step]}</span>
+            <span>
+              {stepIndex + 1} / {STEPS.length}
+            </span>
+          </div>
           <Progress value={progressPct} />
         </div>
         {step !== 'done' && (
@@ -190,6 +237,12 @@ export function Onboarding({
             variant="ghost"
             size="sm"
             onClick={onComplete}
+            disabled={!modelReady}
+            title={
+              modelReady
+                ? 'Skip the rest of setup'
+                : 'Install the local AI model first — CofounderOS needs it to run.'
+            }
             className="app-no-drag"
           >
             Skip setup
@@ -197,8 +250,13 @@ export function Onboarding({
         )}
       </header>
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-6 py-10">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div
+          className={cn(
+            'mx-auto px-6 py-8 sm:py-10',
+            step === 'welcome' ? 'max-w-5xl' : 'max-w-4xl',
+          )}
+        >
           {step === 'welcome' && <WelcomeStep onContinue={goNext} />}
           {step === 'how-it-works' && <HowItWorksStep onContinue={goNext} onBack={goBack} />}
           {step === 'privacy' && <PrivacyStep onContinue={goNext} onBack={goBack} />}
@@ -214,19 +272,20 @@ export function Onboarding({
             <InstallModelStep
               chosenModel={chosenModel}
               bootstrapEvents={bootstrapEvents}
-              modelReady={overview?.model.ready ?? false}
+              modelReady={modelReady}
               onClearEvents={onClearBootstrapEvents}
               onContinue={goNext}
               onBack={goBack}
             />
           )}
-          {step === 'first-capture' && (
-            <FirstCaptureStep overview={overview} onContinue={goNext} onBack={goBack} />
+          {step === 'audio' && <AudioStep onContinue={goNext} onBack={goBack} />}
+          {step === 'done' && (
+            <DoneStep
+              modelReady={modelReady}
+              onFinish={finish}
+              onInstallModel={goToInstall}
+            />
           )}
-          {step === 'first-search' && (
-            <FirstSearchStep onContinue={goNext} onBack={goBack} />
-          )}
-          {step === 'done' && <DoneStep onFinish={finish} />}
         </div>
       </div>
     </div>
@@ -254,22 +313,30 @@ function StepCard({
   };
 }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-6 py-2">
-        {eyebrow ? (
-          <div className="text-xs font-medium uppercase tracking-wide text-primary">
-            {eyebrow}
-          </div>
-        ) : null}
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
-          {lede ? (
-            <p className="text-base text-muted-foreground mt-3 leading-relaxed">{lede}</p>
+    <Card className="overflow-hidden py-0">
+      <CardContent className="p-0">
+        <div className="border-b border-border bg-muted/20 px-6 py-6 sm:px-8">
+          {eyebrow ? (
+            <div className="text-xs font-medium uppercase tracking-wide text-primary">
+              {eyebrow}
+            </div>
           ) : null}
+          <div className="mt-3 max-w-2xl">
+            <h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
+            {lede ? (
+              <p className="text-base text-muted-foreground mt-3 leading-relaxed">{lede}</p>
+            ) : null}
+          </div>
+          <PrivacyPillRow className="mt-5" />
         </div>
-        {children}
+
+        <div className="flex flex-col gap-6 p-6 sm:p-8">
+          {children}
+          <PrivacyNote />
+        </div>
+
         {(back || next) && (
-          <div className="flex items-center justify-between gap-2 pt-2">
+          <div className="flex items-center justify-between gap-2 border-t border-border bg-muted/10 px-6 py-4 sm:px-8">
             <div>
               {back ? (
                 <Button
@@ -302,41 +369,147 @@ function StepCard({
   );
 }
 
+function PrivacyPillRow({
+  className,
+  compact = false,
+}: {
+  className?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div className={cn('flex flex-wrap items-center gap-2', className)}>
+      <Badge variant="outline" className={compact ? 'text-[11px]' : undefined}>
+        <Lock />
+        Local by default
+      </Badge>
+      <Badge variant="outline" className={compact ? 'text-[11px]' : undefined}>
+        <Shield />
+        Encrypted memory
+      </Badge>
+      <Badge variant="outline" className={compact ? 'text-[11px]' : undefined}>
+        <Eye />
+        Only you can see it
+      </Badge>
+    </div>
+  );
+}
+
+function PrivacyNote({
+  children = 'Your memory stays local, encrypted, and visible only to you unless you choose otherwise.',
+  className,
+}: {
+  children?: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex items-start gap-3 rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-muted-foreground',
+        className,
+      )}
+    >
+      <Shield className="mt-0.5 size-4 shrink-0 text-primary" />
+      <p className="leading-relaxed">{children}</p>
+    </div>
+  );
+}
+
+function FeatureTile({
+  icon,
+  title,
+  body,
+  className,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex gap-3 rounded-lg border border-border bg-card p-4', className)}>
+      <div className="size-9 shrink-0 rounded-md bg-primary/10 text-primary grid place-items-center">
+        {icon}
+      </div>
+      <div>
+        <h3 className="font-medium text-sm">{title}</h3>
+        <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{body}</p>
+      </div>
+    </div>
+  );
+}
+
 function WelcomeStep({ onContinue }: { onContinue: () => void }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center text-center gap-5 py-8">
-        <div className="size-16 rounded-2xl bg-primary/10 text-primary grid place-items-center">
-          <Brain className="size-9" />
+    <Card className="relative overflow-hidden border-primary/15 py-0">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            'radial-gradient(circle at 20% 0%, rgba(96,165,250,0.22), transparent 45%), radial-gradient(circle at 90% 100%, rgba(168,85,247,0.18), transparent 55%)',
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent"
+      />
+
+      <CardContent className="relative p-0">
+        <div className="flex flex-col items-center px-6 pb-10 pt-14 text-center sm:px-12 sm:pt-20 sm:pb-14">
+          <BrandHeroMark />
+
+          <Badge
+            variant="outline"
+            className="mt-7 gap-1.5 border-primary/30 bg-primary/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-primary"
+          >
+            <Sparkles className="size-3" />
+            Private memory for your work
+          </Badge>
+
+          <h1 className="mt-5 max-w-3xl text-balance text-4xl font-semibold tracking-tight sm:text-6xl">
+            Your work,{' '}
+            <span className="bg-gradient-to-r from-primary via-sky-400 to-violet-400 bg-clip-text text-transparent">
+              perfectly remembered.
+            </span>
+          </h1>
+
+          <p className="mt-5 max-w-xl text-base text-muted-foreground leading-relaxed sm:text-lg">
+            A second brain that quietly captures what you do — and lets you search it later. Local,
+            encrypted, and only you can see it.
+          </p>
+
+          <PrivacyPillRow className="mt-7 justify-center" />
+
+          <div className="mt-8 flex flex-col items-center gap-3">
+            <Button size="xl" onClick={onContinue} className="px-8">
+              Get started
+              <ArrowRight />
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Takes about 2 minutes. Runs entirely on your computer.
+            </p>
+          </div>
         </div>
-        <h1 className="text-3xl font-semibold tracking-tight">Meet your second brain</h1>
-        <p className="text-base text-muted-foreground max-w-md leading-relaxed">
-          CofounderOS quietly remembers what you do on your computer — apps, docs, browsers — and
-          turns it into a private, searchable memory you can ask anything.
-        </p>
-        <div className="flex flex-wrap items-center justify-center gap-2">
-          <Badge variant="outline">
-            <Lock />
-            100% local
-          </Badge>
-          <Badge variant="outline">
-            <Shield />
-            No cloud
-          </Badge>
-          <Badge variant="outline">
-            <Zap />
-            No subscription
-          </Badge>
-        </div>
-        <Button size="xl" onClick={onContinue}>
-          Get started
-          <ArrowRight />
-        </Button>
-        <p className="text-xs text-muted-foreground">
-          Takes about 2 minutes. We'll set up a small AI helper that runs on your Mac.
-        </p>
       </CardContent>
     </Card>
+  );
+}
+
+function BrandHeroMark() {
+  return (
+    <div className="relative grid place-items-center">
+      <div
+        aria-hidden
+        className="absolute size-40 rounded-full bg-primary/20 blur-3xl"
+      />
+      <div
+        aria-hidden
+        className="absolute size-28 rounded-full bg-violet-500/20 blur-2xl"
+      />
+      <div className="relative flex size-20 items-center justify-center rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/30 via-primary/10 to-violet-500/20 shadow-[0_0_40px_-10px_rgba(96,165,250,0.55)]">
+        <Brain className="size-10 text-primary" />
+      </div>
+    </div>
   );
 }
 
@@ -350,41 +523,31 @@ function HowItWorksStep({
   const items = [
     {
       icon: <Eye />,
-      title: 'It watches what you work on',
-      body: 'Every few seconds, CofounderOS notes the active app, window title, URL, and takes a small screenshot — only when something actually changed.',
+      title: 'Capture useful context',
+      body: 'CofounderOS notes the active app, window title, URL, and a small screenshot only when something changes.',
     },
     {
       icon: <Layers />,
-      title: 'It organizes everything for you',
-      body: 'A local AI builds a tidy wiki of your work — projects, people, decisions — that updates itself in the background.',
+      title: 'Organize it locally',
+      body: 'A local AI turns those moments into projects, people, and decisions without sending your memory elsewhere.',
     },
     {
       icon: <Search />,
-      title: 'You can ask anything',
-      body: 'Search "what was I doing yesterday afternoon?" or hand the memory to your favorite AI app (Cursor, Claude, ChatGPT) and let it answer for you.',
+      title: 'Ask your private memory',
+      body: 'Search what happened yesterday, where a decision was made, or what changed in a project.',
     },
   ];
   return (
     <StepCard
       eyebrow="How it works"
-      title="Three quiet superpowers"
+      title="A private memory in three steps"
+      lede="Onboarding sets up the local pieces first: capture, encrypted storage, and private search."
       back={{ onClick: onBack }}
       next={{ label: 'Continue', onClick: onContinue }}
     >
-      <div className="flex flex-col gap-4">
-        {items.map((it, i) => (
-          <div
-            key={i}
-            className="flex gap-4 rounded-lg border border-border bg-muted/30 p-4"
-          >
-            <div className="size-9 shrink-0 rounded-md bg-primary/10 text-primary grid place-items-center">
-              {it.icon}
-            </div>
-            <div>
-              <h3 className="font-medium">{it.title}</h3>
-              <p className="text-sm text-muted-foreground mt-1 leading-relaxed">{it.body}</p>
-            </div>
-          </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        {items.map((it) => (
+          <FeatureTile key={it.title} icon={it.icon} title={it.title} body={it.body} />
         ))}
       </div>
     </StepCard>
@@ -401,47 +564,35 @@ function PrivacyStep({
   const promises = [
     {
       icon: <Lock />,
-      title: 'Stays on your computer — always',
-      body: 'Screenshots, notes, and the search index are stored only on this Mac. Nothing is uploaded, ever.',
-    },
-    {
-      icon: <Cpu />,
-      title: 'The AI runs locally too',
-      body: 'We use a small open-source model (Google Gemma) that runs on your hardware. Your prompts never reach OpenAI, Google, Anthropic, or anyone else.',
+      title: 'Stored locally',
+      body: 'Screenshots, notes, and the search index live in your CofounderOS data folder on this device.',
     },
     {
       icon: <Shield />,
-      title: 'No telemetry, no accounts, no cost',
-      body: 'No analytics. No usage tracking. No sign-up. CofounderOS is open source — you can read every line.',
+      title: 'Encrypted memory',
+      body: 'The memory store is designed around encrypted local data, so your history remains yours.',
+    },
+    {
+      icon: <Cpu />,
+      title: 'Private processing',
+      body: 'The model runs on your hardware, keeping prompts and summaries on the same machine.',
     },
     {
       icon: <Eye />,
-      title: "You're always in control",
-      body: 'Pause capture anytime from the menu bar. Tell us which apps to ignore. Set sensitive keywords to skip. Delete everything in one click.',
+      title: 'You stay in control',
+      body: 'Pause capture, ignore apps, skip sensitive keywords, and delete your memory whenever you want.',
     },
   ];
   return (
     <StepCard
-      eyebrow="Your privacy"
-      title="Your memory never leaves this device"
-      lede="Privacy isn't a setting we added later — it's the whole reason CofounderOS exists. Read this carefully:"
+      title="Privacy: local, encrypted, only yours"
+      lede="Privacy isn't a setting we added later — it's the product shape. You control what gets remembered, when capture runs, and what stays on disk."
       back={{ onClick: onBack }}
       next={{ label: 'Sounds good', onClick: onContinue }}
     >
       <div className="grid gap-3 sm:grid-cols-2">
-        {promises.map((p, i) => (
-          <div
-            key={i}
-            className="flex gap-3 rounded-lg border border-border bg-muted/30 p-4"
-          >
-            <div className="size-8 shrink-0 rounded-md bg-primary/10 text-primary grid place-items-center">
-              {p.icon}
-            </div>
-            <div>
-              <h3 className="font-medium text-sm">{p.title}</h3>
-              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{p.body}</p>
-            </div>
-          </div>
+        {promises.map((p) => (
+          <FeatureTile key={p.title} icon={p.icon} title={p.title} body={p.body} />
         ))}
       </div>
     </StepCard>
@@ -462,33 +613,33 @@ function ChooseModelStep({
   return (
     <StepCard
       eyebrow="Choose your local AI"
-      title="Pick a model to run on your computer"
-      lede="We'll use Ollama (a free, open-source tool) to run the model offline. The smaller the model, the faster it runs and the less disk it uses."
+      title="Pick the private model that runs on this device"
+      lede="CofounderOS uses Ollama, an open-source tool, so search and summaries can be processed locally. The smaller the model, the faster it runs and the less disk it uses."
       back={{ onClick: onBack }}
       next={{ label: 'Continue', onClick: onContinue }}
     >
-      <RadioGroup value={chosenModel} onValueChange={onChoose} className="gap-2">
+      <RadioGroup value={chosenModel} onValueChange={onChoose} className="grid gap-3 lg:grid-cols-3">
         {MODEL_CHOICES.map((m) => (
           <Label
             key={m.id}
             htmlFor={m.id}
             className={cn(
-              'flex cursor-pointer items-start gap-4 rounded-lg border bg-card p-4 transition-colors',
+              'flex h-full cursor-pointer items-start gap-4 rounded-xl border bg-card p-4 transition-colors',
               chosenModel === m.id ? 'border-primary ring-2 ring-primary/20' : 'hover:bg-accent/40',
             )}
           >
             <RadioGroupItem value={m.id} id={m.id} className="mt-1" />
-            <div className="flex-1">
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-medium">{m.name}</span>
                 {m.badge && <Badge>{m.badge}</Badge>}
                 <Badge variant="muted">{m.vendor}</Badge>
               </div>
-              <p className="text-sm text-muted-foreground mt-1">{m.description}</p>
-              <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-muted-foreground">
+              <p className="text-sm text-muted-foreground">{m.description}</p>
+              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                 <span>{m.size} download</span>
                 <span>· Runs locally</span>
-                <span>· Free</span>
+                <span>· Private processing</span>
               </div>
             </div>
           </Label>
@@ -496,7 +647,7 @@ function ChooseModelStep({
       </RadioGroup>
       <p className="text-xs text-muted-foreground">
         You can switch models later in Settings. If a download fails, CofounderOS falls back to a
-        simple offline indexer so you can keep working.
+        simple local indexer so you can keep working.
       </p>
     </StepCard>
   );
@@ -602,74 +753,84 @@ function InstallModelStep({
 
   const lede =
     phase === 'done'
-      ? 'Everything is installed and running on your computer. Time to capture your first moment.'
+      ? 'Everything is installed and running locally. Time to capture your first private moment.'
       : phase === 'error'
-        ? "We couldn't finish the install. You can retry, or skip the AI and use the simple offline indexer for now."
-        : "This is a one-time install. Nothing is uploaded — we're downloading the model directly to your computer.";
+        ? "We couldn't finish the install. You can retry, or continue with the simple local indexer for now."
+        : 'This is a one-time download for private processing on this device. Your memory stays local and encrypted while the model installs.';
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-5 py-2">
-        <div className="text-xs font-medium uppercase tracking-wide text-primary">
-          Setting up your local AI
-        </div>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{headline}</h1>
-          <p className="text-sm text-muted-foreground mt-2 leading-relaxed">{lede}</p>
-        </div>
-
-        <div className="flex flex-col gap-2">
-          {phasesShown.map((p) => (
-            <PhaseRow
-              key={p.id}
-              phase={p}
-              progress={p.id === 'pull' && p.state === 'active' ? lastPullProgress : null}
-            />
-          ))}
+    <Card className="overflow-hidden py-0">
+      <CardContent className="p-0">
+        <div className="border-b border-border bg-muted/20 px-6 py-6 sm:px-8">
+          <div className="text-xs font-medium uppercase tracking-wide text-primary">
+            Setting up your local AI
+          </div>
+          <div className="mt-3 max-w-2xl">
+            <h1 className="text-3xl font-semibold tracking-tight">{headline}</h1>
+            <p className="text-base text-muted-foreground mt-3 leading-relaxed">{lede}</p>
+          </div>
+          <PrivacyPillRow className="mt-5" />
         </div>
 
-        {errorMessage && (
-          <Alert variant="destructive">
-            <X />
-            <AlertTitle>Install failed</AlertTitle>
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        )}
+        <div className="flex flex-col gap-6 p-6 sm:p-8">
+          <div className="grid gap-2">
+            {phasesShown.map((p) => (
+              <PhaseRow
+                key={p.id}
+                phase={p}
+                progress={p.id === 'pull' && p.state === 'active' ? lastPullProgress : null}
+              />
+            ))}
+          </div>
 
-        <details className="text-xs">
-          <summary className="text-muted-foreground cursor-pointer select-none">
-            Show technical log
-          </summary>
-          <pre className="mt-2 max-h-48 overflow-auto rounded-md border bg-muted/50 p-3 font-mono text-[11px] leading-snug">
-            {bootstrapEvents.length === 0
-              ? '(waiting for bootstrap to begin…)'
-              : bootstrapEvents.slice(-25).map(formatBootstrapLine).join('\n')}
-          </pre>
-        </details>
+          {errorMessage && (
+            <Alert variant="destructive">
+              <X />
+              <AlertTitle>Install failed</AlertTitle>
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Alert>
+          )}
 
-        <div className="flex items-center justify-between gap-2 pt-2">
-          <Button variant="ghost" onClick={onBack} disabled={phase === 'running'}>
-            <ArrowLeft />
-            Back
-          </Button>
-          <div className="flex items-center gap-2">
-            {phase === 'error' && (
-              <Button variant="outline" onClick={() => void runInstall()}>
-                Try again
-              </Button>
-            )}
-            {phase === 'error' && (
-              <Button variant="ghost" onClick={onContinue}>
-                Skip and continue
-                <ArrowRight />
-              </Button>
-            )}
-            {phase !== 'error' && (
-              <Button size="lg" onClick={onContinue} disabled={phase !== 'done'}>
-                {phase === 'done' ? 'Continue' : 'Working…'}
-                {phase === 'done' && <ArrowRight />}
-              </Button>
-            )}
+          <PrivacyNote>
+            The model gives CofounderOS private reasoning on your device. Captured memory remains
+            local, encrypted, and visible only to you.
+          </PrivacyNote>
+
+          <details className="text-xs">
+            <summary className="text-muted-foreground cursor-pointer select-none">
+              Show technical log
+            </summary>
+            <pre className="mt-2 max-h-48 overflow-auto rounded-md border bg-muted/50 p-3 font-mono text-[11px] leading-snug">
+              {bootstrapEvents.length === 0
+                ? '(waiting for bootstrap to begin…)'
+                : bootstrapEvents.slice(-25).map(formatBootstrapLine).join('\n')}
+            </pre>
+          </details>
+
+          <div className="flex items-center justify-between gap-2 border-t border-border pt-4">
+            <Button variant="ghost" onClick={onBack} disabled={phase === 'running'}>
+              <ArrowLeft />
+              Back
+            </Button>
+            <div className="flex items-center gap-2">
+              {phase === 'error' && (
+                <Button variant="outline" onClick={() => void runInstall()}>
+                  Try again
+                </Button>
+              )}
+              {phase === 'error' && (
+                <Button variant="ghost" onClick={onContinue}>
+                  Skip and continue
+                  <ArrowRight />
+                </Button>
+              )}
+              {phase !== 'error' && (
+                <Button size="lg" onClick={onContinue} disabled={phase !== 'done'}>
+                  {phase === 'done' ? 'Continue' : 'Working…'}
+                  {phase === 'done' && <ArrowRight />}
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </CardContent>
@@ -729,332 +890,447 @@ function PhaseRow({
   );
 }
 
-function FirstCaptureStep({
-  overview,
+
+function AudioStep({
   onContinue,
   onBack,
 }: {
-  overview: RuntimeOverview | null;
   onContinue: () => void;
   onBack: () => void;
 }) {
-  const [starting, setStarting] = React.useState(false);
-  const [startError, setStartError] = React.useState<string | null>(null);
-  const [didAttemptStart, setDidAttemptStart] = React.useState(false);
-  const initialTotalRef = React.useRef<number | null>(null);
+  const [enabled, setEnabled] = React.useState(false);
+  const [whisper, setWhisper] = React.useState<WhisperProbe | null>(null);
+  const [installer, setInstaller] = React.useState<WhisperInstaller | null | undefined>(
+    undefined,
+  );
+  const [installState, setInstallState] = React.useState<
+    'idle' | 'running' | 'failed' | 'finished'
+  >('idle');
+  const [installLog, setInstallLog] = React.useState<string[]>([]);
+  const [installError, setInstallError] = React.useState<string | null>(null);
+  const [activeInstaller, setActiveInstaller] = React.useState<WhisperInstaller | null>(
+    null,
+  );
+  const [mic, setMic] = React.useState<MicPermission | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  const refreshProbes = React.useCallback(async () => {
+    try {
+      const [w, m] = await Promise.all([
+        window.cofounderos.probeWhisper(),
+        window.cofounderos.probeMicPermission(),
+      ]);
+      setWhisper(w);
+      setMic(m);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   React.useEffect(() => {
-    if (!overview) return;
-    if (initialTotalRef.current == null) {
-      initialTotalRef.current = overview.storage.totalEvents;
-    }
-  }, [overview]);
+    void refreshProbes();
+    void window.cofounderos
+      .detectWhisperInstaller()
+      .then((res) => setInstaller(res.installer))
+      .catch(() => setInstaller(null));
+  }, [refreshProbes]);
 
-  const eventsToday = overview?.capture.eventsToday ?? 0;
-  const totalEvents = overview?.storage.totalEvents ?? 0;
-  const displayCount = eventsToday > 0 ? eventsToday : totalEvents;
-  const baseline = initialTotalRef.current ?? totalEvents;
-  const newSinceArrival = Math.max(0, totalEvents - baseline);
-  const captureLive = !!overview?.capture.running && !overview.capture.paused;
-  const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
-  const hasFirst = captureLive && (newSinceArrival >= 1 || displayCount >= 1);
-
-  async function startCapturing(): Promise<void> {
-    setStarting(true);
-    setStartError(null);
-    setDidAttemptStart(true);
-    try {
-      await window.cofounderos.startRuntime();
-      try {
-        await window.cofounderos.resumeCapture();
-      } catch {
-        /* may already be live */
+  // Subscribe to live install progress streamed from the main process.
+  React.useEffect(() => {
+    if (!window.cofounderos.onWhisperInstallProgress) return;
+    window.cofounderos.onWhisperInstallProgress((event) => {
+      if (event.kind === 'started') {
+        setInstallState('running');
+        setInstallError(null);
+        setInstallLog([`$ ${event.message ?? `${event.installer} install openai-whisper`}`]);
+        setActiveInstaller(event.installer);
+      } else if (event.kind === 'log') {
+        setInstallLog((prev) => [...prev.slice(-80), event.message]);
+      } else if (event.kind === 'finished') {
+        setInstallState(event.available ? 'finished' : 'failed');
+        if (!event.available) {
+          setInstallError(
+            "We installed Whisper but couldn't find it on PATH afterwards. Try running the app from a fresh terminal session.",
+          );
+        }
+        void refreshProbes();
+      } else if (event.kind === 'failed') {
+        setInstallState('failed');
+        setInstallError(event.reason ?? 'Install failed.');
       }
-      for (let i = 0; i < 6; i++) {
-        const next = await window.cofounderos.getOverview();
-        if (next.capture.running && !next.capture.paused) break;
-        await new Promise((r) => setTimeout(r, 500));
+    });
+  }, [refreshProbes]);
+
+  async function commit(turnOn: boolean) {
+    setBusy(true);
+    setSaveError(null);
+    try {
+      if (turnOn && mic?.status === 'not-determined') {
+        const after = await window.cofounderos.requestMicPermission();
+        setMic(after);
+      }
+      await window.cofounderos.saveConfigPatch({
+        capture: {
+          capture_audio: turnOn,
+          // Ensure live recording flips with the master toggle while
+          // staying gated on another app using microphone input.
+          audio: {
+            live_recording: {
+              enabled: turnOn,
+              activation: 'other_process_input',
+              poll_interval_sec: 3,
+            },
+          },
+        },
+      });
+      setEnabled(turnOn);
+      // Once turned on, kick the installer automatically if Whisper isn't
+      // already there — saves the user from having to click again.
+      if (
+        turnOn &&
+        whisper &&
+        !whisper.available &&
+        installer &&
+        installState === 'idle'
+      ) {
+        void runInstall();
       }
     } catch (err) {
-      setStartError(err instanceof Error ? err.message : String(err));
+      setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
-      setStarting(false);
+      setBusy(false);
     }
   }
 
-  const showAdvance = captureLive || didAttemptStart;
+  async function runInstall() {
+    setInstallState('running');
+    setInstallError(null);
+    setInstallLog([]);
+    try {
+      const res = await window.cofounderos.installWhisper();
+      if (!res.started) {
+        setInstallState('failed');
+        setInstallError(res.reason ?? 'Could not start the installer.');
+      } else if (res.installer) {
+        setActiveInstaller(res.installer);
+      }
+    } catch (err) {
+      setInstallState('failed');
+      setInstallError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const ready = enabled && whisper?.available;
+  const installerDetectionDone = installer !== undefined;
+  const needsInstall = enabled && whisper && !whisper.available;
+  const micDenied = enabled && mic?.status === 'denied';
+  const canAutoInstall = installer != null;
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-5 py-2">
-        <div className="text-xs font-medium uppercase tracking-wide text-primary">
-          Your first capture
+    <StepCard
+      eyebrow="Optional"
+      title="Add private microphone memory"
+      lede="If you turn this on, CofounderOS records short microphone chunks only while another app is using audio input, transcribes them locally with Whisper, and keeps the searchable transcript in your encrypted memory."
+      back={{ onClick: onBack }}
+      next={{
+        label: enabled ? 'Continue' : 'Skip for now',
+        onClick: onContinue,
+        variant: enabled ? 'default' : 'outline',
+      }}
+    >
+      <div className="rounded-xl border bg-card p-4 flex items-start gap-4 shadow-sm">
+        <div className="size-10 shrink-0 rounded-md bg-primary/10 text-primary grid place-items-center">
+          <Mic className="size-5" />
         </div>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Let's record your first moment
-          </h1>
-          <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-            When you click Start, CofounderOS will quietly note the active app and take a small
-            screenshot every few seconds — only when something changed. Try switching to another
-            app or scrolling a doc.
+        <div className="flex-1">
+          <h3 className="font-medium">Capture meeting audio privately</h3>
+          <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
+            When another app activates the microphone, audio is chunked every 5 minutes,
+            transcribed on your device, then deleted by default. The redacted transcript is what
+            stays in your local encrypted memory.
           </p>
         </div>
-
-        <div className="rounded-xl border bg-muted/30 p-6 flex flex-col items-center gap-4">
-          <div
-            className={cn(
-              'size-16 rounded-full grid place-items-center transition-colors',
-              captureLive
-                ? 'bg-success/20 text-success ring-4 ring-success/20 animate-pulse'
-                : 'bg-muted text-muted-foreground',
-            )}
+        <div className="pt-1">
+          <Button
+            size="sm"
+            variant={enabled ? 'outline' : 'default'}
+            onClick={() => void commit(!enabled)}
+            disabled={busy}
           >
-            <Eye className="size-8" />
-          </div>
-          <div className="text-center">
-            <div className="text-4xl font-semibold tracking-tight">{formatNumber(displayCount)}</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {eventsToday > 0
-                ? displayCount === 1
-                  ? 'moment captured today'
-                  : 'moments captured today'
-                : displayCount === 1
-                  ? 'moment captured'
-                  : 'moments captured'}
-              {newSinceArrival > 0 && (
-                <Badge variant="success" className="ml-2">
-                  +{newSinceArrival} new
-                </Badge>
+            {busy ? <Loader2 className="animate-spin" /> : enabled ? 'Turn off' : 'Turn on'}
+          </Button>
+        </div>
+      </div>
+
+      {saveError && (
+        <Alert variant="destructive">
+          <X />
+          <AlertTitle>Could not save</AlertTitle>
+          <AlertDescription>{saveError}</AlertDescription>
+        </Alert>
+      )}
+
+      {enabled && (
+        <div className="flex flex-col gap-3">
+          <StatusRow
+            label="Speech-to-text engine"
+            status={
+              whisper === null
+                ? 'pending'
+                : whisper.available
+                  ? 'ok'
+                  : installState === 'running'
+                    ? 'installing'
+                    : 'missing'
+            }
+            detail={
+              whisper === null
+                ? 'Checking…'
+                : whisper.available
+                  ? 'Installed and ready.'
+                  : installState === 'running'
+                    ? `Installing in the background${activeInstaller ? ` via ${activeInstaller}` : ''}…`
+                    : 'Not installed yet — CofounderOS can install it for you in one click.'
+            }
+          />
+          {mic && mic.status !== 'unsupported' && (
+            <StatusRow
+              label="Microphone permission"
+              status={
+                mic.status === 'granted'
+                  ? 'ok'
+                  : mic.status === 'denied' || mic.status === 'restricted'
+                    ? 'missing'
+                    : 'pending'
+              }
+              detail={
+                mic.status === 'granted'
+                  ? 'Granted — we can record while another app is using audio input.'
+                  : mic.status === 'denied'
+                    ? 'Denied. Open System Settings → Privacy & Security → Microphone, and enable CofounderOS.'
+                    : mic.status === 'restricted'
+                      ? "Restricted by a profile or parental control. We can't record."
+                      : 'Will prompt the first time recording starts.'
+              }
+            />
+          )}
+        </div>
+      )}
+
+      {needsInstall && installerDetectionDone && canAutoInstall && (
+        <div className="rounded-xl border bg-card p-4 flex flex-col gap-3 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="size-9 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
+              {installState === 'running' ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : installState === 'finished' ? (
+                <Check className="size-4" />
+              ) : installState === 'failed' ? (
+                <X className="size-4 text-destructive" />
+              ) : (
+                <Mic className="size-4" />
               )}
             </div>
-          </div>
-          <div
-            className={cn(
-              'text-xs font-medium',
-              captureLive
-                ? 'text-success'
-                : capturePaused
-                  ? 'text-warning'
-                  : 'text-muted-foreground',
-            )}
-          >
-            {captureLive
-              ? 'Capturing — try doing something on your computer'
-              : capturePaused
-                ? 'Capture is paused'
-                : starting
-                  ? 'Waking the capture engine…'
-                  : 'Not capturing yet'}
-          </div>
-        </div>
-
-        {startError && (
-          <Alert variant="destructive">
-            <X />
-            <AlertTitle>Could not start capture</AlertTitle>
-            <AlertDescription>{startError}</AlertDescription>
-          </Alert>
-        )}
-
-        {didAttemptStart && !captureLive && !starting && (
-          <Alert variant="warning">
-            <Shield />
-            <AlertTitle>Permissions needed</AlertTitle>
-            <AlertDescription>
-              On macOS this usually means CofounderOS needs <strong>Screen Recording</strong> and
-              <strong> Accessibility</strong> permission. Open <em>System Settings → Privacy
-              &amp; Security</em>, grant access to the CofounderOS app (or your terminal in dev
-              mode), then try again.
-            </AlertDescription>
-          </Alert>
-        )}
-
-        <div className="flex items-center justify-between gap-2 pt-2">
-          <Button variant="ghost" onClick={onBack}>
-            <ArrowLeft />
-            Back
-          </Button>
-          <div className="flex items-center gap-2">
-            {!captureLive && (
-              <Button size="lg" onClick={() => void startCapturing()} disabled={starting}>
-                {starting ? 'Starting…' : didAttemptStart ? 'Try again' : 'Start capturing'}
+            <div className="flex-1 min-w-0">
+              <h4 className="font-medium text-sm">
+                {installState === 'finished'
+                  ? 'Whisper is installed and ready'
+                  : installState === 'running'
+                    ? 'Installing Whisper privately on your device…'
+                    : installState === 'failed'
+                      ? 'Whisper install ran into a snag'
+                      : `One-click install with ${installer}`}
+              </h4>
+              <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                {installState === 'running'
+                  ? 'This usually takes a minute or two. You can keep going through onboarding while it finishes.'
+                  : installState === 'failed'
+                    ? installError ?? 'See the log below for details.'
+                    : 'CofounderOS will run the install for you using your existing package manager. Nothing leaves this device.'}
+              </p>
+            </div>
+            {installState !== 'running' && (
+              <Button
+                size="sm"
+                variant={installState === 'failed' ? 'outline' : 'default'}
+                onClick={() => void runInstall()}
+              >
+                {installState === 'failed' ? (
+                  <>
+                    <RefreshCw />
+                    Try again
+                  </>
+                ) : (
+                  'Install Whisper'
+                )}
               </Button>
             )}
-            {captureLive ? (
-              <Button size="lg" onClick={onContinue} disabled={!hasFirst}>
-                {hasFirst ? 'Continue' : 'Waiting for first moment…'}
-                {hasFirst && <ArrowRight />}
-              </Button>
-            ) : showAdvance || displayCount > 0 ? (
-              <Button variant="ghost" onClick={onContinue}>
-                Continue anyway
-                <ArrowRight />
-              </Button>
-            ) : null}
           </div>
+
+          <InstallLogDisclosure log={installLog} />
         </div>
-      </CardContent>
-    </Card>
+      )}
+
+      {needsInstall && installerDetectionDone && !canAutoInstall && (
+        <Alert variant="warning">
+          <Shield />
+          <AlertTitle>We can't auto-install Whisper here</AlertTitle>
+          <AlertDescription>
+            CofounderOS couldn't find Homebrew, pipx, or pip on your system. Conditional audio
+            capture will queue files from future mic sessions until Whisper becomes available. You
+            can install one of those tools and come back, or skip this step for now.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {micDenied && (
+        <Alert variant="warning">
+          <Shield />
+          <AlertTitle>Microphone access denied</AlertTitle>
+          <AlertDescription>
+            Open <em>System Settings → Privacy &amp; Security → Microphone</em> and enable
+            CofounderOS, then come back to this step.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {ready && (
+        <Alert>
+          <Check />
+          <AlertTitle>You're ready</AlertTitle>
+          <AlertDescription>
+            Audio capture will arm with the runtime and start only while another app is using audio
+            input. You can change this anytime in Settings → Audio; transcripts stay local and
+            private.
+          </AlertDescription>
+        </Alert>
+      )}
+    </StepCard>
   );
 }
 
-function FirstSearchStep({
-  onContinue,
-  onBack,
-}: {
-  onContinue: () => void;
-  onBack: () => void;
-}) {
-  const [query, setQuery] = React.useState('');
-  const [results, setResults] = React.useState<Frame[] | null>(null);
-  const [loading, setLoading] = React.useState(false);
-  const [searched, setSearched] = React.useState(false);
-
-  async function runSearch(): Promise<void> {
-    if (!query.trim()) return;
-    setLoading(true);
-    setSearched(true);
-    try {
-      const found = await window.cofounderos.searchFrames({ text: query.trim(), limit: 6 });
-      setResults(found);
-    } catch {
-      setResults([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
+function InstallLogDisclosure({ log }: { log: string[] }) {
+  if (log.length === 0) return null;
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-5 py-2">
-        <div className="text-xs font-medium uppercase tracking-wide text-primary">
-          Try a search
-        </div>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Ask your memory anything</h1>
-          <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-            Type a word from something you just saw — an app name, a webpage title, or text on
-            screen. CofounderOS searches everything you've captured so far. (No worries if there's
-            nothing yet — give it a few minutes.)
-          </p>
-        </div>
-
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
-            <Input
-              autoFocus
-              placeholder="e.g. Cursor, GitHub, slack, design doc…"
-              value={query}
-              onChange={(e) => setQuery(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void runSearch();
-              }}
-              className="pl-9"
-            />
-          </div>
-          <Button onClick={() => void runSearch()} disabled={loading || !query.trim()}>
-            {loading ? 'Searching…' : 'Search'}
-          </Button>
-        </div>
-
-        {searched && (
-          <div className="flex flex-col gap-2">
-            {results && results.length > 0 ? (
-              results.map((f, i) => (
-                <div
-                  key={i}
-                  className="flex gap-3 rounded-md border bg-card p-3 text-sm"
-                >
-                  <div className="font-mono text-xs text-muted-foreground w-12 shrink-0">
-                    {formatLocalTime(f.timestamp)}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-medium truncate">{f.app || 'Unknown app'}</div>
-                    <div className="text-muted-foreground text-xs mt-0.5 line-clamp-2">
-                      {f.window_title ||
-                        f.url ||
-                        (f.text ? String(f.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}
-                    </div>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <div className="rounded-md border border-dashed bg-muted/30 p-6 text-center">
-                <p className="text-sm">No matches yet. That's normal — capture only just started.</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Try searching for an app you have open, like the one you're reading this in.
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="flex items-center justify-between gap-2 pt-2">
-          <Button variant="ghost" onClick={onBack}>
-            <ArrowLeft />
-            Back
-          </Button>
-          <Button size="lg" onClick={onContinue}>
-            {searched ? 'Looks good' : 'Skip for now'}
-            <ArrowRight />
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+    <details className="text-xs">
+      <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+        Show install details
+      </summary>
+      <pre className="mt-2 max-h-40 overflow-auto rounded-md border bg-muted/50 p-3 font-mono text-[11px] leading-snug">
+        {log.slice(-12).join('\n')}
+      </pre>
+    </details>
   );
 }
 
-function DoneStep({ onFinish }: { onFinish: () => void }) {
+function StatusRow({
+  label,
+  status,
+  detail,
+}: {
+  label: string;
+  status: 'ok' | 'missing' | 'pending' | 'installing';
+  detail?: string;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-md border bg-card p-3">
+      <div className="mt-0.5">
+        {status === 'ok' ? (
+          <Check className="size-4 text-success" />
+        ) : status === 'installing' ? (
+          <Mic className="size-4 text-muted-foreground" />
+        ) : status === 'missing' ? (
+          <X className="size-4 text-destructive" />
+        ) : (
+          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium">{label}</div>
+        {detail && (
+          <div className="text-xs text-muted-foreground mt-0.5 break-words">{detail}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DoneStep({
+  modelReady,
+  onFinish,
+  onInstallModel,
+}: {
+  modelReady: boolean;
+  onFinish: () => void;
+  onInstallModel: () => void;
+}) {
   const items = [
     {
-      icon: <Sparkles />,
-      title: 'Browse your memories',
-      body: 'See what you worked on, by day or session.',
+      icon: <Search />,
+      title: 'Search your private timeline',
+      body: 'Revisit captured moments by day, session, app, or remembered detail.',
     },
     {
       icon: <Sparkles />,
-      title: 'Connect Cursor or Claude',
-      body: 'Copy a tiny snippet so your AI app can ask your memory directly.',
+      title: 'Use memory where you choose',
+      body: 'Connect tools like Cursor or Claude only when you decide to share access.',
     },
     {
-      icon: <Sparkles />,
-      title: 'Tune privacy & storage',
-      body: "Exclude apps, set retention, change models. Everything's a click away.",
+      icon: <Shield />,
+      title: 'Tune privacy and storage',
+      body: 'Exclude apps, change retention, switch models, or delete the encrypted memory.',
     },
   ];
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center text-center gap-5 py-8">
-        <div className="size-16 rounded-2xl bg-primary/10 text-primary grid place-items-center">
-          <Rocket className="size-9" />
+    <Card className="overflow-hidden py-0">
+      <CardContent className="p-0">
+        <div className="border-b border-border bg-muted/20 px-6 py-8 text-center sm:px-8">
+          <div className="mx-auto size-16 rounded-2xl bg-primary/10 text-primary grid place-items-center">
+            <Rocket className="size-9" />
+          </div>
+          <h1 className="mt-5 text-3xl font-semibold tracking-tight">You're all set</h1>
+          <p className="mx-auto mt-3 max-w-xl text-base text-muted-foreground leading-relaxed">
+            CofounderOS is now ready to remember quietly in the background, with a local encrypted
+            memory only you can see and control.
+          </p>
+          <PrivacyPillRow className="mt-5 justify-center" />
         </div>
-        <h1 className="text-3xl font-semibold tracking-tight">You're all set</h1>
-        <p className="text-base text-muted-foreground max-w-md leading-relaxed">
-          CofounderOS is now remembering quietly in the background. Whenever you want to revisit
-          something, open the menu bar icon — your memory will be waiting.
-        </p>
-        <div className="grid gap-2 w-full max-w-md">
-          {items.map((it, i) => (
-            <div
-              key={i}
-              className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3 text-left"
-            >
-              <div className="size-8 shrink-0 rounded-md bg-primary/10 text-primary grid place-items-center">
-                {it.icon}
-              </div>
-              <div>
-                <h3 className="font-medium text-sm">{it.title}</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">{it.body}</p>
-              </div>
-            </div>
-          ))}
+
+        <div className="flex flex-col gap-6 p-6 sm:p-8">
+          <div className="grid gap-3 md:grid-cols-3">
+            {items.map((it) => (
+              <FeatureTile key={it.title} icon={it.icon} title={it.title} body={it.body} />
+            ))}
+          </div>
+          <PrivacyNote>
+            You can pause capture from the menu bar and change privacy settings anytime. Your local
+            memory remains encrypted and under your control.
+          </PrivacyNote>
+          {!modelReady && (
+            <Alert variant="warning">
+              <Shield />
+              <AlertTitle>Local AI not installed yet</AlertTitle>
+              <AlertDescription>
+                CofounderOS needs the local model to organize and answer questions about your
+                memory. Finish installing it before opening the app.
+              </AlertDescription>
+            </Alert>
+          )}
+          <div className="flex justify-center border-t border-border pt-4">
+            {modelReady ? (
+              <Button size="xl" onClick={onFinish}>
+                Open CofounderOS
+                <ArrowRight />
+              </Button>
+            ) : (
+              <Button size="xl" onClick={onInstallModel}>
+                Install local AI
+                <ArrowRight />
+              </Button>
+            )}
+          </div>
         </div>
-        <Button size="xl" onClick={onFinish}>
-          Open CofounderOS
-          <ArrowRight />
-        </Button>
       </CardContent>
     </Card>
   );

@@ -323,6 +323,7 @@ self-bounded footprint by combining four levers — tweak any of them in
 | `capture.screenshot_max_dim` | capture | `1280` | Longest-edge resize at capture time. Native Retina (~3000 px) is ~4-5× the pixels of the resized version. `0` keeps native resolution. |
 | `capture.screenshot_quality` | capture | `55` | WebP quality. Screen content (UI, text) tolerates much lower quality than photographs — `55` is visually indistinguishable from `75` for OCR and human review. |
 | `capture.screenshot_diff_threshold` | capture | `0.10` | Soft-trigger floor on perceptual-hash distance. Higher = fewer near-duplicate frames. |
+| `capture.focus_settle_delay_ms` | capture | `900` | Delay after a focus change before taking the screenshot, so transient switcher UI such as Cmd+Tab is not captured. |
 | `capture.content_change_min_interval_ms` | capture | `20000` | Minimum delay between two soft-trigger captures of the same display. Hard triggers (window focus, URL change, idle end) bypass this. |
 | `storage.local.vacuum.*` | storage | tiered | Sliding-window retention: re-encode at lower quality after `compress_after_days`, downscale after `thumbnail_after_days`, delete after `delete_after_days`. Each accepts `*_minutes` for finer-grained tuning (e.g. `compress_after_minutes: 30` for testing). SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
 

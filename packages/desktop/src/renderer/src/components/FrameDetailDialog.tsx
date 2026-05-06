@@ -32,7 +32,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from '@/components/ui/sonner';
 import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
 import { formatLocalTime, localDayKey, prettyDay } from '@/lib/format';
-import type { Frame } from '@/global';
+import type { Frame, FrameIndexDetails } from '@/global';
 
 type DeleteHandler = (frame: Frame) => void | Promise<void>;
 
@@ -142,6 +142,8 @@ function FrameDetailBody({
     searchContext?.explanation ?? null,
   );
   const [explanationLoading, setExplanationLoading] = React.useState(false);
+  const [indexDetails, setIndexDetails] = React.useState<FrameIndexDetails | null>(null);
+  const [indexDetailsLoading, setIndexDetailsLoading] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -205,6 +207,34 @@ function FrameDetailBody({
     };
   }, [frame, searchContext?.explanation, searchContext?.query]);
 
+  React.useEffect(() => {
+    let cancelled = false;
+    setIndexDetails(null);
+    if (!frame.id) {
+      setIndexDetailsLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setIndexDetailsLoading(true);
+    void window.cofounderos
+      .getFrameIndexDetails(frame.id)
+      .then((details) => {
+        if (!cancelled) setIndexDetails(details);
+      })
+      .catch(() => {
+        if (!cancelled) setIndexDetails(null);
+      })
+      .finally(() => {
+        if (!cancelled) setIndexDetailsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [frame.id]);
+
   const title =
     frame.window_title ||
     frame.entity_path ||
@@ -212,15 +242,19 @@ function FrameDetailBody({
     (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 80) : 'Untitled moment');
   const time = formatLocalTime(frame.timestamp, { seconds: true });
   const day = frame.day || (frame.timestamp ? localDayKey(new Date(frame.timestamp)) : '');
+  const metadataEntries = Object.entries(indexDetails?.metadata ?? {}).filter(
+    ([key]) => !AI_CAPTION_KEYS.has(key),
+  );
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr] max-h-[80vh]">
-      <div className="bg-muted/40 grid place-items-center min-h-64 md:min-h-[480px] overflow-hidden">
+    <div className="grid h-[80vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[1.4fr_1fr]">
+      <div className="bg-muted/40 flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
         {thumbUrl ? (
           <img
             src={thumbUrl}
-            alt=""
-            className="w-full h-full object-contain max-h-[80vh]"
+            alt="Captured screenshot"
+            onError={() => setThumbUrl(null)}
+            className="block max-h-full max-w-full object-contain rounded-md border border-border bg-black shadow-sm"
           />
         ) : (
           <div className="flex flex-col items-center gap-2 text-muted-foreground p-8">
@@ -230,7 +264,7 @@ function FrameDetailBody({
         )}
       </div>
 
-      <div className="flex flex-col border-l border-border min-w-0">
+      <div className="flex min-h-0 min-w-0 flex-col border-l border-border">
         <div className="px-6 pt-6 pb-3 border-b border-border">
           <DialogTitle className="text-base leading-snug line-clamp-3">{title}</DialogTitle>
           <DialogDescription className="mt-2 flex flex-wrap items-center gap-2">
@@ -279,6 +313,44 @@ function FrameDetailBody({
                 <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
                   {detailExplanation || (explanationLoading ? 'Reading context from this result…' : 'No AI context available for this result yet.')}
                 </div>
+              </div>
+            ) : null}
+            {indexDetails?.caption ? (
+              <div>
+                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
+                  <Sparkles className="size-3.5" />
+                  <span>AI caption</span>
+                </div>
+                <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
+                  {indexDetails.caption}
+                </div>
+              </div>
+            ) : null}
+            {indexDetails?.indexingText || indexDetailsLoading ? (
+              <div>
+                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
+                  <Layers className="size-3.5" />
+                  <span>Indexed metadata</span>
+                </div>
+                <div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-auto font-mono">
+                  {indexDetails?.indexingText ??
+                    (indexDetailsLoading ? 'Loading indexing metadata…' : '')}
+                </div>
+              </div>
+            ) : null}
+            {metadataEntries.length > 0 ? (
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+                  Event metadata
+                </div>
+                <dl className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">
+                  {metadataEntries.map(([key, value]) => (
+                    <div key={key} className="grid grid-cols-[120px_1fr] gap-2">
+                      <dt className="font-mono text-muted-foreground break-all">{key}</dt>
+                      <dd className="font-mono break-all">{formatMetadataValue(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
               </div>
             ) : null}
             {frame.text ? (
@@ -393,3 +465,26 @@ function DetailRow({
     </div>
   );
 }
+
+const AI_CAPTION_KEYS = new Set([
+  'ai_caption',
+  'caption',
+  'image_caption',
+  'screenshot_caption',
+  'vision_caption',
+  'visual_caption',
+  'description',
+  'summary',
+]);
+
+function formatMetadataValue(value: unknown): string {
+  if (value == null) return '—';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+

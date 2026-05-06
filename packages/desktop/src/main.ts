@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import readline from 'node:readline';
 import {
   app,
@@ -13,6 +14,7 @@ import {
   nativeImage,
   shell,
   dialog,
+  systemPreferences,
 } from 'electron';
 import { defaultDataDir, expandPath, loadConfig } from '@cofounderos/core';
 
@@ -788,6 +790,364 @@ async function getRuntimeDoctorText(): Promise<string> {
   ].join('\n');
 }
 
+const execFileP = promisify(execFile);
+
+/**
+ * Probe whether the OpenAI Whisper CLI is installed and runnable.
+ * Used by the audio onboarding step and the Settings → Audio tab so
+ * users get an honest "installed / not installed" signal instead of
+ * silently producing nothing when audio capture is enabled.
+ *
+ * We probe the literal `whisper` command (matching the runtime config
+ * default `capture.audio.whisper_command`) on PATH plus a few common
+ * install locations; advanced users with custom commands set their
+ * config and the runtime preflight handles it from there.
+ */
+async function probeWhisperCli(): Promise<{
+  available: boolean;
+  path?: string;
+  version?: string;
+  triedCommand?: string;
+}> {
+  const command = 'whisper';
+  const env = whisperEnv();
+  try {
+    const resolvedPath = await whichOnPath(command, env);
+    if (!resolvedPath) throw new Error('whisper not found on PATH');
+    const help = await execFileP(resolvedPath, ['--help'], {
+      env,
+      timeout: 30_000,
+      maxBuffer: 1 << 20,
+    });
+    const firstLine = help.stdout.split('\n').find((l) => l.trim()) ?? '';
+    return {
+      available: true,
+      path: resolvedPath,
+      version: firstLine.slice(0, 200),
+      triedCommand: command,
+    };
+  } catch {
+    return { available: false, triedCommand: command };
+  }
+}
+
+/**
+ * Cross-platform `which` shim. macOS/Linux use `/usr/bin/which`; Windows
+ * uses `where.exe` and may print multiple paths (one per line) — we keep
+ * the first match in either case.
+ */
+async function whichOnPath(
+  command: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | null> {
+  const isWin = process.platform === 'win32';
+  const tool = isWin ? 'where' : '/usr/bin/which';
+  const target = isWin ? `${command}.exe` : command;
+  try {
+    const res = await execFileP(tool, [target], { env, timeout: 5_000 });
+    const first = res.stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    return first ?? null;
+  } catch {
+    if (!isWin) return null;
+    // `where.exe` returns non-zero when nothing matches — fall back to the
+    // bare name and let `where` look it up as written (covers .cmd / .bat
+    // shims that some installers create without a trailing .exe).
+    try {
+      const res = await execFileP('where', [command], { env, timeout: 5_000 });
+      const first = res.stdout
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0);
+      return first ?? null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+type WhisperInstaller = 'brew' | 'pipx' | 'pip3' | 'pip';
+
+/**
+ * Lightweight detector that the renderer uses to decide whether the
+ * one-click "Install Whisper" path is available. Candidate order is
+ * platform-aware so we surface the most user-friendly tool first.
+ */
+async function detectWhisperInstaller(): Promise<{
+  installer: WhisperInstaller | null;
+  installerPath?: string;
+}> {
+  const env = whisperEnv();
+  const candidates = whisperInstallerCandidates();
+  for (const tool of candidates) {
+    const resolved = await whichOnPath(tool, env);
+    if (resolved) return { installer: tool, installerPath: resolved };
+  }
+  return { installer: null };
+}
+
+function whisperInstallerCandidates(): WhisperInstaller[] {
+  // openai-whisper is a Python package, so the only installers that
+  // actually work cross-platform are pipx → pip3 → pip. Brew is added
+  // first on macOS / Linuxbrew because it bundles the Python runtime
+  // for users who don't have one. We deliberately don't list winget /
+  // choco / apt because none of them ship `openai-whisper`.
+  if (process.platform === 'win32') {
+    return ['pipx', 'pip3', 'pip'];
+  }
+  if (process.platform === 'linux') {
+    return ['pipx', 'pip3', 'pip', 'brew'];
+  }
+  return ['brew', 'pipx', 'pip3', 'pip'];
+}
+
+function whisperEnv(): NodeJS.ProcessEnv {
+  // GUI Electron apps inherit a stripped PATH from the launcher
+  // (launchd on macOS, the desktop session on Linux, the shell config
+  // on Windows). Augment with the most common package-manager bin
+  // locations so install + probe stay in sync across platforms.
+  const extras: string[] = [];
+  if (process.platform === 'darwin') {
+    extras.push(
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      `${process.env.HOME ?? ''}/.local/bin`,
+      `${process.env.HOME ?? ''}/Library/Python/3.11/bin`,
+      `${process.env.HOME ?? ''}/Library/Python/3.12/bin`,
+    );
+  } else if (process.platform === 'linux') {
+    extras.push(
+      '/usr/local/bin',
+      '/usr/bin',
+      `${process.env.HOME ?? ''}/.local/bin`,
+      '/home/linuxbrew/.linuxbrew/bin',
+    );
+  } else if (process.platform === 'win32') {
+    const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
+    const localAppData =
+      process.env.LOCALAPPDATA ?? (home ? path.join(home, 'AppData', 'Local') : '');
+    if (home) {
+      extras.push(
+        path.join(home, '.local', 'bin'),
+        path.join(home, 'AppData', 'Roaming', 'Python', 'Scripts'),
+      );
+    }
+    if (localAppData) {
+      extras.push(path.join(localAppData, 'Programs', 'Python', 'Scripts'));
+      // Common per-user pipx target on Windows.
+      extras.push(path.join(localAppData, 'pipx', 'venvs'));
+    }
+  }
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const filtered = extras.filter((p) => p && p.length > 0);
+  return {
+    ...process.env,
+    PATH: [process.env.PATH ?? process.env.Path, ...filtered].filter(Boolean).join(sep),
+  };
+}
+
+interface WhisperInstallEvent {
+  kind: 'started' | 'log' | 'finished' | 'failed';
+  installer?: WhisperInstaller;
+  message?: string;
+  reason?: string;
+  available?: boolean;
+  path?: string;
+}
+
+let activeWhisperInstall: ChildProcess | null = null;
+
+/**
+ * One-click Whisper installer. Picks the first available package
+ * manager appropriate for the platform, runs it in the background, and
+ * streams stdout/stderr lines back to the renderer as
+ * `whisper-install-progress` events. Re-probes on completion so the UI
+ * can flip its "installed" state without the user touching anything.
+ */
+async function installWhisper(): Promise<{
+  started: boolean;
+  reason?: string;
+  installer?: WhisperInstaller;
+}> {
+  if (activeWhisperInstall && !activeWhisperInstall.killed) {
+    return { started: false, reason: 'Install already running.' };
+  }
+  const { installer, installerPath } = await detectWhisperInstaller();
+  if (!installer || !installerPath) {
+    const reason = whisperMissingInstallerMessage();
+    emitWhisperInstall({ kind: 'failed', reason });
+    return { started: false, reason };
+  }
+  const args = whisperInstallerArgs(installer);
+
+  emitWhisperInstall({
+    kind: 'started',
+    installer,
+    message: `${installer} ${args.join(' ')}`,
+  });
+
+  const env = whisperEnv();
+  // Brew refuses to install with HOMEBREW_NO_AUTO_UPDATE unset and a
+  // stale repo; setting it keeps the install short and predictable.
+  if (installer === 'brew') env.HOMEBREW_NO_AUTO_UPDATE = '1';
+
+  return await new Promise<{
+    started: boolean;
+    installer: WhisperInstaller;
+  }>((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(installerPath, args, {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // winget / choco are .exe files; spawning them directly works
+        // without a shell. No `shell: true` to keep injection-safe.
+      });
+    } catch (err) {
+      emitWhisperInstall({
+        kind: 'failed',
+        installer,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      resolve({ started: false, installer });
+      return;
+    }
+    activeWhisperInstall = child;
+
+    const forward = (stream: NodeJS.ReadableStream | null) => {
+      if (!stream) return;
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      rl.on('line', (line) => {
+        if (line.trim()) emitWhisperInstall({ kind: 'log', installer, message: line });
+      });
+    };
+    forward(child.stdout);
+    forward(child.stderr);
+
+    child.on('error', (err) => {
+      emitWhisperInstall({
+        kind: 'failed',
+        installer,
+        reason: err.message,
+      });
+      activeWhisperInstall = null;
+    });
+
+    child.on('exit', async (code, signal) => {
+      activeWhisperInstall = null;
+      const probe = await probeWhisperCli();
+      if (code === 0 || probe.available) {
+        if (code !== 0) {
+          emitWhisperInstall({
+            kind: 'log',
+            installer,
+            message: `Installer exited with code ${code ?? 'unknown'}, but Whisper is available at ${
+              probe.path ?? 'whisper'
+            }.`,
+          });
+        }
+        emitWhisperInstall({
+          kind: 'finished',
+          installer,
+          available: probe.available,
+          path: probe.path,
+        });
+      } else {
+        emitWhisperInstall({
+          kind: 'failed',
+          installer,
+          reason:
+            signal != null
+              ? `Install was interrupted (${signal}).`
+              : `Install exited with code ${code ?? 'unknown'}. Check the log above for details.`,
+        });
+      }
+    });
+
+    resolve({ started: true, installer });
+  });
+}
+
+function emitWhisperInstall(event: WhisperInstallEvent): void {
+  const line =
+    event.kind === 'log'
+      ? `whisper-install [${event.installer}] ${event.message ?? ''}`
+      : `whisper-install ${event.kind}${event.installer ? ` [${event.installer}]` : ''}${
+          event.reason ? `: ${event.reason}` : event.message ? `: ${event.message}` : ''
+        }`;
+  appendLog(line);
+  statusWindow?.webContents.send('cofounderos:whisper-install-progress', event);
+}
+
+function whisperInstallerArgs(installer: WhisperInstaller): string[] {
+  switch (installer) {
+    case 'brew':
+      return ['install', 'openai-whisper'];
+    case 'pipx':
+      return ['install', 'openai-whisper'];
+    case 'pip3':
+    case 'pip':
+      // `--user` keeps the install scoped to the current user on every
+      // platform, avoiding sudo prompts on Linux/macOS and admin elev
+      // on Windows. `-U` makes a no-op safe if it's already installed.
+      return ['install', '--user', '-U', 'openai-whisper'];
+  }
+}
+
+function whisperMissingInstallerMessage(): string {
+  if (process.platform === 'win32') {
+    return "Couldn't find pipx, pip3, or pip on this system. Install Python from python.org (be sure to check 'Add Python to PATH' in the installer), then click Install Whisper again.";
+  }
+  if (process.platform === 'linux') {
+    return "Couldn't find pipx, pip3, or pip on this system. Install Python with pip (e.g. `sudo apt install python3-pip pipx` or your distro's equivalent), then click Install Whisper again.";
+  }
+  return "Couldn't find Homebrew, pipx, or pip on this system. Install Homebrew from brew.sh or pipx via `python3 -m pip install --user pipx`, then click Install Whisper again.";
+}
+
+async function probeFfprobe(): Promise<{ available: boolean; path?: string }> {
+  const env = whisperEnv();
+  const resolved = await whichOnPath('ffprobe', env);
+  if (!resolved) return { available: false };
+  return { available: true, path: resolved };
+}
+
+/**
+ * macOS-only wrapper around `systemPreferences.getMediaAccessStatus`.
+ * On other platforms we report `unsupported` so the renderer can omit
+ * the permission row entirely.
+ */
+type MicStatus = 'granted' | 'denied' | 'not-determined' | 'restricted' | 'unsupported';
+
+function probeMicPermission(): { status: MicStatus } {
+  if (process.platform !== 'darwin') return { status: 'unsupported' };
+  try {
+    const raw = systemPreferences.getMediaAccessStatus('microphone');
+    // Electron declares `unknown` as a possible value (returned on
+    // platforms where the API isn't meaningful); map it to our
+    // `unsupported` bucket so the renderer has a single fallback case.
+    if (raw === 'unknown') return { status: 'unsupported' };
+    return { status: raw };
+  } catch {
+    return { status: 'unsupported' };
+  }
+}
+
+async function requestMicPermission(): Promise<{ status: MicStatus }> {
+  if (process.platform !== 'darwin') return { status: 'unsupported' };
+  try {
+    // `askForMediaAccess` triggers the system prompt the *first* time
+    // it's called; subsequent calls return the cached decision without
+    // re-prompting the user. Pair with `probeMicPermission` afterwards
+    // to translate the boolean into our richer status enum.
+    await systemPreferences.askForMediaAccess('microphone');
+  } catch {
+    /* ignore — we'll just return the current status below */
+  }
+  return probeMicPermission();
+}
+
 function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:overview', async () => {
     return await getOverviewForRequest();
@@ -818,6 +1178,9 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:explain-search-results', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('explainSearchResults', query);
+  });
+  ipcMain.handle('cofounderos:get-frame-index-details', async (_event, frameId: string) => {
+    return await (await getRuntimeForRequest()).call('getFrameIndexDetails', frameId);
   });
   ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
     const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
@@ -877,6 +1240,25 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:delete-all-memory', async () => {
     return await (await getRuntimeForRequest()).call('deleteAllMemory');
+  });
+  ipcMain.handle('cofounderos:probe-whisper', async () => {
+    return await probeWhisperCli();
+  });
+  ipcMain.handle('cofounderos:detect-whisper-installer', async () => {
+    const detected = await detectWhisperInstaller();
+    return { installer: detected.installer };
+  });
+  ipcMain.handle('cofounderos:install-whisper', async () => {
+    return await installWhisper();
+  });
+  ipcMain.handle('cofounderos:probe-ffprobe', async () => {
+    return await probeFfprobe();
+  });
+  ipcMain.handle('cofounderos:probe-mic-permission', async () => {
+    return probeMicPermission();
+  });
+  ipcMain.handle('cofounderos:request-mic-permission', async () => {
+    return await requestMicPermission();
   });
 }
 

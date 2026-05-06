@@ -2,9 +2,9 @@ import * as React from 'react';
 import {
   Code2,
   Copy,
+  Eye,
   ExternalLink,
   FolderOpen,
-  Heart,
   Lock,
   RefreshCcw,
   Sparkles,
@@ -222,8 +222,8 @@ function AboutCard() {
         </div>
 
         <div className="grid gap-2 sm:grid-cols-3">
-          <AboutPill icon={<Lock />} label="100% local" />
-          <AboutPill icon={<Heart />} label="No subscription" />
+          <AboutPill icon={<Lock />} label="Local by default" />
+          <AboutPill icon={<Eye />} label="Only you can see it" />
           <AboutPill icon={<Sparkles />} label="No telemetry" />
         </div>
 

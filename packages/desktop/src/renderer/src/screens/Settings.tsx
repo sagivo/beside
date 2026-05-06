@@ -1,5 +1,21 @@
 import * as React from 'react';
-import { AlertTriangle, FolderOpen, Monitor, Moon, Power, Save, Sun, Trash2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  FolderOpen,
+  Loader2,
+  Mic,
+  Monitor,
+  Moon,
+  Power,
+  RefreshCw,
+  Save,
+  Shield,
+  Sun,
+  Trash2,
+  X,
+} from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,7 +42,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { formatBytes } from '@/lib/format';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
-import type { LoadedConfig } from '@/global';
+import type { LoadedConfig, MicPermission, WhisperProbe } from '@/global';
 
 interface SettingsDraft {
   blurPasswordFields: boolean;
@@ -43,6 +59,12 @@ interface SettingsDraft {
   ollamaAutoInstall: boolean;
   markdownPath: string;
   mcpPort: number;
+  // Audio
+  captureAudio: boolean;
+  whisperModel: string;
+  liveRecordingEnabled: boolean;
+  chunkSeconds: number;
+  deleteAudioAfterTranscribe: boolean;
 }
 
 export function Settings({
@@ -172,6 +194,7 @@ export function Settings({
           <TabsTrigger value="privacy">Privacy</TabsTrigger>
           <TabsTrigger value="storage">Storage</TabsTrigger>
           <TabsTrigger value="ai">AI</TabsTrigger>
+          <TabsTrigger value="audio">Audio</TabsTrigger>
           <TabsTrigger value="advanced">Advanced</TabsTrigger>
         </TabsList>
 
@@ -301,6 +324,17 @@ export function Settings({
           </Card>
         </TabsContent>
 
+        <TabsContent value="audio">
+          <AudioSettings
+            captureAudio={draft.captureAudio}
+            liveRecordingEnabled={draft.liveRecordingEnabled}
+            whisperModel={draft.whisperModel}
+            chunkSeconds={draft.chunkSeconds}
+            deleteAudioAfterTranscribe={draft.deleteAudioAfterTranscribe}
+            set={set}
+          />
+        </TabsContent>
+
         <TabsContent value="advanced">
           <Card>
             <CardContent className="flex flex-col gap-4">
@@ -349,6 +383,405 @@ export function Settings({
         onReset={resetDraft}
       />
     </div>
+  );
+}
+
+const WHISPER_MODELS: Array<{ id: string; label: string; size: string; quality: string }> = [
+  { id: 'tiny', label: 'tiny', size: '~75 MB', quality: 'Fastest, lower quality' },
+  { id: 'base', label: 'base', size: '~150 MB', quality: 'Recommended' },
+  { id: 'small', label: 'small', size: '~500 MB', quality: 'Better, slower' },
+  { id: 'medium', label: 'medium', size: '~1.5 GB', quality: 'Best, much slower' },
+];
+
+function AudioSettings({
+  captureAudio,
+  liveRecordingEnabled,
+  whisperModel,
+  chunkSeconds,
+  deleteAudioAfterTranscribe,
+  set,
+}: {
+  captureAudio: boolean;
+  liveRecordingEnabled: boolean;
+  whisperModel: string;
+  chunkSeconds: number;
+  deleteAudioAfterTranscribe: boolean;
+  set: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void;
+}) {
+  const [whisper, setWhisper] = React.useState<WhisperProbe | null>(null);
+  const [ffprobe, setFfprobe] = React.useState<{ available: boolean; path?: string } | null>(null);
+  const [mic, setMic] = React.useState<MicPermission | null>(null);
+  const [refreshing, setRefreshing] = React.useState(false);
+
+  const refreshProbes = React.useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const [w, f, m] = await Promise.all([
+        window.cofounderos.probeWhisper(),
+        window.cofounderos.probeFfprobe(),
+        window.cofounderos.probeMicPermission(),
+      ]);
+      setWhisper(w);
+      setFfprobe(f);
+      setMic(m);
+    } catch {
+      /* ignore */
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refreshProbes();
+  }, [refreshProbes]);
+
+  async function handleRequestMic() {
+    const after = await window.cofounderos.requestMicPermission();
+    setMic(after);
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card>
+        <CardContent className="flex flex-col gap-0">
+          <ToggleRow
+            title="Capture audio from microphone"
+            description="When another app is using the microphone, record short chunks and transcribe them locally with Whisper. Off by default."
+            checked={captureAudio}
+            onChange={(v) => {
+              set('captureAudio', v);
+              set('liveRecordingEnabled', v);
+            }}
+          />
+          {captureAudio && (
+            <>
+              <Separator className="my-4" />
+              <div className="flex flex-col gap-3">
+                <div>
+                  <h4 className="font-medium">Whisper model</h4>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Trade-off between transcription quality and speed.
+                  </p>
+                </div>
+                <RadioGroup
+                  value={whisperModel}
+                  onValueChange={(v) => set('whisperModel', v)}
+                  className="grid gap-2 sm:grid-cols-2"
+                >
+                  {WHISPER_MODELS.map((m) => (
+                    <Label
+                      key={m.id}
+                      htmlFor={`wm-${m.id}`}
+                      className={cn(
+                        'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
+                        whisperModel === m.id
+                          ? 'border-primary ring-2 ring-primary/20'
+                          : 'hover:bg-accent/40',
+                      )}
+                    >
+                      <RadioGroupItem
+                        value={m.id}
+                        id={`wm-${m.id}`}
+                        className="mt-0.5"
+                      />
+                      <div className="min-w-0">
+                        <div className="font-medium">{m.label}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {m.size} · {m.quality}
+                        </div>
+                      </div>
+                    </Label>
+                  ))}
+                </RadioGroup>
+              </div>
+              <Separator className="my-4" />
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label="Chunk length (seconds)"
+                  hint="Shorter chunks = faster feedback during calls, more Whisper invocations."
+                >
+                  <Input
+                    type="number"
+                    min="10"
+                    value={chunkSeconds}
+                    onChange={(e) => set('chunkSeconds', Number(e.currentTarget.value))}
+                  />
+                </Field>
+              </div>
+              <Separator className="my-4" />
+              <ToggleRow
+                title="Delete audio after transcribing"
+                description="Recommended. The redacted transcript stays; the raw audio file is removed so credentials and other PII don't linger on disk."
+                checked={deleteAudioAfterTranscribe}
+                onChange={(v) => set('deleteAudioAfterTranscribe', v)}
+              />
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="size-8 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
+                <Mic className="size-4" />
+              </div>
+              <div>
+                <h4 className="font-medium">Status</h4>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  Conditional audio capture needs Whisper installed and microphone permission.
+                </p>
+              </div>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => void refreshProbes()} disabled={refreshing}>
+              {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              Re-check
+            </Button>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <SettingsStatusRow
+              label="Whisper"
+              status={whisper === null ? 'pending' : whisper.available ? 'ok' : 'missing'}
+              detail={
+                whisper === null
+                  ? 'Checking…'
+                  : whisper.available
+                    ? whisper.path ?? 'installed'
+                    : 'Not found on PATH. Install instructions below.'
+              }
+            />
+            <SettingsStatusRow
+              label="ffprobe (for accurate durations)"
+              status={ffprobe === null ? 'pending' : ffprobe.available ? 'ok' : 'optional-missing'}
+              detail={
+                ffprobe === null
+                  ? 'Checking…'
+                  : ffprobe.available
+                    ? ffprobe.path ?? 'installed'
+                    : 'Optional. Without ffprobe, audio events have no duration_ms. Install with `brew install ffmpeg`.'
+              }
+            />
+            {mic && mic.status !== 'unsupported' && (
+              <SettingsStatusRow
+                label="Microphone permission"
+                status={
+                  mic.status === 'granted'
+                    ? 'ok'
+                    : mic.status === 'denied' || mic.status === 'restricted'
+                      ? 'missing'
+                      : 'pending'
+                }
+                detail={
+                  mic.status === 'granted'
+                    ? 'Granted'
+                    : mic.status === 'denied'
+                      ? 'Denied. Open System Settings → Privacy & Security → Microphone and enable CofounderOS.'
+                      : mic.status === 'restricted'
+                        ? "Restricted by a profile or parental control."
+                        : 'Not yet asked. Click Request below to prompt.'
+                }
+                action={
+                  mic.status === 'not-determined'
+                    ? { label: 'Request', onClick: () => void handleRequestMic() }
+                    : undefined
+                }
+              />
+            )}
+          </div>
+
+          {whisper && !whisper.available && (
+            <WhisperOneClickInstall onInstalled={() => void refreshProbes()} />
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function SettingsStatusRow({
+  label,
+  status,
+  detail,
+  action,
+}: {
+  label: string;
+  status: 'ok' | 'missing' | 'optional-missing' | 'pending';
+  detail?: string;
+  action?: { label: string; onClick: () => void };
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-md border bg-muted/30 p-3">
+      <div className="mt-0.5">
+        {status === 'ok' ? (
+          <Check className="size-4 text-success" />
+        ) : status === 'missing' ? (
+          <X className="size-4 text-destructive" />
+        ) : status === 'optional-missing' ? (
+          <Shield className="size-4 text-muted-foreground" />
+        ) : (
+          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-medium">{label}</div>
+        {detail && <div className="text-xs text-muted-foreground mt-0.5 break-words">{detail}</div>}
+      </div>
+      {action && (
+        <Button size="sm" variant="outline" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function WhisperOneClickInstall({ onInstalled }: { onInstalled: () => void }) {
+  const [installer, setInstaller] = React.useState<
+    'brew' | 'pipx' | 'pip3' | 'pip' | null | undefined
+  >(undefined);
+  const [state, setState] = React.useState<'idle' | 'running' | 'failed' | 'finished'>(
+    'idle',
+  );
+  const [log, setLog] = React.useState<string[]>([]);
+  const [error, setError] = React.useState<string | null>(null);
+  const [activeInstaller, setActiveInstaller] = React.useState<
+    'brew' | 'pipx' | 'pip3' | 'pip' | null
+  >(null);
+
+  React.useEffect(() => {
+    void window.cofounderos
+      .detectWhisperInstaller()
+      .then((res) => setInstaller(res.installer))
+      .catch(() => setInstaller(null));
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.cofounderos.onWhisperInstallProgress) return;
+    window.cofounderos.onWhisperInstallProgress((event) => {
+      if (event.kind === 'started') {
+        setState('running');
+        setError(null);
+        setLog([`$ ${event.message ?? `${event.installer} install openai-whisper`}`]);
+        setActiveInstaller(event.installer);
+      } else if (event.kind === 'log') {
+        setLog((prev) => [...prev.slice(-80), event.message]);
+      } else if (event.kind === 'finished') {
+        setState(event.available ? 'finished' : 'failed');
+        if (!event.available) {
+          setError(
+            "Install completed but Whisper still isn't on PATH. Try restarting CofounderOS from a fresh terminal.",
+          );
+        }
+        onInstalled();
+      } else if (event.kind === 'failed') {
+        setState('failed');
+        setError(event.reason ?? 'Install failed.');
+      }
+    });
+  }, [onInstalled]);
+
+  async function runInstall() {
+    setState('running');
+    setError(null);
+    setLog([]);
+    try {
+      const res = await window.cofounderos.installWhisper();
+      if (!res.started) {
+        setState('failed');
+        setError(res.reason ?? 'Could not start the installer.');
+      } else if (res.installer) {
+        setActiveInstaller(res.installer);
+      }
+    } catch (err) {
+      setState('failed');
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (installer === undefined) {
+    return null;
+  }
+
+  if (installer === null) {
+    return (
+      <Alert variant="warning">
+        <Shield />
+        <AlertTitle>We can't auto-install Whisper here</AlertTitle>
+        <AlertDescription>
+          CofounderOS couldn't find Homebrew, pipx, or pip on your system. Install one of those and
+          come back, or skip transcription for now.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-4 flex flex-col gap-3">
+      <div className="flex items-start gap-3">
+        <div className="size-8 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
+          {state === 'running' ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : state === 'finished' ? (
+            <Check className="size-4" />
+          ) : state === 'failed' ? (
+            <X className="size-4 text-destructive" />
+          ) : (
+            <Mic className="size-4" />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <h4 className="font-medium text-sm">
+            {state === 'finished'
+              ? 'Whisper installed'
+              : state === 'running'
+                ? `Installing Whisper via ${activeInstaller ?? installer}…`
+                : state === 'failed'
+                  ? 'Install ran into a snag'
+                  : `Install Whisper via ${installer}`}
+          </h4>
+          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+            {state === 'running'
+              ? 'This usually takes a minute or two. The install runs locally — nothing leaves this device.'
+              : state === 'failed'
+                ? error ?? 'See the log below.'
+                : 'CofounderOS will run the install for you using your existing package manager.'}
+          </p>
+        </div>
+        {state !== 'running' && (
+          <Button
+            size="sm"
+            variant={state === 'failed' ? 'outline' : 'default'}
+            onClick={() => void runInstall()}
+          >
+            {state === 'failed' ? (
+              <>
+                <RefreshCw />
+                Try again
+              </>
+            ) : (
+              'Install Whisper'
+            )}
+          </Button>
+        )}
+      </div>
+      <SettingsInstallLogDisclosure log={log} />
+    </div>
+  );
+}
+
+function SettingsInstallLogDisclosure({ log }: { log: string[] }) {
+  if (log.length === 0) return null;
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+        Show install details
+      </summary>
+      <pre className="mt-2 max-h-40 overflow-auto rounded-md border bg-card p-3 font-mono text-[11px] leading-snug">
+        {log.slice(-12).join('\n')}
+      </pre>
+    </details>
   );
 }
 
@@ -413,8 +846,8 @@ function DangerZone() {
                 <AlertDialogTitle>Delete all memory?</AlertDialogTitle>
                 <AlertDialogDescription>
                   This permanently removes every captured moment, screenshot, and the entire
-                  search index from this device. It can't be undone — your data is local, so
-                  there's no copy in the cloud to restore from.
+                  search index from this device. It can't be undone, and there is no backup copy to
+                  restore from.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <div className="flex flex-col gap-2">
@@ -599,6 +1032,11 @@ function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     ollamaAutoInstall: cfg.index.model.ollama?.auto_install ?? true,
     markdownPath: typeof markdown?.path === 'string' ? markdown.path : '',
     mcpPort: typeof mcp?.port === 'number' ? mcp.port : 3456,
+    captureAudio: cfg.capture.capture_audio ?? false,
+    whisperModel: cfg.capture.whisper_model ?? 'base',
+    liveRecordingEnabled: cfg.capture.audio?.live_recording?.enabled ?? false,
+    chunkSeconds: cfg.capture.audio?.live_recording?.chunk_seconds ?? 300,
+    deleteAudioAfterTranscribe: cfg.capture.audio?.delete_audio_after_transcribe ?? true,
   };
 }
 
@@ -616,6 +1054,17 @@ function configPatchFromDraft(draft: SettingsDraft) {
         blur_password_fields: draft.blurPasswordFields,
         pause_on_screen_lock: draft.pauseOnScreenLock,
         sensitive_keywords: lines(draft.sensitiveKeywords),
+      },
+      capture_audio: draft.captureAudio,
+      whisper_model: draft.whisperModel.trim() || 'base',
+      audio: {
+        delete_audio_after_transcribe: draft.deleteAudioAfterTranscribe,
+        live_recording: {
+          enabled: draft.liveRecordingEnabled,
+          activation: 'other_process_input',
+          poll_interval_sec: 3,
+          chunk_seconds: Math.max(1, draft.chunkSeconds),
+        },
       },
     },
     storage: {

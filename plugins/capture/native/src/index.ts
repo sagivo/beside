@@ -20,6 +20,7 @@ interface NativeCaptureConfig {
   fixture?: boolean;
   restart_on_crash?: boolean;
   poll_interval_ms?: number;
+  focus_settle_delay_ms?: number;
   screenshot_diff_threshold?: number;
   idle_threshold_sec?: number;
   screenshot_format?: 'webp' | 'jpeg';
@@ -45,6 +46,8 @@ interface NativeCaptureConfig {
       format?: 'm4a';
       sample_rate?: number;
       channels?: number;
+      activation?: 'other_process_input';
+      poll_interval_sec?: number;
     };
   };
   raw_root?: string;
@@ -97,6 +100,7 @@ class NativeCapture implements ICapture {
       fixture: config.fixture ?? process.env.COFOUNDEROS_CAPTURE_FIXTURE === '1',
       restart_on_crash: config.restart_on_crash ?? true,
       poll_interval_ms: config.poll_interval_ms ?? 1500,
+      focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
       screenshot_format: format,
@@ -155,6 +159,7 @@ class NativeCapture implements ICapture {
     return {
       pluginName: 'native',
       poll_interval_ms: this.config.poll_interval_ms,
+      focus_settle_delay_ms: this.config.focus_settle_delay_ms,
       screenshot_diff_threshold: this.config.screenshot_diff_threshold,
       idle_threshold_sec: this.config.idle_threshold_sec,
       screenshot_format: this.config.screenshot_format,

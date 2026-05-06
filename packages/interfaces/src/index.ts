@@ -101,6 +101,9 @@ export interface CaptureConfig {
   // Polling cadence used by event-driven recorders to detect window/url
   // change. NOT a screenshot interval — screenshots are event-driven.
   poll_interval_ms: number;
+  // Delay before taking a screenshot for a focus change, so transient UI
+  // like the macOS Cmd+Tab switcher can settle before pixels are captured.
+  focus_settle_delay_ms: number;
   // Storage root so the capture agent can write asset files directly
   // without round-tripping every byte through IPC.
   raw_root: string;
@@ -123,6 +126,7 @@ export interface ICapture {
 // ---------------------------------------------------------------------------
 
 export interface StorageQuery {
+  ids?: string[];
   from?: string;
   to?: string;
   types?: RawEventType[];

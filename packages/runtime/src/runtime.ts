@@ -16,6 +16,7 @@ import type {
   FrameQuery,
   IndexState,
   Logger,
+  RawEvent,
   StorageStats,
 } from '@cofounderos/interfaces';
 import {
@@ -141,6 +142,13 @@ export interface RuntimeIndexedJournalDay {
 export interface SearchResultExplanation {
   frameId: string;
   explanation: string;
+}
+
+export interface FrameIndexDetails {
+  frameId: string;
+  caption: string | null;
+  indexingText: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface ExplainSearchResultsQuery {
@@ -574,6 +582,29 @@ export class CofounderRuntime {
     });
   }
 
+  async getFrameIndexDetails(frameId: string): Promise<FrameIndexDetails | null> {
+    const id = frameId.trim();
+    if (!id) return null;
+
+    return await this.withHandles(async (handles) => {
+      const context = await handles.storage.getFrameContext(id, 0, 0);
+      const frame = context?.anchor;
+      if (!frame) return null;
+
+      const sourceIds = frame.source_event_ids ?? [];
+      const events = sourceIds.length > 0
+        ? await handles.storage.readEvents({ ids: sourceIds, limit: sourceIds.length })
+        : [];
+      const metadata = buildDisplayMetadata(frame, events);
+      return {
+        frameId: frame.id,
+        caption: extractAiCaption(metadata),
+        indexingText: buildFrameIndexingText(frame),
+        metadata,
+      };
+    });
+  }
+
   async deleteFrame(frameId: string): Promise<{ assetPath: string | null }> {
     return await this.withHandles((handles) => handles.storage.deleteFrame(frameId));
   }
@@ -664,6 +695,114 @@ export class CofounderRuntime {
 
 export function createRuntime(opts: RuntimeOptions = {}): CofounderRuntime {
   return new CofounderRuntime(opts);
+}
+
+const AI_CAPTION_KEYS = [
+  'ai_caption',
+  'caption',
+  'image_caption',
+  'screenshot_caption',
+  'vision_caption',
+  'visual_caption',
+  'description',
+  'summary',
+];
+
+const HIDDEN_METADATA_KEYS = new Set([
+  'ax_text',
+  'ocr_text',
+  'text',
+  'content',
+]);
+
+function buildFrameIndexingText(frame: Frame): string | null {
+  const parts = [
+    frame.app ? `App: ${frame.app}` : null,
+    frame.window_title ? `Window: ${frame.window_title}` : null,
+    frame.url ? `URL: ${frame.url}` : null,
+    frame.entity_path ? `Entity: ${frame.entity_path}` : null,
+    frame.text ? `Text: ${truncateIndexText(frame.text, 3000)}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join('\n') : null;
+}
+
+function buildDisplayMetadata(frame: Frame, events: RawEvent[]): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {
+    ...(frame.text_source ? { text_source: frame.text_source } : {}),
+    ...(frame.trigger ? { trigger: frame.trigger } : {}),
+    ...(frame.entity_kind ? { entity_kind: frame.entity_kind } : {}),
+    ...(frame.perceptual_hash ? { perceptual_hash: frame.perceptual_hash } : {}),
+  };
+
+  for (const event of events) {
+    const eventMetadata = normaliseEventMetadata(event.metadata);
+    for (const [key, value] of Object.entries(eventMetadata)) {
+      const displayValue = normaliseMetadataValue(key, value);
+      if (displayValue == null) continue;
+      metadata[key] = displayValue;
+    }
+  }
+
+  if (frame.source_event_ids.length > 0) {
+    metadata.source_event_ids = frame.source_event_ids;
+  }
+  return metadata;
+}
+
+function normaliseEventMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const nested = isRecord(metadata.metadata) ? metadata.metadata : {};
+  const topLevel = Object.fromEntries(
+    Object.entries(metadata).filter(([key]) => key !== 'metadata'),
+  );
+  return { ...nested, ...topLevel };
+}
+
+function normaliseMetadataValue(key: string, value: unknown): unknown {
+  if (HIDDEN_METADATA_KEYS.has(key)) return null;
+  if (value == null) return null;
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const safe = value.filter((item) => item == null || isScalar(item));
+    return safe.length > 0 && safe.length === value.length ? safe : null;
+  }
+  if (isRecord(value)) {
+    const safe = Object.fromEntries(
+      Object.entries(value).filter(([, item]) => item == null || isScalar(item)),
+    );
+    return Object.keys(safe).length > 0 ? safe : null;
+  }
+  return null;
+}
+
+function extractAiCaption(metadata: Record<string, unknown>): string | null {
+  for (const key of AI_CAPTION_KEYS) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function truncateIndexText(text: string, maxChars: number): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  return cleaned.length <= maxChars ? cleaned : cleaned.slice(0, maxChars).trimEnd();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isScalar(value: unknown): boolean {
+  return (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  );
 }
 
 function getIndexingStatus(

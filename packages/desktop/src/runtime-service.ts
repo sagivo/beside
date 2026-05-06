@@ -172,6 +172,8 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.searchFrames(req.params as never);
     case 'explainSearchResults':
       return await runtime.explainSearchResults(req.params as never);
+    case 'getFrameIndexDetails':
+      return await runtime.getFrameIndexDetails(String(req.params));
     case 'readAsset': {
       const buf = await runtime.readAsset(String(req.params));
       return { base64: buf.toString('base64') };

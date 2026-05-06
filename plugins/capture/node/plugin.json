@@ -9,6 +9,7 @@
     "type": "object",
     "properties": {
       "poll_interval_ms": { "type": "integer" },
+      "focus_settle_delay_ms": { "type": "integer", "default": 900 },
       "screenshot_diff_threshold": { "type": "number" },
       "idle_threshold_sec": { "type": "integer" },
       "jpeg_quality": { "type": "integer" },

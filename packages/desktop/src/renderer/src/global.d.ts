@@ -16,6 +16,7 @@ declare global {
       getIndexedJournalDay: (day: string) => Promise<IndexedJournalDay>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
+      getFrameIndexDetails: (frameId: string) => Promise<FrameIndexDetails | null>;
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
@@ -32,8 +33,21 @@ declare global {
       deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
       deleteFramesByDay: (day: string) => Promise<{ frames: number; assetPaths: string[] }>;
       deleteAllMemory: () => Promise<{ frames: number; events: number; assetBytes: number }>;
+      probeWhisper: () => Promise<WhisperProbe>;
+      detectWhisperInstaller: () => Promise<{ installer: WhisperInstaller | null }>;
+      installWhisper: () => Promise<{
+        started: boolean;
+        installer?: WhisperInstaller;
+        reason?: string;
+      }>;
+      probeFfprobe: () => Promise<{ available: boolean; path?: string }>;
+      probeMicPermission: () => Promise<MicPermission>;
+      requestMicPermission: () => Promise<MicPermission>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
+      onWhisperInstallProgress?: (
+        callback: (event: WhisperInstallProgress) => void,
+      ) => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
     };
   }
@@ -129,6 +143,43 @@ export interface RuntimeBackgroundJobStatus {
   skippedCount: number;
 }
 
+export interface WhisperProbe {
+  available: boolean;
+  /** Absolute path to the binary, if found. */
+  path?: string;
+  /** First line of `whisper --help` for sanity-display, if available. */
+  version?: string;
+  /** When `available` is false, the resolved command name we tried. */
+  triedCommand?: string;
+}
+
+/**
+ * Package managers we can shell out to for the one-click Whisper
+ * installer. `null` means we couldn't find any of them — the renderer
+ * uses that to fall back to a manual instruction state.
+ */
+export type WhisperInstaller = 'brew' | 'pipx' | 'pip3' | 'pip';
+
+export type WhisperInstallProgress =
+  | { kind: 'started'; installer: WhisperInstaller; message?: string }
+  | { kind: 'log'; installer: WhisperInstaller; message: string }
+  | {
+      kind: 'finished';
+      installer: WhisperInstaller;
+      available: boolean;
+      path?: string;
+    }
+  | { kind: 'failed'; installer?: WhisperInstaller; reason?: string };
+
+/**
+ * macOS reports microphone permission as one of these states. On
+ * non-macOS platforms (or before any probe), the renderer treats
+ * `unsupported` as "we don't know — try anyway".
+ */
+export type MicPermission = {
+  status: 'granted' | 'denied' | 'not-determined' | 'restricted' | 'unsupported';
+};
+
 export interface DoctorCheck {
   area: string;
   status: 'ok' | 'warn' | 'fail' | 'info';
@@ -158,6 +209,27 @@ export interface CofounderConfig {
       blur_password_fields: boolean;
       pause_on_screen_lock: boolean;
       sensitive_keywords: string[];
+    };
+    capture_audio?: boolean;
+    whisper_model?: string;
+    audio?: {
+      inbox_path?: string;
+      processed_path?: string;
+      failed_path?: string;
+      tick_interval_sec?: number;
+      batch_size?: number;
+      whisper_command?: string;
+      whisper_language?: string;
+      delete_audio_after_transcribe?: boolean;
+      max_audio_bytes?: number;
+      live_recording?: {
+        enabled?: boolean;
+        chunk_seconds?: number;
+        sample_rate?: number;
+        channels?: number;
+        activation?: 'other_process_input';
+        poll_interval_sec?: number;
+      };
     };
   };
   storage: {
@@ -215,9 +287,21 @@ export interface Frame {
   window_title?: string;
   url?: string | null;
   text?: string | null;
+  text_source?: string | null;
   asset_path?: string | null;
+  perceptual_hash?: string | null;
+  trigger?: string | null;
   activity_session_id?: string | null;
   entity_path?: string | null;
+  entity_kind?: string | null;
+  source_event_ids?: string[];
+}
+
+export interface FrameIndexDetails {
+  frameId: string;
+  caption: string | null;
+  indexingText: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface SearchResultExplanation {

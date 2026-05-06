@@ -123,6 +123,12 @@ class LocalStorage implements IStorage {
     const sql: string[] = [`SELECT ${EVENT_SELECT_COLUMNS} FROM events WHERE 1=1`];
     const params: Record<string, unknown> = {};
 
+    if (query.ids?.length) {
+      sql.push(`AND id IN (${query.ids.map((_, i) => `@id_${i}`).join(',')})`);
+      query.ids.forEach((id, i) => {
+        params[`id_${i}`] = id;
+      });
+    }
     if (query.from) {
       sql.push('AND timestamp >= @from_ts');
       params.from_ts = query.from;
@@ -176,6 +182,12 @@ class LocalStorage implements IStorage {
     const sql: string[] = ['SELECT COUNT(*) AS n FROM events WHERE 1=1'];
     const params: Record<string, unknown> = {};
 
+    if (query.ids?.length) {
+      sql.push(`AND id IN (${query.ids.map((_, i) => `@id_${i}`).join(',')})`);
+      query.ids.forEach((id, i) => {
+        params[`id_${i}`] = id;
+      });
+    }
     if (query.from) {
       sql.push('AND timestamp >= @from_ts');
       params.from_ts = query.from;
