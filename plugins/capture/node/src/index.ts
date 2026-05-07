@@ -32,7 +32,7 @@ interface CaptureNodeConfig {
    * Polling cadence (ms) while the user is idle (`idle_start` fired,
    * before `idle_end`). Active-window queries, screenshot probes, and
    * perceptual-hash diff loops are wasted CPU when the user isn't
-   * touching the machine. Defaults to 10000 (10s); set <=
+   * touching the machine. Defaults to 30000 (30s); set <=
    * `poll_interval_ms` to disable the backoff.
    */
   idle_poll_interval_ms?: number;
@@ -43,10 +43,10 @@ interface CaptureNodeConfig {
   screenshot_quality?: number;
   /**
    * Cap the longest edge of every screenshot at capture time. Native
-   * Retina captures are ~3000+ px wide; that's ~4-5× more pixels than
+   * Retina captures are ~3000+ px wide; that's roughly 7× more pixels than
    * any downstream consumer (OCR, perceptual hash, markdown export
    * thumbnails) actually uses. Resizing here is the single biggest
-   * win for on-disk size — typical reductions are 4-6×. Set to 0 to
+   * win for on-disk size. Set to 0 to
    * keep native resolution.
    */
   screenshot_max_dim?: number;
@@ -366,21 +366,21 @@ class NodeCapture implements ICapture {
     const fallbackQuality = format === 'jpeg' ? config.jpeg_quality : undefined;
     // Lower default than the historic 75 — for screen content (UI, text,
     // flat colors) the quality floor before visible artifacts is much
-    // lower than for photographs. 55 cuts ~30-40% off file size with no
-    // perceptible loss for OCR or human review.
+    // lower than for photographs. 45 keeps screen text readable while
+    // further reducing encode work and disk churn.
     const quality =
-      explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 55 : 80);
+      explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 45 : 80);
     this.config = {
-      poll_interval_ms: config.poll_interval_ms ?? 1500,
-      idle_poll_interval_ms: config.idle_poll_interval_ms ?? 10_000,
+      poll_interval_ms: config.poll_interval_ms ?? 3000,
+      idle_poll_interval_ms: config.idle_poll_interval_ms ?? 30_000,
       focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
-      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
+      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.15,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
       screenshot_format: format,
       screenshot_quality: quality,
-      screenshot_max_dim: config.screenshot_max_dim ?? 1280,
+      screenshot_max_dim: config.screenshot_max_dim ?? 1100,
       content_change_min_interval_ms:
-        config.content_change_min_interval_ms ?? 20_000,
+        config.content_change_min_interval_ms ?? 60_000,
       jpeg_quality: format === 'jpeg' ? quality : 80,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],

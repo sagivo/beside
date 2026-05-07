@@ -8,10 +8,15 @@
   "config_schema": {
     "type": "object",
     "properties": {
-      "poll_interval_ms": { "type": "integer" },
+      "poll_interval_ms": { "type": "integer", "default": 3000 },
+      "idle_poll_interval_ms": { "type": "integer", "default": 30000 },
       "focus_settle_delay_ms": { "type": "integer", "default": 900 },
-      "screenshot_diff_threshold": { "type": "number" },
+      "screenshot_diff_threshold": { "type": "number", "default": 0.15 },
       "idle_threshold_sec": { "type": "integer" },
+      "screenshot_format": { "type": "string", "enum": ["webp", "jpeg"], "default": "webp" },
+      "screenshot_quality": { "type": "integer", "default": 45 },
+      "screenshot_max_dim": { "type": "integer", "default": 1100 },
+      "content_change_min_interval_ms": { "type": "integer", "default": 60000 },
       "jpeg_quality": { "type": "integer" },
       "excluded_apps": { "type": "array", "items": { "type": "string" } },
       "excluded_url_patterns": { "type": "array", "items": { "type": "string" } },

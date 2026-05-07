@@ -9,6 +9,8 @@ import { cn } from '@/lib/utils';
 import type { ActivitySession, JournalDay, RuntimeOverview } from '@/global';
 
 const TOP_N = 5;
+const FULL_JOURNAL_FRAME_LIMIT = 600;
+const ACTIVITY_SAMPLE_LIMIT = 500;
 
 /**
  * Unified activity card. Replaces the older 3-stat grid + separate
@@ -45,7 +47,17 @@ export function ActivityCard({
     (async () => {
       try {
         const today = localDayKey();
-        const j = await window.cofounderos.getJournalDay(today);
+        const j =
+          eventsToday <= FULL_JOURNAL_FRAME_LIMIT
+            ? await window.cofounderos.getJournalDay(today)
+            : {
+                day: today,
+                frames: await window.cofounderos.searchFrames({
+                  day: today,
+                  limit: ACTIVITY_SAMPLE_LIMIT,
+                }),
+                sessions: [],
+              };
         if (!cancelled) setJournal(j);
       } catch {
         if (!cancelled) setJournal(null);
@@ -60,7 +72,7 @@ export function ActivityCard({
 
   const apps = journal ? countByApp(journal.frames) : [];
   const top = apps.slice(0, TOP_N);
-  const totalToday = journal?.frames.length ?? eventsToday;
+  const appFrameTotal = journal?.frames.length ?? eventsToday;
   const activeMinutes = journal ? totalActiveMinutes(journal.sessions) : 0;
 
   return (
@@ -123,7 +135,7 @@ export function ActivityCard({
                 <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
                   Top apps today
                 </h4>
-                {journal && totalToday > 0 && (
+                {journal && appFrameTotal > 0 && (
                   <span className="text-xs text-muted-foreground">
                     {apps.length} app{apps.length === 1 ? '' : 's'}
                   </span>
@@ -138,7 +150,7 @@ export function ActivityCard({
                       key={entry.app}
                       app={entry.app}
                       count={entry.count}
-                      percent={(entry.count / Math.max(1, totalToday)) * 100}
+                      percent={(entry.count / Math.max(1, appFrameTotal)) * 100}
                       rank={i}
                     />
                   ))}

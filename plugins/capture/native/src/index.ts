@@ -20,6 +20,7 @@ interface NativeCaptureConfig {
   fixture?: boolean;
   restart_on_crash?: boolean;
   poll_interval_ms?: number;
+  idle_poll_interval_ms?: number;
   focus_settle_delay_ms?: number;
   screenshot_diff_threshold?: number;
   idle_threshold_sec?: number;
@@ -105,19 +106,20 @@ class NativeCapture implements ICapture {
     this.logger = logger.child('capture-native');
     const format = config.screenshot_format ?? 'webp';
     const quality = config.screenshot_quality
-      ?? (format === 'webp' ? 55 : config.jpeg_quality ?? 80);
+      ?? (format === 'webp' ? 45 : config.jpeg_quality ?? 80);
     this.config = {
       helper_path: config.helper_path ? expandPath(config.helper_path) : undefined,
       fixture: config.fixture ?? process.env.COFOUNDEROS_CAPTURE_FIXTURE === '1',
       restart_on_crash: config.restart_on_crash ?? true,
-      poll_interval_ms: config.poll_interval_ms ?? 1500,
+      poll_interval_ms: config.poll_interval_ms ?? 3000,
+      idle_poll_interval_ms: config.idle_poll_interval_ms ?? 30_000,
       focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
-      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
+      screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.15,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
       screenshot_format: format,
       screenshot_quality: quality,
-      screenshot_max_dim: config.screenshot_max_dim ?? 1280,
-      content_change_min_interval_ms: config.content_change_min_interval_ms ?? 20_000,
+      screenshot_max_dim: config.screenshot_max_dim ?? 1100,
+      content_change_min_interval_ms: config.content_change_min_interval_ms ?? 60_000,
       jpeg_quality: format === 'jpeg' ? quality : 80,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
@@ -132,7 +134,7 @@ class NativeCapture implements ICapture {
         whisper_command: config.audio?.whisper_command ?? 'whisper',
         whisper_language: config.audio?.whisper_language,
         live_recording: {
-          enabled: config.audio?.live_recording?.enabled ?? true,
+          enabled: config.audio?.live_recording?.enabled ?? false,
           chunk_seconds: config.audio?.live_recording?.chunk_seconds ?? 300,
           format: config.audio?.live_recording?.format ?? 'm4a',
           sample_rate: config.audio?.live_recording?.sample_rate ?? 16_000,

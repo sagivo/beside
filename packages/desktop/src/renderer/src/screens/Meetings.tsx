@@ -22,11 +22,19 @@ import { cn } from '@/lib/utils';
 import type { Meeting, MeetingPlatform } from '@/global';
 
 function formatDuration(ms: number): string {
-  const totalMin = Math.round(ms / 60_000);
+  const totalMin = durationMinutes(ms);
   if (totalMin < 60) return `${totalMin}m`;
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function durationMinutes(ms: number): number {
+  return Math.round(ms / 60_000);
+}
+
+function shouldShowMeeting(meeting: Meeting): boolean {
+  return durationMinutes(meeting.duration_ms) > 0;
 }
 
 function platformLabel(platform: MeetingPlatform): string {
@@ -80,15 +88,19 @@ export function Meetings({
   onRefresh: () => void;
 }) {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
-  const selected = meetings.find((m) => m.id === selectedId) ?? null;
+  const visibleMeetings = React.useMemo(
+    () => meetings.filter(shouldShowMeeting),
+    [meetings],
+  );
+  const selected = visibleMeetings.find((m) => m.id === selectedId) ?? null;
 
-  const groups = groupByDay(meetings);
+  const groups = groupByDay(visibleMeetings);
 
   React.useEffect(() => {
-    if (selectedId && !meetings.find((m) => m.id === selectedId)) {
+    if (selectedId && !visibleMeetings.find((m) => m.id === selectedId)) {
       setSelectedId(null);
     }
-  }, [meetings, selectedId]);
+  }, [visibleMeetings, selectedId]);
 
   return (
     <div className="flex flex-col gap-6 pt-6">
@@ -113,12 +125,12 @@ export function Meetings({
         }
       />
 
-      {loading && meetings.length === 0 ? (
+      {loading && visibleMeetings.length === 0 ? (
         <div className="grid min-h-[30vh] place-items-center text-muted-foreground text-sm gap-2">
           <Loader2 className="size-5 animate-spin" />
           Loading meetings…
         </div>
-      ) : meetings.length === 0 ? (
+      ) : visibleMeetings.length === 0 ? (
         <EmptyState />
       ) : (
         <div className="flex gap-4 min-h-0">

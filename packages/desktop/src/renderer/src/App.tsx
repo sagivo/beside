@@ -104,9 +104,9 @@ function AppInner() {
 
   // Sparse safety-net poll. We trust the push channel for normal
   // operation; this only fires if the runtime service wedges or the
-  // IPC listener drops updates. 60s is fine because the runtime's own
-  // 2s/15s heartbeat covers the steady-state freshness, and a wedge
-  // is rare enough that 60s recovery is acceptable.
+  // IPC listener drops updates. 60s is fine because the runtime's
+  // active/idle heartbeat covers steady-state freshness, and a wedge is
+  // rare enough that 60s recovery is acceptable.
   React.useEffect(() => {
     const timer = window.setInterval(() => {
       if (!window.cofounderos) return;

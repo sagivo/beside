@@ -111,8 +111,8 @@ export function Onboarding({
     };
   }, []);
 
-  // Subscribe to live overview push (heartbeat every 2s plus after every
-  // mutation). Falls back to a sparse manual poll only if the push channel
+  // Subscribe to live overview push (heartbeat plus after every mutation).
+  // Falls back to a sparse manual poll only if the push channel
   // isn't available — important because onboarding decides when to advance
   // based on capture state changing.
   React.useEffect(() => {

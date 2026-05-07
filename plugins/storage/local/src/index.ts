@@ -45,6 +45,7 @@ interface LocalStorageConfig {
 }
 
 const MAX_EMBEDDING_TEXT_CHARS = 3000;
+const ASSET_BYTES_CACHE_TTL_MS = 5 * 60_000;
 const CACHEABLE_SCREENSHOT_EXTENSIONS = new Set(['.webp']);
 const FLAT_INTERNED_SCREENSHOT_RE =
   /^raw\/\d{4}-\d{2}-\d{2}\/screenshots\/[a-f0-9]{64}\.webp$/i;
@@ -67,6 +68,7 @@ class LocalStorage implements IStorage {
   private frameFtsDeleteStmt: Database.Statement | null = null;
   private frameFtsInsertStmt: Database.Statement | null = null;
   private frameFtsFrameSelectStmt: Database.Statement | null = null;
+  private assetBytesCache: { value: number; expiresAt: number } | null = null;
 
   constructor(root: string, logger: Logger) {
     this.root = root;
@@ -120,6 +122,7 @@ class LocalStorage implements IStorage {
     const abs = this.absoluteAssetPath(assetPath);
     await ensureDir(path.dirname(abs));
     await fsp.writeFile(abs, data);
+    this.invalidateAssetBytesCache();
   }
 
   async readAsset(assetPath: string): Promise<Buffer> {
@@ -277,7 +280,7 @@ class LocalStorage implements IStorage {
       return acc;
     }, {});
 
-    const totalAssetBytes = await this.measureAssetBytes();
+    const totalAssetBytes = await this.getCachedAssetBytes();
 
     return {
       totalEvents: totals.count,
@@ -839,30 +842,35 @@ class LocalStorage implements IStorage {
       params.text_source = query.textSource;
     }
 
-    const rows = this.db
-      .prepare(
-        `SELECT frames.*, frame_embeddings.vector AS vector_blob
-         FROM frame_embeddings
-         JOIN frames ON frames.id = frame_embeddings.frame_id
-         WHERE ${where.join(' AND ')}`,
-      )
-      .all(params) as Array<RawFrameRow & { vector_blob: Buffer }>;
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const limit = Math.max(1, Math.floor(query.limit ?? 25));
+    const keep = offset + limit;
+    const spillLimit = Math.max(keep * 4, 100);
+    const keepLimit = Math.max(keep * 2, 50);
+    const candidates: Array<{ row: RawFrameRow; score: number }> = [];
+    const stmt = this.db.prepare(
+      `SELECT frames.*, frame_embeddings.vector AS vector_blob
+       FROM frame_embeddings
+       JOIN frames ON frames.id = frame_embeddings.frame_id
+       WHERE ${where.join(' AND ')}`,
+    );
 
-    const matches: FrameSemanticMatch[] = [];
-    for (const row of rows) {
+    for (const row of stmt.iterate(params) as Iterable<RawFrameRow & { vector_blob: Buffer }>) {
       const candidate = unpackFloat32(row.vector_blob);
       if (candidate.length !== target.length) continue;
       const score = dot(target, candidate);
       if (!Number.isFinite(score)) continue;
-      matches.push({ frame: rowToFrame(row), score });
+      candidates.push({ row, score });
+      if (candidates.length > spillLimit) {
+        candidates.sort(compareSemanticCandidates);
+        candidates.length = keepLimit;
+      }
     }
-    matches.sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score;
-      return b.frame.timestamp.localeCompare(a.frame.timestamp);
-    });
-    const offset = Math.max(0, Math.floor(query.offset ?? 0));
-    const limit = Math.max(1, Math.floor(query.limit ?? 25));
-    return matches.slice(offset, offset + limit);
+    candidates.sort(compareSemanticCandidates);
+    return candidates.slice(offset, offset + limit).map(({ row, score }) => ({
+      frame: rowToFrame(row),
+      score,
+    }));
   }
 
   async clearFrameEmbeddings(model?: string): Promise<void> {
@@ -1460,6 +1468,7 @@ class LocalStorage implements IStorage {
         .prepare('UPDATE frames SET vacuum_tier = ? WHERE id = ?')
         .run(update.tier, frameId);
     }
+    this.invalidateAssetBytesCache();
   }
 
   async countFramesByTier(): Promise<Record<FrameAssetTier, number>> {
@@ -1868,6 +1877,7 @@ class LocalStorage implements IStorage {
     if (row.asset_path) {
       await this.unlinkAsset(row.asset_path);
     }
+    this.invalidateAssetBytesCache();
     return { assetPath: row.asset_path };
   }
 
@@ -1907,6 +1917,7 @@ class LocalStorage implements IStorage {
     for (const p of assetPaths) {
       await this.unlinkAsset(p);
     }
+    this.invalidateAssetBytesCache();
     // Best-effort: drop the day's raw/<day> directory if it's now empty.
     try {
       const dayDir = path.join(this.root, 'raw', day);
@@ -1926,7 +1937,7 @@ class LocalStorage implements IStorage {
     events: number;
     assetBytes: number;
   }> {
-    const stats = await this.getStats();
+    const assetBytes = await this.measureAssetBytes();
     const frames = (
       this.db.prepare('SELECT COUNT(*) AS n FROM frames').get() as { n: number }
     ).n;
@@ -1979,11 +1990,12 @@ class LocalStorage implements IStorage {
         err: String(err),
       });
     }
+    this.invalidateAssetBytesCache();
 
     return {
       frames,
       events,
-      assetBytes: stats.totalAssetBytes,
+      assetBytes,
     };
   }
 
@@ -2999,6 +3011,23 @@ class LocalStorage implements IStorage {
     await walk(rawDir);
     return total;
   }
+
+  private async getCachedAssetBytes(): Promise<number> {
+    const now = Date.now();
+    if (this.assetBytesCache && this.assetBytesCache.expiresAt > now) {
+      return this.assetBytesCache.value;
+    }
+    const value = await this.measureAssetBytes();
+    this.assetBytesCache = {
+      value,
+      expiresAt: now + ASSET_BYTES_CACHE_TTL_MS,
+    };
+    return value;
+  }
+
+  private invalidateAssetBytesCache(): void {
+    this.assetBytesCache = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3317,6 +3346,14 @@ function dot(a: ArrayLike<number>, b: ArrayLike<number>): number {
   for (let i = 0; i < len; i++) out += (a[i] ?? 0) * (b[i] ?? 0);
   // Convert cosine [-1, 1] into a friendlier [0, 1] score.
   return (out + 1) / 2;
+}
+
+function compareSemanticCandidates(
+  a: { row: RawFrameRow; score: number },
+  b: { row: RawFrameRow; score: number },
+): number {
+  if (b.score !== a.score) return b.score - a.score;
+  return b.row.timestamp.localeCompare(a.row.timestamp);
 }
 
 /**

@@ -68,9 +68,8 @@ const getRuntimeOverview = runtime.getOverview.bind(runtime) as (
 // interval (2-5s). Now the runtime-service is the single source of truth
 // and pushes overview snapshots:
 //
-//   - on a 2s lightweight heartbeat while the desktop window is visible
-//   - on a 15s heartbeat while the window is hidden / minimised / closed
-//     (matches the tray refresh cadence; main.ts toggles via setHeartbeat)
+//   - on a 5s lightweight heartbeat while the desktop window is visible
+//   - on a 60s heartbeat while the window is hidden / minimised / closed
 //   - immediately after any state-mutating call (start/stop/pause/
 //     resume/triggerIndex/triggerReorganise/saveConfigPatch)
 //
@@ -78,14 +77,14 @@ const getRuntimeOverview = runtime.getOverview.bind(runtime) as (
 // skip that tick rather than crashing the service.
 // ---------------------------------------------------------------------
 
-const ACTIVE_HEARTBEAT_MS = 2000;
-const IDLE_HEARTBEAT_MS = 15_000;
+const ACTIVE_HEARTBEAT_MS = 5000;
+const IDLE_HEARTBEAT_MS = 60_000;
 
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 let heartbeatMs = ACTIVE_HEARTBEAT_MS;
 
 // Lightweight dirty-flag: track a JSON fingerprint of the last pushed
-// overview so the 2s heartbeat is a no-op when nothing has changed.
+// overview so heartbeat ticks are no-ops when nothing has changed.
 let lastOverviewFingerprint: string | null = null;
 
 function fingerprintOverview(overview: unknown): string {
@@ -195,9 +194,9 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.getOverview();
     case 'setHeartbeat': {
       // Main process tells us whether the desktop window is visible;
-      // we slow the broadcast cadence to 15s (matching the tray refresh
-      // interval) when no UI is consuming the stream. `intervalMs: 0`
-      // pauses heartbeat entirely — explicit mutations still push.
+      // we slow the broadcast cadence to 60s when no UI is consuming the
+      // stream. `intervalMs: 0` pauses heartbeat entirely — explicit
+      // mutations still push.
       const params = (req.params ?? {}) as {
         intervalMs?: number;
         mode?: 'active' | 'idle' | 'paused';
@@ -249,7 +248,7 @@ async function handle(req: Request): Promise<unknown> {
     case 'deleteFrame': {
       const result = await runtime.deleteFrame(String(req.params));
       // Re-emit overview so KPIs / live strip update without waiting for
-      // the 2s heartbeat after a destructive action.
+      // the next heartbeat after a destructive action.
       void pushOverview('full');
       return result;
     }

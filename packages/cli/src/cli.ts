@@ -244,6 +244,7 @@ ${JSON.stringify({ name: overview.model.name, isLocal: overview.model.isLocal },
 ## System
 load (1m):      ${formatLoad(overview.system.load)}
 load_guard:     ${overview.system.loadGuardEnabled ? 'enabled' : 'disabled'}
+model jobs:     ${overview.system.backgroundModelJobs}
 
 ## Exports
 ${overview.exports.map((e) => `- ${e.name}: ${JSON.stringify(e)}`).join('\n')}

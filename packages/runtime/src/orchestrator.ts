@@ -87,7 +87,7 @@ const FRAME_BUILDER_JOB = 'frame-builder';
 // freshness while there's activity, and when the system is fully idle
 // no work is needed at all. `runIncremental` also drains these workers
 // before each indexing pass, so any drift is bounded by
-// `incremental_interval_min` (default 5).
+// `incremental_interval_min` when scheduled model jobs are enabled.
 const FRAME_BUILDER_INTERVAL_MS = 5 * 60_000;
 const FRAME_BUILDER_BATCH_SIZE = 25;
 const OCR_WORKER_JOB = 'ocr-worker';
@@ -110,21 +110,24 @@ const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
 
 /**
- * Debounce + max-wait used by the activity coalescer below. After 30s
+ * Debounce + max-wait used by the activity coalescer below. After 60s
  * with no new capture events, the worker chain runs once. If activity
  * is constant (debounce never settles), the max-wait forces a run
- * after 90s so the queue can't grow unbounded during long-form work.
+ * after 4 minutes so the queue can't grow unbounded during long-form
+ * work. Stretched from 30s/90s — the embedding leg of the chain is an
+ * LLM call when `system.background_model_jobs: scheduled`, and during
+ * constant typing the previous cadence pegged Ollama every ~90s.
  */
-const COALESCE_DEBOUNCE_MS = 30_000;
-const COALESCE_MAX_WAIT_MS = 90_000;
+const COALESCE_DEBOUNCE_MS = 60_000;
+const COALESCE_MAX_WAIT_MS = 240_000;
 
 /**
  * Bus-driven coalescer that runs the lightweight worker chain
- * (frame → entity → session → embeddings) shortly after a burst of
- * capture activity settles. Replaces the fixed-cadence ticks as the
- * primary freshness mechanism: when the user is active, search results
- * update within ~30s of the latest capture instead of ~60-120s; when
- * the user is idle, we don't run at all. The scheduler `every`
+ * (frame → entity → session, plus embeddings only in scheduled mode)
+ * shortly after a burst of capture activity settles. Replaces the
+ * fixed-cadence ticks as the primary freshness mechanism: when the user
+ * is active, search results update within ~60s of the latest capture;
+ * when the user is idle, we don't run at all. The scheduler `every`
  * intervals stretched out alongside this become safety nets that fire
  * only on long droughts of activity (e.g. one-off CLI commands that
  * bypass the bus).
@@ -450,6 +453,7 @@ export async function buildOrchestrator(
       await frameBuilder.tick();
       await entityResolver.tick();
       await sessionBuilder.tick();
+      if (config.system.background_model_jobs !== 'scheduled') return;
       // Embedding worker runs the LLM; gate it the same way
       // `scheduleAll` does (load guard + index-maintenance lock) so
       // the coalescer never fights the user during heavy work.
@@ -826,9 +830,10 @@ function indexMaintenanceLockPath(dataDir: string): string {
 export function scheduleAll(handles: OrchestratorHandles): void {
   const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer } =
     handles;
+  const backgroundModelJobsScheduled = config.system.background_model_jobs === 'scheduled';
 
   // Subscribe the coalescer to the bus so capture activity drives the
-  // worker chain reactively (debounced 30s settle / 90s max-wait).
+  // worker chain reactively (debounced 60s settle / 4min max-wait).
   // The scheduler.every entries below remain as backstops for long
   // idle periods or out-of-band ingestion (CLI imports, etc.) but are
   // intentionally stretched out — the coalescer dominates freshness.
@@ -863,6 +868,18 @@ export function scheduleAll(handles: OrchestratorHandles): void {
     }
     await run();
   };
+  const modelJob = (
+    jobName: string,
+    run: () => Promise<unknown>,
+  ) => async (ctx?: { trigger: 'schedule' | 'manual' }) => {
+    if ((ctx?.trigger ?? 'schedule') === 'schedule' && !backgroundModelJobsScheduled) {
+      logger.child(jobName).debug(
+        'skipped — system.background_model_jobs is manual',
+      );
+      return;
+    }
+    await run();
+  };
   // Frame builder runs frequently and cheaply so search results stay
   // close to real-time even when a full index pass hasn't fired yet.
   scheduler.every(FRAME_BUILDER_JOB, FRAME_BUILDER_INTERVAL_MS, skipDuringIndexMaintenance(FRAME_BUILDER_JOB, async () => {
@@ -889,13 +906,13 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   scheduler.every(
     AUDIO_TRANSCRIPT_JOB,
     Math.max(15_000, config.capture.audio.tick_interval_sec * 1000),
-    skipDuringIndexMaintenance(AUDIO_TRANSCRIPT_JOB, async () => {
+    skipDuringIndexMaintenance(AUDIO_TRANSCRIPT_JOB, guarded(AUDIO_TRANSCRIPT_JOB, async () => {
       try {
         await audioTranscriptWorker.tick();
       } catch (err) {
         logger.child('audio-transcript-worker').warn('tick failed', { err: String(err) });
       }
-    }),
+    })),
   );
   // Entity resolver runs after the frame builder so freshly built frames
   // become resolvable in the next ~30s.
@@ -909,8 +926,8 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   // Session builder runs slightly slower than the resolver — sessions
   // benefit from frames that already have entity assignments, so we
   // don't want to assign frames to sessions before entity resolution
-  // catches up. A 2-minute cadence keeps journals current to roughly
-  // the last activity-session boundary at any moment.
+  // catches up. A 10-minute cadence is only a backstop because the
+  // activity coalescer keeps active sessions fresh after capture bursts.
   scheduler.every(SESSION_BUILDER_JOB, SESSION_BUILDER_INTERVAL_MS, skipDuringIndexMaintenance(SESSION_BUILDER_JOB, async () => {
     try {
       await sessionBuilder.tick();
@@ -930,28 +947,29 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   }));
   // Meeting summarizer: heavier (calls the model). Runs every 5 min
   // and gates on the load guard so it never fights the user during
-  // active work.
+  // active work. In the default `manual` model-jobs mode, the scheduled
+  // tick is a no-op; explicit summarize actions still run it.
   scheduler.every(
     MEETING_SUMMARIZER_JOB,
     MEETING_SUMMARIZER_INTERVAL_MS,
-    skipDuringIndexMaintenance(MEETING_SUMMARIZER_JOB, guarded(MEETING_SUMMARIZER_JOB, async () => {
+    modelJob(MEETING_SUMMARIZER_JOB, skipDuringIndexMaintenance(MEETING_SUMMARIZER_JOB, guarded(MEETING_SUMMARIZER_JOB, async () => {
       try {
         await meetingSummarizer.tick();
       } catch (err) {
         logger.child('meeting-summarizer').warn('tick failed', { err: String(err) });
       }
-    })),
+    }))),
   );
   scheduler.every(
     EMBEDDING_WORKER_JOB,
     Math.max(60_000, config.index.embeddings.tick_interval_min * 60_000),
-    skipDuringIndexMaintenance(EMBEDDING_WORKER_JOB, guarded(EMBEDDING_WORKER_JOB, async () => {
+    modelJob(EMBEDDING_WORKER_JOB, skipDuringIndexMaintenance(EMBEDDING_WORKER_JOB, guarded(EMBEDDING_WORKER_JOB, async () => {
       try {
         await embeddingWorker.tick();
       } catch (err) {
         logger.child('embedding-worker').warn('tick failed', { err: String(err) });
       }
-    })),
+    }))),
   );
   // Vacuum runs on a slow tick (default hourly). Each tick processes a
   // small batch so it never starves capture.
@@ -970,12 +988,21 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   scheduler.every(
     INCREMENTAL_JOB,
     config.index.incremental_interval_min * 60 * 1000,
-    skipDuringIndexMaintenance(INCREMENTAL_JOB, guarded(INCREMENTAL_JOB, () => runIncremental(handles).then(() => undefined))),
+    modelJob(
+      INCREMENTAL_JOB,
+      skipDuringIndexMaintenance(
+        INCREMENTAL_JOB,
+        guarded(INCREMENTAL_JOB, () => runIncremental(handles).then(() => undefined)),
+      ),
+    ),
   );
   scheduler.cron(
     REORG_JOB,
     config.index.reorganise_schedule,
-    skipDuringIndexMaintenance(REORG_JOB, guarded(REORG_JOB, () => runReorganisation(handles))),
+    modelJob(
+      REORG_JOB,
+      skipDuringIndexMaintenance(REORG_JOB, guarded(REORG_JOB, () => runReorganisation(handles))),
+    ),
   );
 }
 

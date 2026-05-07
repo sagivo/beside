@@ -11,6 +11,7 @@ struct HelperConfig: Decodable {
   var capture_audio: Bool?
   var audio: AudioConfig?
   var poll_interval_ms: Int?
+  var idle_poll_interval_ms: Int?
   var focus_settle_delay_ms: Int?
   var idle_threshold_sec: Int?
   var screenshot_format: String?
@@ -232,10 +233,11 @@ struct PendingFocusCapture {
 
 func runMacCapture(config: HelperConfig) {
   let sessionId = "sess_" + String(Int(Date().timeIntervalSince1970 * 1000), radix: 36) + "_native"
-  let pollInterval = max(0.25, Double(config.poll_interval_ms ?? 1500) / 1000.0)
+  let pollInterval = max(0.25, Double(config.poll_interval_ms ?? 3000) / 1000.0)
+  let idlePollInterval = max(pollInterval, Double(config.idle_poll_interval_ms ?? 30_000) / 1000.0)
   let focusSettleDelay = max(0, Double(config.focus_settle_delay_ms ?? 900) / 1000.0)
   let idleThreshold = Double(config.idle_threshold_sec ?? 60)
-  let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 20_000) / 1000.0)
+  let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 60_000) / 1000.0)
   let displays = enumerateDisplays()
   let selectedDisplays = selectDisplays(displays: displays, config: config)
   let audioChunker = AudioChunker(config: config)
@@ -252,6 +254,7 @@ func runMacCapture(config: HelperConfig) {
       "displays": displays.map { displayJson($0) },
       "selected_displays": selectedDisplays.map { displayJson($0) },
       "poll_interval_sec": pollInterval,
+      "idle_poll_interval_sec": idlePollInterval,
       "focus_settle_delay_sec": focusSettleDelay,
       "content_change_interval_sec": contentChangeInterval,
       "idle_threshold_sec": idleThreshold
@@ -299,7 +302,7 @@ func runMacCapture(config: HelperConfig) {
     if paused {
       audioChunker.tick(paused: true)
       // sysAudio is already stopped on pause; nothing to tick
-      Thread.sleep(forTimeInterval: pollInterval)
+      Thread.sleep(forTimeInterval: idlePollInterval)
       continue
     }
 
@@ -442,7 +445,7 @@ func runMacCapture(config: HelperConfig) {
     emit(["kind": "status", "cpuPercent": 0, "memoryMB": currentMemoryMB(), "storageBytesToday": 0])
     audioChunker.tick(paused: false)
     sysAudio?.tick()
-    Thread.sleep(forTimeInterval: pollInterval)
+    Thread.sleep(forTimeInterval: idle ? idlePollInterval : pollInterval)
   }
 }
 

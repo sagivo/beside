@@ -22,22 +22,22 @@ const AppSchema = z.object({
 
 const CaptureSchema = z.object({
   plugin: z.string().default('node'),
-  poll_interval_ms: z.number().int().positive().default(1500),
+  poll_interval_ms: z.number().int().positive().default(3000),
   // Polling cadence to use while the user is idle (`idle_start` fired,
   // before `idle_end`). The active-window poll, screenshot probe, and
   // perceptual-hash diff loop are all wasted CPU when the user isn't
-  // touching the machine. 10 s is fine because the next user
+  // touching the machine. 30 s is fine because the next user
   // interaction will fire `idle_end` within one tick — and that tick
   // immediately produces a fresh screenshot, so the perceived recovery
   // latency is bounded by this value. Set <= `poll_interval_ms` to
   // disable the backoff.
-  idle_poll_interval_ms: z.number().int().positive().default(10_000),
+  idle_poll_interval_ms: z.number().int().positive().default(30_000),
   focus_settle_delay_ms: z.number().int().nonnegative().default(900),
-  // Soft-trigger sensitivity. Bumped from 0.05 → 0.10 because at the
-  // old threshold even pixel-level noise (e.g. blinking cursor, clock
-  // ticking) triggered captures. 0.10 is still well below "human
-  // notices a difference".
-  screenshot_diff_threshold: z.number().min(0).max(1).default(0.1),
+  // Soft-trigger sensitivity. Bumped above the historic 0.05/0.10
+  // defaults because pixel-level noise (blinking cursor, ticking clock,
+  // tiny animations) otherwise produced frequent screenshots. Hard
+  // triggers still capture focus/url/idle transitions immediately.
+  screenshot_diff_threshold: z.number().min(0).max(1).default(0.15),
   idle_threshold_sec: z.number().int().positive().default(60),
   capture_audio: z.boolean().default(true),
   // `tiny` is fast but produces noticeably bad transcripts on
@@ -131,19 +131,19 @@ const CaptureSchema = z.object({
   // that need OS-native compatibility (e.g., older Quick Look stacks).
   screenshot_format: z.enum(['webp', 'jpeg']).default('webp'),
   // Initial encoding quality (1-100). For screen content (UI, text,
-  // flat colors) WebP-55 is visually indistinguishable from 75 and
-  // ~30-40% smaller. Photographs would warrant ~75; we don't shoot
-  // those.
-  screenshot_quality: z.number().int().min(1).max(100).default(55),
+  // flat colors) WebP-45 is still readable for OCR/human review while
+  // reducing encode work and disk churn further than the old WebP-55.
+  // Photographs would warrant ~75; we don't shoot those.
+  screenshot_quality: z.number().int().min(1).max(100).default(45),
   // Cap the longest edge of every screenshot at capture time. Native
-  // Retina captures are ~3000+ px wide — 4-5× more pixels than any
+  // Retina captures are ~3000+ px wide — roughly 7× more pixels than any
   // downstream consumer (OCR, perceptual hash, markdown thumbnails)
   // actually uses. 0 disables the resize.
-  screenshot_max_dim: z.number().int().nonnegative().max(8192).default(1280),
+  screenshot_max_dim: z.number().int().nonnegative().max(8192).default(1100),
   // Floor between two soft-trigger (`content_change`) captures of the
   // same display, in ms. Hard triggers (window_focus / url_change /
   // idle_end) bypass this. 0 disables the throttle.
-  content_change_min_interval_ms: z.number().int().nonnegative().default(20_000),
+  content_change_min_interval_ms: z.number().int().nonnegative().default(60_000),
   /** @deprecated kept for backward-compat; if set, overrides quality when format=jpeg. */
   jpeg_quality: z.number().int().min(1).max(100).optional(),
   excluded_apps: z.array(z.string()).default([
@@ -260,12 +260,11 @@ const StorageSchema = z.object({
 const IndexSchema = z.object({
   strategy: z.string().default('karpathy'),
   index_path: z.string().default('~/.cofounderOS/index'),
-  // Ceiling on how stale the index can be during idle. The scheduler's
-  // single-flight guard prevents overlap, and `runIncremental` is a
-  // near-no-op (~20ms) when there are no new events, so a tight default
-  // is safe. Active capture also nudges this job out-of-band via the
-  // event bus, so this is effectively the *idle* upper bound.
-  incremental_interval_min: z.number().int().positive().default(5),
+  // Ceiling on how stale the LLM-backed index can be when scheduled
+  // background model jobs are enabled. The laptop-friendly default is
+  // `system.background_model_jobs: manual`, so this only applies after
+  // a user explicitly opts back into always-on organisation.
+  incremental_interval_min: z.number().int().positive().default(30),
   reorganise_schedule: z.string().default('0 2 * * *'),
   reorganise_on_idle: z.boolean().default(true),
   idle_trigger_min: z.number().int().positive().default(10),
@@ -393,10 +392,11 @@ const IndexSchema = z.object({
 }).passthrough();
 
 /**
- * System-level guards that apply across layers. The `load_guard` skips
- * heavy scheduled work (incremental index, reorganise, vacuum) when the
- * machine is already under load, so CofounderOS never competes with the
- * user's foreground tasks.
+ * System-level guards that apply across layers. `background_model_jobs`
+ * controls whether scheduled LLM/embedding work runs automatically at
+ * all. The `load_guard` then skips any enabled heavy scheduled work
+ * (incremental index, reorganise, vacuum) when the machine is already
+ * under load, so CofounderOS never competes with foreground tasks.
  *
  * The signal is the 1-minute load average normalised by CPU count. A
  * threshold of `0.7` means: skip when the box has been running at >=70%
@@ -408,6 +408,12 @@ const IndexSchema = z.object({
  * the guard auto-disables there so we never block forever.
  */
 const SystemSchema = z.object({
+  // `manual` keeps deterministic capture preparation (frames, OCR/AX
+  // text, entities, sessions) fresh but does not run scheduled
+  // LLM/embedding jobs by itself. Chat, manual "Organize now", MCP
+  // reindex requests, and explicit meeting summarisation still use
+  // the model. Set `scheduled` for the old always-organising behavior.
+  background_model_jobs: z.enum(['manual', 'scheduled']).default('manual'),
   load_guard: z.object({
     enabled: z.boolean().default(true),
     // Normalised 1-min load average (loadavg[0] / cpuCount). 0.7 = 70%.
@@ -422,6 +428,7 @@ const SystemSchema = z.object({
     max_consecutive_skips: 6,
   }),
 }).default({
+  background_model_jobs: 'manual',
   load_guard: {
     enabled: true,
     threshold: 0.7,
@@ -473,15 +480,15 @@ app:
 # Layer 1 — Capture
 capture:
   plugin: node                    # default Node-based capture; "rust" once available
-  poll_interval_ms: 1500          # how often to poll for window/url changes
-  idle_poll_interval_ms: 10000    # cadence while idle (>= poll_interval_ms; lower = faster idle_end recovery, higher = less idle CPU)
+  poll_interval_ms: 3000          # how often to poll for window/url changes
+  idle_poll_interval_ms: 30000    # cadence while idle (>= poll_interval_ms; lower = faster idle_end recovery, higher = less idle CPU)
   focus_settle_delay_ms: 900      # wait after app switch before screenshot
-  screenshot_diff_threshold: 0.10 # skip screenshots with < 10% visual change
+  screenshot_diff_threshold: 0.15 # skip screenshots with < 15% visual change
   idle_threshold_sec: 60
   screenshot_format: webp         # 'webp' (smaller) or 'jpeg'
-  screenshot_quality: 55          # 1-100; 55 is plenty for screen content
-  screenshot_max_dim: 1280        # cap longest edge at capture (0 = native res)
-  content_change_min_interval_ms: 20000 # min ms between soft-trigger captures
+  screenshot_quality: 45          # 1-100; 45 is plenty for screen content
+  screenshot_max_dim: 1100        # cap longest edge at capture (0 = native res)
+  content_change_min_interval_ms: 60000 # min ms between soft-trigger captures
   capture_audio: true             # V2; processes ~/.cofounderOS/raw/audio/inbox into audio_transcript events
   whisper_model: base             # V2; tiny is faster but transcripts are noticeably worse
   audio:
@@ -580,7 +587,7 @@ storage:
 index:
   strategy: karpathy
   index_path: ~/.cofounderOS/index
-  incremental_interval_min: 5      # idle ceiling; active capture triggers indexing out-of-band
+  incremental_interval_min: 30     # used only when system.background_model_jobs: scheduled
   reorganise_schedule: "0 2 * * *"
   reorganise_on_idle: true
   idle_trigger_min: 10
@@ -641,6 +648,12 @@ index:
 
 # Cross-cutting system guards
 system:
+  # \`manual\` is the laptop-friendly default: capture/text/session work
+  # stays current, while LLM indexing, embeddings, and meeting summaries
+  # run only from explicit actions (Organize now, MCP reindex,
+  # summarize meeting, chat/search explanations). Set to \`scheduled\`
+  # for always-on background organization.
+  background_model_jobs: manual
   # Skip heavy scheduled work (indexing, reorganise, vacuum) when the
   # machine is already busy, so CofounderOS never competes with your
   # foreground apps. Disable to always run on schedule.

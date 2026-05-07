@@ -71,6 +71,7 @@ export interface RuntimeOverview {
   system: {
     load: number | null;
     loadGuardEnabled: boolean;
+    backgroundModelJobs: 'manual' | 'scheduled';
     overviewGeneratedAt: string;
     overviewDurationMs: number;
     overviewCacheTtlMs: number;
@@ -362,6 +363,7 @@ export class CofounderRuntime {
         system: {
           load,
           loadGuardEnabled: handles.config.system.load_guard.enabled,
+          backgroundModelJobs: handles.config.system.background_model_jobs,
           overviewGeneratedAt: new Date().toISOString(),
           overviewDurationMs,
           overviewCacheTtlMs: OVERVIEW_CACHE_TTL_MS,

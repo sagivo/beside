@@ -1,7 +1,11 @@
 import cronParser from 'cron-parser';
 import type { Logger } from '@cofounderos/interfaces';
 
-export type Task = () => Promise<void>;
+export interface TaskContext {
+  trigger: 'schedule' | 'manual';
+}
+
+export type Task = (ctx?: TaskContext) => Promise<void>;
 
 interface IntervalJob {
   kind: 'interval';
@@ -113,7 +117,7 @@ export class Scheduler {
   async runNow(name: string): Promise<void> {
     const job = this.jobs.get(name);
     if (!job) throw new Error(`No job named "${name}"`);
-    await this.run(job);
+    await this.run(job, 'manual');
   }
 
   has(name: string): boolean {
@@ -150,14 +154,14 @@ export class Scheduler {
     const delayMs = Math.max(1000, next.getTime() - Date.now());
     job.timer = setTimeout(() => {
       void (async () => {
-        await this.run(job);
+        await this.run(job, 'schedule');
         this.scheduleNextCron(job);
       })();
     }, delayMs);
     this.logger.debug(`next "${job.name}" at ${next.toISOString()} (${delayMs}ms)`);
   }
 
-  private async run(job: Job): Promise<void> {
+  private async run(job: Job, trigger: TaskContext['trigger'] = 'schedule'): Promise<void> {
     if (job.running) {
       job.skippedCount += 1;
       this.logger.debug(`skip "${job.name}" — previous run still in flight`);
@@ -167,7 +171,7 @@ export class Scheduler {
     job.lastStartedAt = new Date().toISOString();
     const start = Date.now();
     try {
-      await job.task();
+      await job.task({ trigger });
       const durationMs = Date.now() - start;
       job.lastDurationMs = durationMs;
       job.lastError = null;

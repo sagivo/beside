@@ -21,7 +21,9 @@ import type { Frame } from '@/global';
 
 const RECENT_KEY = 'cofounderos:recent-searches';
 const RECENT_LIMIT = 6;
-const EXPLANATION_CONCURRENCY = 3;
+const EXPLANATION_LIMIT = 8;
+const EXPLANATION_CONCURRENCY = 1;
+const KNOWN_APPS_SAMPLE_LIMIT = 500;
 
 const SUGGESTIONS: string[] = [
   'design doc',
@@ -81,10 +83,13 @@ export function Search({
       try {
         const today = days[days.length - 1];
         if (!today) return;
-        const j = await window.cofounderos.getJournalDay(today);
+        const frames = await window.cofounderos.searchFrames({
+          day: today,
+          limit: KNOWN_APPS_SAMPLE_LIMIT,
+        });
         if (cancelled) return;
         setKnownApps(
-          Array.from(new Set(j.frames.map((f) => f.app).filter(Boolean) as string[])).sort(),
+          Array.from(new Set(frames.map((f) => f.app).filter(Boolean) as string[])).sort(),
         );
       } catch {
         /* ignore */
@@ -123,13 +128,14 @@ export function Search({
       });
       if (searchRunRef.current !== runId) return;
       setResults(found);
-      if (found.length > 0) {
+      const framesToExplain = found.slice(0, EXPLANATION_LIMIT);
+      if (framesToExplain.length > 0) {
         setExplaining(true);
         void (async () => {
           let nextIndex = 0;
           const explainNext = async (): Promise<void> => {
-            while (searchRunRef.current === runId && nextIndex < found.length) {
-              const frame = found[nextIndex];
+            while (searchRunRef.current === runId && nextIndex < framesToExplain.length) {
+              const frame = framesToExplain[nextIndex];
               nextIndex += 1;
               try {
                 const explained = await window.cofounderos.explainSearchResults({
@@ -151,7 +157,7 @@ export function Search({
           try {
             await Promise.all(
               Array.from(
-                { length: Math.min(EXPLANATION_CONCURRENCY, found.length) },
+                { length: Math.min(EXPLANATION_CONCURRENCY, framesToExplain.length) },
                 () => explainNext(),
               ),
             );
@@ -282,7 +288,7 @@ export function Search({
                     frame={frame}
                     searchQuery={activeSearchQuery}
                     explanation={frame.id ? explanations[frame.id] : undefined}
-                    explaining={explaining}
+                    explaining={explaining && i < EXPLANATION_LIMIT}
                     onDeleted={(deleted) =>
                       setResults((prev) => (prev ? prev.filter((f) => f.id !== deleted.id) : prev))
                     }

@@ -374,12 +374,14 @@ function createElectronTrayFallback(): void {
     applyMenuBarIndicator(getMenuBarIndicator(lastOverview));
     appendLog('Electron tray fallback created');
     void refreshTray();
-    // Keep the tray menu's "N today" line live without hammering the
-    // runtime; 15s is plenty for an at-a-glance count and well below
-    // any user-noticeable staleness on a context menu open.
+    // Tray title/tooltip are already updated on every pushed overview
+    // (see RuntimeServiceClient `on('overview')`). This interval only
+    // rebuilds the context menu, which is just visible during a click —
+    // 60s keeps the "N today" count fresh enough without paying the
+    // full menu rebuild on every heartbeat.
     const trayRefreshTimer = setInterval(() => {
       void refreshTray();
-    }, 15000);
+    }, 60_000);
     app.once('before-quit', () => clearInterval(trayRefreshTimer));
     tray.on('click', () => {
       void showStatusWindow();
@@ -522,9 +524,9 @@ async function refreshTray(): Promise<void> {
             },
           }
         : {
-            label: 'Start CofounderOS',
+            label: 'Start Capture',
             click: () => void startRuntime(),
-            enabled: !health.ok && !managedRuntime,
+            enabled: !captureLive && !capturePaused && !(health.ok && !managedRuntime),
           };
 
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -617,13 +619,12 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
     statusWindow.on('closed', () => {
       statusWindow = null;
       enterMacAccessoryMode();
-      // Window gone — slow the runtime push to the same 15s cadence the
-      // tray menu uses. Saves wake-ups + IPC churn when the user is
-      // running tray-only.
+      // Window gone — slow the runtime push cadence. Saves wake-ups +
+      // IPC churn when the user is running tray-only.
       setRuntimeHeartbeat('idle');
     });
-    // Toggle between fast (2s) and idle (15s) heartbeat cadence based on
-    // window visibility. The renderer also has a 30s safety-net poll, so
+    // Toggle between active and idle heartbeat cadence based on
+    // window visibility. The renderer also has a 60s safety-net poll, so
     // it's safe to skip pushes while no UI is observing the stream.
     statusWindow.on('show', () => setRuntimeHeartbeat('active'));
     statusWindow.on('restore', () => setRuntimeHeartbeat('active'));
@@ -738,8 +739,9 @@ async function startRuntime(): Promise<void> {
 }
 
 async function startDaemonIfNeeded(): Promise<void> {
-  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART === '0') {
-    appendLog('Desktop autostart disabled by COFOUNDEROS_DESKTOP_AUTOSTART=0.');
+  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART !== '1') {
+    appendLog('Desktop autostart disabled by default. Set COFOUNDEROS_DESKTOP_AUTOSTART=1 to start capture on launch.');
+    await refreshTray();
     return;
   }
   const health = await getHealth();
@@ -1403,11 +1405,10 @@ async function getRuntimeForRequest(): Promise<RuntimeServiceClient> {
 
 /**
  * Tell the runtime service whether to broadcast overview snapshots at
- * the active (2s) or idle (15s) cadence. Called on window visibility
- * changes — when the only consumer is the tray indicator, 15s is
- * already what the tray's own refresh timer uses, so any faster push
- * is wasted CPU + IPC. Fire-and-forget; if the runtime isn't up yet
- * we silently skip, and the next mutation will reset cadence anyway.
+ * the active or idle cadence. Called on window visibility changes so
+ * a tray-only runtime avoids wasted CPU + IPC. Fire-and-forget; if the
+ * runtime isn't up yet we silently skip, and the next mutation will
+ * reset cadence anyway.
  */
 function setRuntimeHeartbeat(mode: 'active' | 'idle' | 'paused'): void {
   if (!managedRuntime) return;

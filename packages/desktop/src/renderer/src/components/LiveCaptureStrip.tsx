@@ -42,12 +42,11 @@ export function LiveCaptureStrip({
     (async () => {
       try {
         const today = localDayKey();
-        const journal = await window.cofounderos.getJournalDay(today);
+        const recent = await window.cofounderos.searchFrames({
+          day: today,
+          limit: MAX_FRAMES,
+        });
         if (cancelled) return;
-        const recent = journal.frames
-          .slice()
-          .sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
-          .slice(0, MAX_FRAMES);
         setFrames(recent);
       } catch {
         if (!cancelled) setFrames([]);

@@ -144,6 +144,7 @@ export interface RuntimeOverview {
   system?: {
     load?: number | null;
     loadGuardEnabled?: boolean;
+    backgroundModelJobs?: 'manual' | 'scheduled';
     overviewGeneratedAt?: string;
     overviewDurationMs?: number;
     overviewCacheTtlMs?: number;

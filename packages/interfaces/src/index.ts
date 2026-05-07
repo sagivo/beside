@@ -78,7 +78,7 @@ export interface CaptureConfig {
   screenshot_quality: number;
   /**
    * Longest-edge cap applied at capture time. 0 = native resolution.
-   * Defaults to 1280, which is plenty for OCR/perceptual-hash and
+   * Defaults to 1100, which is plenty for OCR/perceptual-hash and
    * yields ~4-6× smaller files than native Retina.
    */
   screenshot_max_dim: number;
