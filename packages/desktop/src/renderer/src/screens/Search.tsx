@@ -15,7 +15,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { formatLocalDateTime } from '@/lib/format';
 import { listItemProps, useListKeyboardNav } from '@/lib/list-keys';
-import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
+import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
 import type { Frame } from '@/global';
 
@@ -420,14 +420,8 @@ function ResultCard({
         return;
       }
       try {
-        const bytes = await window.cofounderos.readAsset(frame.asset_path);
+        const url = await resolveAssetUrl(frame.asset_path);
         if (cancelled) return;
-        const type = frame.asset_path.endsWith('.png')
-          ? 'image/png'
-          : frame.asset_path.match(/\.jpe?g$/)
-            ? 'image/jpeg'
-            : 'image/webp';
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
         cacheThumbnail(frame.asset_path, url);
         setThumbUrl(url);
       } catch {

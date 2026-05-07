@@ -6,6 +6,8 @@ import { ensureDir } from '@cofounderos/core';
 const STATE_FILENAME = '_state.json';
 const ROOT_INDEX_FILENAME = 'index.md';
 const LOG_FILENAME = 'log.md';
+const MANIFEST_FILENAME = '_manifest.json';
+const LOG_MAX_SIZE_BYTES = 1024 * 1024; // rotate at 1 MB
 
 interface PersistedState {
   strategy: string;
@@ -13,6 +15,19 @@ interface PersistedState {
   lastReorganisationRun: string | null;
   pageCount: number;
   eventsCovered: number;
+}
+
+interface PageManifestEntry {
+  path: string;
+  title: string;
+  summary: string | null;
+  lastUpdated: string;
+}
+
+interface PageManifest {
+  version: 1;
+  generatedAt: string;
+  pages: PageManifestEntry[];
 }
 
 /**
@@ -85,6 +100,16 @@ export class PageStore {
   async appendLog(entry: string): Promise<void> {
     await ensureDir(this.root);
     const file = path.join(this.root, LOG_FILENAME);
+    try {
+      const { size } = await fs.stat(file);
+      if (size >= LOG_MAX_SIZE_BYTES) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const archive = path.join(this.root, `log.${stamp}.md`);
+        await fs.rename(file, archive);
+      }
+    } catch {
+      // file doesn't exist yet — nothing to rotate
+    }
     const stamp = new Date().toISOString();
     const block = `\n## ${stamp}\n\n${entry}\n`;
     try {
@@ -109,6 +134,7 @@ export class PageStore {
     const abs = path.join(this.root, page.path);
     await ensureDir(path.dirname(abs));
     await fs.writeFile(abs, serialisePage(page), 'utf8');
+    await this.upsertManifestEntry(page);
   }
 
   async deletePage(pagePath: string): Promise<void> {
@@ -118,9 +144,31 @@ export class PageStore {
     } catch {
       // ignore
     }
+    await this.deleteManifestEntry(pagePath);
   }
 
   async listPages(): Promise<IndexPage[]> {
+    const manifest = await this.readManifest();
+    if (manifest) {
+      const pages = await Promise.all(manifest.pages.map((entry) => this.readPage(entry.path)));
+      return pages.filter((page): page is IndexPage => page != null);
+    }
+
+    const pages = await this.walkPages();
+    await this.writeManifestFromPages(pages);
+    return pages;
+  }
+
+  async reset(): Promise<void> {
+    try {
+      await fs.rm(this.root, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+    await ensureDir(this.root);
+  }
+
+  private async walkPages(): Promise<IndexPage[]> {
     const out: IndexPage[] = [];
     const walk = async (dir: string): Promise<void> => {
       let entries: import('node:fs').Dirent[];
@@ -139,7 +187,7 @@ export class PageStore {
           path.basename(full) !== ROOT_INDEX_FILENAME &&
           path.basename(full) !== LOG_FILENAME
         ) {
-          const rel = path.relative(this.root, full);
+          const rel = path.relative(this.root, full).replace(/\\/g, '/');
           const page = await this.readPage(rel);
           if (page) out.push(page);
         }
@@ -149,13 +197,54 @@ export class PageStore {
     return out;
   }
 
-  async reset(): Promise<void> {
+  private async readManifest(): Promise<PageManifest | null> {
     try {
-      await fs.rm(this.root, { recursive: true, force: true });
+      const raw = await fs.readFile(path.join(this.root, MANIFEST_FILENAME), 'utf8');
+      const parsed = JSON.parse(raw) as PageManifest;
+      if (parsed.version !== 1 || !Array.isArray(parsed.pages)) return null;
+      return parsed;
     } catch {
-      // ignore
+      return null;
     }
+  }
+
+  private async writeManifest(manifest: PageManifest): Promise<void> {
     await ensureDir(this.root);
+    await fs.writeFile(
+      path.join(this.root, MANIFEST_FILENAME),
+      JSON.stringify(manifest, null, 2),
+      'utf8',
+    );
+  }
+
+  private async writeManifestFromPages(pages: IndexPage[]): Promise<void> {
+    await this.writeManifest({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      pages: pages.map((page) => pageToManifestEntry(page)).sort((a, b) => a.path.localeCompare(b.path)),
+    });
+  }
+
+  private async upsertManifestEntry(page: IndexPage): Promise<void> {
+    const manifest = await this.readManifest();
+    const pages = new Map((manifest?.pages ?? []).map((entry) => [entry.path, entry]));
+    pages.set(page.path, pageToManifestEntry(page));
+    await this.writeManifest({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      pages: [...pages.values()].sort((a, b) => a.path.localeCompare(b.path)),
+    });
+  }
+
+  private async deleteManifestEntry(pagePath: string): Promise<void> {
+    const manifest = await this.readManifest();
+    if (!manifest) return;
+    const pages = manifest.pages.filter((entry) => entry.path !== pagePath);
+    await this.writeManifest({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      pages,
+    });
   }
 }
 
@@ -200,4 +289,50 @@ export function serialisePage(page: IndexPage): string {
     lastUpdated: page.lastUpdated,
   };
   return `${META_OPEN}\n${JSON.stringify(meta, null, 2)}\n${META_CLOSE}\n\n${page.content.trim()}\n`;
+}
+
+function pageToManifestEntry(page: IndexPage): PageManifestEntry {
+  return {
+    path: page.path,
+    title: extractMarkdownTitle(page.content) ?? path.basename(page.path, '.md'),
+    summary: extractMarkdownSummary(page.content),
+    lastUpdated: page.lastUpdated,
+  };
+}
+
+function extractMarkdownTitle(content: string): string | null {
+  const match = content.match(/^#\s+(.+)$/m);
+  return match?.[1]?.trim() || null;
+}
+
+function extractMarkdownSummary(content: string): string | null {
+  const section = extractMarkdownSection(content, 'Summary') ?? extractMarkdownSection(content, 'Overview');
+  const cleaned = stripMarkdownForPreview(section ?? '').trim();
+  return cleaned ? truncateText(cleaned, 180) : null;
+}
+
+function extractMarkdownSection(content: string, heading: string): string | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (start === -1) return null;
+  const body: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^##\s+/.test(line.trim())) break;
+    body.push(line);
+  }
+  return body.join('\n');
+}
+
+function stripMarkdownForPreview(input: string): string {
+  return input
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[#>*_\-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function truncateText(input: string, max: number): string {
+  return input.length <= max ? input : `${input.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
 }

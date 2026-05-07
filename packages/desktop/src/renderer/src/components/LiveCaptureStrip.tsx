@@ -1,9 +1,9 @@
 import * as React from 'react';
-import { ImageOff, Radio } from 'lucide-react';
+import { ImageOff, Mic, Radio } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
-import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
+import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { formatLocalTime, localDayKey } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import type { Frame, RuntimeOverview } from '@/global';
@@ -115,6 +115,7 @@ function Header({ onJump }: { onJump?: () => void }) {
 function LiveFrame({ frame }: { frame: Frame }) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const detail = useFrameDetail();
+  const isAudio = frame.text_source === 'audio' || frame.app === 'Audio';
 
   React.useEffect(() => {
     let cancelled = false;
@@ -129,14 +130,8 @@ function LiveFrame({ frame }: { frame: Frame }) {
         return;
       }
       try {
-        const bytes = await window.cofounderos.readAsset(frame.asset_path);
+        const url = await resolveAssetUrl(frame.asset_path);
         if (cancelled) return;
-        const type = frame.asset_path.endsWith('.png')
-          ? 'image/png'
-          : frame.asset_path.match(/\.jpe?g$/)
-            ? 'image/jpeg'
-            : 'image/webp';
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
         cacheThumbnail(frame.asset_path, url);
         setThumbUrl(url);
       } catch {
@@ -169,7 +164,7 @@ function LiveFrame({ frame }: { frame: Frame }) {
         />
       ) : (
         <div className="size-full grid place-items-center text-muted-foreground">
-          <ImageOff className="size-5" />
+          {isAudio ? <Mic className="size-5" /> : <ImageOff className="size-5" />}
         </div>
       )}
       <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-2 py-1 text-[10px] text-white flex items-center justify-between">

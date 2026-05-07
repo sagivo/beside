@@ -33,6 +33,7 @@ import {
   type InstallPhase,
 } from '@/lib/bootstrap-phases';
 import { formatBytes } from '@/lib/format';
+import { MODEL_CHOICES } from '@/lib/model-catalog';
 import { cn } from '@/lib/utils';
 import type {
   MicPermission,
@@ -71,43 +72,8 @@ const STEP_LABELS: Record<OnboardingStep, string> = {
   done: 'Done',
 };
 
-interface ModelChoice {
-  id: string;
-  name: string;
-  vendor: string;
-  size: string;
-  bytes: number;
-  description: string;
-  badge?: string;
-}
-
-const MODEL_CHOICES: ModelChoice[] = [
-  {
-    id: 'gemma2:2b',
-    name: 'Gemma 2 · 2B',
-    vendor: 'Google',
-    size: '~1.6 GB',
-    bytes: 1.6 * 1024 ** 3,
-    description: 'Fast and lightweight. Great default for everyday work.',
-    badge: 'Recommended',
-  },
-  {
-    id: 'gemma3:4b',
-    name: 'Gemma 3 · 4B',
-    vendor: 'Google',
-    size: '~3.3 GB',
-    bytes: 3.3 * 1024 ** 3,
-    description: 'Smarter answers. A bit larger and slower.',
-  },
-  {
-    id: 'gemma2:9b',
-    name: 'Gemma 2 · 9B',
-    vendor: 'Google',
-    size: '~5.4 GB',
-    bytes: 5.4 * 1024 ** 3,
-    description: 'Most capable. Needs a beefier Mac/PC and more disk.',
-  },
-];
+// Model catalog is shared with Settings → AI; edit it in
+// `lib/model-catalog.ts`.
 
 export function Onboarding({
   bootstrapEvents,

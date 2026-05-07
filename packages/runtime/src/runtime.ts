@@ -16,6 +16,7 @@ import type {
   FrameQuery,
   IndexState,
   Logger,
+  Meeting,
   RawEvent,
   StorageStats,
 } from '@cofounderos/interfaces';
@@ -165,8 +166,26 @@ export interface ExplainSearchResultsQuery {
 
 export type ConfigPatch = Record<string, unknown>;
 
-const OVERVIEW_CACHE_TTL_MS = 10_000;
+// Full overviews touch SQLite (countEvents x2, getStats), the index
+// directory (recursive readdir), and the model availability check —
+// hundreds of syscalls per build. The 30s TTL caps how often that
+// runs while still letting fast overviews refresh in-memory status
+// (capture, scheduler jobs, load guard) on every heartbeat.
+const OVERVIEW_CACHE_TTL_MS = 30_000;
 const OVERVIEW_SLOW_LOG_MS = 500;
+
+/**
+ * Bounded cache for `explainSearchResults`. Each entry costs one
+ * vision-model call (~1-3 s on Apple Silicon, much more on CPU-only),
+ * so a tiny in-process cache pays for itself immediately on any UI
+ * surface that re-asks for the same `(query, frame)` pair — typing
+ * "slack" then deleting back to "sla" then retyping, navigating away
+ * and back, splitting the search result into a different result page,
+ * etc. 256 entries × ~250 chars/entry ≈ ~64 KB; trivial relative to
+ * the work it skips. Keyed on `${frameId}::${normalisedQuery}`; values
+ * are stored in insertion order so we evict the oldest first.
+ */
+const EXPLAIN_SEARCH_CACHE_MAX = 256;
 
 export class CofounderRuntime {
   private readonly logger: Logger;
@@ -178,6 +197,12 @@ export class CofounderRuntime {
   private manualJob: { name: string; startedAt: string } | null = null;
   private lastManualJobCompletedAt: string | null = null;
   private readonly activeChatTurns = new Map<string, HarnessHandle>();
+  /**
+   * LRU cache for `explainSearchResults`. Map iteration order in JS is
+   * insertion order, so we delete + re-set on hit (to mark recent) and
+   * pop `keys().next()` on overflow (to evict oldest).
+   */
+  private readonly explainSearchCache = new Map<string, string>();
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -203,8 +228,11 @@ export class CofounderRuntime {
     this.invalidateOverview();
   }
 
-  async bootstrapModel(onProgress?: Parameters<typeof bootstrapModel>[1]): Promise<void> {
-    await this.withHandles((handles) => bootstrapModel(handles, onProgress));
+  async bootstrapModel(
+    onProgress?: Parameters<typeof bootstrapModel>[1],
+    opts?: Parameters<typeof bootstrapModel>[2],
+  ): Promise<void> {
+    await this.withHandles((handles) => bootstrapModel(handles, onProgress, opts));
   }
 
   async stop(): Promise<void> {
@@ -501,6 +529,21 @@ export class CofounderRuntime {
     return await loadConfig(this.opts.configPath);
   }
 
+  async listMeetings(query: { from?: string; to?: string; limit?: number } = {}): Promise<Meeting[]> {
+    return await this.withHandles(async (handles) => {
+      try {
+        return await handles.storage.listMeetings({
+          from: query.from,
+          to: query.to,
+          order: 'recent',
+          limit: query.limit ?? 200,
+        });
+      } catch {
+        return [];
+      }
+    });
+  }
+
   async listJournalDays(): Promise<string[]> {
     return await this.withHandles((handles) => handles.storage.listDays());
   }
@@ -538,10 +581,21 @@ export class CofounderRuntime {
       } catch {
         sessions = [];
       }
+      let meetings: Meeting[] = [];
+      try {
+        meetings = await handles.storage.listMeetings({
+          day,
+          order: 'chronological',
+          limit: 100,
+        });
+      } catch {
+        meetings = [];
+      }
       return {
         day,
         markdown: renderJournalMarkdown(day, frames, {
           sessions,
+          meetings,
         }),
       };
     });
@@ -555,12 +609,38 @@ export class CofounderRuntime {
     const text = query.text.trim();
     if (!text || query.frames.length === 0) return [];
 
+    // Normalise the query for cache keying — collapsing whitespace and
+    // lowercasing means the user typing "Slack messages" then
+    // "slack  messages" doesn't double-pay for the vision call.
+    const cacheText = text.toLowerCase().replace(/\s+/g, ' ');
+
+    // Serve cache hits without ever touching the model. Each hit is a
+    // genuine 1-3s+ vision call avoided. Misses get a list back so we
+    // only call the model for the frames not already explained.
+    const cached: SearchResultExplanation[] = [];
+    const misses: typeof query.frames = [];
+    for (const frame of query.frames) {
+      const key = explainCacheKey(frame.id, cacheText);
+      const hit = this.explainSearchCache.get(key);
+      if (hit !== undefined) {
+        // Refresh recency: re-insert so this entry is the youngest.
+        this.explainSearchCache.delete(key);
+        this.explainSearchCache.set(key, hit);
+        if (hit) cached.push({ frameId: frame.id, explanation: hit });
+      } else {
+        misses.push(frame);
+      }
+    }
+
+    if (misses.length === 0) return cached;
+
     return await this.withHandles(async (handles) => {
-      if (!(await handles.model.isAvailable().catch(() => false))) return [];
+      if (!(await handles.model.isAvailable().catch(() => false))) return cached;
 
       const modelInfo = handles.model.getModelInfo();
-      const explanations: SearchResultExplanation[] = [];
-      for (const frame of query.frames) {
+      const fresh: SearchResultExplanation[] = [];
+      for (const frame of misses) {
+        const key = explainCacheKey(frame.id, cacheText);
         try {
           const image = modelInfo.supportsVision && frame.asset_path
             ? await readFrameAssetForModel(handles, frame.asset_path)
@@ -576,8 +656,11 @@ export class CofounderRuntime {
                 temperature: 0.2,
               });
           const explanation = cleanSearchExplanation(raw);
+          // Cache empty strings too so we don't keep hammering the
+          // model on frames that consistently produce nothing useful.
+          this.rememberExplainCache(key, explanation);
           if (explanation) {
-            explanations.push({ frameId: frame.id, explanation });
+            fresh.push({ frameId: frame.id, explanation });
           }
         } catch (err) {
           handles.logger.debug('search result explanation failed', {
@@ -586,8 +669,24 @@ export class CofounderRuntime {
           });
         }
       }
-      return explanations;
+      return [...cached, ...fresh];
     });
+  }
+
+  /**
+   * Insert into the LRU and evict the oldest entry when over capacity.
+   * Map iteration order in JS is insertion order, so `keys().next()`
+   * gives us the oldest key.
+   */
+  private rememberExplainCache(key: string, value: string): void {
+    if (this.explainSearchCache.has(key)) {
+      this.explainSearchCache.delete(key);
+    }
+    this.explainSearchCache.set(key, value);
+    if (this.explainSearchCache.size > EXPLAIN_SEARCH_CACHE_MAX) {
+      const oldest = this.explainSearchCache.keys().next().value;
+      if (oldest !== undefined) this.explainSearchCache.delete(oldest);
+    }
   }
 
   async getFrameIndexDetails(frameId: string): Promise<FrameIndexDetails | null> {
@@ -948,8 +1047,16 @@ const INDEX_CATEGORY_ORDER = [
   'patterns',
 ];
 
-const INDEX_CATEGORY_CACHE_TTL_MS = 30_000;
+// Categories on the wiki rarely move once a workspace is established —
+// the underlying directory tree is reorganised at most once a day by
+// the cron job, and individual page touches don't bubble new categories
+// into existence. A 5-minute TTL keeps the dashboard fresh without
+// rerunning a recursive readdir + per-category markdown previews on
+// every full overview (which used to dominate `getOverview()` on
+// indexed workspaces).
+const INDEX_CATEGORY_CACHE_TTL_MS = 5 * 60_000;
 const INDEX_CATEGORY_RECENT_PAGE_LIMIT = 3;
+const INDEX_MANIFEST_FILENAME = '_manifest.json';
 
 let indexCategoryCache:
   | {
@@ -959,6 +1066,18 @@ let indexCategoryCache:
     }
   | null = null;
 
+interface IndexManifestEntry {
+  path: string;
+  title?: string;
+  summary?: string | null;
+  lastUpdated: string;
+}
+
+interface IndexManifest {
+  version: 1;
+  pages: IndexManifestEntry[];
+}
+
 async function readIndexCategories(rootPath: string): Promise<RuntimeIndexCategory[]> {
   const now = Date.now();
   if (
@@ -967,6 +1086,16 @@ async function readIndexCategories(rootPath: string): Promise<RuntimeIndexCatego
     indexCategoryCache.expiresAt > now
   ) {
     return indexCategoryCache.categories;
+  }
+
+  const manifestCategories = await readIndexCategoriesFromManifest(rootPath);
+  if (manifestCategories) {
+    indexCategoryCache = {
+      rootPath,
+      expiresAt: now + INDEX_CATEGORY_CACHE_TTL_MS,
+      categories: manifestCategories,
+    };
+    return manifestCategories;
   }
 
   const entries = await fs.readdir(rootPath, { withFileTypes: true });
@@ -997,7 +1126,17 @@ async function readIndexCategories(rootPath: string): Promise<RuntimeIndexCatego
     });
   }
 
-  const sorted = categories.sort((a, b) => {
+  const sorted = sortIndexCategories(categories);
+  indexCategoryCache = {
+    rootPath,
+    expiresAt: now + INDEX_CATEGORY_CACHE_TTL_MS,
+    categories: sorted,
+  };
+  return sorted;
+}
+
+function sortIndexCategories(categories: RuntimeIndexCategory[]): RuntimeIndexCategory[] {
+  return categories.sort((a, b) => {
     const ai = INDEX_CATEGORY_ORDER.indexOf(a.name);
     const bi = INDEX_CATEGORY_ORDER.indexOf(b.name);
     if (ai !== -1 || bi !== -1) {
@@ -1007,12 +1146,52 @@ async function readIndexCategories(rootPath: string): Promise<RuntimeIndexCatego
     }
     return a.name.localeCompare(b.name);
   });
-  indexCategoryCache = {
-    rootPath,
-    expiresAt: now + INDEX_CATEGORY_CACHE_TTL_MS,
-    categories: sorted,
-  };
-  return sorted;
+}
+
+async function readIndexCategoriesFromManifest(rootPath: string): Promise<RuntimeIndexCategory[] | null> {
+  let manifest: IndexManifest;
+  try {
+    const raw = await fs.readFile(path.join(rootPath, INDEX_MANIFEST_FILENAME), 'utf8');
+    manifest = JSON.parse(raw) as IndexManifest;
+  } catch {
+    return null;
+  }
+  if (manifest.version !== 1 || !Array.isArray(manifest.pages)) return null;
+
+  const byCategory = new Map<string, IndexManifestEntry[]>();
+  for (const page of manifest.pages) {
+    const normalised = page.path.replace(/\\/g, '/');
+    const category = normalised.split('/')[0];
+    if (!category || category.startsWith('.') || category === 'archive') continue;
+    if (path.basename(normalised) === '_summary.md') continue;
+    const bucket = byCategory.get(category) ?? [];
+    bucket.push({ ...page, path: normalised });
+    byCategory.set(category, bucket);
+  }
+
+  const categories: RuntimeIndexCategory[] = [];
+  for (const [name, pages] of byCategory) {
+    if (pages.length === 0) continue;
+    const recentPages = pages
+      .slice()
+      .sort((a, b) => b.lastUpdated.localeCompare(a.lastUpdated))
+      .slice(0, INDEX_CATEGORY_RECENT_PAGE_LIMIT)
+      .map((page) => ({
+        path: page.path,
+        title: page.title || path.basename(page.path, '.md'),
+        summary: page.summary ?? null,
+        lastUpdated: page.lastUpdated,
+      }));
+    categories.push({
+      name,
+      pageCount: pages.length,
+      summaryPath: manifest.pages.find((page) => page.path === `${name}/_summary.md`)?.path,
+      lastUpdated: latestIso(pages.map((page) => page.lastUpdated)),
+      recentPages,
+    });
+  }
+
+  return sortIndexCategories(categories);
 }
 
 async function listMarkdownPages(
@@ -1147,6 +1326,10 @@ async function readFrameAssetForModel(
   } catch {
     return null;
   }
+}
+
+function explainCacheKey(frameId: string, normalisedQuery: string): string {
+  return `${frameId}::${normalisedQuery}`;
 }
 
 function cleanSearchExplanation(raw: string): string {

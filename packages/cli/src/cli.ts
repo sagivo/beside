@@ -82,6 +82,10 @@ Commands:
                              Shortcut for --full-reindex --from <date>. Date-only
                              values use the local day's start; --to uses day end.
   mcp [--stdio]              Run only the MCP server (HTTP by default; stdio for AI clients).
+  model:update               Re-pull the configured local model (and embedding model)
+                             to refresh weights under a floating Ollama tag (e.g. when
+                             gemma4:e2b gets new weights published under the same name).
+                             No-op for remote model plugins.
   plugin list                List discovered plugins by layer.
   reset [--yes] [--keep-config]
                              Wipe everything and start from scratch: raw capture
@@ -147,6 +151,10 @@ async function main(): Promise<void> {
 
     case 'mcp':
       await cmdMcp(logger, args);
+      return;
+
+    case 'model:update':
+      await cmdModelUpdate(logger, args);
       return;
 
     case 'plugin':
@@ -1513,6 +1521,56 @@ async function cmdPlugin(logger: ReturnType<typeof createLogger>, args: ParsedAr
       // eslint-disable-next-line no-console
       console.log();
     }
+  } finally {
+    await stopAll(handles);
+  }
+}
+
+/**
+ * Force-refresh the configured local model (and embedding model). Picks
+ * up newer weights published under the same Ollama tag — the typical
+ * case is a floating tag like `gemma4:e2b` getting an updated manifest
+ * a few weeks after release. Idempotent: if the registry has nothing
+ * new, Ollama re-uses the cached blobs by content hash and the pull
+ * finishes near-instantly.
+ *
+ * Honours `--offline` (no-op + warning) so scripts can call it
+ * unconditionally in any environment.
+ */
+async function cmdModelUpdate(
+  logger: ReturnType<typeof createLogger>,
+  args: ParsedArgs,
+): Promise<void> {
+  if (args.flags.offline) {
+    // eslint-disable-next-line no-console
+    console.log('• --offline set: skipping model:update.');
+    return;
+  }
+
+  const handles = await buildOrchestrator(logger, configFromArgs(args));
+  const modelInfo = handles.model.getModelInfo();
+  if (typeof handles.model.ensureReady !== 'function') {
+    // eslint-disable-next-line no-console
+    console.log(
+      `• Active model plugin (${modelInfo.name}) does not manage local weights — nothing to refresh.`,
+    );
+    await stopAll(handles);
+    return;
+  }
+
+  // eslint-disable-next-line no-console
+  console.log(`Refreshing local model weights for ${modelInfo.name}…`);
+  const { handler, finalize } = createBootstrapRenderer();
+  try {
+    await bootstrapModel(handles, handler, { force: true });
+    finalize();
+    // eslint-disable-next-line no-console
+    console.log(`\n✓ ${modelInfo.name} up to date.`);
+  } catch (err) {
+    finalize();
+    // eslint-disable-next-line no-console
+    console.error(`\n✗ Model update failed: ${(err as Error).message}`);
+    process.exitCode = 1;
   } finally {
     await stopAll(handles);
   }

@@ -38,6 +38,25 @@ export interface AudioTranscriptWorkerOptions {
    * burning the 30-minute whisper timeout. 0 disables. Default 500 MiB.
    */
   maxAudioBytes?: number;
+  /**
+   * Reject (and delete as silent) audio files whose average byte rate
+   * is below this floor. A 16 kHz mono AAC chunk at "medium" quality
+   * runs ~8–12 KB/s; a recording that comes in well under that is
+   * almost certainly silence/room-tone and would just waste a whisper
+   * call before failing the empty-transcript check anyway. Computing
+   * a rate (bytes ÷ duration) instead of a flat byte floor avoids
+   * murdering legitimately short clips that happen to be small.
+   *
+   * Set 0 to disable. Default 4096 (4 KB/s) — well below the AAC
+   * floor for real speech but above bitstream-overhead-only files.
+   */
+  minAudioBytesPerSec?: number;
+  /**
+   * Below this duration (ms) the rate check is skipped — short clips
+   * are dominated by container overhead and the rate metric is
+   * meaningless. Default 5000 (5s).
+   */
+  minAudioRateCheckMs?: number;
 }
 
 export interface AudioTranscriptWorkerResult {
@@ -45,6 +64,53 @@ export interface AudioTranscriptWorkerResult {
   transcribed: number;
   imported: number;
   failed: number;
+  /**
+   * Audio files that transcribed to empty text — overwhelmingly silent
+   * recordings (e.g. a Zoom call that never had real input on this
+   * track, or a chunk captured while the mic was muted). These are
+   * deleted outright rather than parked in `failed/`: there is nothing
+   * to recover and nothing to debug.
+   */
+  silent: number;
+}
+
+/**
+ * Sentinel thrown when a transcription produced no text. Caught
+ * specifically in the per-file loop to delete the source rather than
+ * route it through `writeFailure` (which would persist a useless
+ * `.m4a` + `.error.txt` pair into `failed/` forever).
+ *
+ * Direct text imports (.txt/.vtt/.srt) intentionally still go through
+ * `writeFailure` when empty — an empty user-provided transcript is
+ * suspicious enough that silently deleting it would hide bugs.
+ */
+class SilentAudioError extends Error {
+  constructor(message = 'transcript was empty') {
+    super(message);
+    this.name = 'SilentAudioError';
+  }
+}
+
+/**
+ * One transcript utterance with timing relative to the audio chunk
+ * start. We pass these through to `audio_transcript` events as
+ * `metadata.turns` so the MeetingBuilder can fuse them with the
+ * screenshot timeline. `offset_ms` is preferred over absolute ISO
+ * timestamps in the metadata — the chunk's own `timestamp` field
+ * carries the absolute start, and offsets stay correct even if the
+ * chunk's timestamp is later refined.
+ */
+interface ExtractedTurn {
+  offset_ms: number;
+  end_ms: number;
+  speaker: string | null;
+  text: string;
+  source: 'whisper' | 'vtt' | 'srt' | 'import';
+}
+
+interface TranscribeResult {
+  text: string;
+  turns: ExtractedTurn[];
 }
 
 /**
@@ -81,6 +147,8 @@ export class AudioTranscriptWorker {
   private readonly sensitiveKeywords: string[];
   private readonly deleteAudioAfterTranscribe: boolean;
   private readonly maxAudioBytes: number;
+  private readonly minAudioBytesPerSec: number;
+  private readonly minAudioRateCheckMs: number;
 
   /** Re-entrancy guard: a slow whisper call must not let a second tick
    *  start a parallel one. */
@@ -112,6 +180,8 @@ export class AudioTranscriptWorker {
     this.sensitiveKeywords = opts.sensitiveKeywords ?? [];
     this.deleteAudioAfterTranscribe = opts.deleteAudioAfterTranscribe ?? true;
     this.maxAudioBytes = opts.maxAudioBytes ?? 500 * 1024 * 1024;
+    this.minAudioBytesPerSec = opts.minAudioBytesPerSec ?? 4096;
+    this.minAudioRateCheckMs = opts.minAudioRateCheckMs ?? 5000;
   }
 
   async tick(): Promise<AudioTranscriptWorkerResult> {
@@ -120,6 +190,7 @@ export class AudioTranscriptWorker {
       transcribed: 0,
       imported: 0,
       failed: 0,
+      silent: 0,
     };
     if (!this.enabled) return empty;
     if (this.running) {
@@ -156,6 +227,7 @@ export class AudioTranscriptWorker {
       transcribed: 0,
       imported: 0,
       failed: 0,
+      silent: 0,
     };
 
     // Probe whisper once if any file in this batch needs it. If the
@@ -184,12 +256,51 @@ export class AudioTranscriptWorker {
             );
           }
         }
-        const text = direct
+        // Pre-flight silent-detection: if ffprobe says the file is
+        // long enough to evaluate but its byte rate is below the
+        // floor, skip whisper entirely and treat as silent. Saves a
+        // 30-min whisper timeout on a chunk that was guaranteed to
+        // come back empty. ffprobe is best-effort: if it's not
+        // installed, we fall through to whisper as before.
+        if (!direct && this.minAudioBytesPerSec > 0) {
+          const durationMs = await this.probeDurationMs(file);
+          if (durationMs !== null && durationMs >= this.minAudioRateCheckMs) {
+            const { size } = await fs.stat(file);
+            const bytesPerSec = size / (durationMs / 1000);
+            if (bytesPerSec < this.minAudioBytesPerSec) {
+              this.logger.info('audio chunk below silence floor — skipping whisper', {
+                file: path.basename(file),
+                bytes: size,
+                duration_ms: durationMs,
+                bytes_per_sec: Math.round(bytesPerSec),
+                floor_bytes_per_sec: this.minAudioBytesPerSec,
+              });
+              throw new SilentAudioError('audio chunk below silence floor');
+            }
+          }
+        }
+        const result = direct
           ? await this.readTranscriptFile(file)
           : await this.transcribeAudioFile(file);
-        const cleaned = redactPii(text.trim(), this.sensitiveKeywords);
-        if (!cleaned) throw new Error('transcript was empty');
-        const event = await this.buildEvent(file, cleaned, direct ? 'import' : 'whisper');
+        const cleaned = redactPii(result.text.trim(), this.sensitiveKeywords);
+        if (!cleaned) {
+          // For audio inputs, an empty transcript almost always means
+          // silence (muted mic, no remote speaker, room tone). Surface
+          // it via the typed sentinel so the catch block can delete
+          // the source instead of writing a `failed/` artifact. Direct
+          // text imports keep the generic error — an empty .txt drop
+          // is operator-visible and worth investigating.
+          throw direct ? new Error('transcript was empty') : new SilentAudioError();
+        }
+        const cleanedTurns = result.turns
+          .map((t) => ({ ...t, text: redactPii(t.text.trim(), this.sensitiveKeywords) }))
+          .filter((t) => t.text.length > 0);
+        const event = await this.buildEvent(
+          file,
+          cleaned,
+          direct ? 'import' : 'whisper',
+          cleanedTurns,
+        );
         await this.storage.write(event);
         await this.disposeSource(file, direct);
         totals.processed += 1;
@@ -205,6 +316,28 @@ export class AudioTranscriptWorker {
           model: direct ? null : this.whisperModel,
         });
       } catch (err) {
+        if (err instanceof SilentAudioError) {
+          totals.silent += 1;
+          this.logger.debug('audio transcript silent — deleting source', {
+            file: path.basename(file),
+            duration_ms: Date.now() - startedMs,
+          });
+          // Best-effort delete; if the unlink itself fails (permissions,
+          // race with another process), fall back to the normal
+          // failure path so the file doesn't get retried forever.
+          try {
+            await fs.rm(file, { force: true });
+          } catch (rmErr) {
+            totals.failed += 1;
+            totals.silent -= 1;
+            this.logger.warn(
+              `silent audio cleanup failed for ${path.basename(file)} — moving to failed/`,
+              { err: String(rmErr) },
+            );
+            await this.writeFailure(file, rmErr);
+          }
+          continue;
+        }
         totals.failed += 1;
         this.logger.warn(`audio transcript failed for ${path.basename(file)}`, {
           err: String(err),
@@ -214,9 +347,9 @@ export class AudioTranscriptWorker {
       }
     }
 
-    if (totals.processed > 0 || totals.failed > 0) {
+    if (totals.processed > 0 || totals.failed > 0 || totals.silent > 0) {
       this.logger.info(
-        `audio transcripts: ${totals.processed} processed (${totals.imported} imported, ${totals.transcribed} transcribed), ${totals.failed} failed`,
+        `audio transcripts: ${totals.processed} processed (${totals.imported} imported, ${totals.transcribed} transcribed), ${totals.silent} silent (deleted), ${totals.failed} failed`,
       );
     }
     return totals;
@@ -239,6 +372,7 @@ export class AudioTranscriptWorker {
       transcribed: 0,
       imported: 0,
       failed: 0,
+      silent: 0,
     };
     while (true) {
       const r = await this.tick();
@@ -246,8 +380,14 @@ export class AudioTranscriptWorker {
       total.transcribed += r.transcribed;
       total.imported += r.imported;
       total.failed += r.failed;
-      if (r.processed + r.failed === 0) break;
-      if (r.processed + r.failed < this.batchSize) break;
+      total.silent += r.silent;
+      // Silent files are real work (we did the whisper call), so they
+      // count toward the "did we make progress this tick?" check —
+      // otherwise drain() would terminate prematurely on a queue
+      // that's all silent chunks.
+      const touched = r.processed + r.failed + r.silent;
+      if (touched === 0) break;
+      if (touched < this.batchSize) break;
     }
     return total;
   }
@@ -303,15 +443,24 @@ export class AudioTranscriptWorker {
     await fs.rm(filePath, { force: true });
   }
 
-  private async readTranscriptFile(filePath: string): Promise<string> {
+  private async readTranscriptFile(filePath: string): Promise<TranscribeResult> {
     const raw = await fs.readFile(filePath, 'utf8');
     const ext = path.extname(filePath).toLowerCase();
-    if (ext === '.vtt') return stripSubtitles(raw, 'vtt');
-    if (ext === '.srt') return stripSubtitles(raw, 'srt');
-    return raw;
+    if (ext === '.vtt') return parseSubtitles(raw, 'vtt');
+    if (ext === '.srt') return parseSubtitles(raw, 'srt');
+    return { text: raw, turns: [] };
   }
 
-  private async transcribeAudioFile(filePath: string): Promise<string> {
+  /**
+   * Run whisper and return both the bulk transcript and per-segment
+   * timing data when whisper emits its JSON sidecar. We ask for both
+   * `txt` and `json` outputs in one invocation: the JSON file gives us
+   * authoritative `(start, end, text)` segments which the MeetingBuilder
+   * uses to align utterances to screenshot frames; if JSON parsing
+   * fails for any reason we fall through to the bulk-text path with
+   * `turns: []` so the rest of the pipeline keeps working.
+   */
+  private async transcribeAudioFile(filePath: string): Promise<TranscribeResult> {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-whisper-'));
     const base = path.basename(filePath, path.extname(filePath));
     try {
@@ -320,7 +469,7 @@ export class AudioTranscriptWorker {
         '--model',
         this.whisperModel,
         '--output_format',
-        'txt',
+        'all',
         '--output_dir',
         tmpDir,
       ];
@@ -331,8 +480,19 @@ export class AudioTranscriptWorker {
         timeout: 30 * 60_000,
         maxBuffer: 16 * 1024 * 1024,
       });
-      const txt = path.join(tmpDir, `${base}.txt`);
-      return await fs.readFile(txt, 'utf8');
+      const txtPath = path.join(tmpDir, `${base}.txt`);
+      const jsonPath = path.join(tmpDir, `${base}.json`);
+      const text = await fs.readFile(txtPath, 'utf8');
+      let turns: ExtractedTurn[] = [];
+      try {
+        const json = await fs.readFile(jsonPath, 'utf8');
+        turns = parseWhisperJson(json);
+      } catch {
+        // No JSON sidecar (older whisper, or `--output_format all`
+        // unsupported on this fork). Bulk text alignment is still
+        // useful — MeetingBuilder will sentence-split and distribute.
+      }
+      return { text, turns };
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -342,6 +502,7 @@ export class AudioTranscriptWorker {
     sourcePath: string,
     transcript: string,
     source: 'import' | 'whisper',
+    turns: ExtractedTurn[],
   ): Promise<RawEvent> {
     const stat = await fs.stat(sourcePath);
     const filename = path.basename(sourcePath);
@@ -384,6 +545,15 @@ export class AudioTranscriptWorker {
         source,
         original_filename: filename,
         whisper_model: source === 'whisper' ? this.whisperModel : null,
+        // duration_ms is also returned at the top level, but the
+        // MeetingBuilder reads metadata from raw events and benefits
+        // from a duplicate here so per-turn fallback math (when no
+        // explicit turns exist) doesn't have to query both fields.
+        duration_ms: durationMs,
+        // Per-utterance turns with offset_ms relative to `timestamp`.
+        // Empty when whisper didn't emit a JSON sidecar and the input
+        // was a plain `.txt` (no timing info to preserve).
+        turns: turns.length > 0 ? turns : undefined,
       },
       privacy_filtered: false,
       capture_plugin: 'audio-transcript-worker',
@@ -447,60 +617,136 @@ export class AudioTranscriptWorker {
 }
 
 /**
- * Convert a subtitle file (VTT or SRT) to plain text while preserving
- * cue structure: each cue becomes a paragraph, separated by a blank
- * line. Speaker tags from VTT (`<v Alice>...`) are surfaced as a
- * `Alice: ` prefix so embeddings and search can attribute lines.
- *
- * The earlier implementation collapsed every line into a single
- * stream, which destroyed pause/turn information that downstream
- * search and chunking benefits from.
+ * Convert a subtitle file (VTT or SRT) to plain text PLUS a list of
+ * timed turns. Each cue becomes:
+ *   - a paragraph in `text` (preserving turn boundaries for search /
+ *     embeddings), with an optional `Speaker: ` prefix from VTT
+ *     `<v Alice>` tags
+ *   - a `turn` row with `offset_ms` (ms from the file start) so the
+ *     MeetingBuilder can align each utterance to a screenshot.
  */
-function stripSubtitles(input: string, kind: 'vtt' | 'srt'): string {
-  const cues: string[] = [];
-  let current: string[] = [];
-  let currentSpeaker: string | null = null;
+function parseSubtitles(input: string, kind: 'vtt' | 'srt'): TranscribeResult {
+  const turns: ExtractedTurn[] = [];
+  const paragraphs: string[] = [];
 
-  const flush = () => {
-    if (current.length === 0) return;
-    const body = current.join(' ').replace(/\s+/g, ' ').trim();
-    if (body) {
-      cues.push(currentSpeaker ? `${currentSpeaker}: ${body}` : body);
+  let cueLines: string[] = [];
+  let cueSpeaker: string | null = null;
+  let cueStartMs: number | null = null;
+  let cueEndMs: number | null = null;
+
+  const flush = (): void => {
+    if (cueLines.length === 0) {
+      cueSpeaker = null;
+      cueStartMs = null;
+      cueEndMs = null;
+      return;
     }
-    current = [];
-    currentSpeaker = null;
+    const body = cueLines.join(' ').replace(/\s+/g, ' ').trim();
+    if (body) {
+      paragraphs.push(cueSpeaker ? `${cueSpeaker}: ${body}` : body);
+      if (cueStartMs !== null) {
+        turns.push({
+          offset_ms: cueStartMs,
+          end_ms: cueEndMs ?? cueStartMs,
+          speaker: cueSpeaker,
+          text: body,
+          source: kind,
+        });
+      }
+    }
+    cueLines = [];
+    cueSpeaker = null;
+    cueStartMs = null;
+    cueEndMs = null;
   };
 
   for (const rawLine of input.split(/\r?\n/)) {
     const line = rawLine.trim();
-    // Blank line ends a cue.
     if (!line) {
       flush();
       continue;
     }
-    // VTT preamble.
     if (kind === 'vtt' && (line === 'WEBVTT' || line.startsWith('NOTE') || line.startsWith('STYLE'))) {
       continue;
     }
-    // Cue numbers (SRT) and standalone integer cue ids (VTT).
     if (/^\d+$/.test(line)) continue;
-    // Timing line.
-    if (line.includes('-->')) continue;
-    // Capture the first VTT speaker tag in a cue, then strip all tags.
-    if (kind === 'vtt' && currentSpeaker === null) {
+    if (line.includes('-->')) {
+      const parsed = parseSubtitleTimingLine(line);
+      if (parsed) {
+        cueStartMs = parsed.startMs;
+        cueEndMs = parsed.endMs;
+      }
+      continue;
+    }
+    if (kind === 'vtt' && cueSpeaker === null) {
       const speakerMatch = line.match(/<v(?:\s+[^>]*?)?\s+([^>]+?)>/);
-      if (speakerMatch) currentSpeaker = speakerMatch[1].trim();
+      if (speakerMatch) cueSpeaker = speakerMatch[1]!.trim();
     }
     const cleaned = line.replace(/<[^>]+>/g, '').trim();
-    if (cleaned) current.push(cleaned);
+    if (cleaned) cueLines.push(cleaned);
   }
   flush();
-  return cues.join('\n\n');
+
+  return { text: paragraphs.join('\n\n'), turns };
+}
+
+/**
+ * Parse a VTT/SRT cue timing line like `00:00:01.500 --> 00:00:04.000`.
+ * Returns the start/end offsets in ms from the file start, or null
+ * when the line doesn't parse.
+ */
+function parseSubtitleTimingLine(line: string): { startMs: number; endMs: number } | null {
+  const m = line.match(
+    /(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/,
+  );
+  if (!m) return null;
+  const [, h1, m1, s1, ms1, h2, m2, s2, ms2] = m;
+  const startMs =
+    Number(h1) * 3_600_000 + Number(m1) * 60_000 + Number(s1) * 1_000 + Number(ms1);
+  const endMs =
+    Number(h2) * 3_600_000 + Number(m2) * 60_000 + Number(s2) * 1_000 + Number(ms2);
+  return { startMs, endMs };
+}
+
+/**
+ * Parse the JSON sidecar produced by `whisper --output_format json` (or
+ * `--output_format all`). The relevant shape is `{ segments: [{ start,
+ * end, text }] }` — start/end are seconds, text is the segment body.
+ * Tolerates schema drift across whisper forks (faster-whisper, openai,
+ * mlx-whisper) by reading defensively.
+ */
+function parseWhisperJson(raw: string): ExtractedTurn[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const segments = (parsed as { segments?: unknown }).segments;
+  if (!Array.isArray(segments)) return [];
+  const out: ExtractedTurn[] = [];
+  for (const seg of segments) {
+    if (!seg || typeof seg !== 'object') continue;
+    const obj = seg as Record<string, unknown>;
+    const start = typeof obj.start === 'number' ? obj.start : null;
+    const end = typeof obj.end === 'number' ? obj.end : null;
+    const text = typeof obj.text === 'string' ? obj.text.trim() : '';
+    if (start === null || !text) continue;
+    out.push({
+      offset_ms: Math.round(start * 1000),
+      end_ms: Math.round((end ?? start) * 1000),
+      speaker: null,
+      text,
+      source: 'whisper',
+    });
+  }
+  return out;
 }
 
 /**
  * Parse the native chunker's filename convention:
  *   `native-YYYY-MM-DD-HH-mm-ss-SSS-N.m4a`
+ *   `native-YYYY-MM-DD-HH-mm-ss-SSS-core-N.wav`
  * The Swift side emits these in *local* time (no timezone suffix), so
  * we construct the Date using local-time components to round-trip
  * correctly. Returns null for non-matching filenames (user drops,
@@ -508,7 +754,7 @@ function stripSubtitles(input: string, kind: 'vtt' | 'srt'): string {
  */
 function parseNativeChunkTimestamp(filename: string): Date | null {
   const m = filename.match(
-    /^native-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{3})-\d+\.[A-Za-z0-9]+$/,
+    /^native-(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{3})-(?:[a-z]+-)?\d+\.[A-Za-z0-9]+$/,
   );
   if (!m) return null;
   const [, y, mo, d, h, mi, s, ms] = m;

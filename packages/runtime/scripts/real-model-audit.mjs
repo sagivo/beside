@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Run the chat harness against the LIVE local Ollama adapter and audit
 // the actual model output. Same fake storage as smoke-harness.mjs, but
-// the model is real (gemma2:2b by default) so we can see how the
+// the model is real (gemma4:e4b by default) so we can see how the
 // prompts hold up with a small local model — and debug when they don't.
 //
 // Usage:
@@ -33,7 +33,7 @@ const flag = (name, fallback = null) => {
 };
 const has = (name) => argv.includes(name);
 
-const modelName = flag('--model') ?? 'gemma2:2b';
+const modelName = flag('--model') ?? 'gemma4:e4b';
 const only = flag('--only');
 const verbose = has('--verbose') || has('-v');
 

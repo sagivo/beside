@@ -13,6 +13,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  Video,
   Wand2,
 } from 'lucide-react';
 import {
@@ -88,6 +89,9 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('timeline'))}>
             <Calendar /> Timeline
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onJump('meetings'))}>
+            <Video /> Meetings
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search

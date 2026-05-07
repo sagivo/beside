@@ -33,7 +33,7 @@ interface OllamaModelConfig {
 // (rather than 'localhost') avoids surprises on hosts where 'localhost'
 // resolves to ::1 first while Ollama is only listening on v4.
 const DEFAULT_HOST = 'http://127.0.0.1:11434';
-const DEFAULT_MODEL = 'gemma2:2b';
+const DEFAULT_MODEL = 'gemma4:e4b';
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 const DEFAULT_KEEP_ALIVE = '30s';
 const DEFAULT_UNLOAD_AFTER_IDLE_MIN = 2;
@@ -266,10 +266,24 @@ class OllamaAdapter implements IModelAdapter {
    * daemon if it isn't serving, downloads the configured model if it
    * isn't pulled yet. Memoised so concurrent callers share one bootstrap.
    */
-  async ensureReady(onProgress?: ModelBootstrapHandler): Promise<void> {
+  async ensureReady(
+    onProgress?: ModelBootstrapHandler,
+    opts?: { force?: boolean },
+  ): Promise<void> {
+    // Force-refresh path bypasses the memoised promise so callers (e.g.
+    // `cofounderos model:update`) can request a fresh pull even after a
+    // normal bootstrap has already resolved in this process.
+    if (opts?.force) {
+      const run = this.runBootstrap(onProgress ?? (() => {}), { force: true });
+      this.readyPromise = run.catch((err) => {
+        this.readyPromise = null;
+        throw err;
+      });
+      return this.readyPromise;
+    }
     if (this.readyPromise) return this.readyPromise;
     this.readyPromise = this.runBootstrap(onProgress ?? (() => {})).catch((err) => {
-      this.readyPromise = null; // allow retry
+      this.readyPromise = null;
       throw err;
     });
     return this.readyPromise;
@@ -279,19 +293,27 @@ class OllamaAdapter implements IModelAdapter {
   // Internals
   // -------------------------------------------------------------------------
 
-  private async runBootstrap(emit: ModelBootstrapHandler): Promise<void> {
+  private async runBootstrap(
+    emit: ModelBootstrapHandler,
+    opts: { force?: boolean } = {},
+  ): Promise<void> {
+    const force = opts.force === true;
     emit({ kind: 'check', message: `checking Ollama at ${this.host}` });
 
-    // Fast path: server reachable and model present.
+    // Fast path: server reachable and model present (skipped under force).
     if (await isOllamaReachable(this.host)) {
-      if (await this.modelPresent(this.model) && await this.modelPresent(this.embeddingModel)) {
+      if (
+        !force &&
+        (await this.modelPresent(this.model)) &&
+        (await this.modelPresent(this.embeddingModel))
+      ) {
         emit({ kind: 'ready', model: this.model });
         this.scheduleIdleUnload();
         return;
       }
-      // Server up but model missing — skip install/start, jump to pull.
-      await this.pullModel(emit, this.model);
-      await this.pullModel(emit, this.embeddingModel);
+      // Server up but model missing (or force-refresh) — skip install/start.
+      await this.pullModel(emit, this.model, { force });
+      await this.pullModel(emit, this.embeddingModel, { force });
       emit({ kind: 'ready', model: this.model });
       this.scheduleIdleUnload();
       return;
@@ -309,8 +331,8 @@ class OllamaAdapter implements IModelAdapter {
     }
 
     await this.startServer(emit);
-    await this.pullModel(emit, this.model);
-    await this.pullModel(emit, this.embeddingModel);
+    await this.pullModel(emit, this.model, { force });
+    await this.pullModel(emit, this.embeddingModel, { force });
     emit({ kind: 'ready', model: this.model });
     this.scheduleIdleUnload();
   }
@@ -362,8 +384,16 @@ class OllamaAdapter implements IModelAdapter {
     emit({ kind: 'server_ready', host: this.host });
   }
 
-  private async pullModel(emit: ModelBootstrapHandler, model: string): Promise<void> {
-    if (await this.modelPresent(model)) return;
+  private async pullModel(
+    emit: ModelBootstrapHandler,
+    model: string,
+    opts: { force?: boolean } = {},
+  ): Promise<void> {
+    // Skip the pull when the model is already cached locally — unless the
+    // caller is explicitly refreshing. Ollama's pull always re-resolves
+    // the manifest from the registry, so a forced pull is what picks up
+    // fresh weights published under the same floating tag.
+    if (!opts.force && (await this.modelPresent(model))) return;
 
     emit({
       kind: 'pull_started',
@@ -412,9 +442,13 @@ class OllamaAdapter implements IModelAdapter {
     // Coarse heuristic so the CLI can warn the user before a 4GB download.
     const m = model.toLowerCase();
     if (m.includes('embed')) return '~300 MB';
+    // Order matters: ':e2b' must be checked before ':2b' (and ':e4b'
+    // before ':4b') because String.includes is a substring match.
+    if (m.includes(':e2b')) return '~7.2 GB';
+    if (m.includes(':e4b')) return '~9.6 GB';
     if (m.includes(':2b')) return '~1.6 GB';
     if (m.includes(':3b')) return '~2 GB';
-    if (m.includes(':e4b') || m.includes(':4b')) return '~3 GB';
+    if (m.includes(':4b')) return '~3 GB';
     if (m.includes(':7b') || m.includes(':8b')) return '~4-5 GB';
     if (m.includes(':9b')) return '~5 GB';
     if (m.includes(':12b') || m.includes(':13b')) return '~8 GB';

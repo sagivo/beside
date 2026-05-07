@@ -141,9 +141,23 @@ class MarkdownExport implements IExport {
     } catch {
       sessions = [];
     }
+    // Meetings overlapping this day. Same tolerance as sessions — the
+    // renderer falls back gracefully when the adapter doesn't
+    // materialise meetings.
+    let meetings: Awaited<ReturnType<typeof this.services.storage.listMeetings>> = [];
+    try {
+      meetings = await this.services.storage.listMeetings({
+        day,
+        order: 'chronological',
+        limit: 100,
+      });
+    } catch {
+      meetings = [];
+    }
     let md = renderJournalMarkdown(day, frames, {
       assetUrlPrefix: prefix,
       sessions,
+      meetings,
     });
     if (options.enrich) {
       md = await this.maybeAddModelJournalNarrative(day, frames, sessions, md);

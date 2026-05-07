@@ -75,6 +75,7 @@ class McpExport implements IExport {
       model: (services as ExportServices).model,
       embeddingModelName: (services as ExportServices).embeddingModelName,
       triggerReindex: (services as ExportServices).triggerReindex,
+      summarizeMeeting: (services as ExportServices).summarizeMeeting,
     };
   }
 

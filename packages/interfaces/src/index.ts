@@ -181,6 +181,14 @@ export interface Frame {
    * and can span capture sessions cleanly.
    */
   activity_session_id: string | null;
+  /**
+   * Meeting this frame belongs to, when applicable. Null for non-meeting
+   * frames; populated by the MeetingBuilder for both meeting screenshot
+   * frames and audio_transcript frames whose time window overlaps a
+   * meeting. Distinct from `activity_session_id` because two meetings
+   * in the same focus session each get their own meeting id.
+   */
+  meeting_id: string | null;
   /** Raw event ids that contributed to this frame. */
   source_event_ids: string[];
 }
@@ -239,6 +247,14 @@ export interface FrameOcrTask {
   asset_path: string;
   existing_text: string | null;
   existing_source: FrameTextSource | null;
+  /**
+   * dHash of the captured screenshot, computed at capture time before
+   * any vacuum re-encode. The OCR worker uses it to copy text from a
+   * previously-OCR'd frame with identical pixels (e.g. user toggled
+   * back to the same app/window/tab) instead of running Tesseract
+   * again. Null when capture didn't produce one.
+   */
+  perceptual_hash?: string | null;
 }
 
 /**
@@ -410,6 +426,148 @@ export interface ListSessionsQuery {
   order?: 'recent' | 'chronological';
 }
 
+// ---------------------------------------------------------------------------
+// Meetings — V2.
+//
+// A `Meeting` is a maximal time-contiguous run of frames whose entity_kind
+// is `meeting` for the same `entity_path`, fused with any audio_transcript
+// frames whose timestamp window overlaps that run. Distinct from
+// ActivitySession: a meeting is its own first-class object so two meetings
+// in the same session (back-to-back Zooms after a 10 min break) become
+// independent summaries.
+//
+// Meetings are derived from frames; full reindex clears them with
+// `clearAllMeetings()` and the MeetingBuilder rebuilds from scratch.
+// ---------------------------------------------------------------------------
+
+export type MeetingPlatform =
+  | 'zoom'
+  | 'meet'
+  | 'teams'
+  | 'webex'
+  | 'whereby'
+  | 'around'
+  | 'other';
+
+export type MeetingSummaryStatus =
+  | 'pending'
+  | 'running'
+  | 'ready'
+  | 'failed'
+  | 'skipped_short';
+
+export type MeetingTurnSource = 'whisper' | 'vtt' | 'srt' | 'import';
+
+/**
+ * One transcript turn — a single utterance with a timestamp. Aligned to
+ * the screenshot frame whose validity window covers `t_start` so an
+ * agent can look up "what was on the screen when this was said".
+ */
+export interface MeetingTurn {
+  /** Auto-incremented row id. */
+  id: number;
+  meeting_id: string;
+  /** ISO timestamp of the start of the utterance. */
+  t_start: string;
+  /** ISO timestamp of the end (best effort; may equal t_start when unknown). */
+  t_end: string;
+  /** Speaker label when available — VTT `<v Name>` tag or active-speaker OCR. */
+  speaker: string | null;
+  text: string;
+  /** Frame id whose pixels were on screen at `t_start`, when known. */
+  visual_frame_id: string | null;
+  /** How this turn was extracted. */
+  source: MeetingTurnSource;
+}
+
+export interface Meeting {
+  id: string;
+  /** Stable `meetings/<day>-<slug>` path — same as `frames.entity_path`. */
+  entity_path: string;
+  /** Human-readable meeting title extracted from window titles or the LLM summary. */
+  title: string | null;
+  /** Primary platform inferred from app/URL of the meeting frames. */
+  platform: MeetingPlatform;
+  started_at: string;
+  ended_at: string;
+  /** YYYY-MM-DD of started_at; meetings never span midnight. */
+  day: string;
+  duration_ms: number;
+  /** All meeting frames + overlapping audio frames. */
+  frame_count: number;
+  /** Just the screen frames (not audio). */
+  screenshot_count: number;
+  /** Just the audio_transcript frames overlapping the meeting window. */
+  audio_chunk_count: number;
+  /** Sum of transcript text lengths across overlapping audio frames. */
+  transcript_chars: number;
+  /** Stable hash of (turn count, key screenshot ids). Drives summary staleness. */
+  content_hash: string;
+  summary_status: MeetingSummaryStatus;
+  /** Markdown rendering of the structured summary. Null until ready. */
+  summary_md: string | null;
+  /** Structured summary (parsed JSON) — see MeetingSummaryJson. */
+  summary_json: MeetingSummaryJson | null;
+  /** Names extracted from speaker labels + active-speaker overlays. */
+  attendees: string[];
+  /** URLs spotted in OCR text or url_change events during the meeting. */
+  links: string[];
+  /** Reason summary failed, when status='failed'. */
+  failure_reason: string | null;
+  /** Last writer timestamp. */
+  updated_at: string;
+}
+
+/**
+ * Structured payload produced by the MeetingSummarizer. Rendered to
+ * markdown for the journal but kept in this shape so MCP clients can
+ * pluck individual fields without parsing prose.
+ */
+export interface MeetingSummaryJson {
+  /** Short title for this meeting, e.g. "Weekly Engineering Standup". */
+  title: string | null;
+  tldr: string;
+  agenda: string[];
+  decisions: Array<{ text: string; evidence_turn_ids: number[] }>;
+  action_items: Array<{
+    owner: string | null;
+    task: string;
+    due: string | null;
+    evidence_turn_ids: number[];
+  }>;
+  open_questions: Array<{ text: string; evidence_turn_ids: number[] }>;
+  key_moments: Array<{
+    t: string;
+    what: string;
+    frame_id: string | null;
+  }>;
+  attendees_seen: string[];
+  links_shared: string[];
+  /** Free-form notes from the model (e.g. "remote audio not captured"). */
+  notes: string | null;
+}
+
+export interface ListMeetingsQuery {
+  day?: string;
+  from?: string;
+  to?: string;
+  platform?: MeetingPlatform;
+  limit?: number;
+  order?: 'recent' | 'chronological';
+  /** When set, only meetings whose summary status matches. */
+  summaryStatus?: MeetingSummaryStatus;
+}
+
+export interface MeetingSummaryUpdate {
+  status: MeetingSummaryStatus;
+  md?: string | null;
+  json?: MeetingSummaryJson | null;
+  contentHash?: string;
+  failureReason?: string | null;
+  /** When set, overwrite the meeting's stored title. */
+  title?: string | null;
+}
+
 export interface StorageStats {
   totalEvents: number;
   totalAssetBytes: number;
@@ -488,6 +646,23 @@ export interface IStorage {
     source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>,
   ): Promise<void>;
 
+  /**
+   * Find a previously-OCR'd frame with the same perceptual hash so the
+   * OCR worker can copy its text instead of re-running Tesseract on
+   * pixel-identical screens (typical when the user toggles back to a
+   * previously-captured window/tab). Returns the OCR text + source on
+   * a hit, `null` otherwise. Implementations that don't index by
+   * perceptual hash can omit this method; the worker falls back to
+   * always running OCR.
+   */
+  findOcrTextByPerceptualHash?(
+    perceptualHash: string,
+    excludeFrameId?: string,
+  ): Promise<{
+    text: string;
+    source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>;
+  } | null>;
+
   /** Mark raw events as having been folded into a frame. */
   markFramed(eventIds: string[]): Promise<void>;
 
@@ -507,6 +682,48 @@ export interface IStorage {
     contentHash: string,
     vector: number[],
   ): Promise<void>;
+
+  /** Insert or replace multiple frame embeddings in one storage transaction. */
+  upsertFrameEmbeddings?(
+    embeddings: Array<{
+      frameId: string;
+      model: string;
+      contentHash: string;
+      vector: number[];
+    }>,
+  ): Promise<void>;
+
+  /**
+   * Look up an existing embedding by `(model, contentHash)` from any
+   * frame. The same captured window/title/url/text often produces
+   * identical embedding inputs across many consecutive frames (the
+   * user dwelling on one Slack channel, browser tab, IDE buffer, …).
+   * The embedding worker calls this before invoking `model.embed()`
+   * so we don't pay the LLM cost — typically the slowest part of any
+   * indexing tick — to recompute a vector we've already stored. Each
+   * cache hit saves a full nomic-embed-text round-trip (~50-200ms on
+   * Apple Silicon, much more on CPU-only).
+   *
+   * Returns `null` when nothing matches. Implementations that don't
+   * track content hashes can omit this method entirely; the worker
+   * falls back to in-batch dedupe alone.
+   */
+  findExistingFrameEmbedding?(
+    model: string,
+    contentHash: string,
+  ): Promise<{ vector: number[]; dims: number } | null>;
+
+  /**
+   * Batch variant of `findExistingFrameEmbedding`. Returns a Map from
+   * contentHash → embedding for every hash that already has a stored vector.
+   * Hashes with no stored embedding are absent from the Map. Implementations
+   * that expose this method avoid N sequential DB round-trips in the embedding
+   * worker by issuing a single `IN (…)` query instead.
+   */
+  findExistingFrameEmbeddings?(
+    model: string,
+    contentHashes: string[],
+  ): Promise<Map<string, { vector: number[]; dims: number }>>;
 
   /** Semantic nearest-neighbour search over frame embeddings. */
   searchFrameEmbeddings(
@@ -697,6 +914,69 @@ export interface IStorage {
   clearAllSessions(): Promise<void>;
 
   // -------------------------------------------------------------------------
+  // Meetings — V2.
+  //
+  // Implementations may throw `not_implemented` if they don't materialise
+  // meetings; the orchestrator gracefully degrades to "no meeting digests"
+  // in that case. The local storage adapter implements them.
+  // -------------------------------------------------------------------------
+
+  upsertMeeting(meeting: Meeting): Promise<void>;
+  getMeeting(id: string): Promise<Meeting | null>;
+  listMeetings(query?: ListMeetingsQuery): Promise<Meeting[]>;
+
+  /**
+   * Frames flagged as meeting kind that haven't been attached to a
+   * meeting row yet. Walked by the MeetingBuilder. Ordered ASC by
+   * timestamp.
+   */
+  listFramesNeedingMeetingAssignment(limit: number): Promise<Frame[]>;
+
+  /**
+   * Bulk attach frames to a meeting. Both meeting screenshot frames
+   * (entity_kind=meeting) and overlapping audio_transcript frames
+   * may be attached; the meeting row must already exist.
+   */
+  assignFramesToMeeting(frameIds: string[], meetingId: string): Promise<void>;
+
+  /** Frames belonging to a meeting (screens + audio), oldest first. */
+  getMeetingFrames(meetingId: string): Promise<Frame[]>;
+
+  /**
+   * Audio_transcript frames whose timestamp falls inside `[from, to]`,
+   * ordered ASC. Used by the MeetingBuilder to attach audio chunks to
+   * a meeting after the screenshot run is closed (audio frames carry
+   * their own entity_path of `apps/audio`, so they don't show up via
+   * the meeting entity).
+   */
+  listAudioFramesInRange(fromIso: string, toIso: string): Promise<Frame[]>;
+
+  /** Replace all turns for a meeting with a fresh list. */
+  setMeetingTurns(
+    meetingId: string,
+    turns: Array<Omit<MeetingTurn, 'id' | 'meeting_id'>>,
+  ): Promise<MeetingTurn[]>;
+
+  /** All turns for a meeting, ordered ASC by t_start. */
+  getMeetingTurns(meetingId: string): Promise<MeetingTurn[]>;
+
+  /**
+   * Update only the summary slot — status, optional markdown / json
+   * payload, optional content hash for staleness tracking. Other
+   * meeting fields are left alone.
+   */
+  setMeetingSummary(
+    meetingId: string,
+    update: MeetingSummaryUpdate,
+  ): Promise<void>;
+
+  /**
+   * Wipe all meeting rows + null `frames.meeting_id`. Called from
+   * `--full-reindex`.
+   */
+  clearAllMeetings(): Promise<void>;
+
+  // -------------------------------------------------------------------------
   // Deletion (privacy-driven). Implementations MUST also remove on-disk
   // assets referenced by deleted frames so the user-visible promise that
   // "delete actually deletes" holds. Storage adapters that don't track
@@ -819,8 +1099,16 @@ export interface IModelAdapter {
    * network failure, user denied permission).
    *
    * Idempotent — safe to call on every startup.
+   *
+   * Pass `{ force: true }` to re-run the model pull step even when the
+   * model is already present locally. Adapters that download weights
+   * (Ollama) use this to refresh a floating tag that points at newer
+   * weights than what's on disk; remote adapters can ignore it.
    */
-  ensureReady?(onProgress?: ModelBootstrapHandler): Promise<void>;
+  ensureReady?(
+    onProgress?: ModelBootstrapHandler,
+    opts?: { force?: boolean },
+  ): Promise<void>;
 }
 
 export interface IndexState {
@@ -928,6 +1216,15 @@ export interface ExportServices {
    * exports (e.g. MCP) when a client requests fresh data.
    */
   triggerReindex: (full?: boolean) => Promise<void>;
+  /**
+   * Summarise a single meeting on demand (used by the MCP
+   * `summarize_meeting` tool). Optional — exports can ignore it. The
+   * orchestrator wires this to the MeetingSummarizer.
+   */
+  summarizeMeeting?: (meetingId: string, opts?: { force?: boolean }) => Promise<{
+    status: 'ok' | 'failed' | 'not_found';
+    message?: string;
+  }>;
 }
 
 export interface IExport {
@@ -1024,6 +1321,13 @@ export interface JournalRenderOptions {
    * trailing "Loose frames" section.
    */
   sessions?: ActivitySession[];
+  /**
+   * Meetings overlapping this day. When provided AND a meeting carries
+   * a rendered `summary_md`, the meeting block is emitted at the top
+   * of the day so the user can scan TL;DR + decisions + action items
+   * without scrolling through the timeline.
+   */
+  meetings?: Meeting[];
   /** Threshold (ms) above which inter-session gaps render as AFK markers. Default 2 min. */
   afkThresholdMs?: number;
 }
@@ -1039,6 +1343,7 @@ export function renderJournalMarkdown(
       : optionsOrPrefix;
   const assetUrlPrefix = options.assetUrlPrefix ?? '';
   const sessions = options.sessions ?? [];
+  const meetings = options.meetings ?? [];
   const afkThresholdMs = options.afkThresholdMs ?? 2 * 60_000;
 
   if (frames.length === 0) {
@@ -1048,6 +1353,10 @@ export function renderJournalMarkdown(
   const lines: string[] = [];
   lines.push(`# Journal — ${day}`);
   lines.push('');
+  // Meeting digest section — emitted before timelines so the
+  // high-signal stuff is the first thing the user (or an AI agent)
+  // sees on the page.
+  renderMeetingsBlock(meetings, lines);
 
   const totalMs = frames.reduce((acc, f) => acc + (f.duration_ms ?? 0), 0);
   const minutes = Math.round(totalMs / 60_000);
@@ -2193,4 +2502,43 @@ function humaniseDuration(ms: number): string {
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+/**
+ * Render a "Meetings" digest section at the top of the journal,
+ * inlining each meeting's summary_md when available. Skipped when no
+ * meetings overlap the day; for meetings without a summary yet we still
+ * emit a one-line entry so the user knows it was captured.
+ */
+function renderMeetingsBlock(meetings: Meeting[], lines: string[]): void {
+  if (meetings.length === 0) return;
+  const sorted = meetings
+    .slice()
+    .sort((a, b) => a.started_at.localeCompare(b.started_at));
+  lines.push(`## Meetings (${sorted.length})`);
+  lines.push('');
+  for (const m of sorted) {
+    if (m.summary_md && m.summary_md.trim()) {
+      lines.push(m.summary_md.trim());
+      lines.push('');
+      continue;
+    }
+    const start = m.started_at.slice(11, 16);
+    const end = m.ended_at.slice(11, 16);
+    const dur = Math.max(1, Math.round(m.duration_ms / 60_000));
+    const status =
+      m.summary_status === 'pending'
+        ? '_(summary pending)_'
+        : m.summary_status === 'running'
+          ? '_(summary in progress)_'
+          : m.summary_status === 'failed'
+            ? `_(summary failed: ${m.failure_reason ?? 'unknown'})_`
+            : m.summary_status === 'skipped_short'
+              ? '_(skipped — short meeting / no audio)_'
+              : '';
+    lines.push(
+      `- **${start}-${end}** · [[${m.entity_path}]] · ${dur} min · ${m.platform} ${status}`,
+    );
+  }
+  lines.push('');
 }

@@ -21,7 +21,7 @@
       "content_change_min_interval_ms": { "type": "integer" },
       "excluded_apps": { "type": "array", "items": { "type": "string" } },
       "excluded_url_patterns": { "type": "array", "items": { "type": "string" } },
-      "capture_audio": { "type": "boolean", "default": false },
+      "capture_audio": { "type": "boolean", "default": true },
       "audio": {
         "type": "object",
         "properties": {
@@ -29,14 +29,19 @@
           "live_recording": {
             "type": "object",
             "properties": {
-              "enabled": { "type": "boolean", "default": false },
+              "enabled": { "type": "boolean", "default": true },
               "chunk_seconds": { "type": "integer", "default": 300 },
               "format": { "type": "string", "enum": ["m4a"], "default": "m4a" },
               "sample_rate": { "type": "integer", "default": 16000 },
               "channels": { "type": "integer", "default": 1 },
+              "system_audio_backend": {
+                "type": "string",
+                "enum": ["core_audio_tap", "screencapturekit", "off"],
+                "default": "core_audio_tap"
+              },
               "activation": {
                 "type": "string",
-                "enum": ["other_process_input"],
+                "enum": ["other_process_input", "always"],
                 "default": "other_process_input"
               },
               "poll_interval_sec": { "type": "integer", "default": 3 }

@@ -32,7 +32,27 @@ interface OcrWorkerOptions {
   storageRoot: string;
   /** Substrings whose presence causes a *line* to be redacted. */
   sensitiveKeywords?: string[];
+  /**
+   * When a frame already has accessibility-text coverage of at least
+   * this many characters, skip OCR for that frame entirely. AX text is
+   * verbatim from the focused app's text widgets (Slack, Mail, Cursor,
+   * browsers, Notion, Linear, …) — substantially better than OCR for
+   * those apps, and once we have ~400+ chars the marginal value of
+   * adding OCR-recovered toolbar/menu text rarely justifies 1-3s of
+   * Tesseract CPU per frame. Set 0 to always run OCR.
+   */
+  skipWhenAxTextChars?: number;
 }
+
+/**
+ * Default AX-text length above which we treat OCR as redundant. Tuned
+ * conservatively — at 400 chars the focused window has surfaced a
+ * meaningful body of text via the AX tree, and `mergeVisualText`'s
+ * line-level dedupe means OCR contributions on top of that are
+ * typically a handful of menu/toolbar labels. Tunable via the
+ * `skipWhenAxTextChars` option.
+ */
+const DEFAULT_SKIP_WHEN_AX_TEXT_CHARS = 400;
 
 export interface OcrWorkerResult {
   processed: number;
@@ -127,10 +147,12 @@ export class OcrWorker {
   private readonly enabled: boolean;
   private readonly storageRoot: string;
   private readonly sensitiveKeywords: string[];
+  private readonly skipWhenAxTextChars: number;
 
   private workerPromise: Promise<TesseractWorker | null> | null = null;
   private terminating = false;
   private startupLogged = false;
+  private axSkipCount = 0;
 
   constructor(
     private readonly storage: IStorage,
@@ -142,6 +164,10 @@ export class OcrWorker {
     this.enabled = opts.enabled ?? true;
     this.storageRoot = opts.storageRoot;
     this.sensitiveKeywords = opts.sensitiveKeywords ?? [];
+    this.skipWhenAxTextChars = Math.max(
+      0,
+      opts.skipWhenAxTextChars ?? DEFAULT_SKIP_WHEN_AX_TEXT_CHARS,
+    );
     // Install the stderr filter eagerly so Leptonica chatter is suppressed
     // from the very first OCR tick. Previously the filter was set up
     // lazily inside `getWorker()`, which left a small race where the
@@ -159,17 +185,104 @@ export class OcrWorker {
     if (tasks.length === 0) {
       return { processed: 0, failed: 0, remaining: 0 };
     }
+
+    // First pass: drain frames that don't actually need Tesseract.
+    //
+    //   1. AX-text-already-covers — when the focused app surfaces
+    //      enough text via the Accessibility tree, OCR's marginal
+    //      value rarely justifies 1-3s of CPU per frame. AX text is
+    //      verbatim from the widget tree (Slack, Mail, Cursor,
+    //      browsers, Notion, Linear, …); the merge in mergeVisualText
+    //      typically only gains a handful of menu/toolbar labels on
+    //      top.
+    //
+    //   2. Perceptual-hash cache hit — when the user toggles back to
+    //      a window/tab they've already seen, the captured pixels are
+    //      identical and Tesseract will return the same text it did
+    //      the first time. Reusing the prior result is correct and
+    //      saves the entire recognize() cost.
+    //
+    // In both cases we mark the row with a terminal text_source so it
+    // moves out of `listFramesNeedingOcr`'s candidate set.
+    const phashLookupAvailable =
+      typeof this.storage.findOcrTextByPerceptualHash === 'function';
+    let processed = 0;
+    let axSkipped = 0;
+    let phashSkipped = 0;
+    const remaining: typeof tasks = [];
+    for (const task of tasks) {
+      if (this.terminating) break;
+      const existingText = (task.existing_text ?? '').trim();
+      if (
+        this.skipWhenAxTextChars > 0 &&
+        task.existing_source === 'accessibility' &&
+        existingText.length >= this.skipWhenAxTextChars
+      ) {
+        try {
+          await this.storage.setFrameText(task.id, existingText, 'ocr_accessibility');
+          processed += 1;
+          axSkipped += 1;
+          this.axSkipCount += 1;
+          continue;
+        } catch (err) {
+          this.logger.debug('ax-skip mark failed; falling through to OCR', {
+            id: task.id,
+            err: String(err),
+          });
+        }
+      }
+
+      // Perceptual-hash cache lookup. Cheap (indexed) and saves the
+      // ~1-3s recognize() round-trip when it hits.
+      if (phashLookupAvailable && task.perceptual_hash) {
+        try {
+          const cached = await this.storage.findOcrTextByPerceptualHash!(
+            task.perceptual_hash,
+            task.id,
+          );
+          if (cached && cached.text) {
+            const merged = mergeVisualText(cached.text, existingText);
+            const source = existingText && task.existing_source === 'accessibility'
+              ? 'ocr_accessibility'
+              : cached.source;
+            await this.storage.setFrameText(task.id, merged, source);
+            processed += 1;
+            phashSkipped += 1;
+            continue;
+          }
+        } catch (err) {
+          this.logger.debug('phash cache lookup failed; falling through to OCR', {
+            id: task.id,
+            err: String(err),
+          });
+        }
+      }
+
+      remaining.push(task);
+    }
+
+    if (remaining.length === 0) {
+      // Everything in this batch was AX-covered or pixel-cached. Don't
+      // even boot Tesseract — it's a ~2s / ~100 MB warmup we'd
+      // otherwise pay for nothing on AX-rich or static-screen workloads.
+      if (processed > 0) {
+        this.logger.debug(
+          `ocr: ${processed} processed (${axSkipped} ax-skipped, ${phashSkipped} phash-cached, 0 failed)`,
+        );
+      }
+      return { processed, failed: 0, remaining: 0 };
+    }
+
     const worker = await this.getWorker();
     if (!worker) {
       // Tesseract failed to load; disable until restart so we don't
       // log an error every 30s for the rest of the session.
       this.logger.warn('OCR worker disabled (tesseract.js unavailable)');
-      return { processed: 0, failed: tasks.length, remaining: tasks.length };
+      return { processed, failed: remaining.length, remaining: remaining.length };
     }
 
-    let processed = 0;
     let failed = 0;
-    for (const task of tasks) {
+    for (const task of remaining) {
       if (this.terminating) break;
       try {
         const abs = path.isAbsolute(task.asset_path)
@@ -218,7 +331,9 @@ export class OcrWorker {
       }
     }
     if (processed > 0) {
-      this.logger.debug(`ocr: ${processed} processed, ${failed} failed`);
+      this.logger.debug(
+        `ocr: ${processed} processed (${axSkipped} ax-skipped, ${phashSkipped} phash-cached, ${failed} failed)`,
+      );
     }
     return {
       processed,
@@ -379,8 +494,14 @@ async function prepareForOcr(absPath: string): Promise<string | Buffer | null> {
     if (meanLuminance < 128) {
       pipeline = pipeline.negate({ alpha: false });
     }
+    // `compressionLevel: 0` writes a "stored" (uncompressed) PNG. We
+    // hand the buffer directly to Tesseract and discard it, so the
+    // larger byte size never hits disk or the network — and skipping
+    // zlib altogether shaves a few ms per frame from the encode. Level
+    // 1 was the previous "fastest with some compression"; level 0 is
+    // strictly faster for an in-memory consumer.
     return await pipeline
-      .png({ compressionLevel: 1 })
+      .png({ compressionLevel: 0 })
       .toBuffer();
   } catch {
     return absPath;

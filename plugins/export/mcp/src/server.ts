@@ -14,6 +14,7 @@ import type {
   Frame,
   EntityKind,
   FrameTextSource,
+  MeetingPlatform,
 } from '@cofounderos/interfaces';
 import { renderJournalMarkdown } from '@cofounderos/interfaces';
 import { isSelfFrame } from './parsers.js';
@@ -29,6 +30,10 @@ export interface McpServices {
   model?: IModelAdapter;
   embeddingModelName?: string;
   triggerReindex?: (full?: boolean) => Promise<void>;
+  summarizeMeeting?: (
+    meetingId: string,
+    opts?: { force?: boolean },
+  ) => Promise<{ status: 'ok' | 'failed' | 'not_found'; message?: string }>;
 }
 
 export interface McpServerOptions {
@@ -82,6 +87,16 @@ const FRAME_TEXT_SOURCES: readonly FrameTextSource[] = [
   'ocr_accessibility',
   'audio',
   'none',
+];
+
+const MEETING_PLATFORMS: readonly MeetingPlatform[] = [
+  'zoom',
+  'meet',
+  'teams',
+  'webex',
+  'whereby',
+  'around',
+  'other',
 ];
 
 export function createMcpServer(
@@ -355,7 +370,17 @@ export function createMcpServer(
       } catch {
         sessions = [];
       }
-      const md = renderJournalMarkdown(day, frames, { sessions });
+      let meetings: Awaited<ReturnType<typeof services.storage.listMeetings>> = [];
+      try {
+        meetings = await services.storage.listMeetings({
+          day,
+          order: 'chronological',
+          limit: 100,
+        });
+      } catch {
+        meetings = [];
+      }
+      const md = renderJournalMarkdown(day, frames, { sessions, meetings });
       return {
         content: [{ type: 'text', text: md }],
       };
@@ -1016,6 +1041,176 @@ export function createMcpServer(
             ),
           },
         ],
+      };
+    },
+  );
+
+  server.registerTool(
+    'list_meetings',
+    {
+      description:
+        'List Zoom / Google Meet / Microsoft Teams / Webex (etc.) meetings detected from screenshots, fused with their audio transcripts. Each row reports time range, platform, attendees seen, link/file mentions, and whether a summary is ready. Use this as the entrypoint for "what meetings did I have today / this week" queries.',
+      inputSchema: {
+        day: z.string().optional().describe('Restrict to a single YYYY-MM-DD.'),
+        from: z.string().optional().describe('Meetings starting on or after this ISO timestamp.'),
+        to: z.string().optional().describe('Meetings starting on or before this ISO timestamp.'),
+        platform: z
+          .enum(MEETING_PLATFORMS as [MeetingPlatform, ...MeetingPlatform[]])
+          .optional()
+          .describe('Filter to one platform (zoom/meet/teams/webex/whereby/around/other).'),
+        limit: z.number().int().positive().optional().describe('Max meetings to return. Default 50.'),
+        order: z
+          .enum(['recent', 'chronological'])
+          .optional()
+          .describe('"recent" (default) returns newest first.'),
+      },
+    },
+    async ({ day, from, to, platform, limit, order }) => {
+      try {
+        const meetings = await services.storage.listMeetings({
+          day,
+          from,
+          to,
+          platform,
+          limit: limit ?? 50,
+          order,
+        });
+        const rows = meetings.map((m) => ({
+          id: m.id,
+          entity_path: m.entity_path,
+          platform: m.platform,
+          started_at: m.started_at,
+          ended_at: m.ended_at,
+          day: m.day,
+          duration_min: Math.round(m.duration_ms / 60_000),
+          screenshot_count: m.screenshot_count,
+          audio_chunk_count: m.audio_chunk_count,
+          transcript_chars: m.transcript_chars,
+          attendees: m.attendees,
+          links: m.links,
+          summary_status: m.summary_status,
+          has_summary: m.summary_status === 'ready',
+        }));
+        return {
+          content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
+        };
+      } catch (err) {
+        return {
+          content: [
+            { type: 'text', text: `Meetings not yet available (${String(err)}). Try trigger_reindex first.` },
+          ],
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_meeting',
+    {
+      description:
+        'Fetch a single meeting by id with its structured summary, fused transcript turns (each tied to a screenshot via visual_frame_id), and metadata. Pair with `list_meetings` to drill in. Pass `include` to control payload size; the default is summary+turns.',
+      inputSchema: {
+        id: z.string().describe('Meeting id (starts with "mtg_").'),
+        include_turns: z
+          .boolean()
+          .optional()
+          .describe('Include transcript turns. Default true.'),
+        include_screens: z
+          .boolean()
+          .optional()
+          .describe('Include the meeting\'s screenshot frames as a thin manifest. Default false.'),
+      },
+    },
+    async ({ id, include_turns, include_screens }) => {
+      const meeting = await services.storage.getMeeting(id);
+      if (!meeting) {
+        return {
+          content: [{ type: 'text', text: `Meeting ${id} not found.` }],
+        };
+      }
+      const wantTurns = include_turns !== false;
+      const wantScreens = include_screens === true;
+      const turns = wantTurns ? await services.storage.getMeetingTurns(id) : [];
+      const screens = wantScreens
+        ? (await services.storage.getMeetingFrames(id)).filter(
+            (f) => f.entity_kind === 'meeting' && f.asset_path,
+          )
+        : [];
+      const payload: Record<string, unknown> = {
+        meeting: {
+          id: meeting.id,
+          entity_path: meeting.entity_path,
+          platform: meeting.platform,
+          started_at: meeting.started_at,
+          ended_at: meeting.ended_at,
+          day: meeting.day,
+          duration_min: Math.round(meeting.duration_ms / 60_000),
+          screenshot_count: meeting.screenshot_count,
+          audio_chunk_count: meeting.audio_chunk_count,
+          transcript_chars: meeting.transcript_chars,
+          attendees: meeting.attendees,
+          links: meeting.links,
+          summary_status: meeting.summary_status,
+          summary: meeting.summary_json,
+          summary_failure_reason: meeting.failure_reason,
+          updated_at: meeting.updated_at,
+        },
+      };
+      if (wantTurns) {
+        payload.turns = turns.map((t) => ({
+          id: t.id,
+          t_start: t.t_start,
+          t_end: t.t_end,
+          speaker: t.speaker,
+          text: t.text,
+          visual_frame_id: t.visual_frame_id,
+          source: t.source,
+        }));
+      }
+      if (wantScreens) {
+        payload.screens = screens.map((f) => ({
+          id: f.id,
+          timestamp: f.timestamp,
+          window_title: f.window_title,
+          asset_path: f.asset_path,
+          url: f.url,
+        }));
+      }
+      const responses = [
+        { type: 'text' as const, text: JSON.stringify(payload, null, 2) },
+      ];
+      if (meeting.summary_md) {
+        responses.push({ type: 'text' as const, text: meeting.summary_md });
+      }
+      return { content: responses };
+    },
+  );
+
+  server.registerTool(
+    'summarize_meeting',
+    {
+      description:
+        'Run (or re-run) the meeting summarizer for a single meeting. Useful right after dropping a .vtt transcript into the audio inbox, or to refresh the summary with a different model. Pass `force: true` to bypass the cached-summary fast path.',
+      inputSchema: {
+        id: z.string().describe('Meeting id.'),
+        force: z.boolean().optional().describe('Force re-summarisation even when a summary already exists.'),
+      },
+    },
+    async ({ id, force }) => {
+      if (!services.summarizeMeeting) {
+        return {
+          content: [
+            { type: 'text', text: 'summarize_meeting unavailable in this process — start the agent to enable.' },
+          ],
+          isError: true,
+        };
+      }
+      const result = await services.summarizeMeeting(id, { force });
+      return {
+        content: [
+          { type: 'text', text: JSON.stringify(result, null, 2) },
+        ],
+        isError: result.status === 'failed' || result.status === 'not_found',
       };
     },
   );

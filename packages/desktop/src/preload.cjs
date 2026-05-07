@@ -12,6 +12,7 @@ const api = {
   searchFrames: (query) => ipcRenderer.invoke('cofounderos:search-frames', query),
   explainSearchResults: (query) => ipcRenderer.invoke('cofounderos:explain-search-results', query),
   getFrameIndexDetails: (frameId) => ipcRenderer.invoke('cofounderos:get-frame-index-details', frameId),
+  assetUrl: (assetPath) => ipcRenderer.invoke('cofounderos:asset-url', assetPath),
   readAsset: (assetPath) => ipcRenderer.invoke('cofounderos:read-asset', assetPath),
   startRuntime: () => ipcRenderer.invoke('cofounderos:start-runtime'),
   stopRuntime: () => ipcRenderer.invoke('cofounderos:stop-runtime'),
@@ -21,6 +22,7 @@ const api = {
   triggerReorganise: () => ipcRenderer.invoke('cofounderos:trigger-reorganise'),
   triggerFullReindex: (range) => ipcRenderer.invoke('cofounderos:trigger-full-reindex', range),
   bootstrapModel: () => ipcRenderer.invoke('cofounderos:bootstrap-model'),
+  updateModel: () => ipcRenderer.invoke('cofounderos:update-model'),
   getStartAtLogin: () => ipcRenderer.invoke('cofounderos:get-start-at-login'),
   setStartAtLogin: (enabled) => ipcRenderer.invoke('cofounderos:set-start-at-login', enabled),
   openPath: (target) => ipcRenderer.invoke('cofounderos:open-path', target),
@@ -53,6 +55,7 @@ const api = {
     ipcRenderer.on('cofounderos:chat-event', listener);
     return () => ipcRenderer.removeListener('cofounderos:chat-event', listener);
   },
+  listMeetings: (query) => ipcRenderer.invoke('cofounderos:list-meetings', query),
 };
 
 contextBridge.exposeInMainWorld('cofounderos', api);

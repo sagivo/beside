@@ -8,6 +8,7 @@ import {
   Plug,
   Search,
   Settings,
+  Video,
   type LucideIcon,
 } from 'lucide-react';
 import { BrandMark } from '@/components/BrandMark';
@@ -20,11 +21,12 @@ import { cn } from '@/lib/utils';
 const NAV: Array<{ id: Screen; label: string; icon: LucideIcon; shortcut: string }> = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, shortcut: '1' },
   { id: 'timeline', label: 'Timeline', icon: Calendar, shortcut: '2' },
-  { id: 'search', label: 'Search', icon: Search, shortcut: '3' },
-  { id: 'chat', label: 'AI Chat', icon: MessageSquare, shortcut: '4' },
-  { id: 'connect', label: 'Connect AI', icon: Plug, shortcut: '5' },
-  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '6' },
-  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '7' },
+  { id: 'meetings', label: 'Meetings', icon: Video, shortcut: '3' },
+  { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
+  { id: 'chat', label: 'AI Chat', icon: MessageSquare, shortcut: '5' },
+  { id: 'connect', label: 'Connect AI', icon: Plug, shortcut: '6' },
+  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '7' },
+  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '8' },
 ];
 
 export function Sidebar({

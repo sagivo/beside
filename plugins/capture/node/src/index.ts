@@ -28,6 +28,14 @@ import { AccessibilityTextReader } from './accessibility-text.js';
 
 interface CaptureNodeConfig {
   poll_interval_ms?: number;
+  /**
+   * Polling cadence (ms) while the user is idle (`idle_start` fired,
+   * before `idle_end`). Active-window queries, screenshot probes, and
+   * perceptual-hash diff loops are wasted CPU when the user isn't
+   * touching the machine. Defaults to 10000 (10s); set <=
+   * `poll_interval_ms` to disable the backoff.
+   */
+  idle_poll_interval_ms?: number;
   focus_settle_delay_ms?: number;
   screenshot_diff_threshold?: number;
   idle_threshold_sec?: number;
@@ -284,6 +292,8 @@ class NodeCapture implements ICapture {
   private readonly handlers = new Set<RawEventHandler>();
 
   private timer: NodeJS.Timeout | null = null;
+  private nextTickDueAt: number | null = null;
+  private scheduledIntervalMs: number | null = null;
   private running = false;
   private paused = false;
 
@@ -362,6 +372,7 @@ class NodeCapture implements ICapture {
       explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 55 : 80);
     this.config = {
       poll_interval_ms: config.poll_interval_ms ?? 1500,
+      idle_poll_interval_ms: config.idle_poll_interval_ms ?? 10_000,
       focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.1,
       idle_threshold_sec: config.idle_threshold_sec ?? 60,
@@ -373,7 +384,7 @@ class NodeCapture implements ICapture {
       jpeg_quality: format === 'jpeg' ? quality : 80,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
-      capture_audio: config.capture_audio ?? false,
+      capture_audio: config.capture_audio ?? true,
       whisper_model: config.whisper_model ?? 'base',
       raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
       privacy: config.privacy ?? {
@@ -485,6 +496,8 @@ class NodeCapture implements ICapture {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.nextTickDueAt = null;
+    this.scheduledIntervalMs = null;
 
     // Final blur for whatever was last focused.
     if (this.lastWindow) {
@@ -532,6 +545,27 @@ class NodeCapture implements ICapture {
 
   private scheduleNext(): void {
     if (!this.running) return;
+    // Back the polling cadence off while the user is idle. Every
+    // active-window query, screenshot probe, and perceptual-hash diff
+    // costs CPU + (on macOS) Apple Events traffic; running the
+    // 1.5s cadence for hours of unattended idle time burns power for
+    // no signal. The slow cadence still detects `idle_end` within one
+    // tick (default 10s), and that tick immediately produces a fresh
+    // screenshot, so resume latency is bounded by `idle_poll_interval_ms`.
+    // When paused (privacy pause / explicit pauseCapture), use the
+    // idle cadence too — same logic.
+    const intervalMs = this.idleNotified || this.paused
+      ? Math.max(this.config.poll_interval_ms, this.config.idle_poll_interval_ms)
+      : this.config.poll_interval_ms;
+    const now = Date.now();
+    if (this.nextTickDueAt == null || this.scheduledIntervalMs !== intervalMs) {
+      this.nextTickDueAt = now + intervalMs;
+      this.scheduledIntervalMs = intervalMs;
+    } else {
+      this.nextTickDueAt += intervalMs;
+      while (this.nextTickDueAt <= now) this.nextTickDueAt += intervalMs;
+    }
+    const delayMs = Math.max(0, this.nextTickDueAt - now);
     this.timer = setTimeout(() => {
       void (async () => {
         try {
@@ -541,7 +575,7 @@ class NodeCapture implements ICapture {
         }
         this.scheduleNext();
       })();
-    }, this.config.poll_interval_ms);
+    }, delayMs);
   }
 
   private async tick(): Promise<void> {

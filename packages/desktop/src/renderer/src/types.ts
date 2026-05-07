@@ -1,6 +1,7 @@
 export type Screen =
   | 'dashboard'
   | 'timeline'
+  | 'meetings'
   | 'search'
   | 'chat'
   | 'connect'

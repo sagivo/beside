@@ -2,6 +2,8 @@ import * as React from 'react';
 import {
   AlertTriangle,
   Check,
+  Cpu,
+  Download,
   FolderOpen,
   Loader2,
   Mic,
@@ -11,6 +13,7 @@ import {
   RefreshCw,
   Save,
   Shield,
+  Sparkles,
   Sun,
   Trash2,
   X,
@@ -27,10 +30,12 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -40,9 +45,23 @@ import { Textarea } from '@/components/ui/textarea';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { formatBytes } from '@/lib/format';
+import { formatBootstrapLine, pullPercent } from '@/lib/bootstrap-phases';
+import {
+  MODEL_CHOICES,
+  findModelChoice,
+  isPlausibleOllamaTag,
+} from '@/lib/model-catalog';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
-import type { LoadedConfig, MicPermission, WhisperProbe } from '@/global';
+import type {
+  LoadedConfig,
+  MicPermission,
+  ModelBootstrapProgress,
+  RuntimeOverview,
+  WhisperProbe,
+} from '@/global';
+
+type SystemAudioBackend = 'core_audio_tap' | 'screencapturekit' | 'off';
 
 interface SettingsDraft {
   blurPasswordFields: boolean;
@@ -54,7 +73,11 @@ interface SettingsDraft {
   retentionDays: number;
   compressAfterDays: number;
   deleteAfterDays: number;
-  ollamaModel: string;
+  // Model selection is owned by the dedicated picker in the AI tab and
+  // saved/applied via its own action (see ModelSettings below). We
+  // intentionally do NOT include it in this generic draft so the
+  // global SaveBar can't quietly trigger a model swap or re-pull as a
+  // side-effect of saving e.g. a sensitive_keywords change.
   ollamaHost: string;
   ollamaAutoInstall: boolean;
   markdownPath: string;
@@ -63,15 +86,32 @@ interface SettingsDraft {
   captureAudio: boolean;
   whisperModel: string;
   liveRecordingEnabled: boolean;
+  systemAudioBackend: SystemAudioBackend;
   chunkSeconds: number;
   deleteAudioAfterTranscribe: boolean;
 }
 
 export function Settings({
   config,
+  overview,
+  bootstrapEvents,
+  onClearBootstrapEvents,
   onSaved,
 }: {
   config: LoadedConfig | null;
+  /**
+   * Live runtime overview pushed from the main process. The AI tab uses
+   * `overview.model.ready` to render the "ready / updating" status pill
+   * and to know when a force-refresh has produced a usable model again.
+   */
+  overview: RuntimeOverview | null;
+  /**
+   * Bootstrap progress events streamed from the runtime. Used by the AI
+   * tab to render a live progress bar during model install / refresh.
+   */
+  bootstrapEvents: ModelBootstrapProgress[];
+  /** Clear the local copy of bootstrap events before kicking off a new run. */
+  onClearBootstrapEvents: () => void;
   onSaved: (config: LoadedConfig) => void;
 }) {
   const [draft, setDraft] = React.useState<SettingsDraft | null>(null);
@@ -296,38 +336,26 @@ export function Settings({
           </Card>
         </TabsContent>
 
-        <TabsContent value="ai">
-          <Card>
-            <CardContent className="flex flex-col gap-0">
-              <ToggleRow
-                title="Auto-install AI tools when needed"
-                description="Lets us set up the local model for you."
-                checked={draft.ollamaAutoInstall}
-                onChange={(v) => set('ollamaAutoInstall', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field label="Model">
-                  <Input
-                    value={draft.ollamaModel}
-                    onChange={(e) => set('ollamaModel', e.currentTarget.value)}
-                  />
-                </Field>
-                <Field label="Host">
-                  <Input
-                    value={draft.ollamaHost}
-                    onChange={(e) => set('ollamaHost', e.currentTarget.value)}
-                  />
-                </Field>
-              </div>
-            </CardContent>
-          </Card>
+        <TabsContent value="ai" className="flex flex-col gap-4">
+          <ModelSettings
+            savedModel={loadedConfig.config.index.model.ollama?.model ?? ''}
+            savedRevision={loadedConfig.config.index.model.ollama?.model_revision ?? 1}
+            ollamaHost={draft.ollamaHost}
+            ollamaAutoInstall={draft.ollamaAutoInstall}
+            modelReady={overview?.model.ready ?? false}
+            bootstrapEvents={bootstrapEvents}
+            onClearBootstrapEvents={onClearBootstrapEvents}
+            onHostChange={(v) => set('ollamaHost', v)}
+            onAutoInstallChange={(v) => set('ollamaAutoInstall', v)}
+            onModelChanged={(next) => onSaved(next)}
+          />
         </TabsContent>
 
         <TabsContent value="audio">
           <AudioSettings
             captureAudio={draft.captureAudio}
             liveRecordingEnabled={draft.liveRecordingEnabled}
+            systemAudioBackend={draft.systemAudioBackend}
             whisperModel={draft.whisperModel}
             chunkSeconds={draft.chunkSeconds}
             deleteAudioAfterTranscribe={draft.deleteAudioAfterTranscribe}
@@ -396,6 +424,7 @@ const WHISPER_MODELS: Array<{ id: string; label: string; size: string; quality: 
 function AudioSettings({
   captureAudio,
   liveRecordingEnabled,
+  systemAudioBackend,
   whisperModel,
   chunkSeconds,
   deleteAudioAfterTranscribe,
@@ -403,6 +432,7 @@ function AudioSettings({
 }: {
   captureAudio: boolean;
   liveRecordingEnabled: boolean;
+  systemAudioBackend: SystemAudioBackend;
   whisperModel: string;
   chunkSeconds: number;
   deleteAudioAfterTranscribe: boolean;
@@ -492,6 +522,74 @@ function AudioSettings({
                       </div>
                     </Label>
                   ))}
+                </RadioGroup>
+              </div>
+              <Separator className="my-4" />
+              <div className="flex flex-col gap-3">
+                <div>
+                  <h4 className="font-medium">Remote participant audio</h4>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Choose how CofounderOS records the people you hear during meetings.
+                  </p>
+                </div>
+                <RadioGroup
+                  value={systemAudioBackend}
+                  onValueChange={(v) => set('systemAudioBackend', v as SystemAudioBackend)}
+                  className="grid gap-2"
+                >
+                  <Label
+                    htmlFor="sab-core"
+                    className={cn(
+                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
+                      systemAudioBackend === 'core_audio_tap'
+                        ? 'border-primary ring-2 ring-primary/20'
+                        : 'hover:bg-accent/40',
+                    )}
+                  >
+                    <RadioGroupItem value="core_audio_tap" id="sab-core" className="mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="font-medium">Core Audio tap</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Recommended on macOS 14.2+. Captures system output without the
+                        macOS screen-sharing indicator.
+                      </div>
+                    </div>
+                  </Label>
+                  <Label
+                    htmlFor="sab-off"
+                    className={cn(
+                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
+                      systemAudioBackend === 'off'
+                        ? 'border-primary ring-2 ring-primary/20'
+                        : 'hover:bg-accent/40',
+                    )}
+                  >
+                    <RadioGroupItem value="off" id="sab-off" className="mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="font-medium">Mic only</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Records your voice only. Remote participants are not captured.
+                      </div>
+                    </div>
+                  </Label>
+                  <Label
+                    htmlFor="sab-sck"
+                    className={cn(
+                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
+                      systemAudioBackend === 'screencapturekit'
+                        ? 'border-primary ring-2 ring-primary/20'
+                        : 'hover:bg-accent/40',
+                    )}
+                  >
+                    <RadioGroupItem value="screencapturekit" id="sab-sck" className="mt-0.5" />
+                    <div className="min-w-0">
+                      <div className="font-medium">ScreenCaptureKit fallback</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Captures remote audio on older macOS versions, but macOS shows
+                        "Currently Sharing" while it is active.
+                      </div>
+                    </div>
+                  </Label>
                 </RadioGroup>
               </div>
               <Separator className="my-4" />
@@ -1013,6 +1111,535 @@ function SaveBar({
   );
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// AI / model picker
+// ────────────────────────────────────────────────────────────────────────────
+
+const CUSTOM_MODEL_ID = '__custom__';
+
+/**
+ * Model picker on the AI tab. Owns its own state because changing the
+ * model is a discrete action (save config + force-pull weights + stream
+ * progress) rather than a bag of generic settings the global SaveBar can
+ * batch up. The `Host` and `Auto-install` fields stay in the parent
+ * draft and ride the SaveBar — they're cheap to apply on next start.
+ *
+ * Two primary actions:
+ * 1. **Apply model** — when the picked model differs from what's saved.
+ *    Saves config, then runs a forced bootstrap so the new weights get
+ *    pulled even if the tag is already cached.
+ * 2. **Refresh weights** — when the picked model matches what's saved.
+ *    Force-re-pulls under the same tag to pick up updated weights for
+ *    floating tags like `gemma4:e2b` (Ollama re-uses cached blobs by
+ *    content hash so a refresh with no actual new bytes is fast).
+ *
+ * Both share one progress bar; we infer phase from the bootstrap event
+ * stream the runtime emits and the renderer already subscribes to in
+ * App.tsx.
+ */
+function ModelSettings({
+  savedModel,
+  savedRevision,
+  ollamaHost,
+  ollamaAutoInstall,
+  modelReady,
+  bootstrapEvents,
+  onClearBootstrapEvents,
+  onHostChange,
+  onAutoInstallChange,
+  onModelChanged,
+}: {
+  savedModel: string;
+  savedRevision: number;
+  ollamaHost: string;
+  ollamaAutoInstall: boolean;
+  modelReady: boolean;
+  bootstrapEvents: ModelBootstrapProgress[];
+  onClearBootstrapEvents: () => void;
+  onHostChange: (value: string) => void;
+  onAutoInstallChange: (value: boolean) => void;
+  onModelChanged: (config: LoadedConfig) => void;
+}) {
+  // Picker state: which radio is selected, and the custom-tag input.
+  // We seed both from the saved config so the UI matches reality on
+  // first paint and after a successful apply.
+  const initialIsCustom = !MODEL_CHOICES.some((m) => m.id === savedModel);
+  const [pickerId, setPickerId] = React.useState<string>(
+    initialIsCustom ? CUSTOM_MODEL_ID : savedModel || MODEL_CHOICES[0]!.id,
+  );
+  const [customTag, setCustomTag] = React.useState<string>(
+    initialIsCustom ? savedModel : '',
+  );
+
+  // Re-sync if the upstream `savedModel` changes (another window saved
+  // settings, or we just finished an apply). We don't want to clobber
+  // an in-flight selection mid-typing, so only sync when the saved
+  // model differs from what the picker currently resolves to.
+  const resolvedPickerModel =
+    pickerId === CUSTOM_MODEL_ID ? customTag.trim() : pickerId;
+  React.useEffect(() => {
+    if (savedModel && savedModel !== resolvedPickerModel) {
+      const isCustom = !MODEL_CHOICES.some((m) => m.id === savedModel);
+      setPickerId(isCustom ? CUSTOM_MODEL_ID : savedModel);
+      setCustomTag(isCustom ? savedModel : '');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedModel]);
+
+  // Action state: idle | running | done | error. Driven by the bootstrap
+  // event stream so the bar still updates if the user navigates away
+  // and back (events are buffered in App.tsx).
+  const [phase, setPhase] = React.useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [intent, setIntent] = React.useState<'switch' | 'refresh' | null>(null);
+
+  React.useEffect(() => {
+    if (phase !== 'running') return;
+    for (let i = bootstrapEvents.length - 1; i >= 0; i--) {
+      const ev = bootstrapEvents[i]!;
+      if (
+        ev.kind === 'install_failed' ||
+        ev.kind === 'pull_failed' ||
+        ev.kind === 'server_failed'
+      ) {
+        setPhase('error');
+        setErrorMessage(ev.reason || `${ev.kind} failed`);
+        return;
+      }
+      if (ev.kind === 'ready') {
+        setPhase('done');
+        return;
+      }
+    }
+  }, [bootstrapEvents, phase]);
+
+  // Last pull-progress event drives the progress bar.
+  const lastPullProgress = React.useMemo(() => {
+    for (let i = bootstrapEvents.length - 1; i >= 0; i--) {
+      const ev = bootstrapEvents[i]!;
+      if (
+        ev.kind === 'pull_progress' &&
+        typeof ev.completed === 'number' &&
+        typeof ev.total === 'number'
+      ) {
+        return ev;
+      }
+    }
+    return null;
+  }, [bootstrapEvents]);
+
+  const customValid =
+    pickerId !== CUSTOM_MODEL_ID || isPlausibleOllamaTag(customTag);
+  const targetModel = resolvedPickerModel;
+  const dirty = !!targetModel && targetModel !== savedModel;
+  const canApply =
+    !!targetModel && customValid && phase !== 'running';
+  const canRefresh =
+    !dirty && !!savedModel && phase !== 'running';
+
+  async function applyAndPull(): Promise<void> {
+    if (!canApply) return;
+    setErrorMessage(null);
+    onClearBootstrapEvents();
+    setPhase('running');
+    setIntent('switch');
+    try {
+      // Save the new model (and bump the revision so the marker file
+      // is consistent — the force-pull would already do the work, but
+      // bumping ensures a future restart doesn't try to "refresh"
+      // again unnecessarily).
+      const next = await window.cofounderos.saveConfigPatch({
+        index: {
+          model: {
+            plugin: 'ollama',
+            ollama: {
+              model: targetModel,
+              model_revision: savedRevision + 1,
+              auto_install: true,
+            },
+          },
+        },
+      });
+      onModelChanged(next);
+      // Force-pull so the new weights actually land (and so a custom
+      // tag pointing at fresh weights gets refreshed too).
+      await window.cofounderos.updateModel();
+      setPhase('done');
+      toast.success(`Model switched to ${targetModel}`, {
+        description: 'New weights are ready.',
+      });
+    } catch (err) {
+      setPhase('error');
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMessage(msg);
+      toast.error('Could not switch model', { description: msg });
+    }
+  }
+
+  async function refreshWeights(): Promise<void> {
+    if (!canRefresh) return;
+    setErrorMessage(null);
+    onClearBootstrapEvents();
+    setPhase('running');
+    setIntent('refresh');
+    try {
+      // Bump the revision so future restarts don't repeat this work.
+      const next = await window.cofounderos.saveConfigPatch({
+        index: {
+          model: {
+            plugin: 'ollama',
+            ollama: { model_revision: savedRevision + 1 },
+          },
+        },
+      });
+      onModelChanged(next);
+      await window.cofounderos.updateModel();
+      setPhase('done');
+      toast.success(`${savedModel} is up to date`);
+    } catch (err) {
+      setPhase('error');
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMessage(msg);
+      toast.error('Could not refresh weights', { description: msg });
+    }
+  }
+
+  const currentChoice = findModelChoice(savedModel);
+  const statusLabel = phase === 'running'
+    ? intent === 'refresh'
+      ? 'Refreshing weights…'
+      : 'Installing…'
+    : modelReady
+      ? 'Ready'
+      : 'Not installed';
+  const statusTone: 'success' | 'warning' | 'muted' =
+    phase === 'running' ? 'muted' : modelReady ? 'success' : 'warning';
+
+  return (
+    <>
+      <Card>
+        <CardContent className="flex flex-col gap-4">
+          {/* Current model summary */}
+          <div className="flex items-start gap-3">
+            <div className="size-10 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
+              <Cpu className="size-5" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="font-semibold">Local AI model</h3>
+                <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
+              </div>
+              <p className="text-sm text-muted-foreground mt-0.5 break-all">
+                <span className="font-mono">{savedModel || '(none)'}</span>
+                {currentChoice && (
+                  <span className="text-muted-foreground/80">
+                    {' · '}
+                    {currentChoice.vendor} · {currentChoice.size}
+                  </span>
+                )}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void refreshWeights()}
+              disabled={!canRefresh}
+              title={
+                dirty
+                  ? 'Apply the selected model first to refresh its weights.'
+                  : 'Re-pull the current model to pick up updated weights under the same tag.'
+              }
+            >
+              {phase === 'running' && intent === 'refresh' ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <RefreshCw />
+              )}
+              Refresh weights
+            </Button>
+          </div>
+
+          <Separator />
+
+          {/* Picker */}
+          <div className="flex flex-col gap-3">
+            <div>
+              <h4 className="font-medium">Choose a model</h4>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                Pick from popular options below, or paste any tag from{' '}
+                <a
+                  href="https://ollama.com/library"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-foreground"
+                >
+                  ollama.com/library
+                </a>
+                .
+              </p>
+            </div>
+
+            <RadioGroup
+              value={pickerId}
+              onValueChange={(v) => setPickerId(v)}
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              {MODEL_CHOICES.map((m) => {
+                const isSaved = m.id === savedModel;
+                return (
+                  <Label
+                    key={m.id}
+                    htmlFor={`model-${m.id}`}
+                    className={cn(
+                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
+                      pickerId === m.id
+                        ? 'border-primary ring-2 ring-primary/20'
+                        : 'hover:bg-accent/40',
+                    )}
+                  >
+                    <RadioGroupItem value={m.id} id={`model-${m.id}`} className="mt-0.5" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{m.name}</span>
+                        {m.badge && (
+                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                            <Sparkles className="size-3" />
+                            {m.badge}
+                          </Badge>
+                        )}
+                        {isSaved && (
+                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                            Current
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {m.vendor} · {m.size}
+                        {m.vision ? ' · vision' : ''}
+                      </div>
+                      <div className="text-xs text-muted-foreground/90 mt-1 leading-relaxed">
+                        {m.description}
+                      </div>
+                    </div>
+                  </Label>
+                );
+              })}
+
+              {/* Custom tag */}
+              <Label
+                htmlFor={`model-${CUSTOM_MODEL_ID}`}
+                className={cn(
+                  'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors sm:col-span-2',
+                  pickerId === CUSTOM_MODEL_ID
+                    ? 'border-primary ring-2 ring-primary/20'
+                    : 'hover:bg-accent/40',
+                )}
+              >
+                <RadioGroupItem
+                  value={CUSTOM_MODEL_ID}
+                  id={`model-${CUSTOM_MODEL_ID}`}
+                  className="mt-0.5"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium">Custom Ollama model</span>
+                    {pickerId === CUSTOM_MODEL_ID &&
+                      customTag.trim() !== '' &&
+                      customTag.trim() === savedModel && (
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                          Current
+                        </Badge>
+                      )}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    Any model tag from ollama.com/library — e.g.{' '}
+                    <span className="font-mono">qwen3:14b</span>,{' '}
+                    <span className="font-mono">mistral:7b</span>,{' '}
+                    <span className="font-mono">phi3:mini</span>.
+                  </div>
+                  <div className="mt-2">
+                    <Input
+                      value={customTag}
+                      onChange={(e) => {
+                        setCustomTag(e.currentTarget.value);
+                        if (pickerId !== CUSTOM_MODEL_ID) setPickerId(CUSTOM_MODEL_ID);
+                      }}
+                      placeholder="family:tag"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    {pickerId === CUSTOM_MODEL_ID && customTag.trim() !== '' && !customValid && (
+                      <p className="text-xs text-destructive mt-1">
+                        That doesn't look like a valid Ollama tag. Use the{' '}
+                        <span className="font-mono">family:tag</span> format, e.g.{' '}
+                        <span className="font-mono">gemma4:e2b</span>.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </Label>
+            </RadioGroup>
+
+            {/* Action row */}
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
+              <div className="text-sm">
+                {dirty ? (
+                  <>
+                    <span className="font-medium">Apply </span>
+                    <span className="font-mono">{targetModel}</span>
+                    <span className="text-muted-foreground"> — downloads weights if needed.</span>
+                  </>
+                ) : modelReady ? (
+                  <span className="text-muted-foreground">
+                    Selection matches what's installed. Use{' '}
+                    <span className="font-medium">Refresh weights</span> above to pick up
+                    newer weights under the same tag.
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">
+                    Selection matches your saved config but isn't installed yet — apply to
+                    download.
+                  </span>
+                )}
+              </div>
+              <Button
+                onClick={() => void applyAndPull()}
+                disabled={!canApply || (!dirty && modelReady)}
+              >
+                {phase === 'running' && intent === 'switch' ? (
+                  <>
+                    <Loader2 className="animate-spin" />
+                    Working…
+                  </>
+                ) : (
+                  <>
+                    <Download />
+                    {dirty ? 'Apply model' : 'Re-install'}
+                  </>
+                )}
+              </Button>
+            </div>
+
+            {/* Live progress */}
+            {phase === 'running' && (
+              <ModelInstallProgress
+                model={targetModel || savedModel}
+                progress={lastPullProgress}
+              />
+            )}
+
+            {phase === 'error' && errorMessage && (
+              <Alert variant="destructive">
+                <X />
+                <AlertTitle>
+                  {intent === 'refresh' ? 'Could not refresh weights' : 'Could not install model'}
+                </AlertTitle>
+                <AlertDescription>{errorMessage}</AlertDescription>
+              </Alert>
+            )}
+
+            {bootstrapEvents.length > 0 && (
+              <details className="text-xs">
+                <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
+                  Show technical log
+                </summary>
+                <pre className="mt-2 max-h-40 overflow-auto rounded-md border bg-card p-3 font-mono text-[11px] leading-snug">
+                  {bootstrapEvents.slice(-25).map(formatBootstrapLine).join('\n')}
+                </pre>
+              </details>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex flex-col gap-0">
+          <ToggleRow
+            title="Auto-install AI tools when needed"
+            description="Lets us set up Ollama and pull the model for you on first run."
+            checked={ollamaAutoInstall}
+            onChange={onAutoInstallChange}
+          />
+          <Separator className="my-4" />
+          <Field label="Ollama host" hint="The URL where the local Ollama daemon listens.">
+            <Input value={ollamaHost} onChange={(e) => onHostChange(e.currentTarget.value)} />
+          </Field>
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+function ModelInstallProgress({
+  model,
+  progress,
+}: {
+  model: string;
+  progress: ModelBootstrapProgress | null;
+}) {
+  const pct = progress ? pullPercent(progress) : null;
+  const completed = typeof progress?.completed === 'number' ? progress.completed : 0;
+  const total = typeof progress?.total === 'number' ? progress.total : 0;
+  return (
+    <div className="rounded-md border bg-card p-3 flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-medium flex items-center gap-2 min-w-0">
+          <Loader2 className="size-4 animate-spin text-primary" />
+          <span className="truncate font-mono">{model}</span>
+        </div>
+        {pct != null && (
+          <span className="text-xs text-muted-foreground">
+            {pct}%
+          </span>
+        )}
+      </div>
+      {progress ? (
+        <>
+          <Progress value={pct ?? 0} />
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+            <span>{progress.status || 'downloading'}</span>
+            <span>
+              {formatBytes(completed)} / {formatBytes(total)}
+            </span>
+          </div>
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground">Preparing…</p>
+      )}
+    </div>
+  );
+}
+
+function StatusPill({
+  tone,
+  children,
+}: {
+  tone: 'success' | 'warning' | 'muted';
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+        tone === 'success' && 'bg-success/15 text-success',
+        tone === 'warning' && 'bg-warning/15 text-warning',
+        tone === 'muted' && 'bg-muted text-muted-foreground',
+      )}
+    >
+      <span
+        className={cn(
+          'size-1.5 rounded-full',
+          tone === 'success' && 'bg-success',
+          tone === 'warning' && 'bg-warning',
+          tone === 'muted' && 'bg-muted-foreground/60',
+        )}
+      />
+      {children}
+    </span>
+  );
+}
+
 function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
   const cfg = loaded.config;
   const markdown = cfg.export.plugins.find((p) => p.name === 'markdown');
@@ -1027,14 +1654,14 @@ function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     retentionDays: cfg.storage.local.retention_days,
     compressAfterDays: cfg.storage.local.vacuum.compress_after_days,
     deleteAfterDays: cfg.storage.local.vacuum.delete_after_days,
-    ollamaModel: cfg.index.model.ollama?.model ?? '',
     ollamaHost: cfg.index.model.ollama?.host ?? '',
     ollamaAutoInstall: cfg.index.model.ollama?.auto_install ?? true,
     markdownPath: typeof markdown?.path === 'string' ? markdown.path : '',
     mcpPort: typeof mcp?.port === 'number' ? mcp.port : 3456,
-    captureAudio: cfg.capture.capture_audio ?? false,
+    captureAudio: cfg.capture.capture_audio ?? true,
     whisperModel: cfg.capture.whisper_model ?? 'base',
     liveRecordingEnabled: cfg.capture.audio?.live_recording?.enabled ?? false,
+    systemAudioBackend: cfg.capture.audio?.live_recording?.system_audio_backend ?? 'core_audio_tap',
     chunkSeconds: cfg.capture.audio?.live_recording?.chunk_seconds ?? 300,
     deleteAudioAfterTranscribe: cfg.capture.audio?.delete_audio_after_transcribe ?? true,
   };
@@ -1062,6 +1689,7 @@ function configPatchFromDraft(draft: SettingsDraft) {
         live_recording: {
           enabled: draft.liveRecordingEnabled,
           activation: 'other_process_input',
+          system_audio_backend: draft.systemAudioBackend,
           poll_interval_sec: 3,
           chunk_seconds: Math.max(1, draft.chunkSeconds),
         },
@@ -1081,7 +1709,9 @@ function configPatchFromDraft(draft: SettingsDraft) {
       model: {
         plugin: 'ollama',
         ollama: {
-          model: draft.ollamaModel.trim(),
+          // Note: `model` and `model_revision` are managed by the AI
+          // tab's dedicated picker (see ModelSettings) and saved via
+          // its own action, not by the generic SaveBar.
           host: draft.ollamaHost.trim(),
           auto_install: draft.ollamaAutoInstall,
         },

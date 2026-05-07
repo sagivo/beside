@@ -17,6 +17,7 @@ declare global {
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       getFrameIndexDetails: (frameId: string) => Promise<FrameIndexDetails | null>;
+      assetUrl: (assetPath: string) => Promise<string>;
       readAsset: (assetPath: string) => Promise<Uint8Array>;
       startRuntime: () => Promise<RuntimeOverview>;
       stopRuntime: () => Promise<{ stopped: true }>;
@@ -26,6 +27,7 @@ declare global {
       triggerReorganise: () => Promise<RuntimeOverview>;
       triggerFullReindex: (range: { from?: string; to?: string }) => Promise<RuntimeOverview>;
       bootstrapModel: () => Promise<{ ready: true }>;
+      updateModel: () => Promise<{ ready: true }>;
       getStartAtLogin: () => Promise<boolean>;
       setStartAtLogin: (enabled: boolean) => Promise<boolean>;
       openPath: (target: OpenPathTarget) => Promise<{ opened: string }>;
@@ -57,6 +59,7 @@ declare global {
       }) => Promise<{ turnId: string; completed: boolean }>;
       cancelChat: (turnId: string) => Promise<{ cancelled: boolean }>;
       onChatEvent?: (callback: (event: ChatStreamEvent) => void) => (() => void);
+      listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
     };
   }
 }
@@ -276,6 +279,7 @@ export interface CofounderConfig {
         chunk_seconds?: number;
         sample_rate?: number;
         channels?: number;
+        system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
         activation?: 'other_process_input';
         poll_interval_sec?: number;
       };
@@ -303,6 +307,7 @@ export interface CofounderConfig {
         keep_alive?: string | number;
         unload_after_idle_min?: number;
         auto_install?: boolean;
+        model_revision?: number;
       };
     };
   };
@@ -366,4 +371,42 @@ export interface ActivitySession {
   primary_app?: string | null;
   active_ms?: number;
   frame_count?: number;
+}
+
+export type MeetingPlatform = 'zoom' | 'meet' | 'teams' | 'webex' | 'whereby' | 'around' | 'other';
+export type MeetingSummaryStatus = 'pending' | 'running' | 'ready' | 'failed' | 'skipped_short';
+
+export interface MeetingSummaryJson {
+  title: string | null;
+  tldr: string;
+  agenda: string[];
+  decisions: Array<{ text: string; evidence_turn_ids: number[] }>;
+  action_items: Array<{ task: string; owner: string | null; due: string | null; evidence_turn_ids: number[] }>;
+  open_questions: Array<{ text: string; evidence_turn_ids: number[] }>;
+  attendees_seen: string[];
+  links_shared: string[];
+  notes: string | null;
+}
+
+export interface Meeting {
+  id: string;
+  entity_path: string;
+  title: string | null;
+  platform: MeetingPlatform;
+  started_at: string;
+  ended_at: string;
+  day: string;
+  duration_ms: number;
+  frame_count: number;
+  screenshot_count: number;
+  audio_chunk_count: number;
+  transcript_chars: number;
+  content_hash: string;
+  summary_status: MeetingSummaryStatus;
+  summary_md: string | null;
+  summary_json: MeetingSummaryJson | null;
+  attendees: string[];
+  links: string[];
+  failure_reason: string | null;
+  updated_at: string;
 }

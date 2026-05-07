@@ -30,7 +30,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from '@/components/ui/sonner';
-import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
+import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { formatLocalTime, localDayKey, prettyDay } from '@/lib/format';
 import type { Frame, FrameIndexDetails } from '@/global';
 
@@ -158,14 +158,8 @@ function FrameDetailBody({
         return;
       }
       try {
-        const bytes = await window.cofounderos.readAsset(frame.asset_path);
+        const url = await resolveAssetUrl(frame.asset_path);
         if (cancelled) return;
-        const type = frame.asset_path.endsWith('.png')
-          ? 'image/png'
-          : frame.asset_path.match(/\.jpe?g$/)
-            ? 'image/jpeg'
-            : 'image/webp';
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
         cacheThumbnail(frame.asset_path, url);
         setThumbUrl(url);
       } catch {

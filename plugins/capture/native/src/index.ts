@@ -46,7 +46,18 @@ interface NativeCaptureConfig {
       format?: 'm4a';
       sample_rate?: number;
       channels?: number;
-      activation?: 'other_process_input';
+      system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
+      /**
+       * When to start the microphone recorder:
+       *   'other_process_input' — only record when another process is actively
+       *     using the microphone (e.g. Zoom, Meet). Privacy-preserving but
+       *     unreliable with Bluetooth headsets or virtual audio devices that
+       *     CoreAudio does not register as `kAudioProcessPropertyIsRunningInput`.
+       *   'always' — record whenever capture is running (recommended for calls).
+       *     Pairs well with `delete_audio_after_transcribe: true` so only the
+       *     redacted transcript is retained.
+       */
+      activation?: 'other_process_input' | 'always';
       poll_interval_sec?: number;
     };
   };
@@ -110,7 +121,7 @@ class NativeCapture implements ICapture {
       jpeg_quality: format === 'jpeg' ? quality : 80,
       excluded_apps: config.excluded_apps ?? [],
       excluded_url_patterns: config.excluded_url_patterns ?? [],
-      capture_audio: config.capture_audio ?? false,
+      capture_audio: config.capture_audio ?? true,
       whisper_model: config.whisper_model ?? 'base',
       audio: {
         inbox_path: expandPath(config.audio?.inbox_path ?? '~/.cofounderOS/raw/audio/inbox'),
@@ -121,11 +132,12 @@ class NativeCapture implements ICapture {
         whisper_command: config.audio?.whisper_command ?? 'whisper',
         whisper_language: config.audio?.whisper_language,
         live_recording: {
-          enabled: config.audio?.live_recording?.enabled ?? false,
+          enabled: config.audio?.live_recording?.enabled ?? true,
           chunk_seconds: config.audio?.live_recording?.chunk_seconds ?? 300,
           format: config.audio?.live_recording?.format ?? 'm4a',
           sample_rate: config.audio?.live_recording?.sample_rate ?? 16_000,
           channels: config.audio?.live_recording?.channels ?? 1,
+          system_audio_backend: config.audio?.live_recording?.system_audio_backend ?? 'core_audio_tap',
         },
       },
       raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
@@ -355,11 +367,11 @@ class NativeCapture implements ICapture {
     const diff = hashDiff(previous ?? null, phash);
     const trigger = typeof event.metadata?.trigger === 'string' ? event.metadata.trigger : null;
 
-    let output: Buffer = Buffer.from(input);
+    let output: Buffer;
     let assetPath = event.asset_path;
     let actualFormat = inferFormat(assetPath);
     if (this.config.screenshot_format === 'webp') {
-      output = Buffer.from(await sharp(input)
+      output = await sharp(input)
         .resize({
           width: this.config.screenshot_max_dim,
           height: this.config.screenshot_max_dim,
@@ -367,7 +379,7 @@ class NativeCapture implements ICapture {
           withoutEnlargement: true,
         })
         .webp({ quality: this.config.screenshot_quality })
-        .toBuffer());
+        .toBuffer();
       const nextAssetPath = replaceExtension(assetPath, '.webp');
       const nextAbs = path.isAbsolute(nextAssetPath)
         ? nextAssetPath
@@ -379,7 +391,7 @@ class NativeCapture implements ICapture {
       assetPath = nextAssetPath;
       actualFormat = 'webp';
     } else {
-      output = Buffer.from(await sharp(input)
+      output = await sharp(input)
         .resize({
           width: this.config.screenshot_max_dim,
           height: this.config.screenshot_max_dim,
@@ -387,7 +399,7 @@ class NativeCapture implements ICapture {
           withoutEnlargement: true,
         })
         .jpeg({ quality: this.config.screenshot_quality })
-        .toBuffer());
+        .toBuffer();
       await fs.writeFile(originalAbs, output);
       actualFormat = 'jpeg';
     }

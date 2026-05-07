@@ -1,7 +1,7 @@
 import * as React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { cacheThumbnail, thumbnailCache } from '@/lib/thumbnail-cache';
+import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
 
 export function Markdown({
@@ -147,16 +147,8 @@ function AssetImage({
     }
     void (async () => {
       try {
-        const bytes = await window.cofounderos.readAsset(cleaned);
+        const url = await resolveAssetUrl(cleaned);
         if (cancelled) return;
-        const ext = cleaned.split('.').pop()?.toLowerCase() ?? '';
-        const type =
-          ext === 'png'
-            ? 'image/png'
-            : ext === 'jpg' || ext === 'jpeg'
-              ? 'image/jpeg'
-              : 'image/webp';
-        const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
         cacheThumbnail(cleaned, url);
         setResolved(url);
       } catch {

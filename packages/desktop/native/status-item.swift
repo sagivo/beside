@@ -6,17 +6,6 @@ private enum CaptureState: String {
   case paused
   case stopped
 
-  var buttonTitle: String {
-    switch self {
-    case .capturing:
-      return "CO CAP"
-    case .paused:
-      return "CO PAUSE"
-    case .stopped:
-      return "CO STOP"
-    }
-  }
-
   var statusTitle: String {
     switch self {
     case .capturing:
@@ -37,12 +26,12 @@ final class StatusApp: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
 
-    item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     if let button = item.button {
-      button.title = state.buttonTitle
+      button.title = ""
       button.toolTip = state.statusTitle
       button.image = makeImage(for: state)
-      button.imagePosition = .imageLeft
+      button.imagePosition = .imageOnly
     }
 
     let menu = NSMenu()
@@ -105,10 +94,10 @@ final class StatusApp: NSObject, NSApplicationDelegate {
     let title = label ?? nextState.statusTitle
     statusMenuItem.title = title
     if let button = item.button {
-      button.title = nextState.buttonTitle
+      button.title = ""
       button.toolTip = title
       button.image = makeImage(for: nextState)
-      button.imagePosition = .imageLeft
+      button.imagePosition = .imageOnly
     }
   }
 
@@ -117,15 +106,37 @@ final class StatusApp: NSObject, NSApplicationDelegate {
     let image = NSImage(size: size)
     image.lockFocus()
     NSColor.black.setFill()
-    switch state {
-    case .capturing:
-      NSBezierPath(ovalIn: NSRect(x: 5, y: 5, width: 8, height: 8)).fill()
-    case .paused:
-      NSBezierPath(roundedRect: NSRect(x: 5, y: 4, width: 3, height: 10), xRadius: 1.5, yRadius: 1.5).fill()
-      NSBezierPath(roundedRect: NSRect(x: 10, y: 4, width: 3, height: 10), xRadius: 1.5, yRadius: 1.5).fill()
-    case .stopped:
-      NSBezierPath(roundedRect: NSRect(x: 5, y: 5, width: 8, height: 8), xRadius: 1.5, yRadius: 1.5).fill()
-    }
+
+    let cx: CGFloat = 9
+    let cy: CGFloat = 9
+    let outer: CGFloat = 7
+    let inner: CGFloat = 1.6
+
+    let sparkle = NSBezierPath()
+    sparkle.move(to: NSPoint(x: cx, y: cy + outer))
+    sparkle.curve(
+      to: NSPoint(x: cx + outer, y: cy),
+      controlPoint1: NSPoint(x: cx + inner, y: cy + inner),
+      controlPoint2: NSPoint(x: cx + inner, y: cy + inner)
+    )
+    sparkle.curve(
+      to: NSPoint(x: cx, y: cy - outer),
+      controlPoint1: NSPoint(x: cx + inner, y: cy - inner),
+      controlPoint2: NSPoint(x: cx + inner, y: cy - inner)
+    )
+    sparkle.curve(
+      to: NSPoint(x: cx - outer, y: cy),
+      controlPoint1: NSPoint(x: cx - inner, y: cy - inner),
+      controlPoint2: NSPoint(x: cx - inner, y: cy - inner)
+    )
+    sparkle.curve(
+      to: NSPoint(x: cx, y: cy + outer),
+      controlPoint1: NSPoint(x: cx - inner, y: cy + inner),
+      controlPoint2: NSPoint(x: cx - inner, y: cy + inner)
+    )
+    sparkle.close()
+    sparkle.fill()
+
     image.unlockFocus()
     image.isTemplate = true
     return image

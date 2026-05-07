@@ -4,7 +4,7 @@
   "layer": "model",
   "interface": "IModelAdapter",
   "entrypoint": "dist/index.js",
-  "description": "Default LLM adapter via Ollama (gemma2:2b / gemma4:e4b). Falls back to a deterministic offline indexer if Ollama is unreachable so the pipeline still produces output.",
+  "description": "Default LLM adapter via Ollama (gemma4:e4b / gemma4:e2b). Falls back to a deterministic offline indexer if Ollama is unreachable so the pipeline still produces output.",
   "config_schema": {
     "type": "object",
     "properties": {

@@ -2,7 +2,9 @@ import Foundation
 import AppKit
 import ApplicationServices
 import AVFoundation
+import AudioToolbox
 import CoreAudio
+import ScreenCaptureKit
 
 struct HelperConfig: Decodable {
   var raw_root: String?
@@ -33,6 +35,7 @@ struct LiveRecordingConfig: Decodable {
   var format: String?
   var sample_rate: Int?
   var channels: Int?
+  var system_audio_backend: String?
   var activation: String?
   var poll_interval_sec: Int?
 }
@@ -238,6 +241,8 @@ func runMacCapture(config: HelperConfig) {
   let audioChunker = AudioChunker(config: config)
   audioChunker.startIfEnabled()
 
+  let sysAudio = makeSystemAudioHandle(config: config)
+
   emit([
     "kind": "log",
     "level": "info",
@@ -279,11 +284,13 @@ func runMacCapture(config: HelperConfig) {
     while let command = readStdinLineNonBlocking() {
       if command.contains("\"kind\":\"stop\"") {
         audioChunker.stop()
+        sysAudio?.stop()
         return
       }
       if command.contains("\"kind\":\"pause\"") {
         paused = true
         audioChunker.stop()
+        sysAudio?.stop()
         pendingFocusCapture = nil
       }
       if command.contains("\"kind\":\"resume\"") { paused = false }
@@ -291,6 +298,7 @@ func runMacCapture(config: HelperConfig) {
 
     if paused {
       audioChunker.tick(paused: true)
+      // sysAudio is already stopped on pause; nothing to tick
       Thread.sleep(forTimeInterval: pollInterval)
       continue
     }
@@ -433,6 +441,7 @@ func runMacCapture(config: HelperConfig) {
 
     emit(["kind": "status", "cpuPercent": 0, "memoryMB": currentMemoryMB(), "storageBytesToday": 0])
     audioChunker.tick(paused: false)
+    sysAudio?.tick()
     Thread.sleep(forTimeInterval: pollInterval)
   }
 }
@@ -990,7 +999,12 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
   }
 
   private func shouldRecordNow() -> Bool {
-    if activation != "other_process_input" {
+    switch activation {
+    case "always":
+      return true
+    case "other_process_input":
+      return inputDetector.isOtherProcessUsingInput()
+    default:
       emit([
         "kind": "error",
         "code": "audio_activation_unsupported",
@@ -999,7 +1013,6 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
       ])
       return false
     }
-    return inputDetector.isOtherProcessUsingInput()
   }
 
   private func startRecordingIfPossible() {
@@ -1257,12 +1270,703 @@ final class OtherProcessAudioInputDetector {
   }
 }
 
+// MARK: - System audio capture (remote speakers via ScreenCaptureKit)
+
+/// Wraps the availability-gated SystemAudioChunker behind plain closures so
+/// runMacCapture can call tick/stop without sprinkling @available guards everywhere.
+struct SystemAudioHandle {
+  let tick: () -> Void
+  let stop: () -> Void
+}
+
+func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
+  let backend = config.audio?.live_recording?.system_audio_backend ?? "core_audio_tap"
+  switch backend {
+  case "off":
+    emit(["kind": "log", "level": "info", "message": "system audio capture disabled"])
+    return nil
+  case "core_audio_tap":
+    guard #available(macOS 14.2, *) else {
+      emit(["kind": "log", "level": "warn",
+            "message": "Core Audio system output capture requires macOS 14.2+; remote participant audio will stay off"])
+      return nil
+    }
+    let chunker = CoreAudioSystemAudioChunker(config: config)
+    chunker.startIfEnabled()
+    return SystemAudioHandle(
+      tick: { chunker.tick() },
+      stop: { chunker.stop() }
+    )
+  case "screencapturekit":
+    guard #available(macOS 13.0, *) else {
+      emit(["kind": "log", "level": "info",
+            "message": "ScreenCaptureKit system audio capture requires macOS 13.0+; skipping"])
+      return nil
+    }
+    let chunker = SystemAudioChunker(config: config)
+    chunker.startIfEnabled()
+    return SystemAudioHandle(
+      tick: { chunker.tick() },
+      stop: { chunker.stop() }
+    )
+  default:
+    emit(["kind": "error", "code": "system_audio_backend_unsupported",
+          "message": "Unsupported system_audio_backend '\(backend)'; remote participant audio will stay off.",
+          "fatal": false])
+    return nil
+  }
+}
+
+/// Captures system output audio using Core Audio process taps (macOS 14.2+).
+/// Unlike ScreenCaptureKit, this is an audio-only API and does not open a
+/// persistent screen-sharing stream.
+@available(macOS 14.2, *)
+final class CoreAudioSystemAudioChunker {
+  private let enabled: Bool
+  private let activation: String
+  private let inboxPath: String
+  private let partialPath: String
+  private let chunkSeconds: TimeInterval
+  private let pollInterval: TimeInterval
+  private let inputDetector = OtherProcessAudioInputDetector()
+  private let q = DispatchQueue(label: "cofounderos.sysaudio.coreaudio", qos: .utility)
+
+  private var processTapID = AudioObjectID(kAudioObjectUnknown)
+  private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+  private var deviceProcID: AudioDeviceIOProcID?
+  private var streamDescription: AudioStreamBasicDescription?
+  private var audioFormat: AVAudioFormat?
+
+  private var chunkIndex = 0
+  private var currentFile: AVAudioFile?
+  private var currentStartedAt: Date?
+  private var currentPartialURL: URL?
+  private var currentFinalURL: URL?
+  private var currentHadSamples = false
+  private var running = false
+  private var prepared = false
+  private var nextInputCheckAt = Date.distantPast
+
+  init(config: HelperConfig) {
+    let live = config.audio?.live_recording
+    self.enabled = (config.capture_audio == true) && (live?.enabled == true)
+    self.activation = live?.activation ?? "other_process_input"
+    self.inboxPath = NSString(
+      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+    ).expandingTildeInPath
+    self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-coreaudio")
+    self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
+    self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
+  }
+
+  func startIfEnabled() {
+    guard enabled else { return }
+    do {
+      try FileManager.default.createDirectory(atPath: inboxPath, withIntermediateDirectories: true)
+      try FileManager.default.createDirectory(atPath: partialPath, withIntermediateDirectories: true)
+      reapStalePartials()
+      prepared = true
+      emit(["kind": "log", "level": "info",
+            "message": "native Core Audio system output capture armed",
+            "data": ["chunk_seconds": chunkSeconds, "backend": "core_audio_tap", "activation": activation]])
+      tick()
+    } catch {
+      emit(["kind": "error", "code": "core_audio_tap_prepare_failed",
+            "message": String(describing: error), "fatal": false])
+    }
+  }
+
+  func tick() {
+    guard enabled, prepared else { return }
+    guard Date() >= nextInputCheckAt else {
+      rotateIfNeeded()
+      return
+    }
+    nextInputCheckAt = Date().addingTimeInterval(pollInterval)
+    guard shouldRecordNow() else {
+      stop()
+      return
+    }
+    if !running {
+      startCaptureIfNeeded()
+      return
+    }
+    rotateIfNeeded()
+  }
+
+  private func startCaptureIfNeeded() {
+    guard enabled, prepared, !running else { return }
+    do {
+      try prepareTap()
+      try startNewChunk()
+      try startDevice()
+      running = true
+      emit(["kind": "log", "level": "info",
+            "message": "native Core Audio system output capture started",
+            "data": ["chunk_seconds": chunkSeconds, "backend": "core_audio_tap"]])
+    } catch {
+      emit(["kind": "error", "code": "core_audio_tap_failed",
+            "message": String(describing: error), "fatal": false])
+      stop()
+    }
+  }
+
+  private func rotateIfNeeded() {
+    q.async { [weak self] in
+      guard let self, self.running, let started = self.currentStartedAt else { return }
+      if Date().timeIntervalSince(started) >= self.chunkSeconds {
+        self.rotate()
+      }
+    }
+  }
+
+  private func shouldRecordNow() -> Bool {
+    switch activation {
+    case "always":
+      return true
+    case "other_process_input":
+      return inputDetector.isOtherProcessUsingInput()
+    default:
+      emit(["kind": "error", "code": "audio_activation_unsupported",
+            "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",
+            "fatal": false])
+      return false
+    }
+  }
+
+  func stop() {
+    if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
+      let stopStatus = AudioDeviceStop(aggregateDeviceID, deviceProcID)
+      if stopStatus != noErr {
+        emit(["kind": "log", "level": "warn",
+              "message": "Core Audio tap device stop failed: \(stopStatus)"])
+      }
+      if let deviceProcID {
+        let destroyProcStatus = AudioDeviceDestroyIOProcID(aggregateDeviceID, deviceProcID)
+        if destroyProcStatus != noErr {
+          emit(["kind": "log", "level": "warn",
+                "message": "Core Audio tap IOProc destroy failed: \(destroyProcStatus)"])
+        }
+        self.deviceProcID = nil
+      }
+      let destroyAggregateStatus = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+      if destroyAggregateStatus != noErr {
+        emit(["kind": "log", "level": "warn",
+              "message": "Core Audio aggregate device destroy failed: \(destroyAggregateStatus)"])
+      }
+      aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+    }
+    if processTapID != AudioObjectID(kAudioObjectUnknown) {
+      let destroyTapStatus = AudioHardwareDestroyProcessTap(processTapID)
+      if destroyTapStatus != noErr {
+        emit(["kind": "log", "level": "warn",
+              "message": "Core Audio process tap destroy failed: \(destroyTapStatus)"])
+      }
+      processTapID = AudioObjectID(kAudioObjectUnknown)
+    }
+    q.sync {
+      finalizeCurrentChunk()
+      running = false
+    }
+  }
+
+  deinit {
+    stop()
+  }
+
+  private func prepareTap() throws {
+    let ownProcess = try? translatePidToAudioProcessObject(pid: getpid())
+    let tapDescription = CATapDescription(
+      stereoGlobalTapButExcludeProcesses: ownProcess.map { [$0] } ?? []
+    )
+    tapDescription.uuid = UUID()
+    tapDescription.muteBehavior = .unmuted
+
+    var tapID = AudioObjectID(kAudioObjectUnknown)
+    var status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
+    guard status == noErr else {
+      throw coreAudioError("AudioHardwareCreateProcessTap", status: status)
+    }
+    processTapID = tapID
+    streamDescription = try readTapStreamDescription(tapID)
+    guard var desc = streamDescription,
+          let format = AVAudioFormat(streamDescription: &desc) else {
+      throw coreAudioMessage("Core Audio tap did not expose a usable stream format")
+    }
+    audioFormat = format
+
+    let outputDevice = try readDefaultSystemOutputDevice()
+    let outputUID = try readDeviceUID(outputDevice)
+    let aggregateUID = UUID().uuidString
+    let aggregateDescription: [String: Any] = [
+      kAudioAggregateDeviceNameKey: "CofounderOS Core Audio Tap",
+      kAudioAggregateDeviceUIDKey: aggregateUID,
+      kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+      kAudioAggregateDeviceIsPrivateKey: true,
+      kAudioAggregateDeviceIsStackedKey: false,
+      kAudioAggregateDeviceTapAutoStartKey: true,
+      kAudioAggregateDeviceSubDeviceListKey: [
+        [kAudioSubDeviceUIDKey: outputUID]
+      ],
+      kAudioAggregateDeviceTapListKey: [
+        [
+          kAudioSubTapDriftCompensationKey: true,
+          kAudioSubTapUIDKey: tapDescription.uuid.uuidString
+        ]
+      ]
+    ]
+
+    var aggregateID = AudioObjectID(kAudioObjectUnknown)
+    status = AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &aggregateID)
+    guard status == noErr else {
+      throw coreAudioError("AudioHardwareCreateAggregateDevice", status: status)
+    }
+    aggregateDeviceID = aggregateID
+  }
+
+  private func startDevice() throws {
+    guard aggregateDeviceID != AudioObjectID(kAudioObjectUnknown),
+          let format = audioFormat else {
+      throw coreAudioMessage("Core Audio tap was not prepared")
+    }
+    var status = AudioDeviceCreateIOProcIDWithBlock(
+      &deviceProcID,
+      aggregateDeviceID,
+      q
+    ) { [weak self] _, inInputData, _, _, _ in
+      guard let self, let file = self.currentFile else { return }
+      guard let buffer = AVAudioPCMBuffer(
+        pcmFormat: format,
+        bufferListNoCopy: inInputData,
+        deallocator: nil
+      ) else { return }
+      do {
+        try file.write(from: buffer)
+        self.currentHadSamples = true
+      } catch {
+        emit(["kind": "error", "code": "core_audio_tap_write_failed",
+              "message": String(describing: error), "fatal": false])
+      }
+    }
+    guard status == noErr else {
+      throw coreAudioError("AudioDeviceCreateIOProcIDWithBlock", status: status)
+    }
+
+    status = AudioDeviceStart(aggregateDeviceID, deviceProcID)
+    guard status == noErr else {
+      throw coreAudioError("AudioDeviceStart", status: status)
+    }
+  }
+
+  private func startNewChunk() throws {
+    guard let format = audioFormat else {
+      throw coreAudioMessage("Core Audio tap audio format is unavailable")
+    }
+    chunkIndex += 1
+    let filename = "native-\(dayString(Date()))-\(timeString(Date()))-core-\(chunkIndex).wav"
+    let partialURL = URL(fileURLWithPath: partialPath).appendingPathComponent(filename)
+    let finalURL = URL(fileURLWithPath: inboxPath).appendingPathComponent(filename)
+    let settings: [String: Any] = [
+      AVFormatIDKey: Int(kAudioFormatLinearPCM),
+      AVSampleRateKey: format.sampleRate,
+      AVNumberOfChannelsKey: Int(format.channelCount),
+      AVLinearPCMBitDepthKey: 32,
+      AVLinearPCMIsFloatKey: true,
+      AVLinearPCMIsBigEndianKey: false,
+      AVLinearPCMIsNonInterleaved: !format.isInterleaved
+    ]
+    currentFile = try AVAudioFile(
+      forWriting: partialURL,
+      settings: settings,
+      commonFormat: .pcmFormatFloat32,
+      interleaved: format.isInterleaved
+    )
+    currentStartedAt = Date()
+    currentPartialURL = partialURL
+    currentFinalURL = finalURL
+    currentHadSamples = false
+  }
+
+  private func rotate() {
+    finalizeCurrentChunk()
+    do {
+      try startNewChunk()
+    } catch {
+      emit(["kind": "error", "code": "core_audio_tap_rotate_failed",
+            "message": String(describing: error), "fatal": false])
+    }
+  }
+
+  private func finalizeCurrentChunk() {
+    currentFile = nil
+    currentStartedAt = nil
+    guard let partial = currentPartialURL, let final = currentFinalURL else { return }
+    currentPartialURL = nil
+    currentFinalURL = nil
+    let fm = FileManager.default
+    guard currentHadSamples, fm.fileExists(atPath: partial.path) else {
+      try? fm.removeItem(at: partial)
+      return
+    }
+    do {
+      if fm.fileExists(atPath: final.path) {
+        try fm.removeItem(at: final)
+      }
+      try fm.moveItem(at: partial, to: final)
+    } catch {
+      emit(["kind": "error", "code": "core_audio_tap_finalize_failed",
+            "message": String(describing: error), "fatal": false])
+    }
+  }
+
+  private func reapStalePartials() {
+    let url = URL(fileURLWithPath: partialPath)
+    let entries = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+    for entry in entries {
+      try? FileManager.default.removeItem(at: entry)
+    }
+    if !entries.isEmpty {
+      emit(["kind": "log", "level": "warn",
+            "message": "discarded stale Core Audio tap partials from previous run",
+            "data": ["count": entries.count]])
+    }
+  }
+}
+
+/// Captures system audio output (remote meeting speakers) via SCStream and writes
+/// 5-minute AAC chunks named `native-…-sys-N.m4a` into the same audio inbox as
+/// the microphone chunker. The existing Whisper pipeline transcribes them and the
+/// MeetingBuilder fuses them with screen frames by time overlap — no extra plumbing
+/// needed. Requires macOS 13.0+ (SCStreamConfiguration.sampleRate / channelCount).
+@available(macOS 13.0, *)
+final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
+  private let enabled: Bool
+  private let inboxPath: String
+  private let partialPath: String
+  private let chunkSeconds: TimeInterval
+
+  private var stream: SCStream?
+  // Serial queue owns all chunk state — SCStream audio callbacks are also
+  // dispatched here so no extra locking is needed.
+  private let q = DispatchQueue(label: "cofounderos.sysaudio", qos: .utility)
+
+  private var chunkIndex = 0
+  private var capturing = false
+  private var sessionStarted = false
+  private var currentWriter: AVAssetWriter?
+  private var currentInput: AVAssetWriterInput?
+  private var currentStartedAt: Date?
+  private var currentPartialURL: URL?
+  private var currentFinalURL: URL?
+
+  init(config: HelperConfig) {
+    let live = config.audio?.live_recording
+    self.enabled = (config.capture_audio == true) && (live?.enabled == true)
+    self.inboxPath = NSString(
+      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+    ).expandingTildeInPath
+    self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-sys")
+    self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
+  }
+
+  func startIfEnabled() {
+    guard enabled else { return }
+    try? FileManager.default.createDirectory(atPath: inboxPath,  withIntermediateDirectories: true)
+    try? FileManager.default.createDirectory(atPath: partialPath, withIntermediateDirectories: true)
+    reapStalePartials()
+    startStream()
+  }
+
+  func tick() {
+    q.async { [weak self] in
+      guard let self, self.capturing, let started = self.currentStartedAt else { return }
+      if Date().timeIntervalSince(started) >= self.chunkSeconds { self.rotate() }
+    }
+  }
+
+  func stop() {
+    stream?.stopCapture(completionHandler: { _ in })
+    stream = nil
+    q.async { [weak self] in
+      self?.finalizeCurrentChunk()
+      self?.capturing = false
+    }
+  }
+
+  // MARK: SCStreamOutput — invoked on `q`
+
+  func stream(_ stream: SCStream,
+              didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+              of outputType: SCStreamOutputType) {
+    guard outputType == .audio, capturing,
+          let input = currentInput, input.isReadyForMoreMediaData else { return }
+    if !sessionStarted {
+      currentWriter?.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+      sessionStarted = true
+    }
+    input.append(sampleBuffer)
+  }
+
+  // MARK: SCStreamDelegate
+
+  func stream(_ stream: SCStream, didStopWithError error: Error) {
+    emit(["kind": "log", "level": "warn",
+          "message": "system audio stream stopped: \(error.localizedDescription)"])
+    q.async { self.capturing = false }
+  }
+
+  // MARK: Private
+
+  private func startStream() {
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
+      guard let self else { return }
+      if let error {
+        emit(["kind": "log", "level": "warn",
+              "message": "system audio: SCShareableContent unavailable — \(error.localizedDescription)"])
+        return
+      }
+      guard let display = content?.displays.first else {
+        emit(["kind": "log", "level": "warn", "message": "system audio: no display found"])
+        return
+      }
+      let cfg = SCStreamConfiguration()
+      cfg.capturesAudio = true
+      cfg.excludesCurrentProcessAudio = true
+      cfg.sampleRate = 16_000
+      cfg.channelCount = 1
+      // Minimal video is required by SCStream even for audio-only capture.
+      cfg.width = 2
+      cfg.height = 2
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+      cfg.queueDepth = 6
+
+      let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+      let stream = SCStream(filter: filter, configuration: cfg, delegate: self)
+      do {
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.q)
+        stream.startCapture(completionHandler: { [weak self] error in
+          guard let self else { return }
+          if let error {
+            emit(["kind": "log", "level": "warn",
+                  "message": "system audio capture failed to start: \(error.localizedDescription)"])
+            return
+          }
+          self.stream = stream
+          self.q.async { self.startNewChunk() }
+          emit(["kind": "log", "level": "info",
+                "message": "native system audio capture started",
+                "data": ["sample_rate": 16_000, "channels": 1, "chunk_seconds": self.chunkSeconds]])
+        })
+      } catch {
+        emit(["kind": "log", "level": "warn",
+              "message": "system audio capture setup failed: \(error.localizedDescription)"])
+      }
+    }
+  }
+
+  private func startNewChunk() {
+    chunkIndex += 1
+    let filename = "native-\(dayString(Date()))-\(timeString(Date()))-sys-\(chunkIndex).m4a"
+    let partialURL = URL(fileURLWithPath: partialPath).appendingPathComponent(filename)
+    let finalURL   = URL(fileURLWithPath: inboxPath).appendingPathComponent(filename)
+    do {
+      let writer = try AVAssetWriter(outputURL: partialURL, fileType: .m4a)
+      let outputSettings: [String: Any] = [
+        AVFormatIDKey:            Int(kAudioFormatMPEG4AAC),
+        AVSampleRateKey:          16_000,
+        AVNumberOfChannelsKey:    1,
+        AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue,
+      ]
+      let input = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings)
+      input.expectsMediaDataInRealTime = true
+      writer.add(input)
+      writer.startWriting()
+      currentWriter     = writer
+      currentInput      = input
+      currentStartedAt  = Date()
+      currentPartialURL = partialURL
+      currentFinalURL   = finalURL
+      sessionStarted    = false
+      capturing         = true
+    } catch {
+      emit(["kind": "error", "code": "sys_audio_chunk_start_failed",
+            "message": String(describing: error), "fatal": false])
+    }
+  }
+
+  private func rotate() {
+    let snap = snapshotChunk()
+    resetChunkState()
+    startNewChunk()
+    if let snap { finalizeSnapshot(snap) }
+  }
+
+  private func finalizeCurrentChunk() {
+    if let snap = snapshotChunk() {
+      resetChunkState()
+      finalizeSnapshot(snap)
+    }
+  }
+
+  private struct Snapshot {
+    let writer: AVAssetWriter
+    let input: AVAssetWriterInput
+    let partialURL: URL
+    let finalURL: URL
+    let sessionStarted: Bool
+  }
+
+  private func snapshotChunk() -> Snapshot? {
+    guard let w = currentWriter, let i = currentInput,
+          let p = currentPartialURL, let f = currentFinalURL else { return nil }
+    return Snapshot(writer: w, input: i, partialURL: p, finalURL: f, sessionStarted: sessionStarted)
+  }
+
+  private func resetChunkState() {
+    currentWriter = nil; currentInput = nil
+    currentStartedAt = nil; currentPartialURL = nil; currentFinalURL = nil
+    sessionStarted = false
+  }
+
+  private func finalizeSnapshot(_ snap: Snapshot) {
+    snap.input.markAsFinished()
+    guard snap.sessionStarted else {
+      // No audio received in this chunk (e.g. pure silence) — discard.
+      try? FileManager.default.removeItem(at: snap.partialURL)
+      return
+    }
+    snap.writer.finishWriting {
+      guard snap.writer.status == .completed else {
+        try? FileManager.default.removeItem(at: snap.partialURL)
+        return
+      }
+      let fm = FileManager.default
+      guard fm.fileExists(atPath: snap.partialURL.path) else { return }
+      do {
+        if fm.fileExists(atPath: snap.finalURL.path) { try? fm.removeItem(at: snap.finalURL) }
+        try fm.moveItem(at: snap.partialURL, to: snap.finalURL)
+      } catch {
+        emit(["kind": "error", "code": "sys_audio_finalize_failed",
+              "message": String(describing: error), "fatal": false])
+      }
+    }
+  }
+
+  private func reapStalePartials() {
+    let url = URL(fileURLWithPath: partialPath)
+    let entries = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+    for e in entries { try? FileManager.default.removeItem(at: e) }
+    if !entries.isEmpty {
+      emit(["kind": "log", "level": "warn",
+            "message": "discarded stale system audio partials from previous run",
+            "data": ["count": entries.count]])
+    }
+  }
+}
+
 func audioError(_ operation: String, status: OSStatus) -> NSError {
   NSError(
     domain: "cofounderos.audio.coreaudio",
     code: Int(status),
     userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
   )
+}
+
+func coreAudioError(_ operation: String, status: OSStatus) -> NSError {
+  NSError(
+    domain: "cofounderos.audio.coreaudio.tap",
+    code: Int(status),
+    userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
+  )
+}
+
+func coreAudioMessage(_ message: String) -> NSError {
+  NSError(
+    domain: "cofounderos.audio.coreaudio.tap",
+    code: 1,
+    userInfo: [NSLocalizedDescriptionKey: message]
+  )
+}
+
+@available(macOS 14.2, *)
+func translatePidToAudioProcessObject(pid: pid_t) throws -> AudioObjectID {
+  var address = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var inPid = pid
+  var processObject = AudioObjectID(kAudioObjectUnknown)
+  var size = UInt32(MemoryLayout<AudioObjectID>.size)
+  let status = withUnsafeMutablePointer(to: &inPid) { pidPtr in
+    AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject),
+      &address,
+      UInt32(MemoryLayout<pid_t>.size),
+      pidPtr,
+      &size,
+      &processObject
+    )
+  }
+  guard status == noErr, processObject != AudioObjectID(kAudioObjectUnknown) else {
+    throw coreAudioError("kAudioHardwarePropertyTranslatePIDToProcessObject", status: status)
+  }
+  return processObject
+}
+
+func readDefaultSystemOutputDevice() throws -> AudioDeviceID {
+  var address = AudioObjectPropertyAddress(
+    mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var device = AudioDeviceID(kAudioObjectUnknown)
+  var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+  let status = AudioObjectGetPropertyData(
+    AudioObjectID(kAudioObjectSystemObject),
+    &address,
+    0,
+    nil,
+    &size,
+    &device
+  )
+  guard status == noErr, device != AudioDeviceID(kAudioObjectUnknown) else {
+    throw coreAudioError("kAudioHardwarePropertyDefaultSystemOutputDevice", status: status)
+  }
+  return device
+}
+
+func readDeviceUID(_ device: AudioDeviceID) throws -> String {
+  var address = AudioObjectPropertyAddress(
+    mSelector: kAudioDevicePropertyDeviceUID,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var uid = "" as CFString
+  var size = UInt32(MemoryLayout<CFString>.size)
+  let status = withUnsafeMutablePointer(to: &uid) { uidPtr in
+    AudioObjectGetPropertyData(device, &address, 0, nil, &size, uidPtr)
+  }
+  guard status == noErr else {
+    throw coreAudioError("kAudioDevicePropertyDeviceUID", status: status)
+  }
+  return uid as String
+}
+
+@available(macOS 14.2, *)
+func readTapStreamDescription(_ tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
+  var address = AudioObjectPropertyAddress(
+    mSelector: kAudioTapPropertyFormat,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+  )
+  var desc = AudioStreamBasicDescription()
+  var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+  let status = AudioObjectGetPropertyData(tapID, &address, 0, nil, &size, &desc)
+  guard status == noErr else {
+    throw coreAudioError("kAudioTapPropertyFormat", status: status)
+  }
+  return desc
 }
 
 func valueAfter(_ flag: String, in args: [String]) -> String? {

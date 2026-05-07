@@ -92,17 +92,24 @@ export class FrameBuilder {
     const frames: Frame[] = [];
 
     // Pass 1 — anchor on screenshots, attach proximate metadata events.
+    // candidates is sorted by timestamp; use binary search to find the
+    // ±FRAME_PAIR_WINDOW_MS window instead of scanning all candidates.
     const screenshots = candidates.filter((e) => e.type === 'screenshot');
+    const candidateMs = candidates.map((e) => Date.parse(e.timestamp));
     for (const shot of screenshots) {
       const shotMs = Date.parse(shot.timestamp);
-      const related = candidates.filter((e) => {
-        if (consumedEventIds.has(e.id)) return false;
-        if (e.id === shot.id) return false;
-        if (e.session_id !== shot.session_id) return false;
-        if (e.type === 'screenshot') return false;
-        const dt = Math.abs(Date.parse(e.timestamp) - shotMs);
-        return dt <= FRAME_PAIR_WINDOW_MS;
-      });
+      const lo = shotMs - FRAME_PAIR_WINDOW_MS;
+      const hi = shotMs + FRAME_PAIR_WINDOW_MS;
+      const start = lowerBound(candidateMs, lo);
+      const related: RawEvent[] = [];
+      for (let i = start; i < candidates.length && candidateMs[i]! <= hi; i++) {
+        const e = candidates[i]!;
+        if (consumedEventIds.has(e.id)) continue;
+        if (e.id === shot.id) continue;
+        if (e.session_id !== shot.session_id) continue;
+        if (e.type === 'screenshot') continue;
+        related.push(e);
+      }
       const frame = buildFrame(shot, related, this.sensitiveKeywords);
       if (DROP_UNKNOWN_FRAMES && isUnknown(frame)) continue;
       frames.push(frame);
@@ -272,6 +279,7 @@ function buildFrame(
     entity_path: null,
     entity_kind: null,
     activity_session_id: null,
+    meeting_id: null,
     source_event_ids: sourceEventIds,
   };
 }
@@ -311,6 +319,7 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     entity_path: null,
     entity_kind: null,
     activity_session_id: null,
+    meeting_id: null,
     source_event_ids: group.map((e) => e.id),
   };
 }
@@ -337,4 +346,16 @@ function isUnknownEvent(e: RawEvent): boolean {
     (e.window_title === 'unknown' || !e.window_title) &&
     !e.url
   );
+}
+
+/** Binary search: index of first element >= target in a sorted numeric array. */
+function lowerBound(arr: number[], target: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid]! < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }

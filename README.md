@@ -154,8 +154,10 @@ What `cofounderos init` (and `start` / `index` on first launch) does:
    official shell installer; Windows: `winget`). Inherits your TTY so any
    `sudo` / UAC prompt surfaces directly. Live installer output is mirrored.
 3. **Starts the Ollama daemon** if it isn't already serving.
-4. **Pulls the configured model** (default: `gemma2:2b`, ~1.6 GB) with a
-   live download progress bar — phase, percentage, bytes downloaded.
+4. **Pulls the configured model** (default: `gemma4:e4b`, ~9.6 GB — the
+   recommended variant of Google's latest Gemma 4 with vision + audio
+   and 128K context) with a live download progress bar — phase,
+   percentage, bytes downloaded.
 
 ```
 ────────────────────────────────────────────
@@ -167,9 +169,9 @@ You may be prompted for your password.
   ✓ ollama installed
   ✓ Ollama daemon ready at http://localhost:11434
 
-Downloading model gemma2:2b (~1.6 GB) …
-  pulling 8eeb52dfb1c2  [██████████████████████████████]  100% (1.6GB / 1.6GB)
-  ✓ gemma2:2b ready
+Downloading model gemma4:e4b (~9.6 GB) …
+  pulling c6eb396dbd59  [██████████████████████████████]  100% (9.6GB / 9.6GB)
+  ✓ gemma4:e4b ready
 ```
 
 ### Opting out
@@ -204,17 +206,41 @@ instructions — the rest of the pipeline keeps running.
 
 ### Swapping the model later
 
-The model is just one config line. To upgrade to Gemma 3, larger Gemma
-variants, or any other Ollama model:
+The model is just one config line. To switch to a smaller variant
+(`gemma4:e2b`) for faster responses, a larger one (`gemma4:26b`,
+`gemma4:31b`) for more capability, or any other Ollama model:
 
 ```yaml
 index:
   model:
     ollama:
-      model: gemma3:9b      # any Ollama-compatible tag
+      model: gemma4:e2b      # any Ollama-compatible tag
 ```
 
 Then run `cofounderos init` again — it will pull just the new weights.
+
+### Refreshing weights under a floating tag
+
+Ollama tags like `gemma4:e4b` are *floating* — Google occasionally
+republishes improved weights under the same name. Two ways to pick them up:
+
+1. **On demand** — run `cofounderos model:update` to force a re-pull
+   right now. Idempotent: blobs that already match by content hash are
+   skipped, so the command is fast when there's nothing new.
+
+2. **On next start** — bump `model_revision` in `config.yaml`. The
+   orchestrator compares it against `~/.cofounderOS/.model-revision`
+   and force-re-pulls when the configured value is higher, then writes
+   the new value to the marker. Default ships at `2`; bumping to `3`
+   later refreshes every install once.
+
+```yaml
+index:
+  model:
+    ollama:
+      model: gemma4:e4b
+      model_revision: 3      # bump to force a refresh on next start
+```
 
 ---
 
@@ -356,6 +382,9 @@ search as first-class tools — agents don't need to read files directly.
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
 | `get_daily_summary` | One-shot digest for a day: totals, top apps, top entities, top URL hosts, sessions with headlines, calendar events, Slack threads, code-review queue, and open loops. |
+| `list_meetings` | Zoom / Google Meet / Microsoft Teams / Webex sessions detected from screenshots, fused with their audio transcripts. Each row reports time range, platform, attendees seen, links shared, and whether a structured summary is ready. |
+| `get_meeting` | Fetch a single meeting by id. Returns the structured summary (TL;DR, decisions, action items, key moments) plus the fused transcript turns — each turn is tied to the screenshot frame on screen at the moment of the utterance via `visual_frame_id`. |
+| `summarize_meeting` | Run (or re-run with `force: true`) the meeting summarizer on demand. Useful right after dropping a `.vtt` transcript into the audio inbox or when swapping models. |
 | `get_calendar_events` | Heuristic structured calendar extraction from frames captured on a calendar UI for a given day. Returns `{ time_label, title, source_frame_id }` rows. |
 | `get_open_loops` | Surfaces unanswered Slack messages and open / draft GitHub PRs and issues observed in a day or `since`/`until` window. The "what's still on my plate?" tool. |
 | `get_entity_summary` | Fresh, focused rollup for one entity in an optional time window — totals, top window titles, top URL hosts, recent sessions, calendar events, and open loops tied to that entity. |
@@ -470,6 +499,49 @@ those `.m4a` chunks on its next tick. This captures the selected input
 device; for remote meeting audio while wearing headphones, route system
 audio into an input/aggregate device (for example BlackHole) before
 enabling live recording.
+
+### Meetings (Zoom / Google Meet / Microsoft Teams / Webex)
+
+CofounderOS detects meeting frames from app/URL signals (Zoom, Google
+Meet, Microsoft Teams, Webex, Whereby, Around) and fuses them with
+overlapping audio transcripts to produce per-meeting summaries.
+
+Two layers cooperate:
+
+1. **MeetingBuilder** groups consecutive meeting screenshot frames into
+   a first-class `Meeting` row, attaches every overlapping
+   `audio_transcript` frame, and aligns each transcript turn to the
+   screenshot frame on screen at the moment the line was spoken
+   (`turn.visual_frame_id`). This is how "what was on screen when X said
+   Y" becomes a query.
+2. **MeetingSummarizer** produces a structured TL;DR + decisions + action
+   items + key moments via the model adapter, with vision attachments
+   for the most informative slides when the model supports vision. A
+   deterministic Stage A summary (attendees, links, agenda from window
+   titles, key screenshots) ships even when the LLM is unavailable.
+
+Configure under `index.meetings`:
+
+```yaml
+index:
+  meetings:
+    idle_threshold_sec: 90      # gap that closes an active meeting
+    min_duration_sec: 180       # below this, summary is skipped (skipped_short)
+    audio_grace_sec: 60         # audio chunks arriving up to N sec late still attach
+    summarize: true             # set false to skip the LLM step entirely
+    summarize_cooldown_sec: 300 # wait this long after meeting close before summarising
+    vision_attachments: 4       # number of key screenshots passed to the vision model
+```
+
+Query meetings via the MCP tools `list_meetings` / `get_meeting` /
+`summarize_meeting`, or read them inline at the top of every daily
+journal under the `## Meetings` section.
+
+For best summary quality, enable `capture.audio.live_recording` (native
+plugin) routed to a virtual input that captures system audio
+(e.g. BlackHole) so remote participants are transcribed too. Without
+system audio routing, only your microphone is captured and the summary
+is built from your half of the conversation plus the visible slides.
 
 ### Two transports
 

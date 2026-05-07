@@ -26,6 +26,9 @@ const Timeline = React.lazy(() =>
   import('@/screens/Timeline').then((mod) => ({ default: mod.Timeline })),
 );
 const Chat = React.lazy(() => import('@/screens/Chat').then((mod) => ({ default: mod.Chat })));
+const Meetings = React.lazy(() =>
+  import('@/screens/Meetings').then((mod) => ({ default: mod.Meetings })),
+);
 
 // Onboarding is a sizeable flow (~33KB source, ~6 step components)
 // that 99% of the time only runs once per install. Lazy-loading it keeps
@@ -38,6 +41,7 @@ import type {
   DoctorCheck,
   JournalDay,
   LoadedConfig,
+  Meeting,
   ModelBootstrapProgress,
   RuntimeOverview,
 } from '@/global';
@@ -67,6 +71,8 @@ function AppInner() {
   const [config, setConfig] = React.useState<LoadedConfig | null>(null);
   const [logs, setLogs] = React.useState('');
   const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
+  const [meetings, setMeetings] = React.useState<Meeting[]>([]);
+  const [meetingsLoading, setMeetingsLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(
     null,
@@ -97,13 +103,15 @@ function AppInner() {
   }, [screen, showOnboarding]);
 
   // Sparse safety-net poll. We trust the push channel for normal
-  // operation, but if the runtime service ever wedges or the IPC
-  // listener drops updates, this guarantees we recover within 30s.
+  // operation; this only fires if the runtime service wedges or the
+  // IPC listener drops updates. 60s is fine because the runtime's own
+  // 2s/15s heartbeat covers the steady-state freshness, and a wedge
+  // is rare enough that 60s recovery is acceptable.
   React.useEffect(() => {
     const timer = window.setInterval(() => {
       if (!window.cofounderos) return;
       void window.cofounderos.getOverview().then(setOverview).catch(() => undefined);
-    }, 30000);
+    }, 60000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -132,6 +140,14 @@ function AppInner() {
       if (next === 'connect') {
         setOverview(await window.cofounderos.getOverview());
         setConfig(await window.cofounderos.readConfig());
+      }
+      if (next === 'meetings') {
+        setMeetingsLoading(true);
+        try {
+          setMeetings(await window.cofounderos.listMeetings());
+        } finally {
+          setMeetingsLoading(false);
+        }
       }
       if (next === 'settings') setConfig(await window.cofounderos.readConfig());
       setError(null);
@@ -277,7 +293,12 @@ function AppInner() {
         setBootstrapEvents([]);
         try {
           await window.cofounderos.bootstrapModel();
-          setDoctor(await window.cofounderos.runDoctor());
+          const [nextOverview, nextDoctor] = await Promise.all([
+            window.cofounderos.getOverview(),
+            window.cofounderos.runDoctor(),
+          ]);
+          setOverview(nextOverview);
+          setDoctor(nextDoctor);
           toast.success('Local AI is ready');
         } catch (err) {
           toast.error('AI setup failed', {
@@ -349,6 +370,12 @@ function AppInner() {
       onChooseDay={chooseDay}
       onRefresh={() => loadScreen('timeline')}
     />
+  ) : screen === 'meetings' ? (
+    <Meetings
+      meetings={meetings}
+      loading={meetingsLoading}
+      onRefresh={() => loadScreen('meetings')}
+    />
   ) : screen === 'search' ? (
     <Search days={days} searchRequest={searchRequest} />
   ) : screen === 'chat' ? (
@@ -356,7 +383,13 @@ function AppInner() {
   ) : screen === 'connect' ? (
     <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
   ) : screen === 'settings' ? (
-    <Settings config={config} onSaved={setConfig} />
+    <Settings
+      config={config}
+      overview={overview}
+      bootstrapEvents={bootstrapEvents}
+      onClearBootstrapEvents={() => setBootstrapEvents([])}
+      onSaved={setConfig}
+    />
   ) : (
     <Help
       logs={logs}

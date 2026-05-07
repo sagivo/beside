@@ -23,6 +23,15 @@ const AppSchema = z.object({
 const CaptureSchema = z.object({
   plugin: z.string().default('node'),
   poll_interval_ms: z.number().int().positive().default(1500),
+  // Polling cadence to use while the user is idle (`idle_start` fired,
+  // before `idle_end`). The active-window poll, screenshot probe, and
+  // perceptual-hash diff loop are all wasted CPU when the user isn't
+  // touching the machine. 10 s is fine because the next user
+  // interaction will fire `idle_end` within one tick — and that tick
+  // immediately produces a fresh screenshot, so the perceived recovery
+  // latency is bounded by this value. Set <= `poll_interval_ms` to
+  // disable the backoff.
+  idle_poll_interval_ms: z.number().int().positive().default(10_000),
   focus_settle_delay_ms: z.number().int().nonnegative().default(900),
   // Soft-trigger sensitivity. Bumped from 0.05 → 0.10 because at the
   // old threshold even pixel-level noise (e.g. blinking cursor, clock
@@ -30,7 +39,7 @@ const CaptureSchema = z.object({
   // notices a difference".
   screenshot_diff_threshold: z.number().min(0).max(1).default(0.1),
   idle_threshold_sec: z.number().int().positive().default(60),
-  capture_audio: z.boolean().default(false),
+  capture_audio: z.boolean().default(true),
   // `tiny` is fast but produces noticeably bad transcripts on
   // conversational audio; `base` is the smallest model that's actually
   // usable for a "memory of what I did" product. Trade-off vs `tiny`:
@@ -55,13 +64,35 @@ const CaptureSchema = z.object({
     // Direct text imports (.txt/.vtt/.srt) are not subject to this cap.
     // Default 500 MiB. Set 0 to disable.
     max_audio_bytes: z.number().int().nonnegative().default(500 * 1024 * 1024),
+    // Pre-flight silence floor: if ffprobe reports the file's byte
+    // rate (size ÷ duration) is below this, skip whisper entirely
+    // and treat as silent. Avoids a 30-min whisper timeout on a chunk
+    // that was guaranteed to transcribe to empty (room-tone / muted
+    // mic / corrupted recorder). 0 disables. Default 4096 (4 KB/s),
+    // well below the AAC floor for real speech (~8–12 KB/s at 16 kHz
+    // mono / medium quality).
+    min_audio_bytes_per_sec: z.number().int().nonnegative().default(4096),
+    // Skip the rate check for clips shorter than this — short files
+    // are dominated by container overhead and the rate metric is
+    // noisy. Default 5000 (5 s).
+    min_audio_rate_check_ms: z.number().int().nonnegative().default(5000),
+    // Live mic/input recording. OFF by default for two reasons:
+    //   1. Privacy. Continuous mic capture is a meaningfully more
+    //      sensitive surface than screenshots; users should opt in
+    //      explicitly rather than discover it post-install.
+    //   2. CPU. Whisper transcription runs every audio tick; on
+    //      machines without GPU acceleration it's the heaviest worker
+    //      in the system. Off-by-default keeps idle CPU near zero
+    //      until the user wants meeting capture.
+    // Set `enabled: true` in config.yaml to record (native plugin only).
     live_recording: z.object({
       enabled: z.boolean().default(false),
       chunk_seconds: z.number().int().positive().default(300),
       format: z.enum(['m4a']).default('m4a'),
       sample_rate: z.number().int().positive().default(16_000),
       channels: z.number().int().positive().max(2).default(1),
-      activation: z.enum(['other_process_input']).default('other_process_input'),
+      activation: z.enum(['other_process_input', 'always']).default('other_process_input'),
+      system_audio_backend: z.enum(['core_audio_tap', 'screencapturekit', 'off']).default('core_audio_tap'),
       poll_interval_sec: z.number().int().positive().default(3),
     }).default({
       enabled: false,
@@ -70,6 +101,7 @@ const CaptureSchema = z.object({
       sample_rate: 16_000,
       channels: 1,
       activation: 'other_process_input',
+      system_audio_backend: 'core_audio_tap',
       poll_interval_sec: 3,
     }),
   }).default({
@@ -81,6 +113,8 @@ const CaptureSchema = z.object({
     whisper_command: 'whisper',
     delete_audio_after_transcribe: true,
     max_audio_bytes: 500 * 1024 * 1024,
+    min_audio_bytes_per_sec: 4096,
+    min_audio_rate_check_ms: 5000,
     live_recording: {
       enabled: false,
       chunk_seconds: 300,
@@ -88,6 +122,7 @@ const CaptureSchema = z.object({
       sample_rate: 16_000,
       channels: 1,
       activation: 'other_process_input',
+      system_audio_backend: 'core_audio_tap',
       poll_interval_sec: 3,
     },
   }),
@@ -165,6 +200,23 @@ const StorageSchema = z.object({
       // wins if both are set) or *_days (coarse, legacy). 0 disables
       // the stage entirely. The ms-resolved value is what
       // StorageVacuum actually uses internally.
+      //
+      // Defaults are tuned for "the screenshot mostly serves OCR +
+      // embeddings + occasional vision recall". OCR/AX text is
+      // extracted within ~60-90s; embeddings within minutes; the
+      // information value of the original-quality WebP drops sharply
+      // after that. Compressing within 4h instead of 24h saves
+      // gigabytes/month on a continuously-captured machine without
+      // affecting any indexing path. Thumbnailing after 3 days (vs 7)
+      // matches typical search/recall horizons; older frames are
+      // overwhelmingly accessed via the markdown export which already
+      // serves at 480px.
+      // NOTE: per-field defaults intentionally preserve legacy
+      // semantics (`compress_after_days: 1`, no `compress_after_minutes`)
+      // for users who already have a partial `vacuum:` block in their
+      // config — we only adjust the *fresh-install* defaults below.
+      // The orchestrator's `stageMs(days, minutes)` lets minutes win
+      // when set, otherwise falls back to days.
       compress_after_days: z.number().int().nonnegative().default(1),
       compress_after_minutes: z.number().int().nonnegative().optional(),
       compress_quality: z.number().int().min(1).max(100).default(40),
@@ -179,9 +231,10 @@ const StorageSchema = z.object({
       // small batches keep it from starving capture.
       batch_size: z.number().int().positive().default(50),
     }).default({
-      compress_after_days: 1,
+      compress_after_days: 0,
+      compress_after_minutes: 240,
       compress_quality: 40,
-      thumbnail_after_days: 7,
+      thumbnail_after_days: 3,
       thumbnail_max_dim: 480,
       delete_after_days: 30,
       tick_interval_min: 15,
@@ -192,9 +245,10 @@ const StorageSchema = z.object({
     max_size_gb: 50,
     retention_days: 365,
     vacuum: {
-      compress_after_days: 1,
+      compress_after_days: 0,
+      compress_after_minutes: 240,
       compress_quality: 40,
-      thumbnail_after_days: 7,
+      thumbnail_after_days: 3,
       thumbnail_max_dim: 480,
       delete_after_days: 30,
       tick_interval_min: 15,
@@ -233,6 +287,28 @@ const IndexSchema = z.object({
     min_active_ms: 30_000,
     fallback_frame_attention_ms: 5_000,
   }),
+  // Meetings (V2). The MeetingBuilder groups consecutive
+  // meeting-kind frames (Zoom / Meet / Teams / Webex / ...) into
+  // first-class Meeting rows and fuses overlapping audio_transcript
+  // frames into them. The MeetingSummarizer then produces a
+  // structured TL;DR + decisions + action items per meeting via the
+  // model adapter. Set `summarize: false` to disable the LLM step
+  // and keep only the deterministic Stage A summary (still useful).
+  meetings: z.object({
+    idle_threshold_sec: z.number().int().positive().default(90),
+    min_duration_sec: z.number().int().nonnegative().default(180),
+    audio_grace_sec: z.number().int().nonnegative().default(60),
+    summarize: z.boolean().default(true),
+    summarize_cooldown_sec: z.number().int().nonnegative().default(300),
+    vision_attachments: z.number().int().nonnegative().default(4),
+  }).default({
+    idle_threshold_sec: 90,
+    min_duration_sec: 180,
+    audio_grace_sec: 60,
+    summarize: true,
+    summarize_cooldown_sec: 300,
+    vision_attachments: 4,
+  }),
   // Semantic embeddings (V2). Embeddings are derived from frame
   // text/title/url and blended into MCP search for conceptual matches
   // that keyword FTS would miss.
@@ -250,22 +326,50 @@ const IndexSchema = z.object({
   model: z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({
-      model: z.string().default('gemma2:2b'),
+      model: z.string().default('gemma4:e4b'),
       embedding_model: z.string().default('nomic-embed-text'),
       host: z.string().default('http://127.0.0.1:11434'),
       vision_model: z.string().optional(),
+      // Optional smaller model used for the indexing path
+      // (Karpathy strategy summarisation/categorisation,
+      // reorganisation). When set and different from `model`, the
+      // orchestrator loads a second adapter and uses it for those
+      // calls. Chat and vision recall (`completeWithVision`) keep
+      // running on the primary `model`. Big practical win: the
+      // smaller indexer model loads in seconds and uses ~3 GB of RAM
+      // instead of ~9 GB, while the better model is reserved for
+      // user-facing answers. Default unset (legacy behaviour: one
+      // adapter for everything). Recommended: `gemma4:e2b` when the
+      // primary is `gemma4:e4b`.
+      indexer_model: z.string().optional(),
       keep_alive: z.union([z.string(), z.number()]).default('30s'),
-      unload_after_idle_min: z.number().nonnegative().default(2),
+      // Host-side idle unload timer. The previous default of 2 minutes
+      // double-buffered Ollama's own `keep_alive` (30s) — meaning even
+      // after Ollama would have evicted the model, the host kept it
+      // pinned for another 90s. With `0` we trust Ollama's `keep_alive`,
+      // and a fully idle machine drops the ~9 GB model from RAM
+      // ~30s after the last request instead of ~2 minutes. Set to a
+      // positive number to opt back into the host backstop (useful if
+      // you're running Ollama with `keep_alive: -1` for warm-loading).
+      unload_after_idle_min: z.number().nonnegative().default(0),
       // First-run UX: auto-install Ollama and auto-pull the model the
       // first time the agent loads. Set to false to require manual setup.
       auto_install: z.boolean().default(true),
+      // Bumping this number forces the orchestrator to re-pull the
+      // configured model + embedding model on the next start, even if
+      // they are already present locally. Use it to pick up freshly
+      // re-published weights under the same Ollama tag (e.g. an updated
+      // gemma4:e4b manifest). Compared against a marker file in the
+      // data dir; the bootstrap writes the new value on success.
+      model_revision: z.number().int().nonnegative().default(3),
     }).default({
-      model: 'gemma2:2b',
+      model: 'gemma4:e4b',
       embedding_model: 'nomic-embed-text',
       host: 'http://127.0.0.1:11434',
       keep_alive: '30s',
-      unload_after_idle_min: 2,
+      unload_after_idle_min: 0,
       auto_install: true,
+      model_revision: 3,
     }),
     claude: z.object({
       api_key: z.string().optional(),
@@ -281,7 +385,7 @@ const IndexSchema = z.object({
   }).default({
     plugin: 'ollama',
     ollama: {
-      model: 'gemma2:2b',
+      model: 'gemma4:e4b',
       embedding_model: 'nomic-embed-text',
       host: 'http://127.0.0.1:11434',
     },
@@ -370,6 +474,7 @@ app:
 capture:
   plugin: node                    # default Node-based capture; "rust" once available
   poll_interval_ms: 1500          # how often to poll for window/url changes
+  idle_poll_interval_ms: 10000    # cadence while idle (>= poll_interval_ms; lower = faster idle_end recovery, higher = less idle CPU)
   focus_settle_delay_ms: 900      # wait after app switch before screenshot
   screenshot_diff_threshold: 0.10 # skip screenshots with < 10% visual change
   idle_threshold_sec: 60
@@ -377,7 +482,7 @@ capture:
   screenshot_quality: 55          # 1-100; 55 is plenty for screen content
   screenshot_max_dim: 1280        # cap longest edge at capture (0 = native res)
   content_change_min_interval_ms: 20000 # min ms between soft-trigger captures
-  capture_audio: false            # V2
+  capture_audio: true             # V2; processes ~/.cofounderOS/raw/audio/inbox into audio_transcript events
   whisper_model: base             # V2; tiny is faster but transcripts are noticeably worse
   audio:
     inbox_path: ~/.cofounderOS/raw/audio/inbox
@@ -388,9 +493,20 @@ capture:
     whisper_command: whisper      # OpenAI Whisper CLI; .txt/.vtt/.srt files import without it
     delete_audio_after_transcribe: true # transcript is durable+redacted; raw audio is not retained by default
     max_audio_bytes: 524288000    # 500 MiB; reject larger audio files before whisper (0 = unlimited)
+    min_audio_bytes_per_sec: 4096 # silence floor; chunks below this byte rate skip whisper and are deleted (0 = disable)
+    min_audio_rate_check_ms: 5000 # skip the silence floor check for clips shorter than this (ms)
     live_recording:
-      enabled: false              # native plugin only; records mic/input chunks into inbox
-      activation: other_process_input # record only while another app is using audio input
+      enabled: false              # off by default — mic capture is opt-in (privacy + CPU). Set true on the native plugin to record mic/input chunks into the inbox.
+      # activation controls when microphone recording starts:
+      #   other_process_input — record only while another process is actively using audio input
+      #     (reliable on wired headsets; may miss Bluetooth/AirPods or virtual audio devices)
+      #   always              — record whenever capture is running (recommended for calls)
+      activation: other_process_input
+      # Remote participant audio:
+      #   core_audio_tap  — macOS 14.2+ audio-only system output capture; no screen-sharing indicator
+      #   screencapturekit — legacy remote audio capture; shows macOS "Currently Sharing"
+      #   off             — mic-only meeting capture
+      system_audio_backend: core_audio_tap
       poll_interval_sec: 3        # how often to check whether another process still has mic input
       chunk_seconds: 300
       format: m4a
@@ -444,12 +560,17 @@ storage:
     # downsized or deleted.
     vacuum:
       # Each stage accepts *_days OR *_minutes (minutes wins if set).
-      # 0 disables a stage. Defaults below are tuned for personal use;
-      # for scale testing try compress_after_minutes: 30,
-      # thumbnail_after_minutes: 360, delete_after_days: 14.
-      compress_after_days: 1       # re-encode older originals at lower quality
+      # 0 disables a stage. The defaults below are tuned for "the
+      # screenshot mostly serves OCR + embeddings + occasional vision
+      # recall": OCR/AX text is extracted within ~60-90s, embeddings
+      # within minutes, so the original-quality WebP loses most of its
+      # information value after a few hours. Compressing at 4h saves
+      # gigabytes/month vs the previous 1-day window without affecting
+      # any indexing path; thumbnailing at 3 days matches typical
+      # search/recall horizons.
+      compress_after_minutes: 240  # re-encode older originals at lower quality (~4h)
       compress_quality: 40
-      thumbnail_after_days: 7      # downscale once an asset is this old
+      thumbnail_after_days: 3      # downscale once an asset is this old
       thumbnail_max_dim: 480
       delete_after_days: 30        # 0 = keep image forever
       tick_interval_min: 15
@@ -473,6 +594,18 @@ index:
     idle_threshold_sec: 300
     afk_threshold_sec: 120
     min_active_ms: 30000
+  # Meetings (V2). Group consecutive Zoom/Meet/Teams/Webex frames
+  # into first-class meeting rows; fuse overlapping audio chunks;
+  # summarise via the model adapter when summarize: true. Setting
+  # summarize: false keeps the deterministic Stage A summary
+  # (attendees, links, key screens) but skips the LLM call.
+  meetings:
+    idle_threshold_sec: 90      # gap that closes an active meeting
+    min_duration_sec: 180       # below this, the meeting is flagged short and skipped for summary
+    audio_grace_sec: 60         # audio chunks arriving up to N sec after the meeting still attach
+    summarize: true             # set false to skip the LLM step
+    summarize_cooldown_sec: 300 # wait this long after meeting close before summarising (lets whisper drain)
+    vision_attachments: 4       # number of key screenshots to send to the vision model
   # Semantic embeddings (V2). Generated from frame text/title/url and
   # blended into MCP search so conceptual matches work even when the
   # exact keyword is absent.
@@ -484,12 +617,20 @@ index:
   model:
     plugin: ollama
     ollama:
-      model: gemma2:2b           # swap for gemma4:e4b once your Ollama has it
+      model: gemma4:e4b           # default Gemma 4 variant — vision + 128K context; swap for gemma4:e2b for the fastest small model
+      # Optional smaller model used only for the indexing path
+      # (summarisation, reorganisation). Chat and vision recall keep
+      # using \`model\` above. Big RAM win — e2b is ~3 GB vs e4b ~9 GB —
+      # and idle indexing ticks load and unload faster. Uncomment to opt in:
+      # indexer_model: gemma4:e2b
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
       keep_alive: 30s            # keep local models warm briefly after real work
-      unload_after_idle_min: 2    # explicit host-side unload timer; 0 disables
+      unload_after_idle_min: 0    # 0 = rely entirely on Ollama's keep_alive (~30s).
+                                  # set > 0 only if you run Ollama with keep_alive: -1
+                                  # and want a host-side backstop unload.
       auto_install: true         # auto-install Ollama + pull model on first run
+      model_revision: 3          # bump to force a re-pull on next start (picks up updated weights under the same tag)
     # To use a hosted OpenAI-compatible model instead:
     # plugin: openai
     # openai:

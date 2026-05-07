@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import readline from 'node:readline';
@@ -10,8 +10,10 @@ import {
   clipboard,
   ipcMain,
   Menu,
+  net,
   Tray,
   nativeImage,
+  protocol,
   shell,
   dialog,
   systemPreferences,
@@ -29,6 +31,19 @@ const configPath = path.join(dataDir, 'config.yaml');
 const markdownExportDir = path.join(dataDir, 'export/markdown');
 const windowStatePath = path.join(dataDir, 'desktop-window.json');
 const rendererDevUrl = process.env.COFOUNDEROS_RENDERER_URL;
+const ASSET_PROTOCOL = 'cofounderos-asset';
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: ASSET_PROTOCOL,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: false,
+    },
+  },
+]);
 
 interface WindowState {
   width: number;
@@ -288,6 +303,7 @@ if (process.platform === 'darwin') {
 }
 
 app.whenReady().then(async () => {
+  registerAssetProtocol();
   registerRuntimeIpc();
   applyBrandDockIcon();
   if (useMacAccessoryMode) {
@@ -309,6 +325,35 @@ app.whenReady().then(async () => {
     await showStatusWindow();
   }
 });
+
+function registerAssetProtocol(): void {
+  protocol.handle(ASSET_PROTOCOL, async (request) => {
+    const url = new URL(request.url);
+    const assetPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    const resolved = await resolveAssetPath(assetPath);
+    return await net.fetch(pathToFileURL(resolved).toString());
+  });
+}
+
+async function resolveAssetPath(assetPath: string): Promise<string> {
+  if (!assetPath || assetPath.includes('\0')) {
+    throw new Error('invalid asset path');
+  }
+  const overview = lastOverview ?? await getOverviewForRequest();
+  if (!overview?.storageRoot) {
+    throw new Error('runtime storage root unavailable');
+  }
+  const storageRoot = path.resolve(overview.storageRoot);
+  const resolved = path.resolve(storageRoot, assetPath);
+  if (!resolved.startsWith(`${storageRoot}${path.sep}`) && resolved !== storageRoot) {
+    throw new Error('asset path escapes storage root');
+  }
+  return resolved;
+}
+
+function assetUrl(assetPath: string): string {
+  return `${ASSET_PROTOCOL}://local/${encodeURIComponent(assetPath)}`;
+}
 
 app.on('window-all-closed', () => {
   // Keep the tray process alive after the status window closes.
@@ -417,7 +462,7 @@ function getMenuBarIndicator(
 
 function applyMenuBarIndicator(indicator: MenuBarIndicator): void {
   if (tray) {
-    if (process.platform === 'darwin') tray.setTitle(makeTrayTitle(indicator.state));
+    if (process.platform === 'darwin') tray.setTitle('');
     tray.setToolTip(indicator.label);
   }
   if (!statusItemHelper || statusItemHelper.killed || !statusItemHelper.stdin?.writable) return;
@@ -427,17 +472,6 @@ function applyMenuBarIndicator(indicator: MenuBarIndicator): void {
       if (err) appendLog(`Native status item update failed: ${String(err)}`);
     },
   );
-}
-
-function makeTrayTitle(state: MenuBarCaptureState): string {
-  switch (state) {
-    case 'capturing':
-      return ' CO CAP';
-    case 'paused':
-      return ' CO PAUSE';
-    case 'stopped':
-      return ' CO STOP';
-  }
 }
 
 async function refreshTray(): Promise<void> {
@@ -583,7 +617,19 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
     statusWindow.on('closed', () => {
       statusWindow = null;
       enterMacAccessoryMode();
+      // Window gone — slow the runtime push to the same 15s cadence the
+      // tray menu uses. Saves wake-ups + IPC churn when the user is
+      // running tray-only.
+      setRuntimeHeartbeat('idle');
     });
+    // Toggle between fast (2s) and idle (15s) heartbeat cadence based on
+    // window visibility. The renderer also has a 30s safety-net poll, so
+    // it's safe to skip pushes while no UI is observing the stream.
+    statusWindow.on('show', () => setRuntimeHeartbeat('active'));
+    statusWindow.on('restore', () => setRuntimeHeartbeat('active'));
+    statusWindow.on('focus', () => setRuntimeHeartbeat('active'));
+    statusWindow.on('hide', () => setRuntimeHeartbeat('idle'));
+    statusWindow.on('minimize', () => setRuntimeHeartbeat('idle'));
     statusWindow.webContents.on('console-message', ({ level, message }) => {
       appendLog(`[renderer:${level}] ${message}`);
     });
@@ -1180,6 +1226,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:get-indexed-journal-day', async (_event, day: string) => {
     return await (await getRuntimeForRequest()).call('getIndexedJournalDay', day);
   });
+  ipcMain.handle('cofounderos:list-meetings', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('listMeetings', query);
+  });
   ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('searchFrames', query);
   });
@@ -1189,9 +1238,14 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:get-frame-index-details', async (_event, frameId: string) => {
     return await (await getRuntimeForRequest()).call('getFrameIndexDetails', frameId);
   });
+  ipcMain.handle('cofounderos:asset-url', async (_event, assetPath: string) => {
+    // Validate eagerly so renderer bugs surface as IPC errors instead of
+    // broken <img> loads. The protocol handler validates again before read.
+    await resolveAssetPath(assetPath);
+    return assetUrl(assetPath);
+  });
   ipcMain.handle('cofounderos:read-asset', async (_event, assetPath: string) => {
-    const result = await (await getRuntimeForRequest()).call<{ base64: string }>('readAsset', assetPath);
-    return new Uint8Array(Buffer.from(result.base64, 'base64'));
+    return new Uint8Array(await fs.promises.readFile(await resolveAssetPath(assetPath)));
   });
   ipcMain.handle('cofounderos:start-runtime', async () => {
     await startRuntime();
@@ -1218,6 +1272,9 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:bootstrap-model', async () => {
     return await (await getRuntimeForRequest()).call('bootstrapModel');
+  });
+  ipcMain.handle('cofounderos:update-model', async () => {
+    return await (await getRuntimeForRequest()).call('updateModel');
   });
   ipcMain.handle('cofounderos:get-start-at-login', async () => {
     return app.getLoginItemSettings().openAtLogin;
@@ -1342,6 +1399,23 @@ async function getRuntimeForRequest(): Promise<RuntimeServiceClient> {
     managedRuntime = new RuntimeServiceClient();
   }
   return managedRuntime;
+}
+
+/**
+ * Tell the runtime service whether to broadcast overview snapshots at
+ * the active (2s) or idle (15s) cadence. Called on window visibility
+ * changes — when the only consumer is the tray indicator, 15s is
+ * already what the tray's own refresh timer uses, so any faster push
+ * is wasted CPU + IPC. Fire-and-forget; if the runtime isn't up yet
+ * we silently skip, and the next mutation will reset cadence anyway.
+ */
+function setRuntimeHeartbeat(mode: 'active' | 'idle' | 'paused'): void {
+  if (!managedRuntime) return;
+  void managedRuntime.call('setHeartbeat', { mode }).catch((err) => {
+    if (!isExpectedRuntimeServiceClosure(err)) {
+      appendLog(`setHeartbeat failed: ${String(err)}`);
+    }
+  });
 }
 
 function appendLog(line: string): void {

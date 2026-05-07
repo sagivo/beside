@@ -25,6 +25,8 @@ import {
 } from '@cofounderos/core';
 import { FrameBuilder } from './frame-builder.js';
 import { SessionBuilder } from './session-builder.js';
+import { MeetingBuilder } from './meeting-builder.js';
+import { MeetingSummarizer } from './meeting-summarizer.js';
 import { EmbeddingWorker } from './embedding-worker.js';
 import { AudioTranscriptWorker } from './audio-transcript-worker.js';
 import { OcrWorker } from './ocr-worker.js';
@@ -46,6 +48,14 @@ export interface OrchestratorHandles {
    * user accepts the deterministic fallback.
    */
   model: IModelAdapter;
+  /**
+   * Adapter used by the indexing path (Karpathy strategy summarisation,
+   * reorganisation). When the user has configured a separate
+   * `indexer_model`, this is a distinct, smaller-model adapter; when
+   * unset it points at the same instance as `model`. The chat agent
+   * and vision recall always use `model`.
+   */
+  indexerModel: IModelAdapter;
   strategy: IIndexStrategy;
   exports: IExport[];
   scheduler: Scheduler;
@@ -59,27 +69,132 @@ export interface OrchestratorHandles {
   audioTranscriptWorker: AudioTranscriptWorker;
   entityResolver: EntityResolverWorker;
   sessionBuilder: SessionBuilder;
+  meetingBuilder: MeetingBuilder;
+  meetingSummarizer: MeetingSummarizer;
   embeddingWorker: EmbeddingWorker;
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
+  activityCoalescer: ActivityCoalescer;
 }
 
 const INCREMENTAL_JOB = 'index-incremental';
 const REORG_JOB = 'index-reorganise';
 const FRAME_BUILDER_JOB = 'frame-builder';
-const FRAME_BUILDER_INTERVAL_MS = 60_000;
+// Active capture wakes the worker chain via the bus-driven coalescer
+// (see ActivityCoalescer below) within ~30s of the burst settling, so
+// this is now a backstop interval rather than the primary trigger. We
+// stretch from the previous 60s to 5min — the coalescer dominates
+// freshness while there's activity, and when the system is fully idle
+// no work is needed at all. `runIncremental` also drains these workers
+// before each indexing pass, so any drift is bounded by
+// `incremental_interval_min` (default 5).
+const FRAME_BUILDER_INTERVAL_MS = 5 * 60_000;
 const FRAME_BUILDER_BATCH_SIZE = 25;
 const OCR_WORKER_JOB = 'ocr-worker';
 const OCR_WORKER_INTERVAL_MS = 30_000;
 const AUDIO_TRANSCRIPT_JOB = 'audio-transcript-worker';
 const ENTITY_RESOLVER_JOB = 'entity-resolver';
-const ENTITY_RESOLVER_INTERVAL_MS = 90_000;
+// Same coalescer-vs-backstop logic as FRAME_BUILDER_INTERVAL_MS. Was 90s.
+const ENTITY_RESOLVER_INTERVAL_MS = 5 * 60_000;
 const ENTITY_RESOLVER_BATCH_SIZE = 25;
 const SESSION_BUILDER_JOB = 'session-builder';
-const SESSION_BUILDER_INTERVAL_MS = 120_000;
+// Sessions have looser freshness needs (used by journals + entity
+// timelines, not search), so a 10min backstop is fine. Was 120s.
+const SESSION_BUILDER_INTERVAL_MS = 10 * 60_000;
 const SESSION_BUILDER_BATCH_SIZE = 100;
+const MEETING_BUILDER_JOB = 'meeting-builder';
+const MEETING_BUILDER_INTERVAL_MS = 60_000;
+const MEETING_SUMMARIZER_JOB = 'meeting-summarizer';
+const MEETING_SUMMARIZER_INTERVAL_MS = 5 * 60_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
+
+/**
+ * Debounce + max-wait used by the activity coalescer below. After 30s
+ * with no new capture events, the worker chain runs once. If activity
+ * is constant (debounce never settles), the max-wait forces a run
+ * after 90s so the queue can't grow unbounded during long-form work.
+ */
+const COALESCE_DEBOUNCE_MS = 30_000;
+const COALESCE_MAX_WAIT_MS = 90_000;
+
+/**
+ * Bus-driven coalescer that runs the lightweight worker chain
+ * (frame → entity → session → embeddings) shortly after a burst of
+ * capture activity settles. Replaces the fixed-cadence ticks as the
+ * primary freshness mechanism: when the user is active, search results
+ * update within ~30s of the latest capture instead of ~60-120s; when
+ * the user is idle, we don't run at all. The scheduler `every`
+ * intervals stretched out alongside this become safety nets that fire
+ * only on long droughts of activity (e.g. one-off CLI commands that
+ * bypass the bus).
+ *
+ * Single-flight: while a chain is running, additional bus events
+ * just re-arm the timer. When the chain finishes, the next debounce
+ * fires fresh.
+ */
+class ActivityCoalescer {
+  private timer: NodeJS.Timeout | null = null;
+  private firstNudgeAt: number | null = null;
+  private running = false;
+  private unsubscribe: (() => void) | null = null;
+  private stopped = false;
+
+  constructor(
+    private readonly bus: RawEventBus,
+    private readonly logger: Logger,
+    private readonly run: () => Promise<void>,
+  ) {}
+
+  start(): void {
+    if (this.unsubscribe || this.stopped) return;
+    this.unsubscribe = this.bus.on(() => this.nudge());
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.firstNudgeAt = null;
+  }
+
+  private nudge(): void {
+    if (this.stopped) return;
+    if (this.firstNudgeAt == null) this.firstNudgeAt = Date.now();
+    const elapsed = Date.now() - this.firstNudgeAt;
+    if (elapsed >= COALESCE_MAX_WAIT_MS) {
+      // Constant activity has been resetting the debounce for too
+      // long. Fire now so the queue can drain.
+      this.fire();
+      return;
+    }
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.fire(), COALESCE_DEBOUNCE_MS);
+  }
+
+  private fire(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.firstNudgeAt = null;
+    if (this.running || this.stopped) return;
+    this.running = true;
+    void this.run()
+      .catch((err) => {
+        this.logger.warn('activity coalescer chain failed', { err: String(err) });
+      })
+      .finally(() => {
+        this.running = false;
+      });
+  }
+}
 
 async function startPassiveExports(exports: IExport[], logger: Logger): Promise<void> {
   for (const exp of exports) {
@@ -135,6 +250,43 @@ export async function buildOrchestrator(
     config.index.model.plugin,
     baseCtx((modelBlock as Record<string, unknown>) ?? {}),
   );
+
+  // Optional separate adapter for the indexing path. When the user
+  // has set `index.model.<plugin>.indexer_model` to a smaller variant
+  // (e.g. `gemma4:e2b` when the primary is `gemma4:e4b`), we load a
+  // second adapter so summarisation/reorganisation don't have to
+  // hold the user-facing chat model in RAM. The chat agent and vision
+  // recall keep using the primary `model`.
+  //
+  // When unset (or set to the same value as `model`), `indexerModel`
+  // falls back to `model` and the orchestrator behaves as before.
+  const indexerModelName = (modelBlock as Record<string, unknown> | undefined)?.indexer_model;
+  const primaryModelName = (modelBlock as Record<string, unknown> | undefined)?.model;
+  let indexerModel: IModelAdapter = model;
+  if (
+    typeof indexerModelName === 'string' &&
+    indexerModelName.trim() &&
+    indexerModelName !== primaryModelName
+  ) {
+    try {
+      indexerModel = await registry.loadModel(
+        config.index.model.plugin,
+        baseCtx({
+          ...(modelBlock as Record<string, unknown>),
+          model: indexerModelName,
+        }),
+      );
+      logger.info(
+        `indexer model split: chat/vision="${String(primaryModelName)}", indexer="${indexerModelName}"`,
+      );
+    } catch (err) {
+      logger.warn(
+        `failed to load indexer model "${indexerModelName}"; falling back to primary`,
+        { err: String(err) },
+      );
+      indexerModel = model;
+    }
+  }
 
   // Index strategy.
   const strategy = await registry.loadIndexStrategy(config.index.strategy, baseCtx({
@@ -192,6 +344,27 @@ export async function buildOrchestrator(
     triggerReindex: async (_full) => {
       await scheduler.runNow(INCREMENTAL_JOB);
     },
+    summarizeMeeting: async (meetingId, opts) => {
+      const meeting = await storage.getMeeting(meetingId);
+      if (!meeting) return { status: 'not_found', message: `meeting ${meetingId} not found` };
+      // `force` clears the existing summary so the next summarizer
+      // tick treats it as pending again. We don't run the summarizer
+      // synchronously here so an MCP client doesn't time out behind a
+      // slow LLM call — instead we mark it pending and the scheduler
+      // beat picks it up almost immediately.
+      if (opts?.force || meeting.summary_status === 'failed' || meeting.summary_status === 'skipped_short') {
+        await storage.setMeetingSummary(meetingId, { status: 'pending', failureReason: null });
+      }
+      try {
+        const r = await meetingSummarizer.tick();
+        if (r.failed > 0 && r.succeeded === 0) {
+          return { status: 'failed', message: `${r.failed} summarisation(s) failed this tick` };
+        }
+        return { status: 'ok', message: `attempted=${r.attempted} succeeded=${r.succeeded} failed=${r.failed}` };
+      } catch (err) {
+        return { status: 'failed', message: String(err) };
+      }
+    },
   };
   for (const exp of exports) {
     if (typeof exp.bindServices === 'function') {
@@ -220,6 +393,8 @@ export async function buildOrchestrator(
     sensitiveKeywords,
     deleteAudioAfterTranscribe: config.capture.audio.delete_audio_after_transcribe,
     maxAudioBytes: config.capture.audio.max_audio_bytes,
+    minAudioBytesPerSec: config.capture.audio.min_audio_bytes_per_sec,
+    minAudioRateCheckMs: config.capture.audio.min_audio_rate_check_ms,
   });
   const entityResolver = new EntityResolverWorker(storage, logger, ENTITY_RESOLVER_BATCH_SIZE);
   const sessionsCfg = config.index.sessions;
@@ -228,6 +403,18 @@ export async function buildOrchestrator(
     minActiveMs: sessionsCfg.min_active_ms,
     fallbackFrameAttentionMs: sessionsCfg.fallback_frame_attention_ms,
     batchSize: SESSION_BUILDER_BATCH_SIZE,
+  });
+  const meetingsCfg = config.index.meetings;
+  const meetingBuilder = new MeetingBuilder(storage, logger, {
+    meetingIdleMs: meetingsCfg.idle_threshold_sec * 1000,
+    minDurationMs: meetingsCfg.min_duration_sec * 1000,
+    audioGraceMs: meetingsCfg.audio_grace_sec * 1000,
+  });
+  const meetingSummarizer = new MeetingSummarizer(storage, model, logger, {
+    dataDir,
+    enabled: meetingsCfg.summarize,
+    cooldownMs: meetingsCfg.summarize_cooldown_sec * 1000,
+    visionAttachments: meetingsCfg.vision_attachments,
   });
   const embeddingsCfg = config.index.embeddings;
   const embeddingWorker = new EmbeddingWorker(storage, model, logger, {
@@ -253,10 +440,31 @@ export async function buildOrchestrator(
     batchSize: vacuumCfg.batch_size,
   });
 
+  // Build the coalescer here so it's available on `handles` even
+  // before the bus has any subscribers — `scheduleAll()` calls
+  // `start()` to actually wire it up to events.
+  const activityCoalescer = new ActivityCoalescer(
+    bus,
+    logger.child('activity-coalescer'),
+    async () => {
+      await frameBuilder.tick();
+      await entityResolver.tick();
+      await sessionBuilder.tick();
+      // Embedding worker runs the LLM; gate it the same way
+      // `scheduleAll` does (load guard + index-maintenance lock) so
+      // the coalescer never fights the user during heavy work.
+      const decision = loadGuard.check(EMBEDDING_WORKER_JOB);
+      if (!decision.proceed) return;
+      if (await hasActiveIndexMaintenanceLock(loaded.dataDir)) return;
+      await embeddingWorker.tick();
+    },
+  );
+
   return {
     capture,
     storage,
     model,
+    indexerModel,
     strategy,
     exports,
     scheduler,
@@ -270,9 +478,12 @@ export async function buildOrchestrator(
     audioTranscriptWorker,
     entityResolver,
     sessionBuilder,
+    meetingBuilder,
+    meetingSummarizer,
     embeddingWorker,
     vacuum,
     loadGuard,
+    activityCoalescer,
   };
 }
 
@@ -287,7 +498,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   pagesCreated: number;
   pagesUpdated: number;
 }> {
-  const { storage, strategy, model, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, embeddingWorker } = handles;
+  const { storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
   const log = logger.child('index-runner');
 
   // Materialise frames + resolve entities + group into sessions before
@@ -313,6 +524,13 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
     if (sbResult.framesProcessed > 0) {
       log.info(
         `grouped ${sbResult.framesProcessed} frames into ${sbResult.sessionsCreated} new + ${sbResult.sessionsExtended} extended session(s)`,
+      );
+    }
+    const mbResult = await meetingBuilder.drain();
+    if (mbResult.meetingsCreated + mbResult.meetingsExtended > 0) {
+      log.info(
+        `materialised ${mbResult.meetingsCreated} new + ${mbResult.meetingsExtended} extended meeting(s) ` +
+          `(${mbResult.audioFramesAttached} audio chunks, ${mbResult.turnsBuilt} transcript turns)`,
       );
     }
     const embResult = await embeddingWorker.drain();
@@ -343,7 +561,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
 
     log.info(`indexing batch of ${events.length} events`);
     const state = await strategy.getState();
-    const update = await strategy.indexBatch(events, state, model);
+    const update = await strategy.indexBatch(events, state, indexerModel);
     await strategy.applyUpdate(update);
 
     for (const exp of exports) {
@@ -364,7 +582,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   if (totalEvents === 0) log.debug('no new events to index');
   else log.info(`indexed ${totalEvents} events (${totalCreated} created, ${totalUpdated} updated)`);
 
-  await model.unload?.().catch((err: unknown) => {
+  await indexerModel.unload?.().catch((err: unknown) => {
     log.debug('model unload after incremental indexing failed', { err: String(err) });
   });
 
@@ -376,11 +594,11 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
 }
 
 export async function runReorganisation(handles: OrchestratorHandles): Promise<void> {
-  const { strategy, model, exports, logger } = handles;
+  const { strategy, indexerModel, exports, logger } = handles;
   const log = logger.child('index-reorg');
   await startPassiveExports(exports, log);
   const state = await strategy.getState();
-  const update = await strategy.reorganise(state, model);
+  const update = await strategy.reorganise(state, indexerModel);
   await strategy.applyUpdate(update);
 
   for (const exp of exports) {
@@ -399,7 +617,7 @@ export async function runReorganisation(handles: OrchestratorHandles): Promise<v
       });
     }
   }
-  await model.unload?.().catch((err: unknown) => {
+  await indexerModel.unload?.().catch((err: unknown) => {
     log.debug('model unload after reorganisation failed', { err: String(err) });
   });
   log.info('reorganisation complete');
@@ -421,7 +639,7 @@ async function runFullReindexLocked(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { storage, strategy, model, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, embeddingWorker } = handles;
+  const { storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
   const log = logger.child('full-reindex');
   const range = [
     opts.from ? `from=${opts.from}` : null,
@@ -463,6 +681,14 @@ async function runFullReindexLocked(
       `rebuilt ${sb.sessionsCreated} session(s) from ${sb.framesProcessed} frames`,
     );
   }
+  await storage.clearAllMeetings();
+  const mb = await meetingBuilder.drain();
+  if (mb.framesProcessed > 0) {
+    log.info(
+      `rebuilt ${mb.meetingsCreated} meeting(s) from ${mb.framesProcessed} frames ` +
+        `(${mb.audioFramesAttached} audio chunks, ${mb.turnsBuilt} transcript turns)`,
+    );
+  }
   await storage.clearFrameEmbeddings(getEmbeddingModelName(config));
   const emb = await embeddingWorker.drain();
   if (emb.processed > 0) {
@@ -479,13 +705,16 @@ async function runFullReindexLocked(
   // up front before calling indexBatch directly.
   await strategy.getUnindexedEvents(storage);
 
-  // Collect the requested raw event range, then render entity pages once.
-  // The strategy builds pages from the materialised entity/frame tables, not
-  // from individual raw events, so invoking it once avoids re-rendering the
-  // same active entities for every historical event batch.
+  // Stream the requested raw event range through indexBatch in pages.
+  // Previously all events were collected into one array before a single
+  // indexBatch call (avoids redundant entity re-renders for cross-page
+  // entities) but that is an unbounded OOM hazard for large histories.
+  // We now process per page, accepting that entities spanning multiple
+  // pages may be re-rendered more than once — pages are idempotent so
+  // correctness is preserved and memory stays flat.
   const batchSize = config.index.batch_size;
   let offset = 0;
-  const allEvents: RawEvent[] = [];
+  let totalProcessed = 0;
 
   while (true) {
     const events = await storage.readEvents({
@@ -496,21 +725,19 @@ async function runFullReindexLocked(
     });
     if (events.length === 0) break;
 
-    allEvents.push(...events);
-    offset += events.length;
-    if (events.length < batchSize) break;
-  }
-
-  if (allEvents.length > 0) {
     const state = await strategy.getState();
-    const update = await strategy.indexBatch(allEvents, state, model);
+    const update = await strategy.indexBatch(events, state, indexerModel);
     await strategy.applyUpdate(update);
     for (const exp of exports) {
       for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
       for (const p of update.pagesToUpdate) await exp.onPageUpdate(p);
       for (const d of update.pagesToDelete) await exp.onPageDelete(d);
     }
-    await storage.markIndexed(strategy.name, allEvents.map((e) => e.id));
+    await storage.markIndexed(strategy.name, events.map((e) => e.id));
+
+    totalProcessed += events.length;
+    offset += events.length;
+    if (events.length < batchSize) break;
   }
 
   const finalState = await strategy.getState();
@@ -519,11 +746,11 @@ async function runFullReindexLocked(
     await exp.fullSync(finalState, strategy);
   }
 
-  await model.unload?.().catch((err: unknown) => {
+  await indexerModel.unload?.().catch((err: unknown) => {
     log.debug('model unload after full re-index failed', { err: String(err) });
   });
 
-  log.info(`full re-index complete — ${allEvents.length} events processed`);
+  log.info(`full re-index complete — ${totalProcessed} events processed`);
 }
 
 const INDEX_MAINTENANCE_LOCK = '.index-maintenance.lock';
@@ -597,8 +824,15 @@ function indexMaintenanceLockPath(dataDir: string): string {
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, embeddingWorker, vacuum, logger, loadGuard } =
+  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer } =
     handles;
+
+  // Subscribe the coalescer to the bus so capture activity drives the
+  // worker chain reactively (debounced 30s settle / 90s max-wait).
+  // The scheduler.every entries below remain as backstops for long
+  // idle periods or out-of-band ingestion (CLI imports, etc.) but are
+  // intentionally stretched out — the coalescer dominates freshness.
+  activityCoalescer.start();
 
   // Wrap heavier jobs so they skip when the machine is busy. Cheap jobs
   // (frame builder, OCR, entity resolver) are intentionally not gated —
@@ -640,13 +874,18 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   }));
   // OCR worker runs slightly faster than the frame builder so a frame
   // built at second 0 typically has searchable text by second 60-90.
-  scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, skipDuringIndexMaintenance(OCR_WORKER_JOB, async () => {
+  // Tesseract is the heaviest non-LLM job in the system (1-3s of CPU
+  // per frame on Apple Silicon), so it's gated by the load guard —
+  // when the user's machine is already under load we skip the tick and
+  // catch up later. The frame builder + entity resolver intentionally
+  // are NOT gated; they're tiny and keep search results fresh.
+  scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, skipDuringIndexMaintenance(OCR_WORKER_JOB, guarded(OCR_WORKER_JOB, async () => {
     try {
       await ocrWorker.tick();
     } catch (err) {
       logger.child('ocr-worker').warn('tick failed', { err: String(err) });
     }
-  }));
+  })));
   scheduler.every(
     AUDIO_TRANSCRIPT_JOB,
     Math.max(15_000, config.capture.audio.tick_interval_sec * 1000),
@@ -679,6 +918,30 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       logger.child('session-builder').warn('tick failed', { err: String(err) });
     }
   }));
+  // Meeting builder: runs after the entity resolver so meeting frames
+  // already have their entity_path populated. A 1-minute cadence keeps
+  // open meetings extending live while the call is happening.
+  scheduler.every(MEETING_BUILDER_JOB, MEETING_BUILDER_INTERVAL_MS, skipDuringIndexMaintenance(MEETING_BUILDER_JOB, async () => {
+    try {
+      await meetingBuilder.tick();
+    } catch (err) {
+      logger.child('meeting-builder').warn('tick failed', { err: String(err) });
+    }
+  }));
+  // Meeting summarizer: heavier (calls the model). Runs every 5 min
+  // and gates on the load guard so it never fights the user during
+  // active work.
+  scheduler.every(
+    MEETING_SUMMARIZER_JOB,
+    MEETING_SUMMARIZER_INTERVAL_MS,
+    skipDuringIndexMaintenance(MEETING_SUMMARIZER_JOB, guarded(MEETING_SUMMARIZER_JOB, async () => {
+      try {
+        await meetingSummarizer.tick();
+      } catch (err) {
+        logger.child('meeting-summarizer').warn('tick failed', { err: String(err) });
+      }
+    })),
+  );
   scheduler.every(
     EMBEDDING_WORKER_JOB,
     Math.max(60_000, config.index.embeddings.tick_interval_min * 60_000),
@@ -725,16 +988,27 @@ export async function startAll(handles: OrchestratorHandles): Promise<void> {
 }
 
 export async function stopAll(handles: OrchestratorHandles): Promise<void> {
+  // Tear the coalescer down before the scheduler so a pending debounce
+  // can't fire after the workers have been shut down.
+  handles.activityCoalescer.stop();
   handles.scheduler.stop();
   for (const exp of handles.exports) {
     await exp.stop();
   }
   await handles.capture.stop();
   await handles.ocrWorker.stop();
-  const unloadModel = (handles.model as IModelAdapter & { unload?: () => Promise<void> }).unload;
-  await unloadModel?.().catch((err: unknown) => {
+  // Call as method (not extracted reference) so `this` is bound — the
+  // ollama adapter's `unload` reaches into `this.client` and breaks
+  // when invoked as a free function. Same applies to the indexer
+  // adapter when it's a separate instance.
+  await handles.model.unload?.().catch((err: unknown) => {
     handles.logger.child('model').debug('model unload failed during runtime stop', { err: String(err) });
   });
+  if (handles.indexerModel !== handles.model) {
+    await handles.indexerModel.unload?.().catch((err: unknown) => {
+      handles.logger.child('indexer-model').debug('indexer unload failed during runtime stop', { err: String(err) });
+    });
+  }
 }
 
 export function exportRoot(dataDir: string): string {
@@ -756,18 +1030,125 @@ function getEmbeddingModelName(config: CofounderOSConfig): string {
  * pull model) if it supports `ensureReady`. No-op for adapters without
  * that capability.
  *
+ * Reads `index.model.ollama.model_revision` (or the equivalent block for
+ * the active model plugin) and compares it against `.model-revision` in
+ * the data dir. When the configured revision is greater than the marker,
+ * the bootstrap is run with `force: true` so weights get re-pulled even
+ * when the tag is already cached locally — that's how we ship the
+ * "refresh existing installs" upgrade for floating Ollama tags
+ * (e.g. `gemma4:e2b` getting new weights under the same name).
+ *
+ * Pass `force: true` to bypass the revision marker entirely (used by the
+ * `cofounderos model:update` CLI command).
+ *
  * Throws if bootstrap fails. The CLI catches this and offers `--offline`.
  */
 export async function bootstrapModel(
   handles: OrchestratorHandles,
   onProgress?: ModelBootstrapHandler,
+  opts: { force?: boolean } = {},
 ): Promise<void> {
   if (typeof handles.model.ensureReady !== 'function') return;
-  await handles.model.ensureReady(onProgress);
+
+  const markerPath = path.join(handles.loaded.dataDir, '.model-revision');
+  const configuredRevision = readConfiguredModelRevision(handles.config);
+  const markerData = await readModelRevisionMarker(markerPath);
+  const modelInfo = handles.model.getModelInfo();
+
+  // Force when the caller explicitly asks for it, when the configured
+  // revision moved forward, or when the model identity itself changed
+  // (e.g. user edited config.yaml from gemma4:e2b → gemma4:e4b — the
+  // new model needs a pull but the cached "ready" check could pass for
+  // the old one if both happen to be present).
+  const revisionMoved = configuredRevision != null
+    && (markerData?.revision == null || markerData.revision < configuredRevision);
+  const modelChanged = !!markerData && markerData.model !== modelInfo.name;
+  const force = opts.force === true || revisionMoved || modelChanged;
+
+  await handles.model.ensureReady(onProgress, force ? { force: true } : undefined);
+
+  // If the user has configured a separate indexer adapter, make sure
+  // its weights are also pulled. We don't track a separate revision
+  // marker for it — the primary model's revision bump implicitly
+  // covers "you upgraded; refresh everything", and the indexer model
+  // is typically a smaller variant of the same family.
+  if (
+    handles.indexerModel !== handles.model &&
+    typeof handles.indexerModel.ensureReady === 'function'
+  ) {
+    await handles.indexerModel.ensureReady(
+      onProgress,
+      force ? { force: true } : undefined,
+    );
+  }
+
+  if (configuredRevision != null) {
+    await writeModelRevisionMarker(markerPath, {
+      revision: configuredRevision,
+      model: modelInfo.name,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+}
+
+interface ModelRevisionMarker {
+  revision: number;
+  model: string;
+  updatedAt: string;
+}
+
+function readConfiguredModelRevision(config: CofounderOSConfig): number | null {
+  // Only the ollama plugin currently exposes a revision; remote plugins
+  // (claude / openai) don't manage local weights, so there's nothing to
+  // refresh and the marker mechanism is a no-op for them.
+  const block = config.index.model.ollama as { model_revision?: unknown } | undefined;
+  if (!block) return null;
+  const v = block.model_revision;
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+async function readModelRevisionMarker(
+  markerPath: string,
+): Promise<ModelRevisionMarker | null> {
+  try {
+    const raw = await fsp.readFile(markerPath, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<ModelRevisionMarker>;
+    if (
+      typeof parsed.revision === 'number' &&
+      typeof parsed.model === 'string' &&
+      typeof parsed.updatedAt === 'string'
+    ) {
+      return parsed as ModelRevisionMarker;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeModelRevisionMarker(
+  markerPath: string,
+  marker: ModelRevisionMarker,
+): Promise<void> {
+  try {
+    await fsp.mkdir(path.dirname(markerPath), { recursive: true });
+    await fsp.writeFile(markerPath, JSON.stringify(marker, null, 2));
+  } catch {
+    // Marker is best-effort. Failing to write it just means the next
+    // start may try the force-pull again, which is idempotent (Ollama
+    // skips bytes that match its content-addressed store).
+  }
 }
 
 /** Swap the active model for the offline deterministic adapter. */
 export function useOfflineModel(handles: OrchestratorHandles): void {
-  handles.model = new OfflineFallbackAdapter(handles.logger);
+  const offline = new OfflineFallbackAdapter(handles.logger);
+  // Replace BOTH adapters when the user opts into offline mode: the
+  // indexer adapter would otherwise still try to reach Ollama for
+  // every indexing pass even though the user explicitly asked us to
+  // run without an LLM. Sharing one offline instance is intentional
+  // (it's stateless) and means a single `unload` covers both.
+  handles.model = offline;
+  handles.indexerModel = offline;
   handles.logger.info('using offline deterministic model (no LLM calls).');
 }

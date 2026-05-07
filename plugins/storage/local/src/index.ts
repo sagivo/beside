@@ -26,6 +26,13 @@ import type {
   EntityTimelineQuery,
   ActivitySession,
   ListSessionsQuery,
+  Meeting,
+  MeetingPlatform,
+  MeetingSummaryStatus,
+  MeetingSummaryJson,
+  MeetingSummaryUpdate,
+  MeetingTurn,
+  ListMeetingsQuery,
   PluginFactory,
   Logger,
 } from '@cofounderos/interfaces';
@@ -515,7 +522,9 @@ class LocalStorage implements IStorage {
   async listFramesNeedingOcr(limit: number): Promise<FrameOcrTask[]> {
     const rows = this.db
       .prepare(
-        `SELECT id, asset_path, text AS existing_text, text_source AS existing_source
+        `SELECT id, asset_path, text AS existing_text,
+                text_source AS existing_source,
+                perceptual_hash
          FROM frames
          WHERE asset_path IS NOT NULL
            AND (text_source IS NULL OR text_source = 'accessibility')
@@ -526,13 +535,54 @@ class LocalStorage implements IStorage {
         asset_path: string;
         existing_text: string | null;
         existing_source: string | null;
+        perceptual_hash: string | null;
       }>;
     return rows.map((r) => ({
       id: r.id,
       asset_path: r.asset_path,
       existing_text: r.existing_text,
       existing_source: (r.existing_source as FrameTextSource | null) ?? null,
+      perceptual_hash: r.perceptual_hash,
     }));
+  }
+
+  /**
+   * Find any previously-OCR'd frame with the same perceptual hash. The
+   * OCR worker calls this before running Tesseract — when the user
+   * toggles back to a recently-captured window/tab the pixels are
+   * identical and re-running OCR is pure waste. We restrict to frames
+   * whose `text_source` already includes OCR results so the copy is
+   * actually useful. The candidate set is ordered by timestamp DESC
+   * so the most recent OCR result wins on ties (avoids picking up
+   * very old, possibly stale text for a tab that's been re-rendered).
+   */
+  async findOcrTextByPerceptualHash(
+    perceptualHash: string,
+    excludeFrameId?: string,
+  ): Promise<{
+    text: string;
+    source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>;
+  } | null> {
+    if (!perceptualHash) return null;
+    const row = this.db
+      .prepare(
+        `SELECT text, text_source
+         FROM frames
+         WHERE perceptual_hash = ?
+           AND text IS NOT NULL
+           AND text != ''
+           AND text_source IN ('ocr', 'ocr_accessibility')
+           ${excludeFrameId ? 'AND id != ?' : ''}
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+      )
+      .get(...(excludeFrameId ? [perceptualHash, excludeFrameId] : [perceptualHash])) as
+        | { text: string; text_source: string }
+        | undefined;
+    if (!row) return null;
+    const source = row.text_source as FrameTextSource;
+    if (source !== 'ocr' && source !== 'ocr_accessibility') return null;
+    return { text: row.text, source };
   }
 
   async setFrameText(
@@ -643,6 +693,96 @@ class LocalStorage implements IStorage {
         cleaned.length,
         new Date().toISOString(),
       );
+  }
+
+  async upsertFrameEmbeddings(
+    embeddings: Array<{
+      frameId: string;
+      model: string;
+      contentHash: string;
+      vector: number[];
+    }>,
+  ): Promise<void> {
+    if (embeddings.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO frame_embeddings
+        (frame_id, model, content_hash, vector, dims, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(frame_id, model) DO UPDATE SET
+         content_hash = excluded.content_hash,
+         vector = excluded.vector,
+         dims = excluded.dims,
+         created_at = excluded.created_at`,
+    );
+    const now = new Date().toISOString();
+    const insertMany = this.db.transaction((items: typeof embeddings) => {
+      for (const item of items) {
+        const cleaned = normaliseVector(item.vector);
+        if (cleaned.length === 0) continue;
+        stmt.run(
+          item.frameId,
+          item.model,
+          item.contentHash,
+          packFloat32(cleaned),
+          cleaned.length,
+          now,
+        );
+      }
+    });
+    insertMany(embeddings);
+  }
+
+  /**
+   * Look up an existing embedding by `(model, contentHash)` so the
+   * embedding worker can avoid re-running the model on identical
+   * input. A user dwelling on one Slack channel / browser tab /
+   * editor buffer produces many frames with identical
+   * `App + Window + URL + Entity + Text` content, and re-embedding
+   * each one is wasted work. The query uses the existing
+   * `idx_frame_embeddings_model` index to narrow by model, then a
+   * filtered scan over duplicate content hashes (typically tiny);
+   * `LIMIT 1` short-circuits as soon as any match is found.
+   */
+  async findExistingFrameEmbedding(
+    model: string,
+    contentHash: string,
+  ): Promise<{ vector: number[]; dims: number } | null> {
+    const row = this.db
+      .prepare(
+        `SELECT vector, dims
+         FROM frame_embeddings
+         WHERE model = ? AND content_hash = ?
+         LIMIT 1`,
+      )
+      .get(model, contentHash) as { vector: Buffer; dims: number } | undefined;
+    if (!row) return null;
+    const vector = unpackFloat32(row.vector);
+    if (vector.length === 0) return null;
+    return { vector: Array.from(vector), dims: row.dims };
+  }
+
+  async findExistingFrameEmbeddings(
+    model: string,
+    contentHashes: string[],
+  ): Promise<Map<string, { vector: number[]; dims: number }>> {
+    const result = new Map<string, { vector: number[]; dims: number }>();
+    if (contentHashes.length === 0) return result;
+    const placeholders = contentHashes.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT content_hash, vector, dims
+         FROM frame_embeddings
+         WHERE model = ? AND content_hash IN (${placeholders})
+         GROUP BY content_hash`,
+      )
+      .all(model, ...contentHashes) as Array<{ content_hash: string; vector: Buffer; dims: number }>;
+    for (const row of rows) {
+      const vector = unpackFloat32(row.vector);
+      if (vector.length > 0) {
+        result.set(row.content_hash, { vector: Array.from(vector), dims: row.dims });
+      }
+    }
+    return result;
   }
 
   async searchFrameEmbeddings(
@@ -1473,6 +1613,237 @@ class LocalStorage implements IStorage {
   }
 
   // -------------------------------------------------------------------------
+  // Meetings
+  // -------------------------------------------------------------------------
+
+  async upsertMeeting(meeting: Meeting): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO meetings
+          (id, entity_path, title, platform, started_at, ended_at, day,
+           duration_ms, frame_count, screenshot_count, audio_chunk_count,
+           transcript_chars, content_hash, summary_status, summary_md,
+           summary_json, attendees_json, links_json, failure_reason,
+           updated_at)
+         VALUES
+          (@id, @entity_path, @title, @platform, @started_at, @ended_at, @day,
+           @duration_ms, @frame_count, @screenshot_count, @audio_chunk_count,
+           @transcript_chars, @content_hash, @summary_status, @summary_md,
+           @summary_json, @attendees_json, @links_json, @failure_reason,
+           @updated_at)
+         ON CONFLICT(id) DO UPDATE SET
+           title = COALESCE(excluded.title, meetings.title),
+           ended_at = excluded.ended_at,
+           duration_ms = excluded.duration_ms,
+           frame_count = excluded.frame_count,
+           screenshot_count = excluded.screenshot_count,
+           audio_chunk_count = excluded.audio_chunk_count,
+           transcript_chars = excluded.transcript_chars,
+           content_hash = excluded.content_hash,
+           attendees_json = excluded.attendees_json,
+           links_json = excluded.links_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        id: meeting.id,
+        entity_path: meeting.entity_path,
+        title: meeting.title ?? null,
+        platform: meeting.platform,
+        started_at: meeting.started_at,
+        ended_at: meeting.ended_at,
+        day: meeting.day,
+        duration_ms: meeting.duration_ms,
+        frame_count: meeting.frame_count,
+        screenshot_count: meeting.screenshot_count,
+        audio_chunk_count: meeting.audio_chunk_count,
+        transcript_chars: meeting.transcript_chars,
+        content_hash: meeting.content_hash,
+        summary_status: meeting.summary_status,
+        summary_md: meeting.summary_md,
+        summary_json: meeting.summary_json
+          ? JSON.stringify(meeting.summary_json)
+          : null,
+        attendees_json: JSON.stringify(meeting.attendees ?? []),
+        links_json: JSON.stringify(meeting.links ?? []),
+        failure_reason: meeting.failure_reason,
+        updated_at: meeting.updated_at,
+      });
+  }
+
+  async getMeeting(id: string): Promise<Meeting | null> {
+    const row = this.db
+      .prepare(`SELECT * FROM meetings WHERE id = ?`)
+      .get(id) as RawMeetingRow | undefined;
+    return row ? rowToMeeting(row) : null;
+  }
+
+  async listMeetings(query: ListMeetingsQuery = {}): Promise<Meeting[]> {
+    const where: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.day) {
+      where.push('day = @day');
+      params.day = query.day;
+    }
+    if (query.from) {
+      where.push('started_at >= @from');
+      params.from = query.from;
+    }
+    if (query.to) {
+      where.push('started_at <= @to');
+      params.to = query.to;
+    }
+    if (query.platform) {
+      where.push('platform = @platform');
+      params.platform = query.platform;
+    }
+    if (query.summaryStatus) {
+      where.push('summary_status = @status');
+      params.status = query.summaryStatus;
+    }
+    const order = query.order === 'chronological' ? 'ASC' : 'DESC';
+    const limit = query.limit ?? 200;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM meetings
+         WHERE ${where.join(' AND ')}
+         ORDER BY started_at ${order}
+         LIMIT @limit`,
+      )
+      .all({ ...params, limit }) as RawMeetingRow[];
+    return rows.map(rowToMeeting);
+  }
+
+  async listFramesNeedingMeetingAssignment(limit: number): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames
+         WHERE entity_kind = 'meeting' AND meeting_id IS NULL
+         ORDER BY timestamp ASC
+         LIMIT ?`,
+      )
+      .all(limit) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async assignFramesToMeeting(frameIds: string[], meetingId: string): Promise<void> {
+    if (frameIds.length === 0) return;
+    const stmt = this.db.prepare(
+      `UPDATE frames SET meeting_id = ? WHERE id = ?`,
+    );
+    const tx = this.db.transaction((ids: string[]) => {
+      for (const id of ids) stmt.run(meetingId, id);
+    });
+    tx(frameIds);
+  }
+
+  async getMeetingFrames(meetingId: string): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames
+         WHERE meeting_id = ?
+         ORDER BY timestamp ASC`,
+      )
+      .all(meetingId) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async listAudioFramesInRange(fromIso: string, toIso: string): Promise<Frame[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM frames
+         WHERE text_source = 'audio'
+           AND timestamp >= ?
+           AND timestamp <= ?
+         ORDER BY timestamp ASC`,
+      )
+      .all(fromIso, toIso) as RawFrameRow[];
+    return rows.map(rowToFrame);
+  }
+
+  async setMeetingTurns(
+    meetingId: string,
+    turns: Array<Omit<MeetingTurn, 'id' | 'meeting_id'>>,
+  ): Promise<MeetingTurn[]> {
+    const insert = this.db.prepare(
+      `INSERT INTO meeting_turns
+        (meeting_id, t_start, t_end, speaker, text, visual_frame_id, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM meeting_turns WHERE meeting_id = ?`).run(meetingId);
+      for (const turn of turns) {
+        insert.run(
+          meetingId,
+          turn.t_start,
+          turn.t_end,
+          turn.speaker,
+          turn.text,
+          turn.visual_frame_id,
+          turn.source,
+        );
+      }
+    });
+    tx();
+    return this.getMeetingTurns(meetingId);
+  }
+
+  async getMeetingTurns(meetingId: string): Promise<MeetingTurn[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, meeting_id, t_start, t_end, speaker, text, visual_frame_id, source
+         FROM meeting_turns
+         WHERE meeting_id = ?
+         ORDER BY t_start ASC, id ASC`,
+      )
+      .all(meetingId) as RawMeetingTurnRow[];
+    return rows.map(rowToMeetingTurn);
+  }
+
+  async setMeetingSummary(
+    meetingId: string,
+    update: MeetingSummaryUpdate,
+  ): Promise<void> {
+    const fields: string[] = ['summary_status = @status', 'updated_at = @updated_at'];
+    const params: Record<string, unknown> = {
+      id: meetingId,
+      status: update.status,
+      updated_at: new Date().toISOString(),
+    };
+    if (update.md !== undefined) {
+      fields.push('summary_md = @md');
+      params.md = update.md;
+    }
+    if (update.json !== undefined) {
+      fields.push('summary_json = @json');
+      params.json = update.json ? JSON.stringify(update.json) : null;
+    }
+    if (update.contentHash !== undefined) {
+      fields.push('content_hash = @hash');
+      params.hash = update.contentHash;
+    }
+    if (update.failureReason !== undefined) {
+      fields.push('failure_reason = @reason');
+      params.reason = update.failureReason;
+    }
+    if (update.title !== undefined && update.title !== null) {
+      fields.push('title = @title');
+      params.title = update.title;
+    }
+    this.db
+      .prepare(`UPDATE meetings SET ${fields.join(', ')} WHERE id = @id`)
+      .run(params);
+  }
+
+  async clearAllMeetings(): Promise<void> {
+    const tx = this.db.transaction(() => {
+      this.db.exec(`UPDATE frames SET meeting_id = NULL`);
+      this.db.exec(`DELETE FROM meeting_turns`);
+      this.db.exec(`DELETE FROM meetings`);
+    });
+    tx();
+  }
+
+  // -------------------------------------------------------------------------
   // Deletion (privacy-driven)
   //
   // We always remove DB rows and disk assets together, in that order, so a
@@ -1803,6 +2174,7 @@ class LocalStorage implements IStorage {
         entity_kind         TEXT,
         vacuum_tier         TEXT,
         activity_session_id TEXT,
+        meeting_id          TEXT,
         source_event_ids    TEXT NOT NULL,
         created_at          TEXT NOT NULL
       );
@@ -1929,6 +2301,52 @@ class LocalStorage implements IStorage {
         entities_json       TEXT NOT NULL DEFAULT '[]'
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
+
+      -- Meetings (V2): one row per Zoom/Meet/Teams/etc. session, fusing
+      -- meeting screenshot frames with overlapping audio_transcript
+      -- frames. Distinct from sessions -- a meeting is its own first-class
+      -- object so two back-to-back Zooms get independent summaries.
+      CREATE TABLE IF NOT EXISTS meetings (
+        id                  TEXT PRIMARY KEY,
+        entity_path         TEXT NOT NULL,
+        title               TEXT,
+        platform            TEXT NOT NULL,
+        started_at          TEXT NOT NULL,
+        ended_at            TEXT NOT NULL,
+        day                 TEXT NOT NULL,
+        duration_ms         INTEGER NOT NULL,
+        frame_count         INTEGER NOT NULL DEFAULT 0,
+        screenshot_count    INTEGER NOT NULL DEFAULT 0,
+        audio_chunk_count   INTEGER NOT NULL DEFAULT 0,
+        transcript_chars    INTEGER NOT NULL DEFAULT 0,
+        content_hash        TEXT NOT NULL DEFAULT '',
+        summary_status      TEXT NOT NULL DEFAULT 'pending',
+        summary_md          TEXT,
+        summary_json        TEXT,
+        attendees_json      TEXT NOT NULL DEFAULT '[]',
+        links_json          TEXT NOT NULL DEFAULT '[]',
+        failure_reason      TEXT,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_meetings_day ON meetings(day, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_meetings_entity ON meetings(entity_path);
+
+      -- Per-meeting transcript turns (one utterance each). Rows are
+      -- regenerated atomically by setMeetingTurns when a meeting's
+      -- audio inputs change.
+      CREATE TABLE IF NOT EXISTS meeting_turns (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id      TEXT NOT NULL,
+        t_start         TEXT NOT NULL,
+        t_end           TEXT NOT NULL,
+        speaker         TEXT,
+        text            TEXT NOT NULL,
+        visual_frame_id TEXT,
+        source          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_meeting_turns_meeting
+        ON meeting_turns(meeting_id, t_start);
     `);
 
     this.runSchemaMigrations();
@@ -1958,7 +2376,9 @@ class LocalStorage implements IStorage {
     this.maybeAddColumn('frames', 'entity_kind', 'TEXT');
     this.maybeAddColumn('frames', 'vacuum_tier', 'TEXT');
     this.maybeAddColumn('frames', 'activity_session_id', 'TEXT');
+    this.maybeAddColumn('frames', 'meeting_id', 'TEXT');
     this.maybeAddColumn('frames', 'url_host', 'TEXT');
+    this.maybeAddColumn('meetings', 'title', 'TEXT');
 
     // 2. Drop the dead `events_fts` virtual table. The free-text search
     //    path moved to `frames` / `frame_text` long ago; the FTS table
@@ -2035,6 +2455,15 @@ class LocalStorage implements IStorage {
       -- Worker partials. These are tiny (cover only currently-pending
       -- rows) and let the workers iterate without scanning the full
       -- frames table.
+      -- Lookup OCR'd frames by perceptual hash to skip Tesseract on
+      -- pixel-identical screens (user toggled back to a recently-seen
+      -- window/tab). Partial: indexes only frames that already have
+      -- usable OCR text, so the table stays tiny relative to the
+      -- frames table.
+      CREATE INDEX IF NOT EXISTS idx_frames_phash_ocr
+        ON frames(perceptual_hash, timestamp DESC)
+        WHERE perceptual_hash IS NOT NULL
+          AND text_source IN ('ocr', 'ocr_accessibility');
       CREATE INDEX IF NOT EXISTS idx_frames_pending_ocr
         ON frames(timestamp DESC)
         WHERE asset_path IS NOT NULL
@@ -2049,6 +2478,14 @@ class LocalStorage implements IStorage {
         ON frames(activity_session_id);
       CREATE INDEX IF NOT EXISTS idx_frames_session
         ON frames(session_id);
+      CREATE INDEX IF NOT EXISTS idx_frames_meeting
+        ON frames(meeting_id);
+      -- Partial index for the MeetingBuilder's "find unattached meeting
+      -- frames" query — covers the hot path without scanning the whole
+      -- frames table on every tick.
+      CREATE INDEX IF NOT EXISTS idx_frames_pending_meeting
+        ON frames(timestamp ASC)
+        WHERE entity_kind = 'meeting' AND meeting_id IS NULL;
     `);
 
     // 6. Drop redundant single-column indexes now subsumed by the new
@@ -2683,6 +3120,7 @@ interface RawFrameRow {
   entity_path: string | null;
   entity_kind: string | null;
   activity_session_id: string | null;
+  meeting_id: string | null;
   source_event_ids: string;
 }
 
@@ -2712,7 +3150,106 @@ function rowToFrame(r: RawFrameRow): Frame {
     entity_path: r.entity_path,
     entity_kind: (r.entity_kind as Frame['entity_kind']) ?? null,
     activity_session_id: r.activity_session_id,
+    meeting_id: r.meeting_id ?? null,
     source_event_ids: sourceEventIds,
+  };
+}
+
+interface RawMeetingRow {
+  id: string;
+  entity_path: string;
+  title: string | null;
+  platform: string;
+  started_at: string;
+  ended_at: string;
+  day: string;
+  duration_ms: number;
+  frame_count: number;
+  screenshot_count: number;
+  audio_chunk_count: number;
+  transcript_chars: number;
+  content_hash: string;
+  summary_status: string;
+  summary_md: string | null;
+  summary_json: string | null;
+  attendees_json: string;
+  links_json: string;
+  failure_reason: string | null;
+  updated_at: string;
+}
+
+function rowToMeeting(r: RawMeetingRow): Meeting {
+  let attendees: string[] = [];
+  let links: string[] = [];
+  let summaryJson: MeetingSummaryJson | null = null;
+  try {
+    const parsed = JSON.parse(r.attendees_json) as unknown;
+    if (Array.isArray(parsed)) {
+      attendees = parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    // tolerate corruption
+  }
+  try {
+    const parsed = JSON.parse(r.links_json) as unknown;
+    if (Array.isArray(parsed)) {
+      links = parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    // tolerate corruption
+  }
+  if (r.summary_json) {
+    try {
+      summaryJson = JSON.parse(r.summary_json) as MeetingSummaryJson;
+    } catch {
+      summaryJson = null;
+    }
+  }
+  return {
+    id: r.id,
+    entity_path: r.entity_path,
+    title: r.title ?? null,
+    platform: r.platform as MeetingPlatform,
+    started_at: r.started_at,
+    ended_at: r.ended_at,
+    day: r.day,
+    duration_ms: r.duration_ms,
+    frame_count: r.frame_count,
+    screenshot_count: r.screenshot_count,
+    audio_chunk_count: r.audio_chunk_count,
+    transcript_chars: r.transcript_chars,
+    content_hash: r.content_hash,
+    summary_status: r.summary_status as MeetingSummaryStatus,
+    summary_md: r.summary_md,
+    summary_json: summaryJson,
+    attendees,
+    links,
+    failure_reason: r.failure_reason,
+    updated_at: r.updated_at,
+  };
+}
+
+interface RawMeetingTurnRow {
+  id: number;
+  meeting_id: string;
+  t_start: string;
+  t_end: string;
+  speaker: string | null;
+  text: string;
+  visual_frame_id: string | null;
+  source: string;
+}
+
+function rowToMeetingTurn(r: RawMeetingTurnRow): MeetingTurn {
+  return {
+    id: r.id,
+    meeting_id: r.meeting_id,
+    t_start: r.t_start,
+    t_end: r.t_end,
+    speaker: r.speaker,
+    text: r.text,
+    visual_frame_id: r.visual_frame_id,
+    source: r.source as MeetingTurn['source'],
   };
 }
 

@@ -62,11 +62,12 @@ export function AppShell({
     const SCREEN_KEYS: Record<string, Screen> = {
       '1': 'dashboard',
       '2': 'timeline',
-      '3': 'search',
-      '4': 'chat',
-      '5': 'connect',
-      '6': 'settings',
-      '7': 'help',
+      '3': 'meetings',
+      '4': 'search',
+      '5': 'chat',
+      '6': 'connect',
+      '7': 'settings',
+      '8': 'help',
     };
 
     function onKey(e: KeyboardEvent) {
