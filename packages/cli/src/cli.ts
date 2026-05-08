@@ -14,6 +14,7 @@ import {
   findWorkspaceRoot,
 } from '@cofounderos/core';
 import {
+  assertHeavyWorkAllowed,
   buildOrchestrator,
   bootstrapModel,
   createRuntime,
@@ -243,6 +244,8 @@ ${JSON.stringify({ name: overview.model.name, isLocal: overview.model.isLocal },
 
 ## System
 load (1m):      ${formatLoad(overview.system.load)}
+memory:         ${formatMemoryPressure(overview.system.memory)}
+power:          ${formatPower(overview.system.power)}
 load_guard:     ${overview.system.loadGuardEnabled ? 'enabled' : 'disabled'}
 model jobs:     ${overview.system.backgroundModelJobs}
 
@@ -1308,6 +1311,7 @@ function scheduleDevFullReindex(
     const timer = setTimeout(() => {
       void (async () => {
         try {
+          assertHeavyWorkAllowed(handles, 'index-full-reindex');
           await runFullReindex(handles);
           await fsp.writeFile(markerPath, new Date().toISOString());
           log.info('dev full re-index complete');
@@ -1360,10 +1364,13 @@ async function cmdIndex(logger: ReturnType<typeof createLogger>, args: ParsedArg
   try {
     await ensureModelOrFallback(handles, args);
     if (reindex.full) {
+      assertHeavyWorkAllowed(handles, 'index-full-reindex');
       await runFullReindex(handles, reindex.range);
     } else if (args.flags.reorganise || args.flags.reorg) {
+      assertHeavyWorkAllowed(handles, 'index-reorganise');
       await runReorganisation(handles);
     } else {
+      assertHeavyWorkAllowed(handles, 'index-incremental');
       const result = await runIncremental(handles);
       // eslint-disable-next-line no-console
       console.log(`indexed ${result.eventsProcessed} events (${result.pagesCreated} created, ${result.pagesUpdated} updated)`);
@@ -1482,6 +1489,7 @@ async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs)
         embeddingModelName: handles.embeddingWorker.getModelName(),
         dataDir: handles.loaded.dataDir,
         triggerReindex: async () => {
+          assertHeavyWorkAllowed(handles, 'index-incremental');
           await runIncremental(handles);
         },
       });
@@ -1735,6 +1743,22 @@ function formatNextIncremental(lastRunIso: string | null | undefined, intervalMi
 function formatLoad(normalised: number | null): string {
   if (normalised == null) return 'n/a (unsupported on this platform)';
   return `${(normalised * 100).toFixed(0)}%`;
+}
+
+function formatMemoryPressure(memory: {
+  usedRatio: number;
+  freeMB: number;
+  totalMB: number;
+}): string {
+  return `${(memory.usedRatio * 100).toFixed(0)}% used (${memory.freeMB} MB free / ${memory.totalMB} MB)`;
+}
+
+function formatPower(power: {
+  source: 'ac' | 'battery' | 'unknown';
+  batteryPercent: number | null;
+}): string {
+  const pct = power.batteryPercent == null ? '' : ` (${power.batteryPercent}%)`;
+  return `${power.source}${pct}`;
 }
 
 function formatRecord(r: Record<string, number>): string {

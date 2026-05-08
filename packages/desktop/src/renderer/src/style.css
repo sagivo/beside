@@ -4,22 +4,23 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ────────────────────────────────────────────────────────────────────────
-   Design tokens
-   Warm neutral surface system with an indigo-violet brand. We keep all
-   shadcn-required token names so existing components Just Work, and add
-   a small set of new tokens (surfaces, gradients, shadows) the redesigned
-   shell uses to give the app a distinct, modern feel.
+   Design system v2 — deep-ink dark palette, vibrant brand gradient, real
+   glass surfaces, display-grade type scale. The light palette is kept as
+   a fallback for users who flip the theme, but the app is designed
+   dark-first now: gradients, screenshots, and translucent surfaces all
+   read more strongly against an ink background.
    ──────────────────────────────────────────────────────────────────── */
 :root {
-  --radius: 0.75rem;
+  --radius: 0.875rem;
 
-  /* Surfaces — three-layer system: page → card → elevated/raised */
+  /* Light surfaces (kept available for users who flip the toggle) */
   --background: oklch(0.985 0.005 285);
-  --foreground: oklch(0.18 0.018 285);
+  --foreground: oklch(0.16 0.018 285);
 
   --surface-1: oklch(1 0 0);
   --surface-2: oklch(0.972 0.006 285);
   --surface-raised: oklch(1 0 0);
+  --surface-glass: oklch(1 0 0 / 0.7);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -27,10 +28,9 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  /* Brand: indigo-violet gradient, distinct from stock shadcn blue */
-  --primary: oklch(0.55 0.22 285);
+  --primary: oklch(0.55 0.22 290);
   --primary-foreground: oklch(0.99 0 0);
-  --primary-soft: oklch(0.55 0.22 285 / 0.12);
+  --primary-soft: oklch(0.55 0.22 290 / 0.12);
 
   --secondary: oklch(0.96 0.006 285);
   --secondary-foreground: oklch(0.22 0.015 285);
@@ -52,7 +52,7 @@
 
   --border: oklch(0.92 0.005 285);
   --input: oklch(0.92 0.005 285);
-  --ring: oklch(0.55 0.22 285);
+  --ring: oklch(0.55 0.22 290);
 
   --sidebar: oklch(0.985 0.004 285);
   --sidebar-foreground: var(--foreground);
@@ -63,17 +63,17 @@
   --sidebar-border: oklch(0.93 0.005 285);
   --sidebar-ring: var(--ring);
 
-  --chart-1: oklch(0.55 0.22 285);
+  --chart-1: oklch(0.55 0.22 290);
   --chart-2: oklch(0.65 0.16 155);
   --chart-3: oklch(0.74 0.17 65);
   --chart-4: oklch(0.6 0.22 25);
   --chart-5: oklch(0.6 0.22 320);
 
-  /* Brand gradients — used by hero panels, the brand mark, hero CTA */
   --gradient-brand: linear-gradient(
     135deg,
-    oklch(0.62 0.22 295) 0%,
-    oklch(0.5 0.22 270) 100%
+    oklch(0.65 0.23 295) 0%,
+    oklch(0.5 0.22 270) 60%,
+    oklch(0.45 0.2 250) 100%
   );
   --gradient-brand-soft: linear-gradient(
     135deg,
@@ -82,7 +82,7 @@
   );
   --gradient-page: radial-gradient(
       ellipse 1100px 600px at 100% 0%,
-      oklch(0.55 0.22 285 / 0.05) 0%,
+      oklch(0.55 0.22 290 / 0.06) 0%,
       transparent 60%
     ),
     radial-gradient(
@@ -90,24 +90,36 @@
       oklch(0.55 0.2 220 / 0.04) 0%,
       transparent 60%
     );
+  --gradient-hero-live: linear-gradient(
+    135deg,
+    oklch(0.97 0.04 290) 0%,
+    oklch(0.96 0.04 240) 100%
+  );
 
-  /* Shadow scale — subtle, layered, warm */
   --shadow-xs: 0 1px 1px oklch(0.18 0.015 285 / 0.04);
   --shadow-card: 0 1px 2px oklch(0.18 0.015 285 / 0.04),
     0 1px 3px oklch(0.18 0.015 285 / 0.05);
-  --shadow-raised: 0 4px 12px oklch(0.18 0.015 285 / 0.06),
+  --shadow-raised: 0 4px 14px oklch(0.18 0.015 285 / 0.07),
     0 2px 4px oklch(0.18 0.015 285 / 0.05);
-  --shadow-pop: 0 12px 32px oklch(0.18 0.015 285 / 0.12),
-    0 4px 8px oklch(0.18 0.015 285 / 0.08);
+  --shadow-pop: 0 14px 34px oklch(0.18 0.015 285 / 0.14),
+    0 4px 10px oklch(0.18 0.015 285 / 0.08);
+  --shadow-glow: 0 0 0 1px oklch(0.55 0.22 290 / 0.18),
+    0 8px 28px oklch(0.55 0.22 290 / 0.18);
+
+  /* Type scale — display headlines for hero, normal flow for body */
+  --text-display: clamp(40px, 5.6vw, 64px);
+  --text-hero: clamp(28px, 3.4vw, 40px);
 }
 
 .dark {
-  --background: oklch(0.155 0.012 285);
+  /* Deep ink, near-black base. Single-most-impactful change to feel modern. */
+  --background: oklch(0.135 0.012 285);
   --foreground: oklch(0.97 0.005 285);
 
-  --surface-1: oklch(0.215 0.014 285);
-  --surface-2: oklch(0.245 0.016 285);
-  --surface-raised: oklch(0.255 0.018 287);
+  --surface-1: oklch(0.185 0.014 287);
+  --surface-2: oklch(0.215 0.016 290);
+  --surface-raised: oklch(0.235 0.018 290);
+  --surface-glass: oklch(0.185 0.014 287 / 0.6);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -115,69 +127,81 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  --primary: oklch(0.72 0.17 290);
-  --primary-foreground: oklch(0.18 0.018 285);
-  --primary-soft: oklch(0.72 0.17 290 / 0.16);
+  /* More vibrant brand on dark — pops off the ink background */
+  --primary: oklch(0.78 0.18 295);
+  --primary-foreground: oklch(0.135 0.012 285);
+  --primary-soft: oklch(0.78 0.18 295 / 0.16);
 
-  --secondary: oklch(0.275 0.014 285);
+  --secondary: oklch(0.255 0.014 285);
   --secondary-foreground: oklch(0.97 0.005 285);
 
-  --muted: oklch(0.265 0.014 285);
+  --muted: oklch(0.235 0.014 285);
   --muted-foreground: oklch(0.7 0.014 285);
 
-  --accent: oklch(0.3 0.025 290);
+  --accent: oklch(0.28 0.025 290);
   --accent-foreground: oklch(0.97 0.005 285);
 
   --destructive: oklch(0.7 0.19 22);
   --destructive-foreground: oklch(0.99 0 0);
 
-  --success: oklch(0.7 0.165 155);
-  --success-foreground: oklch(0.155 0.012 285);
+  --success: oklch(0.74 0.17 155);
+  --success-foreground: oklch(0.135 0.012 285);
 
-  --warning: oklch(0.78 0.17 65);
-  --warning-foreground: oklch(0.155 0.012 285);
+  --warning: oklch(0.82 0.17 75);
+  --warning-foreground: oklch(0.135 0.012 285);
 
-  --border: oklch(1 0 0 / 0.1);
-  --input: oklch(1 0 0 / 0.14);
-  --ring: oklch(0.72 0.17 290);
+  --border: oklch(1 0 0 / 0.08);
+  --input: oklch(1 0 0 / 0.12);
+  --ring: oklch(0.78 0.18 295);
 
-  --sidebar: oklch(0.19 0.014 285);
+  /* Sidebar is intentionally darker than the canvas, with a glass
+     overlay (see .glass-pane utility) so the page gradient bleeds through. */
+  --sidebar: oklch(0.115 0.011 285);
   --sidebar-foreground: oklch(0.97 0.005 285);
-  --sidebar-primary: oklch(0.72 0.17 290);
-  --sidebar-primary-foreground: oklch(0.18 0.018 285);
-  --sidebar-accent: oklch(0.28 0.03 290);
+  --sidebar-primary: oklch(0.78 0.18 295);
+  --sidebar-primary-foreground: oklch(0.135 0.012 285);
+  --sidebar-accent: oklch(0.27 0.04 295);
   --sidebar-accent-foreground: oklch(0.97 0.005 285);
-  --sidebar-border: oklch(1 0 0 / 0.08);
-  --sidebar-ring: oklch(0.72 0.17 290);
+  --sidebar-border: oklch(1 0 0 / 0.06);
+  --sidebar-ring: oklch(0.78 0.18 295);
 
   --gradient-brand: linear-gradient(
     135deg,
-    oklch(0.7 0.2 295) 0%,
-    oklch(0.55 0.22 270) 100%
+    oklch(0.82 0.2 305) 0%,
+    oklch(0.62 0.22 280) 55%,
+    oklch(0.52 0.22 250) 100%
   );
   --gradient-brand-soft: linear-gradient(
     135deg,
-    oklch(0.32 0.06 290) 0%,
-    oklch(0.28 0.05 240) 100%
+    oklch(0.32 0.06 295) 0%,
+    oklch(0.27 0.05 250) 100%
   );
   --gradient-page: radial-gradient(
-      ellipse 1100px 600px at 100% 0%,
-      oklch(0.72 0.2 290 / 0.08) 0%,
+      ellipse 1200px 700px at 100% -10%,
+      oklch(0.78 0.18 300 / 0.13) 0%,
       transparent 55%
     ),
     radial-gradient(
-      ellipse 800px 500px at 0% 100%,
-      oklch(0.55 0.22 220 / 0.05) 0%,
+      ellipse 900px 600px at -5% 110%,
+      oklch(0.55 0.22 220 / 0.1) 0%,
       transparent 60%
     );
+  --gradient-hero-live: linear-gradient(
+    135deg,
+    oklch(0.78 0.18 300 / 0.22) 0%,
+    oklch(0.5 0.22 240 / 0.15) 60%,
+    transparent 100%
+  );
 
-  --shadow-xs: 0 1px 1px oklch(0 0 0 / 0.2);
-  --shadow-card: 0 1px 2px oklch(0 0 0 / 0.25),
-    0 1px 3px oklch(0 0 0 / 0.3);
-  --shadow-raised: 0 4px 12px oklch(0 0 0 / 0.35),
-    0 2px 4px oklch(0 0 0 / 0.25);
-  --shadow-pop: 0 12px 32px oklch(0 0 0 / 0.5),
-    0 4px 8px oklch(0 0 0 / 0.3);
+  --shadow-xs: 0 1px 1px oklch(0 0 0 / 0.4);
+  --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3),
+    0 2px 6px oklch(0 0 0 / 0.35);
+  --shadow-raised: 0 6px 18px oklch(0 0 0 / 0.45),
+    0 2px 6px oklch(0 0 0 / 0.3);
+  --shadow-pop: 0 18px 40px oklch(0 0 0 / 0.55),
+    0 6px 14px oklch(0 0 0 / 0.4);
+  --shadow-glow: 0 0 0 1px oklch(0.78 0.18 295 / 0.3),
+    0 12px 36px oklch(0.78 0.18 295 / 0.25);
 }
 
 @theme inline {
@@ -187,6 +211,7 @@
   --color-surface-1: var(--surface-1);
   --color-surface-2: var(--surface-2);
   --color-surface-raised: var(--surface-raised);
+  --color-surface-glass: var(--surface-glass);
 
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -245,9 +270,11 @@
   --shadow-card: var(--shadow-card);
   --shadow-raised: var(--shadow-raised);
   --shadow-pop: var(--shadow-pop);
+  --shadow-glow: var(--shadow-glow);
 
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --font-display: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 @layer base {
@@ -259,7 +286,7 @@
     @apply text-foreground antialiased;
     font-family: var(--font-sans);
     font-size: 14px;
-    font-feature-settings: "cv11", "ss01", "ss03";
+    font-feature-settings: "cv11", "ss01", "ss03", "ss04";
   }
   body {
     margin: 0;
@@ -269,8 +296,28 @@
     background-repeat: no-repeat;
     background-size: 100% 100%;
   }
-  h1, h2, h3 {
-    letter-spacing: -0.01em;
+  /* Subtle grain layer for tactile depth — barely visible but kills the
+     "flat shadcn template" feel. SVG noise inlined to avoid an http hit. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    background-size: 180px 180px;
+  }
+  .dark body::before {
+    opacity: 0.05;
+  }
+  h1, h2, h3, h4 {
+    letter-spacing: -0.018em;
+  }
+  /* Selection in the brand colour rather than browser default */
+  ::selection {
+    background: oklch(from var(--primary) l c h / 0.32);
+    color: var(--foreground);
   }
 }
 
@@ -281,19 +328,20 @@
 .app-no-drag {
   -webkit-app-region: no-drag;
 }
-
-/* macOS traffic-light spacer */
 .titlebar-spacer-mac {
   width: 78px;
   flex-shrink: 0;
 }
 
-/* Brand gradient utilities — referenced inline by BrandMark, hero panels, etc. */
+/* Brand surface utilities */
 .bg-gradient-brand {
   background-image: var(--gradient-brand);
 }
 .bg-gradient-brand-soft {
   background-image: var(--gradient-brand-soft);
+}
+.bg-gradient-hero-live {
+  background-image: var(--gradient-hero-live);
 }
 .text-gradient-brand {
   background-image: var(--gradient-brand);
@@ -302,8 +350,7 @@
   color: transparent;
 }
 
-/* Brand-gradient primary button — gradient surface, soft hover lift, white text.
-   Use on hero CTAs that should feel like the most important action on screen. */
+/* Brand-gradient primary CTA */
 .btn-brand {
   background-image: var(--gradient-brand);
   color: white;
@@ -311,15 +358,45 @@
   transition: box-shadow 150ms ease, transform 150ms ease, filter 150ms ease;
 }
 .btn-brand:hover {
-  filter: brightness(1.05) saturate(1.05);
-  box-shadow: var(--shadow-raised);
+  filter: brightness(1.06) saturate(1.05);
+  box-shadow: var(--shadow-glow);
 }
 .btn-brand:active {
-  filter: brightness(0.97);
+  filter: brightness(0.96);
   transform: translateY(1px);
 }
 
-/* Refined scrollbars: thinner, more subtle */
+/* True frosted-glass surface — used for sidebar and floating overlays.
+   Falls back to a solid surface where backdrop-filter isn't supported. */
+.glass-pane {
+  background-color: var(--surface-glass);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .glass-pane {
+    background-color: var(--surface-1);
+  }
+}
+
+/* Display typography */
+.text-display {
+  font-size: var(--text-display);
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+  font-weight: 600;
+}
+.text-hero {
+  font-size: var(--text-hero);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Refined scrollbars */
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -339,11 +416,34 @@
   background-clip: content-box;
 }
 
-/* Ambient pulse used by status indicators */
+/* Hide scrollbars where we explicitly want a clean horizontal strip */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+/* Animations */
 @keyframes pulse-soft {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
 .pulse-soft {
   animation: pulse-soft 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    oklch(from var(--foreground) l c h / 0.06) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
 }

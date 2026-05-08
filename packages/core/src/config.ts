@@ -266,7 +266,11 @@ const IndexSchema = z.object({
   // a user explicitly opts back into always-on organisation.
   incremental_interval_min: z.number().int().positive().default(30),
   reorganise_schedule: z.string().default('0 2 * * *'),
+  // When true, idle-on-power catch-up may run the expensive indexing
+  // leg after deterministic capture processing has drained.
   reorganise_on_idle: z.boolean().default(true),
+  // Minutes of OS idle time before the idle-on-power catch-up path
+  // wakes deferred heavy work.
   idle_trigger_min: z.number().int().positive().default(10),
   batch_size: z.number().int().positive().default(50),
   // Activity sessions (V2). The SessionBuilder groups frames into
@@ -395,14 +399,15 @@ const IndexSchema = z.object({
  * System-level guards that apply across layers. `background_model_jobs`
  * controls whether scheduled LLM/embedding work runs automatically at
  * all. The `load_guard` then skips any enabled heavy scheduled work
- * (incremental index, reorganise, vacuum) when the machine is already
- * under load, so CofounderOS never competes with foreground tasks.
+ * (OCR, Whisper transcription, embeddings, index maintenance, meeting
+ * summaries, vacuum) when the machine is already under load or low on
+ * battery, so CofounderOS never competes with foreground tasks.
  *
  * The signal is the 1-minute load average normalised by CPU count. A
  * threshold of `0.7` means: skip when the box has been running at >=70%
- * of its cores for the last minute. Cheap jobs (frame builder, OCR,
- * entity resolver) are *not* gated — they're small and keep search
- * results fresh.
+ * of its cores for the last minute. Cheap jobs (frame builder, entity
+ * resolver, session grouping) are *not* gated — they're small and keep
+ * the captured substrate fresh.
  *
  * Note: `os.loadavg()` is not implemented on Windows (returns zeros);
  * the guard auto-disables there so we never block forever.
@@ -410,29 +415,40 @@ const IndexSchema = z.object({
 const SystemSchema = z.object({
   // `manual` keeps deterministic capture preparation (frames, OCR/AX
   // text, entities, sessions) fresh but does not run scheduled
-  // LLM/embedding jobs by itself. Chat, manual "Organize now", MCP
-  // reindex requests, and explicit meeting summarisation still use
-  // the model. Set `scheduled` for the old always-organising behavior.
+  // LLM/embedding jobs by itself. Chat still uses the model; manual
+  // "Organize now", MCP reindex requests, and explicit meeting
+  // summarisation run only when the resource guard allows heavy work.
+  // Set `scheduled` for the old always-organising behavior.
   background_model_jobs: z.enum(['manual', 'scheduled']).default('manual'),
   load_guard: z.object({
     enabled: z.boolean().default(true),
     // Normalised 1-min load average (loadavg[0] / cpuCount). 0.7 = 70%.
     threshold: z.number().positive().max(8).default(0.7),
-    // Hard cap on how long we'll keep deferring a single job. After this
-    // many consecutive skips, we run it anyway so the index can never
-    // fall arbitrarily far behind on a chronically busy machine.
-    max_consecutive_skips: z.number().int().nonnegative().default(6),
+    // Approximate used/total memory ratio. 0.9 = skip heavy work when
+    // the machine has less than ~10% free memory.
+    memory_threshold: z.number().positive().max(1).default(0.9),
+    // Battery percentage below which heavy work is deferred while
+    // unplugged. 0 disables the low-battery brake.
+    low_battery_threshold_pct: z.number().int().min(0).max(100).default(25),
+    // Legacy CPU-only safety valve. 0 means never force background work
+    // while overloaded; low-battery and memory-pressure skips are never
+    // forced regardless of this value.
+    max_consecutive_skips: z.number().int().nonnegative().default(0),
   }).default({
     enabled: true,
     threshold: 0.7,
-    max_consecutive_skips: 6,
+    memory_threshold: 0.9,
+    low_battery_threshold_pct: 25,
+    max_consecutive_skips: 0,
   }),
 }).default({
   background_model_jobs: 'manual',
   load_guard: {
     enabled: true,
     threshold: 0.7,
-    max_consecutive_skips: 6,
+    memory_threshold: 0.9,
+    low_battery_threshold_pct: 25,
+    max_consecutive_skips: 0,
   },
 });
 
@@ -589,8 +605,8 @@ index:
   index_path: ~/.cofounderOS/index
   incremental_interval_min: 30     # used only when system.background_model_jobs: scheduled
   reorganise_schedule: "0 2 * * *"
-  reorganise_on_idle: true
-  idle_trigger_min: 10
+  reorganise_on_idle: true         # allow idle-on-power catch-up to run expensive indexing work
+  idle_trigger_min: 10             # minutes idle before deferred heavy work wakes
   batch_size: 50
   # Activity sessions (V2). Frames separated by a gap larger than
   # idle_threshold_sec start a new session. afk_threshold_sec is the
@@ -654,13 +670,17 @@ system:
   # summarize meeting, chat/search explanations). Set to \`scheduled\`
   # for always-on background organization.
   background_model_jobs: manual
-  # Skip heavy scheduled work (indexing, reorganise, vacuum) when the
-  # machine is already busy, so CofounderOS never competes with your
-  # foreground apps. Disable to always run on schedule.
+  # Skip heavy work (OCR, Whisper audio transcription, embeddings,
+  # indexing, meeting summaries, and vacuum) when the machine is already
+  # busy or low on battery, so CofounderOS never competes with your
+  # foreground apps. Screenshots and raw audio recording continue; the
+  # expensive processing catches up later when idle on wall power.
   load_guard:
     enabled: true
     threshold: 0.7              # normalised 1-min load (loadavg / cpu_count)
-    max_consecutive_skips: 6    # safety valve — run anyway after this many skips
+    memory_threshold: 0.9       # skip when used memory is at/above 90%
+    low_battery_threshold_pct: 25 # skip while unplugged below this battery %
+    max_consecutive_skips: 0    # 0 = never force a CPU-overload run
 
 # Layer 4 — Export
 export:

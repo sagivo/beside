@@ -23,6 +23,7 @@ import type {
 import {
   bootstrapModel,
   buildOrchestrator,
+  assertHeavyWorkAllowed,
   runFullReindex,
   runIncremental,
   runReorganisation,
@@ -70,6 +71,15 @@ export interface RuntimeOverview {
   backgroundJobs: RuntimeBackgroundJobStatus[];
   system: {
     load: number | null;
+    memory: {
+      totalMB: number;
+      freeMB: number;
+      usedRatio: number;
+    };
+    power: {
+      source: 'ac' | 'battery' | 'unknown';
+      batteryPercent: number | null;
+    };
     loadGuardEnabled: boolean;
     backgroundModelJobs: 'manual' | 'scheduled';
     overviewGeneratedAt: string;
@@ -334,7 +344,7 @@ export class CofounderRuntime {
       ));
       const modelInfo = timedSync('modelInfo', () => handles.model.getModelInfo());
       const ready = await timed('modelAvailability', () => handles.model.isAvailable().catch(() => false));
-      const load = timedSync('loadGuard', () => handles.loadGuard.snapshot().normalised);
+      const loadSnapshot = timedSync('loadGuard', () => handles.loadGuard.snapshot());
       const exports = timedSync('exports', () => handles.exports.map((exp) => exp.getStatus()));
       const backgroundJobs = timedSync('backgroundJobs', () => getBackgroundJobs(handles));
       const overviewDurationMs = Date.now() - buildStartedAt;
@@ -361,7 +371,9 @@ export class CofounderRuntime {
         exports,
         backgroundJobs,
         system: {
-          load,
+          load: loadSnapshot.normalised,
+          memory: loadSnapshot.memory,
+          power: loadSnapshot.power,
           loadGuardEnabled: handles.config.system.load_guard.enabled,
           backgroundModelJobs: handles.config.system.background_model_jobs,
           overviewGeneratedAt: new Date().toISOString(),
@@ -415,7 +427,14 @@ export class CofounderRuntime {
         backgroundJobs: getBackgroundJobs(handles),
         system: {
           ...cached.system,
-          load: handles.loadGuard.snapshot().normalised,
+          ...(() => {
+            const snapshot = handles.loadGuard.snapshot();
+            return {
+              load: snapshot.normalised,
+              memory: snapshot.memory,
+              power: snapshot.power,
+            };
+          })(),
           overviewGeneratedAt: new Date().toISOString(),
           overviewDurationMs,
           overviewMode: 'fast',
@@ -794,19 +813,28 @@ export class CofounderRuntime {
 
   async triggerIndex(): Promise<void> {
     await this.runManualJob('index-incremental', async () => {
-      await this.withHandles((handles) => runIncremental(handles).then(() => undefined));
+      await this.withHandles((handles) => {
+        assertHeavyWorkAllowed(handles, 'index-incremental');
+        return runIncremental(handles).then(() => undefined);
+      });
     });
   }
 
   async triggerReorganise(): Promise<void> {
     await this.runManualJob('index-reorganise', async () => {
-      await this.withHandles((handles) => runReorganisation(handles));
+      await this.withHandles((handles) => {
+        assertHeavyWorkAllowed(handles, 'index-reorganise');
+        return runReorganisation(handles);
+      });
     });
   }
 
   async triggerFullReindex(opts: { from?: string; to?: string } = {}): Promise<void> {
     await this.runManualJob('index-full-reindex', async () => {
-      await this.withHandles((handles) => runFullReindex(handles, opts));
+      await this.withHandles((handles) => {
+        assertHeavyWorkAllowed(handles, 'index-full-reindex');
+        return runFullReindex(handles, opts);
+      });
     });
   }
 

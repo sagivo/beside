@@ -33,7 +33,7 @@ export interface McpServices {
   summarizeMeeting?: (
     meetingId: string,
     opts?: { force?: boolean },
-  ) => Promise<{ status: 'ok' | 'failed' | 'not_found'; message?: string }>;
+  ) => Promise<{ status: 'ok' | 'failed' | 'not_found' | 'deferred'; message?: string }>;
 }
 
 export interface McpServerOptions {

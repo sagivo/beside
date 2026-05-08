@@ -143,6 +143,15 @@ export interface RuntimeOverview {
   backgroundJobs?: RuntimeBackgroundJobStatus[];
   system?: {
     load?: number | null;
+    memory?: {
+      totalMB: number;
+      freeMB: number;
+      usedRatio: number;
+    };
+    power?: {
+      source: 'ac' | 'battery' | 'unknown';
+      batteryPercent: number | null;
+    };
     loadGuardEnabled?: boolean;
     backgroundModelJobs?: 'manual' | 'scheduled';
     overviewGeneratedAt?: string;

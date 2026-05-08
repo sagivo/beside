@@ -342,6 +342,24 @@ export class OcrWorker {
     };
   }
 
+  async drain(maxTicks = 1000): Promise<OcrWorkerResult> {
+    const total: OcrWorkerResult = { processed: 0, failed: 0, remaining: 0 };
+    for (let i = 0; i < maxTicks; i++) {
+      const r = await this.tick();
+      total.processed += r.processed;
+      total.failed += r.failed;
+      total.remaining = r.remaining;
+      const touched = r.processed + r.failed;
+      if (touched === 0) break;
+      // If a tick only failed, there may have been no durable progress
+      // (for example, tesseract.js failed to initialise). Avoid a tight
+      // retry loop and let a later scheduler beat try again.
+      if (r.processed === 0) break;
+      if (touched < this.batchSize) break;
+    }
+    return total;
+  }
+
   async stop(): Promise<void> {
     this.terminating = true;
     const w = await this.workerPromise;

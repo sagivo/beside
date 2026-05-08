@@ -20,7 +20,10 @@ function readPreference(): ThemePreference {
   } catch {
     /* ignore */
   }
-  return 'auto';
+  // The redesign is dark-first: the gradient brand, screenshot thumbnails,
+  // and translucent sidebar all read more strongly on a deep ink background.
+  // Users who prefer light mode can flip in Settings → General.
+  return 'dark';
 }
 
 function applyTheme(resolved: ResolvedTheme): void {

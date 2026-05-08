@@ -114,8 +114,11 @@ export function AppShell({
   const helpHasUnread = useHasUnreadChangelog();
 
   return (
+    // The body owns the canvas (solid + gradient + grain). The shell is
+    // transparent so the page gradient bleeds through, which is what makes
+    // the frosted sidebar feel real.
     <div
-      className="flex h-screen overflow-hidden bg-background text-foreground"
+      className="flex h-screen overflow-hidden text-foreground"
       style={sidebarWidthVar}
     >
       <Sidebar

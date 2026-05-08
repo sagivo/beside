@@ -7,13 +7,24 @@ export interface LoadGuardConfig {
   enabled: boolean;
   threshold: number;
   max_consecutive_skips: number;
+  low_battery_threshold_pct?: number;
+  memory_threshold?: number;
 }
 
 export interface PowerState {
-  /** "ac" | "battery" | "unknown" — null when we couldn't read the source. */
+  /** "ac" | "battery" | "unknown" — unknown when we couldn't read the source. */
   source: 'ac' | 'battery' | 'unknown';
   /** Battery percentage 0–100, or null when unknown / desktop without battery. */
   batteryPercent: number | null;
+}
+
+export interface MemoryState {
+  /** Total system memory in MiB. */
+  totalMB: number;
+  /** Best-effort free system memory in MiB. */
+  freeMB: number;
+  /** Approximate used/total ratio in [0, 1]. */
+  usedRatio: number;
 }
 
 export interface LoadSnapshot {
@@ -25,6 +36,23 @@ export interface LoadSnapshot {
   normalised: number | null;
   /** Power source + battery level. Used to defer heavy jobs when on battery + low. */
   power: PowerState;
+  /** Best-effort memory pressure snapshot. */
+  memory: MemoryState;
+}
+
+export interface LoadGuardCheckOptions {
+  /**
+   * Require wall power before proceeding. `unknown` is treated as OK so
+   * desktop machines and platforms without a battery API can still run
+   * idle catch-up work.
+   */
+  requireAcPower?: boolean;
+  /**
+   * Whether the legacy max_consecutive_skips safety valve may force a
+   * CPU-overload run. Low-battery and memory-pressure skips are never
+   * forced.
+   */
+  allowForced?: boolean;
 }
 
 export interface LoadGuardDecision {
@@ -37,7 +65,9 @@ export interface LoadGuardDecision {
     | 'under-threshold'
     | 'forced-after-skips'
     | 'over-threshold'
-    | 'on-battery-low';
+    | 'on-battery-low'
+    | 'on-battery'
+    | 'memory-pressure';
   snapshot: LoadSnapshot;
 }
 
@@ -50,10 +80,13 @@ export interface LoadGuardDecision {
  * battery on background work.
  */
 const ON_BATTERY_LOW_PCT = 25;
+const DEFAULT_MEMORY_THRESHOLD = 0.9;
 
 /** Cache the power-source read briefly so we don't shell out per check. */
 const POWER_CACHE_TTL_MS = 30_000;
 let cachedPower: { value: PowerState; readAt: number } | null = null;
+const MEMORY_CACHE_TTL_MS = 10_000;
+let cachedMemory: { value: MemoryState; readAt: number } | null = null;
 
 function readPowerStateRaw(): PowerState {
   if (process.platform === 'darwin') {
@@ -128,6 +161,76 @@ function readPowerState(): PowerState {
   return value;
 }
 
+function memoryStateFromBytes(totalBytes: number, availableBytes: number): MemoryState {
+  const total = Math.max(1, totalBytes);
+  const available = Math.max(0, Math.min(total, availableBytes));
+  return {
+    totalMB: Math.round(total / (1024 * 1024)),
+    freeMB: Math.round(available / (1024 * 1024)),
+    usedRatio: 1 - available / total,
+  };
+}
+
+function readMemoryStateRaw(): MemoryState {
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('/usr/bin/vm_stat', [], {
+        encoding: 'utf8',
+        timeout: 1500,
+      });
+      const pageSize = parseInt(out.match(/page size of (\d+) bytes/i)?.[1] ?? '', 10);
+      const pages = (label: string): number => {
+        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const match = out.match(new RegExp(`${escaped}:\\s+(\\d+)\\.`));
+        return match ? parseInt(match[1]!, 10) : 0;
+      };
+      if (Number.isFinite(pageSize) && pageSize > 0) {
+        // Inactive/speculative pages are reclaimable, so treating them
+        // as unavailable would make healthy macOS systems look memory
+        // pressured all the time.
+        const availablePages =
+          pages('Pages free') +
+          pages('Pages inactive') +
+          pages('Pages speculative');
+        return memoryStateFromBytes(os.totalmem(), availablePages * pageSize);
+      }
+    } catch {
+      // Fall back to Node's portable signal below.
+    }
+  }
+
+  if (process.platform === 'linux') {
+    try {
+      const meminfo = fs.readFileSync('/proc/meminfo', 'utf8');
+      const kb = (label: string): number | null => {
+        const match = meminfo.match(new RegExp(`^${label}:\\s+(\\d+)\\s+kB`, 'm'));
+        return match ? parseInt(match[1]!, 10) : null;
+      };
+      const totalKb = kb('MemTotal');
+      const availableKb = kb('MemAvailable');
+      if (totalKb != null && availableKb != null) {
+        return memoryStateFromBytes(totalKb * 1024, availableKb * 1024);
+      }
+    } catch {
+      // Fall back to Node's portable signal below.
+    }
+  }
+
+  const totalBytes = Math.max(1, os.totalmem());
+  const freeBytes = Math.max(0, Math.min(totalBytes, os.freemem()));
+  return memoryStateFromBytes(totalBytes, freeBytes);
+}
+
+function readMemoryState(): MemoryState {
+  const now = Date.now();
+  if (cachedMemory && now - cachedMemory.readAt < MEMORY_CACHE_TTL_MS) {
+    return cachedMemory.value;
+  }
+  const value = readMemoryStateRaw();
+  cachedMemory = { value, readAt: now };
+  return value;
+}
+
 /**
  * Per-job throttle that defers heavy work when the machine is busy.
  *
@@ -138,9 +241,10 @@ function readPowerState(): PowerState {
  * warn — the right Windows signal would be a perf counter, which is a
  * separate piece of work.
  *
- * Each job (incremental index, reorganise, vacuum) has its own counter so
- * one chronically-skipped job doesn't starve the others when we hit the
- * `max_consecutive_skips` safety valve.
+ * Each job has its own counter for the legacy CPU-only
+ * `max_consecutive_skips` safety valve. Low-battery and memory-pressure
+ * skips are hard deferrals, and the default config sets the CPU safety
+ * valve to 0 so background work never forces itself onto a busy machine.
  */
 export class LoadGuard {
   private readonly cfg: LoadGuardConfig;
@@ -164,14 +268,23 @@ export class LoadGuard {
         ? oneMin
         : null;
     const normalised = loadavg1 == null ? null : loadavg1 / cpuCount;
-    return { loadavg1, cpuCount, normalised, power: readPowerState() };
+    return {
+      loadavg1,
+      cpuCount,
+      normalised,
+      power: readPowerState(),
+      memory: readMemoryState(),
+    };
   }
 
   /**
    * Decide whether `jobName` should run right now. Updates the per-job
    * skip counter as a side effect so the safety valve works.
    */
-  check(jobName: string): LoadGuardDecision {
+  check(
+    jobName: string,
+    opts: LoadGuardCheckOptions = {},
+  ): LoadGuardDecision {
     const snapshot = this.snapshot();
 
     if (!this.cfg.enabled) {
@@ -179,23 +292,31 @@ export class LoadGuard {
       return { proceed: true, reason: 'disabled', snapshot };
     }
 
-    // Battery brake: when the user is unplugged with low battery, defer
-    // heavy jobs the same way we defer them when load is high. Same
-    // per-job skip counter applies, so the safety valve still forces
-    // a run after `max_consecutive_skips` deferrals — we never starve
-    // a job indefinitely just because the laptop stayed unplugged.
+    if (opts.requireAcPower && snapshot.power.source === 'battery') {
+      this.skipCounts.set(jobName, 0);
+      return { proceed: false, reason: 'on-battery', snapshot };
+    }
+
+    const lowBatteryThreshold =
+      this.cfg.low_battery_threshold_pct ?? ON_BATTERY_LOW_PCT;
+    // Battery brake: when the user is unplugged with low battery,
+    // defer heavy jobs indefinitely. Capture/audio recording continues
+    // elsewhere; this guard only stops derived compute such as OCR,
+    // Whisper, embeddings, and indexing.
     if (
+      lowBatteryThreshold > 0 &&
       snapshot.power.source === 'battery' &&
       snapshot.power.batteryPercent != null &&
-      snapshot.power.batteryPercent < ON_BATTERY_LOW_PCT
+      snapshot.power.batteryPercent < lowBatteryThreshold
     ) {
-      const skips = (this.skipCounts.get(jobName) ?? 0) + 1;
-      if (skips > this.cfg.max_consecutive_skips) {
-        this.skipCounts.set(jobName, 0);
-        return { proceed: true, reason: 'forced-after-skips', snapshot };
-      }
-      this.skipCounts.set(jobName, skips);
+      this.skipCounts.set(jobName, 0);
       return { proceed: false, reason: 'on-battery-low', snapshot };
+    }
+
+    const memoryThreshold = this.cfg.memory_threshold ?? DEFAULT_MEMORY_THRESHOLD;
+    if (memoryThreshold > 0 && snapshot.memory.usedRatio >= memoryThreshold) {
+      this.skipCounts.set(jobName, 0);
+      return { proceed: false, reason: 'memory-pressure', snapshot };
     }
 
     if (snapshot.normalised == null) {
@@ -215,7 +336,9 @@ export class LoadGuard {
     }
 
     const skips = (this.skipCounts.get(jobName) ?? 0) + 1;
-    if (skips > this.cfg.max_consecutive_skips) {
+    const maxSkips = this.cfg.max_consecutive_skips ?? 0;
+    const allowForced = opts.allowForced ?? maxSkips > 0;
+    if (allowForced && maxSkips > 0 && skips > maxSkips) {
       this.skipCounts.set(jobName, 0);
       return { proceed: true, reason: 'forced-after-skips', snapshot };
     }

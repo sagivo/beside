@@ -21,6 +21,7 @@ import {
   loadConfig,
   LoadGuard,
   type CofounderOSConfig,
+  type LoadGuardDecision,
   type LoadedConfig,
 } from '@cofounderos/core';
 import { FrameBuilder } from './frame-builder.js';
@@ -75,6 +76,7 @@ export interface OrchestratorHandles {
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
   activityCoalescer: ActivityCoalescer;
+  idlePowerCatchup: IdlePowerCatchup;
 }
 
 const INCREMENTAL_JOB = 'index-incremental';
@@ -108,6 +110,7 @@ const MEETING_SUMMARIZER_JOB = 'meeting-summarizer';
 const MEETING_SUMMARIZER_INTERVAL_MS = 5 * 60_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
+const IDLE_POWER_CATCHUP_JOB = 'idle-power-catchup';
 const FULL_REINDEX_EVENT_BATCH_SIZE = 1000;
 
 /**
@@ -196,6 +199,80 @@ class ActivityCoalescer {
       })
       .finally(() => {
         this.running = false;
+      });
+  }
+}
+
+/**
+ * Runs deferred heavy work only after the computer has been idle for the
+ * configured window and is not on battery power. Capture continues to
+ * collect screenshots/audio while this waits; this class only wakes the
+ * expensive derived pipeline.
+ */
+class IdlePowerCatchup {
+  private timer: NodeJS.Timeout | null = null;
+  private idle = false;
+  private running = false;
+  private unsubscribe: (() => void) | null = null;
+  private stopped = false;
+
+  constructor(
+    private readonly bus: RawEventBus,
+    private readonly logger: Logger,
+    private readonly idleDelayMs: number,
+    private readonly run: () => Promise<void>,
+  ) {}
+
+  start(): void {
+    if (this.unsubscribe || this.stopped) return;
+    this.unsubscribe = this.bus.on((event) => this.onEvent(event));
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+    this.clearTimer();
+    this.idle = false;
+  }
+
+  private onEvent(event: RawEvent): void {
+    if (this.stopped) return;
+    if (event.type === 'idle_start') {
+      this.idle = true;
+      this.schedule();
+    } else if (event.type === 'idle_end') {
+      this.idle = false;
+      this.clearTimer();
+    }
+  }
+
+  private schedule(): void {
+    this.clearTimer();
+    if (!this.idle || this.stopped) return;
+    this.timer = setTimeout(() => this.fire(), this.idleDelayMs);
+  }
+
+  private clearTimer(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private fire(): void {
+    this.clearTimer();
+    if (!this.idle || this.running || this.stopped) return;
+    this.running = true;
+    void this.run()
+      .catch((err) => {
+        this.logger.warn('idle power catch-up failed', { err: String(err) });
+      })
+      .finally(() => {
+        this.running = false;
+        if (this.idle && !this.stopped) this.schedule();
       });
   }
 }
@@ -351,6 +428,16 @@ export async function buildOrchestrator(
     summarizeMeeting: async (meetingId, opts) => {
       const meeting = await storage.getMeeting(meetingId);
       if (!meeting) return { status: 'not_found', message: `meeting ${meetingId} not found` };
+      const decision = loadGuard.check(MEETING_SUMMARIZER_JOB, { allowForced: false });
+      if (!decision.proceed) {
+        if (opts?.force || meeting.summary_status === 'failed' || meeting.summary_status === 'skipped_short') {
+          await storage.setMeetingSummary(meetingId, { status: 'pending', failureReason: null });
+        }
+        return {
+          status: 'deferred',
+          message: `meeting summarization deferred: ${describeLoadGuardDecision(decision, config)}`,
+        };
+      }
       // `force` clears the existing summary so the next summarizer
       // tick treats it as pending again. We don't run the summarizer
       // synchronously here so an MCP client doesn't time out behind a
@@ -458,14 +545,28 @@ export async function buildOrchestrator(
       // Embedding worker runs the LLM; gate it the same way
       // `scheduleAll` does (load guard + index-maintenance lock) so
       // the coalescer never fights the user during heavy work.
-      const decision = loadGuard.check(EMBEDDING_WORKER_JOB);
-      if (!decision.proceed) return;
+      const decision = loadGuard.check(EMBEDDING_WORKER_JOB, { allowForced: false });
+      if (!decision.proceed) {
+        logGuardSkip(logger, EMBEDDING_WORKER_JOB, decision, config);
+        return;
+      }
       if (await hasActiveIndexMaintenanceLock(loaded.dataDir)) return;
       await embeddingWorker.tick();
     },
   );
 
-  return {
+  let handlesRef: OrchestratorHandles | null = null;
+  const idlePowerCatchup = new IdlePowerCatchup(
+    bus,
+    logger.child(IDLE_POWER_CATCHUP_JOB),
+    config.index.idle_trigger_min * 60_000,
+    async () => {
+      if (!handlesRef) return;
+      await runIdlePowerCatchup(handlesRef);
+    },
+  );
+
+  const handles: OrchestratorHandles = {
     capture,
     storage,
     model,
@@ -489,7 +590,10 @@ export async function buildOrchestrator(
     vacuum,
     loadGuard,
     activityCoalescer,
+    idlePowerCatchup,
   };
+  handlesRef = handles;
+  return handles;
 }
 
 /**
@@ -826,28 +930,102 @@ function indexMaintenanceLockPath(dataDir: string): string {
   return path.join(dataDir, INDEX_MAINTENANCE_LOCK);
 }
 
+export function describeLoadGuardDecision(
+  decision: LoadGuardDecision,
+  config: CofounderOSConfig,
+): string {
+  const load = decision.snapshot.normalised;
+  const loadText = load == null ? 'unknown' : load.toFixed(2);
+  const memoryPct = Math.round(decision.snapshot.memory.usedRatio * 100);
+  const memoryThresholdPct = Math.round(config.system.load_guard.memory_threshold * 100);
+  const battery = decision.snapshot.power.batteryPercent;
+  switch (decision.reason) {
+    case 'on-battery-low':
+      return `battery is ${battery ?? 'unknown'}% while unplugged (threshold ${config.system.load_guard.low_battery_threshold_pct}%)`;
+    case 'on-battery':
+      return 'computer is on battery; waiting for wall power';
+    case 'memory-pressure':
+      return `memory pressure is ${memoryPct}% (threshold ${memoryThresholdPct}%)`;
+    case 'over-threshold':
+      return `CPU load is ${loadText} (threshold ${config.system.load_guard.threshold})`;
+    case 'unsupported-platform':
+      return 'platform does not expose load average';
+    default:
+      return decision.reason;
+  }
+}
+
+function logGuardSkip(
+  logger: Logger,
+  jobName: string,
+  decision: LoadGuardDecision,
+  config: CofounderOSConfig,
+): void {
+  logger.child(jobName).debug(`skipped — ${describeLoadGuardDecision(decision, config)}`, {
+    reason: decision.reason,
+    load: decision.snapshot.normalised,
+    memory_used_ratio: decision.snapshot.memory.usedRatio,
+    power_source: decision.snapshot.power.source,
+    battery_percent: decision.snapshot.power.batteryPercent,
+  });
+}
+
+export function assertHeavyWorkAllowed(handles: OrchestratorHandles, jobName: string): void {
+  const decision = handles.loadGuard.check(jobName, { allowForced: false });
+  if (decision.proceed) return;
+  throw new Error(`Heavy processing deferred: ${describeLoadGuardDecision(decision, handles.config)}`);
+}
+
+async function runIdlePowerCatchup(handles: OrchestratorHandles): Promise<void> {
+  const { scheduler, logger, loadGuard, config } = handles;
+  const decision = loadGuard.check(IDLE_POWER_CATCHUP_JOB, {
+    requireAcPower: true,
+    allowForced: false,
+  });
+  if (!decision.proceed) {
+    logGuardSkip(logger, IDLE_POWER_CATCHUP_JOB, decision, config);
+    return;
+  }
+  if (await hasActiveIndexMaintenanceLock(handles.loaded.dataDir)) {
+    logger.child(IDLE_POWER_CATCHUP_JOB).debug('skipped — index maintenance lock active');
+    return;
+  }
+
+  logger.child(IDLE_POWER_CATCHUP_JOB).info(
+    'idle on power; running deferred capture processing',
+  );
+  const runJob = async (name: string): Promise<void> => {
+    if (!scheduler.has(name)) return;
+    await scheduler.runNow(name);
+  };
+
+  await runJob(AUDIO_TRANSCRIPT_JOB);
+  await runJob(FRAME_BUILDER_JOB);
+  await runJob(OCR_WORKER_JOB);
+  await runJob(ENTITY_RESOLVER_JOB);
+  await runJob(SESSION_BUILDER_JOB);
+  await runJob(MEETING_BUILDER_JOB);
+
+  if (config.index.reorganise_on_idle) {
+    await runJob(INCREMENTAL_JOB);
+  } else {
+    await runJob(EMBEDDING_WORKER_JOB);
+  }
+  await runJob(MEETING_SUMMARIZER_JOB);
+}
+
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer } =
+  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer, idlePowerCatchup } =
     handles;
   const backgroundModelJobsScheduled = config.system.background_model_jobs === 'scheduled';
 
-  // Subscribe the coalescer to the bus so capture activity drives the
-  // worker chain reactively (debounced 60s settle / 4min max-wait).
-  // The scheduler.every entries below remain as backstops for long
-  // idle periods or out-of-band ingestion (CLI imports, etc.) but are
-  // intentionally stretched out — the coalescer dominates freshness.
-  activityCoalescer.start();
-
   // Wrap heavier jobs so they skip when the machine is busy. Cheap jobs
-  // (frame builder, OCR, entity resolver) are intentionally not gated —
-  // they're small and keep search results fresh on the order of seconds.
+  // (frame builder, entity resolver, session builder) are intentionally
+  // not gated — they're small and keep the captured substrate fresh.
   const guarded = (jobName: string, run: () => Promise<unknown>) => async () => {
-    const decision = loadGuard.check(jobName);
+    const decision = loadGuard.check(jobName, { allowForced: false });
     if (!decision.proceed) {
-      const load = decision.snapshot.normalised?.toFixed(2) ?? '?';
-      logger.child(jobName).debug(
-        `skipped — system load ${load} >= threshold ${config.system.load_guard.threshold}`,
-      );
+      logGuardSkip(logger, jobName, decision, config);
       return;
     }
     if (decision.reason === 'forced-after-skips') {
@@ -1003,6 +1181,13 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       skipDuringIndexMaintenance(REORG_JOB, guarded(REORG_JOB, () => runReorganisation(handles))),
     ),
   );
+
+  // Subscribe after all scheduler jobs are registered. Capture activity
+  // drives lightweight freshness via the coalescer; idle_start drives a
+  // separate catch-up path that only runs heavy jobs after the user is
+  // away and the machine is on wall power.
+  activityCoalescer.start();
+  idlePowerCatchup.start();
 }
 
 export async function startAll(handles: OrchestratorHandles): Promise<void> {
@@ -1016,6 +1201,7 @@ export async function startAll(handles: OrchestratorHandles): Promise<void> {
 export async function stopAll(handles: OrchestratorHandles): Promise<void> {
   // Tear the coalescer down before the scheduler so a pending debounce
   // can't fire after the workers have been shut down.
+  handles.idlePowerCatchup.stop();
   handles.activityCoalescer.stop();
   handles.scheduler.stop();
   for (const exp of handles.exports) {
