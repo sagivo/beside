@@ -50,6 +50,7 @@ class MarkdownExport implements IExport {
   private errorCount = 0;
   private services: MarkdownExportServices | null = null;
   private journalsRendered = new Set<string>();
+  private rootIndexCache: string | null = null;
 
   constructor(
     outDir: string,
@@ -97,7 +98,10 @@ class MarkdownExport implements IExport {
       await ensureDir(path.dirname(target));
       // We strip our internal metadata block — the export tree is for
       // humans / external agents, not for our own round-trip.
-      await fs.writeFile(target, this.prepareMarkdownForExport(page.content, target), 'utf8');
+      await this.writeTextIfChanged(
+        target,
+        this.prepareMarkdownForExport(page.content, target),
+      );
       await this.refreshRootIndex();
       this.lastSync = new Date().toISOString();
     } catch (err) {
@@ -162,7 +166,7 @@ class MarkdownExport implements IExport {
     if (options.enrich) {
       md = await this.maybeAddModelJournalNarrative(day, frames, sessions, md);
     }
-    await fs.writeFile(target, md, 'utf8');
+    await this.writeTextIfChanged(target, md);
     this.journalsRendered.add(day);
   }
 
@@ -212,6 +216,7 @@ class MarkdownExport implements IExport {
     await ensureDir(this.outDir);
 
     await this.clearMarkdownFiles(this.outDir);
+    this.rootIndexCache = null;
     await this.copyTree(_state.rootPath, this.outDir);
     await this.refreshRootIndex(strategy);
 
@@ -289,11 +294,24 @@ class MarkdownExport implements IExport {
     try {
       const target = path.join(this.outDir, 'index.md');
       const rootIndex = await strategy.readRootIndex();
-      await fs.writeFile(target, this.prepareMarkdownForExport(rootIndex, target), 'utf8');
+      const rendered = this.prepareMarkdownForExport(rootIndex, target);
+      if (rendered === this.rootIndexCache) return;
+      await fs.writeFile(target, rendered, 'utf8');
+      this.rootIndexCache = rendered;
     } catch (err) {
       this.errorCount += 1;
       this.logger.warn('root index export failed', { err: String(err) });
     }
+  }
+
+  private async writeTextIfChanged(target: string, text: string): Promise<boolean> {
+    try {
+      if ((await fs.readFile(target, 'utf8')) === text) return false;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    await fs.writeFile(target, text, 'utf8');
+    return true;
   }
 
   private prepareMarkdownForExport(text: string, target: string): string {

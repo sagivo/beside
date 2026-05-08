@@ -4,7 +4,10 @@ import ApplicationServices
 import AVFoundation
 import AudioToolbox
 import CoreAudio
+import CoreGraphics
+import ImageIO
 import ScreenCaptureKit
+import Vision
 
 struct HelperConfig: Decodable {
   var raw_root: String?
@@ -282,6 +285,15 @@ func runMacCapture(config: HelperConfig) {
   var lastUrl: String? = nil
   var lastSoftCaptureAt = Date.distantPast
   var pendingFocusCapture: PendingFocusCapture? = nil
+  // Throttle the periodic status emit. Previously fired every poll
+  // (every 3 s when active = 20/min), waking the Node-side stdout
+  // reader and recomputing memory via mach_task_basic_info each time.
+  // The status payload only carries memoryMB; the Node side already
+  // has its own status sources for capture counters. Cap to one emit
+  // every ~10 s plus one on memory delta > 8 MB.
+  var lastStatusEmitAt = Date.distantPast
+  var lastStatusMemoryMB = 0
+  let statusEmitMinInterval: TimeInterval = 10
 
   while true {
     while let command = readStdinLineNonBlocking() {
@@ -442,7 +454,15 @@ func runMacCapture(config: HelperConfig) {
       pendingFocusCapture = nil
     }
 
-    emit(["kind": "status", "cpuPercent": 0, "memoryMB": currentMemoryMB(), "storageBytesToday": 0])
+    let nowTs = Date()
+    if nowTs.timeIntervalSince(lastStatusEmitAt) >= statusEmitMinInterval {
+      let memMB = currentMemoryMB()
+      if abs(memMB - lastStatusMemoryMB) >= 8 || lastStatusEmitAt == Date.distantPast {
+        emit(["kind": "status", "cpuPercent": 0, "memoryMB": memMB, "storageBytesToday": 0])
+        lastStatusMemoryMB = memMB
+      }
+      lastStatusEmitAt = nowTs
+    }
     audioChunker.tick(paused: false)
     sysAudio?.tick()
     Thread.sleep(forTimeInterval: idle ? idlePollInterval : pollInterval)
@@ -466,7 +486,7 @@ func emitEvent(
   let now = Date()
   let event: [String: Any] = [
     "id": "evt_" + String(Int(now.timeIntervalSince1970 * 1000), radix: 36) + "_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
-    "timestamp": ISO8601DateFormatter().string(from: now),
+    "timestamp": DateFormatters.iso.string(from: now),
     "session_id": sessionId,
     "type": type,
     "app": app,
@@ -495,7 +515,7 @@ func queryActiveWindow(displays: [DisplayInfo]) -> ActiveWindow? {
   let title = window.flatMap { stringAttribute($0, kAXTitleAttribute) } ?? ""
   let bounds = window.flatMap { windowBounds($0) }
   let screenIndex = bounds.map { resolveScreenIndex(bounds: $0, displays: displays) } ?? 0
-  let url = browserUrl(appName: appName)
+  let url = browserUrl(appName: appName, pid: pid, title: title)
   return ActiveWindow(
     app: appName,
     bundleId: bundleId,
@@ -605,8 +625,18 @@ func captureScreenshots(
         "display_name": display.name,
         "native_capture_method": "screencapture",
         "requested_format": config.screenshot_format ?? "webp",
-        "actual_format": "jpeg"
+        "actual_format": asset.actualFormat ?? "jpeg",
+        "postprocessed_by": "capture-native-helper"
       ]
+      if let phash = asset.perceptualHash, !phash.isEmpty {
+        metadata["perceptual_hash"] = phash
+      }
+      if let ocrText = asset.visionText, !ocrText.isEmpty {
+        metadata["vision_text"] = ocrText
+        metadata["vision_text_chars"] = ocrText.count
+        if let d = asset.visionDurationMs { metadata["vision_text_duration_ms"] = d }
+        metadata["vision_engine"] = "apple-vision"
+      }
       if let ax {
         metadata["ax_text"] = ax.text
         metadata["ax_text_chars"] = ax.text.count
@@ -635,6 +665,124 @@ func captureScreenshots(
 struct ScreenshotAsset {
   let relativePath: String
   let bytes: Int
+  // Optional fields populated when the native helper does the
+  // resize/encode + perceptual-hash + OCR itself, so the Node side
+  // can skip its sharp re-encode and Tesseract worker.
+  let perceptualHash: String?
+  let actualFormat: String?
+  let visionText: String?
+  let visionDurationMs: Int?
+}
+
+/// Decode a JPEG file into a CGImage, optionally downsizing during
+/// decode via ImageIO's thumbnail path. ImageIO's thumbnail decoder is
+/// significantly faster than decoding the full image and resampling
+/// because it can skip JPEG MCUs above the target size, and on Apple
+/// Silicon the resample step uses Accelerate.
+func decodeJpeg(at path: String, maxDim: Int) -> CGImage? {
+  let url = URL(fileURLWithPath: path)
+  guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+  if maxDim > 0 {
+    let opts: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxDim
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+  }
+  return CGImageSourceCreateImageAtIndex(src, 0, nil)
+}
+
+/// Encode a CGImage as JPEG via ImageIO at the given quality (0.0–1.0).
+func encodeJpeg(_ image: CGImage, to path: String, quality: Double) -> Bool {
+  let url = URL(fileURLWithPath: path)
+  guard let dest = CGImageDestinationCreateWithURL(
+    url as CFURL,
+    "public.jpeg" as CFString,
+    1, nil
+  ) else { return false }
+  let q = max(0.0, min(1.0, quality))
+  let opts: [CFString: Any] = [
+    kCGImageDestinationLossyCompressionQuality: q
+  ]
+  CGImageDestinationAddImage(dest, image, opts as CFDictionary)
+  return CGImageDestinationFinalize(dest)
+}
+
+/// 64-bit dHash, exactly matching the Sharp implementation in
+/// plugins/capture/native/src/perceptual-hash.ts: resize to 9×8
+/// grayscale, compare horizontal pairs, bit set when left < right,
+/// row-major, then nibble-to-hex. The CGContext path on Apple Silicon
+/// resamples via Accelerate and is dramatically cheaper than booting
+/// a libvips pipeline for an 8×9 buffer.
+func computeDHashHex(_ image: CGImage) -> String {
+  let w = 9, h = 8
+  var pixels = [UInt8](repeating: 0, count: w * h)
+  let colorSpace = CGColorSpaceCreateDeviceGray()
+  guard let ctx = CGContext(
+    data: &pixels, width: w, height: h, bitsPerComponent: 8,
+    bytesPerRow: w, space: colorSpace,
+    bitmapInfo: CGImageAlphaInfo.none.rawValue
+  ) else { return "" }
+  ctx.interpolationQuality = .low
+  ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+  var bits = ""
+  bits.reserveCapacity(64)
+  for y in 0..<h {
+    for x in 0..<8 {
+      let left = pixels[y * w + x]
+      let right = pixels[y * w + x + 1]
+      bits.append(left < right ? "1" : "0")
+    }
+  }
+  var hex = ""
+  hex.reserveCapacity(16)
+  var i = bits.startIndex
+  while i < bits.endIndex {
+    let end = bits.index(i, offsetBy: 4, limitedBy: bits.endIndex) ?? bits.endIndex
+    if let n = Int(bits[i..<end], radix: 2) {
+      hex.append(String(n, radix: 16))
+    }
+    i = end
+  }
+  return hex
+}
+
+/// Run Apple Vision text recognition over a CGImage. Returns
+/// (text, durationMs) on success; nil when Vision is unavailable or
+/// the image yields no text. Vision on Apple Silicon executes on the
+/// Neural Engine, which is dramatically more power-efficient than
+/// Tesseract WASM running on the Node main thread.
+@available(macOS 13.0, *)
+func recognizeVisionText(_ image: CGImage, languages: [String]?) -> (text: String, durationMs: Int)? {
+  let started = Date()
+  let req = VNRecognizeTextRequest()
+  req.recognitionLevel = .accurate
+  req.usesLanguageCorrection = true
+  if let langs = languages, !langs.isEmpty {
+    req.recognitionLanguages = langs
+  }
+  let handler = VNImageRequestHandler(cgImage: image, options: [:])
+  do {
+    try handler.perform([req])
+  } catch {
+    return nil
+  }
+  guard let observations = req.results, !observations.isEmpty else {
+    return nil
+  }
+  var lines: [String] = []
+  lines.reserveCapacity(observations.count)
+  for obs in observations {
+    if let candidate = obs.topCandidates(1).first {
+      lines.append(candidate.string)
+    }
+  }
+  let text = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  if text.isEmpty { return nil }
+  return (text, Int(Date().timeIntervalSince(started) * 1000))
 }
 
 struct AccessibilityText {
@@ -719,8 +867,18 @@ func captureScreenshot(display: DisplayInfo, appName: String, config: HelperConf
   let time = timeString(now)
   let safeApp = safeFilename(appName)
   let suffix = display.index == 0 ? "" : "_s\(display.index)"
+
+  // screencapture always produces JPEG. macOS's CGImageDestination
+  // does not include a WebP encoder (only a decoder), so we cannot
+  // produce a final-format `.webp` asset here without bundling
+  // libwebp. We always write JPEG; the Node-side shim transcodes to
+  // WebP when the user requested it. What we *can* skip on the Node
+  // side: the Sharp dHash pass (we already emit a perceptual hash
+  // here) and the Tesseract OCR worker (we attach Vision OCR text
+  // here too).
   let relative = "raw/\(day)/screenshots/\(time)_\(safeApp)\(suffix).jpg"
   let abs = URL(fileURLWithPath: root).appendingPathComponent(relative).path
+
   do {
     try FileManager.default.createDirectory(
       atPath: URL(fileURLWithPath: abs).deletingLastPathComponent().path,
@@ -740,19 +898,62 @@ func captureScreenshot(display: DisplayInfo, appName: String, config: HelperConf
     try process.run()
     process.waitUntilExit()
     guard process.terminationStatus == 0 else {
-      emit(["kind": "error", "code": "screenshot_failed", "message": "screencapture exited \(process.terminationStatus)"])
+      emit(["kind": "error", "code": "screenshot_failed",
+            "message": "screencapture exited \(process.terminationStatus)"])
       return nil
     }
-    if let maxDim = config.screenshot_max_dim, maxDim > 0 {
-      resizeImageInPlace(abs, maxDim: maxDim)
-    }
-    let attrs = try FileManager.default.attributesOfItem(atPath: abs)
-    let bytes = (attrs[.size] as? NSNumber)?.intValue ?? 0
-    return ScreenshotAsset(relativePath: relative, bytes: bytes)
   } catch {
     emit(["kind": "error", "code": "screenshot_failed", "message": String(describing: error)])
     return nil
   }
+
+  let maxDim = max(0, config.screenshot_max_dim ?? 0)
+  let qualityRaw = max(1, min(100, config.screenshot_quality ?? 75))
+  let quality = Double(qualityRaw) / 100.0
+
+  // Decode the screencapture output once via ImageIO, optionally
+  // downsizing during decode. We hand the same CGImage to dHash and
+  // Vision so we don't pay the JPEG decode cost twice.
+  let cgImage = decodeJpeg(at: abs, maxDim: maxDim)
+  var phash: String? = nil
+  var visionText: String? = nil
+  var visionDurationMs: Int? = nil
+
+  if let img = cgImage {
+    phash = computeDHashHex(img)
+
+    // Vision OCR: runs on the Neural Engine on Apple Silicon, where
+    // it's dramatically more power-efficient than the Tesseract WASM
+    // worker on the Node side. Frames carrying `vision_text` are
+    // skipped by the OCR worker.
+    if config.accessibility?.enabled != false, #available(macOS 13.0, *) {
+      if let r = recognizeVisionText(img, languages: nil) {
+        visionText = r.text
+        visionDurationMs = r.durationMs
+      }
+    }
+
+    // Re-encode JPEG via ImageIO so the on-disk asset reflects the
+    // user-configured quality/maxDim. screencapture's default quality
+    // is high (large files); ImageIO at the same source CGImage gives
+    // us deterministic output with one decode and one encode.
+    _ = encodeJpeg(img, to: abs, quality: quality)
+  } else {
+    emit(["kind": "log", "level": "warn",
+          "message": "ImageIO could not decode screencapture output; emitting raw JPEG without phash/Vision",
+          "data": ["path": abs]])
+  }
+
+  let attrs = (try? FileManager.default.attributesOfItem(atPath: abs)) ?? [:]
+  let bytes = (attrs[.size] as? NSNumber)?.intValue ?? 0
+  return ScreenshotAsset(
+    relativePath: relative,
+    bytes: bytes,
+    perceptualHash: phash,
+    actualFormat: "jpeg",
+    visionText: visionText,
+    visionDurationMs: visionDurationMs
+  )
 }
 
 func resizeImageInPlace(_ path: String, maxDim: Int) {
@@ -769,24 +970,42 @@ func resizeImageInPlace(_ path: String, maxDim: Int) {
   }
 }
 
+// Date formatters are non-trivial to allocate (locale + calendar setup)
+// and were previously created on every event/screenshot. We memoize via
+// `static let` inside an enum because top-level `let` initializers in a
+// Swift script run in source order — and this file invokes
+// `runMacCapture()` *before* the bottom-of-file declarations would have
+// run. Static lets on a type are lazy and thread-safe, so they
+// initialize on first access regardless of where they appear in the
+// file.
+enum DateFormatters {
+  static let iso: ISO8601DateFormatter = ISO8601DateFormatter()
+  static let day: DateFormatter = {
+    let f = DateFormatter()
+    f.calendar = Calendar(identifier: .gregorian)
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+  }()
+  static let time: DateFormatter = {
+    let f = DateFormatter()
+    f.calendar = Calendar(identifier: .gregorian)
+    f.locale = Locale(identifier: "en_US_POSIX")
+    // Include milliseconds so a hard-trigger screenshot and a
+    // subsequent content_change probe in the same second never
+    // collide. Collisions are dangerous because the TS shim may delete
+    // low-diff soft-trigger assets after hashing.
+    f.dateFormat = "HH-mm-ss-SSS"
+    return f
+  }()
+}
+
 func dayString(_ date: Date) -> String {
-  let formatter = DateFormatter()
-  formatter.calendar = Calendar(identifier: .gregorian)
-  formatter.locale = Locale(identifier: "en_US_POSIX")
-  formatter.dateFormat = "yyyy-MM-dd"
-  return formatter.string(from: date)
+  return DateFormatters.day.string(from: date)
 }
 
 func timeString(_ date: Date) -> String {
-  let formatter = DateFormatter()
-  formatter.calendar = Calendar(identifier: .gregorian)
-  formatter.locale = Locale(identifier: "en_US_POSIX")
-  // Include milliseconds so a hard-trigger screenshot and a subsequent
-  // content_change probe in the same second never collide. Collisions
-  // are dangerous because the TS shim may delete low-diff soft-trigger
-  // assets after hashing.
-  formatter.dateFormat = "HH-mm-ss-SSS"
-  return formatter.string(from: date)
+  return DateFormatters.time.string(from: date)
 }
 
 func safeFilename(_ value: String) -> String {
@@ -846,7 +1065,20 @@ func windowMetadata(_ window: ActiveWindow, displays: [DisplayInfo]) -> [String:
   return metadata
 }
 
-func browserUrl(appName: String) -> String? {
+// Per-pid cache of the last osascript-resolved URL keyed by window title.
+// Browser windows update their title for every tab switch and almost
+// every navigation, so a title-keyed cache eliminates the spawn on the
+// "still reading the same page" path. The TTL backstop catches SPA
+// route changes that don't update the title.
+struct BrowserUrlCacheEntry {
+  let title: String
+  let url: String?
+  let queriedAt: Date
+}
+var browserUrlCache: [pid_t: BrowserUrlCacheEntry] = [:]
+let browserUrlBackstopTtl: TimeInterval = 30
+
+func browserUrl(appName: String, pid: pid_t, title: String) -> String? {
   let script: String?
   switch appName {
   case "Google Chrome", "Google Chrome Canary", "Google Chrome Beta", "Brave Browser", "Brave Browser Beta", "Brave Browser Nightly", "Microsoft Edge", "Microsoft Edge Beta", "Microsoft Edge Dev", "Arc", "Vivaldi", "Chromium", "Opera", "Opera GX", "Sidekick":
@@ -857,6 +1089,14 @@ func browserUrl(appName: String) -> String? {
     script = nil
   }
   guard let script else { return nil }
+
+  let now = Date()
+  if let cached = browserUrlCache[pid],
+     cached.title == title,
+     now.timeIntervalSince(cached.queriedAt) < browserUrlBackstopTtl {
+    return cached.url
+  }
+
   let process = Process()
   let pipe = Pipe()
   process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -869,7 +1109,14 @@ func browserUrl(appName: String) -> String? {
     guard process.terminationStatus == 0 else { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    return out?.isEmpty == false ? out : nil
+    let resolved = (out?.isEmpty == false) ? out : nil
+    browserUrlCache[pid] = BrowserUrlCacheEntry(title: title, url: resolved, queriedAt: now)
+    if browserUrlCache.count > 8 {
+      for (p, e) in browserUrlCache where now.timeIntervalSince(e.queriedAt) > browserUrlBackstopTtl * 4 {
+        browserUrlCache.removeValue(forKey: p)
+      }
+    }
+    return resolved
   } catch {
     return nil
   }
@@ -1283,6 +1530,14 @@ struct SystemAudioHandle {
 }
 
 func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
+  // Skip allocating a chunker entirely when live recording is off.
+  // The chunkers' own `enabled` flag would already short-circuit
+  // tick(), but constructing them still loads CoreAudio/ScreenCaptureKit
+  // symbols, registers a DispatchQueue, and adds a non-nil handle that
+  // gets ?.tick()'d every poll. Returning nil up front avoids all that.
+  if config.audio?.live_recording?.enabled != true {
+    return nil
+  }
   let backend = config.audio?.live_recording?.system_audio_backend ?? "core_audio_tap"
   switch backend {
   case "off":

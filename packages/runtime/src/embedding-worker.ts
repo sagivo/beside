@@ -35,7 +35,7 @@ export interface EmbeddingWorkerResult {
 export class EmbeddingWorker {
   private readonly logger: Logger;
   private readonly enabled: boolean;
-  private readonly modelName: string;
+  private modelName: string;
   private readonly batchSize: number;
   private readonly unloadAfterIdleMs: number;
   private warnedUnavailable = false;
@@ -43,7 +43,7 @@ export class EmbeddingWorker {
 
   constructor(
     private readonly storage: IStorage,
-    private readonly model: IModelAdapter,
+    private model: IModelAdapter,
     logger: Logger,
     opts: EmbeddingWorkerOptions = {},
   ) {
@@ -52,6 +52,11 @@ export class EmbeddingWorker {
     this.modelName = opts.modelName ?? model.getModelInfo().name;
     this.batchSize = opts.batchSize ?? 32;
     this.unloadAfterIdleMs = opts.unloadAfterIdleMs ?? 30_000;
+  }
+
+  setModel(model: IModelAdapter, modelName: string = model.getModelInfo().name): void {
+    this.model = model;
+    this.modelName = modelName;
   }
 
   private scheduleUnload(): void {
@@ -147,7 +152,7 @@ export class EmbeddingWorker {
 
     try {
       const vectors = uncachedContent.length > 0
-        ? await this.model.embed(uncachedContent)
+        ? await this.embedWithIsolation(uncachedContent)
         : [];
       const fresh = new Map<string, number[]>();
       for (let i = 0; i < uncachedHashes.length; i++) {
@@ -209,11 +214,37 @@ export class EmbeddingWorker {
         remaining: Math.max(0, tasks.length - processed),
       };
     } catch (err) {
-      this.logger.warn('embedding batch failed', { err: String(err) });
+      this.logger.warn('embedding write failed', { err: String(err) });
       return { processed: 0, failed: tasks.length, remaining: tasks.length };
     } finally {
       this.scheduleUnload();
     }
+  }
+
+  private async embedWithIsolation(contents: string[]): Promise<number[][]> {
+    try {
+      return await this.model.embed!(contents);
+    } catch (err) {
+      this.logger.warn('embedding batch failed; retrying frames individually', {
+        err: String(err),
+      });
+    }
+
+    const vectors: number[][] = [];
+    for (let i = 0; i < contents.length; i++) {
+      try {
+        const one = await this.model.embed!([contents[i]!]);
+        vectors.push(one[0] ?? []);
+      } catch (err) {
+        vectors.push([]);
+        this.logger.debug('single frame embedding failed', {
+          index: i,
+          chars: contents[i]?.length ?? 0,
+          err: String(err),
+        });
+      }
+    }
+    return vectors;
   }
 
   async drain(): Promise<EmbeddingWorkerResult> {

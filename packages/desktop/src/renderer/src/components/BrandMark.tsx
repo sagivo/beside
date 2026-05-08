@@ -1,25 +1,43 @@
 import { cn } from '@/lib/utils';
 
+/**
+ * Brand mark — an indigo-violet gradient tile with a stylized "infinity / second
+ * brain" glyph. Replaces the previous flat-primary square. Used in the sidebar
+ * header, in the About card, and as a decorative anchor in hero panels.
+ */
 export function BrandMark({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        'grid size-8 place-items-center rounded-md bg-primary text-primary-foreground shadow-sm',
+        'relative grid size-9 place-items-center rounded-xl text-white shadow-raised overflow-hidden',
         className,
       )}
+      style={{ backgroundImage: 'var(--gradient-brand)' }}
     >
+      {/* Subtle inner highlight for depth */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-0 rounded-xl"
+        style={{
+          background:
+            'linear-gradient(180deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 60%)',
+        }}
+      />
       <svg
-        width="18"
-        height="18"
+        width="20"
+        height="20"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        strokeWidth="2.5"
+        strokeWidth="2.2"
         strokeLinecap="round"
         strokeLinejoin="round"
+        className="relative drop-shadow-sm"
       >
-        <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z" />
-        <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z" />
+        {/* Two interlocked petals → memory / second brain */}
+        <path d="M12 4c-3 0-5 2-5 4.5S9 13 12 13s5-2 5-4.5S15 4 12 4Z" />
+        <path d="M12 11c-3 0-5 2-5 4.5S9 20 12 20s5-2 5-4.5S15 11 12 11Z" />
+        <circle cx="12" cy="12" r="0.9" fill="currentColor" />
       </svg>
     </div>
   );

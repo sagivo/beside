@@ -99,13 +99,20 @@ const TITLE_STRIP_RE = [
 ];
 
 // Titles that are entirely generic with no meeting topic content.
-const GENERIC_TITLE_RE = /^(zoom(\s+meeting)?|google\s*meet|meet|microsoft\s*teams|teams|webex|whereby|around|video\s*call|audio\s*call|meeting|untitled\s*meeting)$/i;
+const GENERIC_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s*meet|meet|microsoft\s*teams|teams|webex|whereby|around|video\s*call|audio\s*call|meeting|untitled\s*meeting|you have ended the meeting|google chrome|chrome|profile)$/i;
+const TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
 
 function extractTopicFromTitle(raw: string): string | null {
   let s = raw.replace(/\s+/g, ' ').trim();
   for (const re of TITLE_STRIP_RE) {
     s = s.replace(re, '').trim();
   }
+  const parts = s
+    .split(/\s+[-–—]\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !TITLE_NOISE_SEGMENT_RE.test(part));
+  s = parts.length > 0 ? parts.join(' - ') : '';
   if (!s || s.length < 3 || GENERIC_TITLE_RE.test(s)) return null;
   return s;
 }
@@ -168,7 +175,7 @@ export class MeetingBuilder {
     opts: MeetingBuilderOptions = {},
   ) {
     this.logger = logger.child('meeting-builder');
-    this.meetingIdleMs = opts.meetingIdleMs ?? 90_000;
+    this.meetingIdleMs = opts.meetingIdleMs ?? 5 * 60_000;
     this.minDurationMs = opts.minDurationMs ?? 3 * 60_000;
     this.audioGraceMs = opts.audioGraceMs ?? 60_000;
     this.batchSize = opts.batchSize ?? 1000;
@@ -314,7 +321,8 @@ export class MeetingBuilder {
   ): Promise<Meeting | null> {
     const list = await this.storage.listMeetings({
       // No platform filter — the entity_path uniquely identifies the meeting.
-      limit: 5,
+      day: nextFrameTs.slice(0, 10),
+      limit: 200,
       order: 'recent',
     });
     const cutoff = Date.parse(nextFrameTs) - this.meetingIdleMs;

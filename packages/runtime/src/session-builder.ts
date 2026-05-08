@@ -336,9 +336,7 @@ export class SessionBuilder {
     // so the persisted session reflects the lifted state.
     await this.maybeLiftSupportingAppFrames(acc);
 
-    const entityRanking = [...acc.entityWeights.entries()].sort(
-      (a, b) => b[1].ms - a[1].ms,
-    );
+    const entityRanking = rankSessionEntities(acc.entityWeights);
     const primaryEntity = entityRanking[0];
     const primaryApp = [...acc.appWeights.entries()].sort(
       (a, b) => b[1] - a[1],
@@ -473,4 +471,22 @@ function deriveFallbackTitle(p: string): string {
       .replace(/\b\w/g, (c) => c.toUpperCase())
       .trim() || p
   );
+}
+
+function rankSessionEntities(
+  weights: Map<string, { kind: EntityKind; ms: number }>,
+): Array<[string, { kind: EntityKind; ms: number }]> {
+  const entries = [...weights.entries()];
+  const hasSubstantiveNonApp = entries.some(
+    ([, info]) => info.kind !== 'app' && info.ms >= LIFT_MIN_TARGET_MS,
+  );
+  const score = ([, info]: [string, { kind: EntityKind; ms: number }]): number => {
+    if (hasSubstantiveNonApp && info.kind === 'app') return info.ms * 0.25;
+    return info.ms;
+  };
+  return entries.sort((a, b) => {
+    const delta = score(b) - score(a);
+    if (delta !== 0) return delta;
+    return a[0].localeCompare(b[0]);
+  });
 }

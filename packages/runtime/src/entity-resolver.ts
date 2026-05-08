@@ -119,8 +119,7 @@ function resolveMeeting(frame: Frame): EntityRef | null {
   if (!inMeetingApp && !inMeetingDomain) return null;
 
   const day = frame.timestamp.slice(0, 10);
-  const rawTitle = stripBrowserSuffixes(frame.window_title || '') || app;
-  const title = stripMeetingSuffix(rawTitle);
+  const title = cleanMeetingEntityTitle(frame.window_title || '', frame);
   const slug = slugify(title) || 'untitled';
   return {
     kind: 'meeting',
@@ -356,7 +355,9 @@ function resolveWebpage(frame: Frame): EntityRef | null {
   } catch {
     return null;
   }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
   const host = parsed.hostname.replace(/^www\./, '');
+  if (!host) return null;
   // Group by host — pages on the same site collapse into one wiki entry.
   // Title prefers what the user actually saw.
   return {
@@ -416,6 +417,36 @@ function stripMeetingSuffix(title: string): string {
     .replace(/[\-—–]\s*(Google Meet|Zoom|Microsoft Teams|Webex|Around|Whereby)\s*$/i, '')
     .replace(/^\s*Meet\s*[\-—–]\s*/i, '')
     .trim();
+}
+
+const MEETING_TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
+const GENERIC_MEETING_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s+meet|meet|microsoft\s+teams|teams|webex|whereby|around|you have ended the meeting|camera and microphone recording|microphone recording|audio playing|google chrome|chrome|profile)$/i;
+
+function cleanMeetingEntityTitle(rawTitle: string, frame: Frame): string {
+  let title = stripMeetingSuffix(stripBrowserSuffixes(rawTitle || '')).replace(/\s+/g, ' ').trim();
+  const parts = title
+    .split(/\s+[-–—]\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !MEETING_TITLE_NOISE_SEGMENT_RE.test(part));
+
+  if (parts.length > 0) title = parts.join(' - ');
+  else title = '';
+
+  if (!title || GENERIC_MEETING_TITLE_RE.test(title)) return fallbackMeetingTitle(frame);
+  return title;
+}
+
+function fallbackMeetingTitle(frame: Frame): string {
+  const app = frame.app ?? '';
+  const url = frame.url ?? '';
+  if (/zoom/i.test(app) || url.includes('zoom.us')) return 'Zoom';
+  if (/google meet/i.test(app) || url.includes('meet.google.com')) return 'Google Meet';
+  if (/microsoft teams/i.test(app) || url.includes('teams.microsoft.com')) return 'Microsoft Teams';
+  if (/webex/i.test(app) || url.includes('webex.com')) return 'Webex';
+  if (/whereby/i.test(app) || url.includes('whereby.com')) return 'Whereby';
+  if (/around/i.test(app) || url.includes('around.co')) return 'Around';
+  return 'Meeting';
 }
 
 function stripBrowserSuffixes(title: string): string {

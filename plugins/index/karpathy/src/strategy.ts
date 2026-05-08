@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type {
+  EntityKind,
   EntityRecord,
   Frame,
   IIndexStrategy,
@@ -9,6 +10,7 @@ import type {
   IndexUpdate,
   IStorage,
   Logger,
+  Meeting,
   RawEvent,
   ReorganisationSummary,
 } from '@cofounderos/interfaces';
@@ -87,11 +89,36 @@ const NOISE_APP_SLUGS: ReadonlySet<string> = new Set([
   'notification-center',
   'screencaptureui',
   'cofounderos', // the host app itself
+  'audio', // synthetic audio_transcript fallback entity
 ]);
 
 function isNoiseAppEntity(entityPath: string): boolean {
   if (!entityPath.startsWith('apps/')) return false;
   return NOISE_APP_SLUGS.has(entityPath.slice('apps/'.length));
+}
+
+function pageHasMeaningfulChanges(existing: IndexPage, next: IndexPage): boolean {
+  if (
+    normaliseVolatileIndexContent(existing.content) !==
+    normaliseVolatileIndexContent(next.content)
+  ) {
+    return true;
+  }
+  if (!stringArraysEqual(existing.sourceEventIds, next.sourceEventIds)) return true;
+  if (!stringArraysEqual(existing.backlinks, next.backlinks)) return true;
+  return false;
+}
+
+function normaliseVolatileIndexContent(content: string): string {
+  return content.replace(/^last_indexed: .+$/m, 'last_indexed: <volatile>');
+}
+
+function stringArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 export class KarpathyStrategy implements IIndexStrategy {
@@ -134,12 +161,19 @@ export class KarpathyStrategy implements IIndexStrategy {
    * deny-list is rejected outright; everything else needs both
    * meaningful focused time AND a non-trivial frame count.
    */
-  private shouldRenderEntityPage(entity: EntityRecord): boolean {
+  private async shouldRenderEntityPage(entity: EntityRecord): Promise<boolean> {
+    if (entity.kind === 'meeting') return await this.shouldRenderMeetingEntity(entity);
     if (entity.kind !== 'app') return true;
     if (isNoiseAppEntity(entity.path)) return false;
     if (entity.totalFocusedMs < this.appPageMinMs) return false;
     if (entity.frameCount < this.appPageMinFrames) return false;
     return true;
+  }
+
+  private async shouldRenderMeetingEntity(entity: EntityRecord): Promise<boolean> {
+    const meetings = await this.listMeetingsForEntity(entity);
+    if (meetings.length > 0) return meetings.some(isSubstantiveMeeting);
+    return entity.totalFocusedMs >= 5 * 60_000 && entity.frameCount >= 6;
   }
 
   async init(rootPath: string): Promise<void> {
@@ -199,6 +233,9 @@ export class KarpathyStrategy implements IIndexStrategy {
     const dirtyByPath = new Map<string, EntityRecord>(
       recent.map((e) => [e.path, e]),
     );
+    for (const entity of await this.listEntitiesTouchedByEvents(events)) {
+      dirtyByPath.set(entity.path, entity);
+    }
 
     if (dirtyByPath.size === 0) {
       this.logger.debug(
@@ -223,15 +260,18 @@ export class KarpathyStrategy implements IIndexStrategy {
       // has now slipped below the threshold (e.g. its real frames got
       // lifted out by SessionBuilder), tear down the stale page so
       // the wiki doesn't carry permanent dead pages around.
-      if (!this.shouldRenderEntityPage(entity)) {
+      if (!(await this.shouldRenderEntityPage(entity))) {
         skippedNoise += 1;
         if (existing) pagesToDelete.push(pagePath);
         continue;
       }
 
       const page = await this.renderEntityPage(entity, frames, existing, model);
-      if (existing) pagesToUpdate.push(page);
-      else pagesToCreate.push(page);
+      if (existing) {
+        if (pageHasMeaningfulChanges(existing, page)) pagesToUpdate.push(page);
+      } else {
+        pagesToCreate.push(page);
+      }
     }
 
     const newPagesByPath = new Map<string, IndexPage>();
@@ -328,7 +368,7 @@ export class KarpathyStrategy implements IIndexStrategy {
         if (pagesToDelete.includes(p.path)) continue; // already archived above
         const entityPath = p.path.replace(/\.md$/, '');
         const entity = await this.storage.getEntity(entityPath);
-        if (!entity || !this.shouldRenderEntityPage(entity)) {
+        if (!entity || !(await this.shouldRenderEntityPage(entity))) {
           pagesToDelete.push(p.path);
           stalePagesDropped += 1;
         }
@@ -388,9 +428,10 @@ export class KarpathyStrategy implements IIndexStrategy {
   }
 
   async applyUpdate(update: IndexUpdate): Promise<IndexState> {
-    for (const p of update.pagesToCreate) await this.store.writePage(p);
-    for (const p of update.pagesToUpdate) await this.store.writePage(p);
-    for (const p of update.pagesToDelete) await this.store.deletePage(p);
+    await this.store.applyPageChanges(
+      [...update.pagesToCreate, ...update.pagesToUpdate],
+      update.pagesToDelete,
+    );
 
     if (update.newRootIndex) await this.store.writeRootIndex(update.newRootIndex);
     if (update.reorganisationNotes) await this.store.appendLog(update.reorganisationNotes);
@@ -458,14 +499,17 @@ export class KarpathyStrategy implements IIndexStrategy {
     existing: IndexPage | null,
     model: IModelAdapter,
   ): Promise<IndexPage> {
-    const evidence = buildEvidence(entity, frames);
+    const meetingDigests = await this.listMeetingDigestsForEntity(entity);
+    const pageEntity = entityForPage(entity, meetingDigests);
+    const related = await this.listRelatedEntitiesForEntity(entity);
+    const evidence = buildEvidence(pageEntity, frames, meetingDigests, related);
     const isOfflineModel = model.getModelInfo().name === 'offline:fallback';
 
     let prose: string;
     if (isOfflineModel) {
-      prose = renderDeterministicProse(entity, evidence);
+      prose = renderDeterministicProse(pageEntity, evidence);
     } else {
-      const prompt = buildEvidencePrompt(existing, entity, evidence);
+      const prompt = buildEvidencePrompt(existing, pageEntity, evidence);
       try {
         const raw = await model.complete(prompt, {
           systemPrompt: SYSTEM_PROMPT,
@@ -476,16 +520,16 @@ export class KarpathyStrategy implements IIndexStrategy {
         // Defensive: if the model went off-script and re-rendered the
         // whole page, keep just the first paragraph.
         prose = trimToProse(prose);
-        if (!prose) prose = renderDeterministicProse(entity, evidence);
+        if (!prose) prose = renderDeterministicProse(pageEntity, evidence);
       } catch (err) {
         this.logger.warn('model.complete failed, falling back to deterministic prose', {
           err: String(err),
         });
-        prose = renderDeterministicProse(entity, evidence);
+        prose = renderDeterministicProse(pageEntity, evidence);
       }
     }
 
-    const content = renderEntityMarkdown(entity, evidence, prose);
+    const content = renderEntityMarkdown(pageEntity, evidence, prose);
 
     return {
       path: `${entity.path}.md`,
@@ -499,6 +543,87 @@ export class KarpathyStrategy implements IIndexStrategy {
       backlinks: existing?.backlinks ?? [],
       lastUpdated: isoTimestamp(),
     };
+  }
+
+  private async listMeetingsForEntity(entity: EntityRecord): Promise<Meeting[]> {
+    if (entity.kind !== 'meeting' || !this.storage) return [];
+    try {
+      const meetings = await this.storage.listMeetings({
+        day: entity.firstSeen.slice(0, 10),
+        limit: 500,
+        order: 'chronological',
+      });
+      return meetings
+        .filter((meeting) => meeting.entity_path === entity.path)
+        .sort((a, b) => a.started_at.localeCompare(b.started_at))
+        .slice(-8);
+    } catch (err) {
+      this.logger.debug('meeting summaries unavailable for entity page', {
+        entity: entity.path,
+        err: String(err),
+      });
+      return [];
+    }
+  }
+
+  private async listMeetingDigestsForEntity(entity: EntityRecord): Promise<MeetingDigest[]> {
+    const meetings = await this.listMeetingsForEntity(entity);
+    const substantive = meetings.filter(isSubstantiveMeeting);
+    const source = substantive.length > 0 ? substantive : meetings;
+    return source.slice(-6).map(meetingToDigest);
+  }
+
+  private async listRelatedEntitiesForEntity(entity: EntityRecord): Promise<RelatedEntityDigest[]> {
+    if (!this.storage) return [];
+    try {
+      const rows = await this.storage.listEntityCoOccurrences(entity.path, 16);
+      return rows
+        .filter((row) => row.path !== entity.path)
+        .filter((row) => !isNoiseAppEntity(row.path))
+        .filter((row) => row.kind !== 'app' || row.sharedFocusedMs >= 60_000)
+        .slice(0, 8)
+        .map((row) => ({
+          path: row.path,
+          kind: row.kind,
+          title: row.title,
+          sharedSessions: row.sharedSessions,
+          sharedFocusedMs: row.sharedFocusedMs,
+          lastSharedAt: row.lastSharedAt,
+        }));
+    } catch (err) {
+      this.logger.debug('entity related-context lookup failed', {
+        entity: entity.path,
+        err: String(err),
+      });
+      return [];
+    }
+  }
+
+  private async listEntitiesTouchedByEvents(events: RawEvent[]): Promise<EntityRecord[]> {
+    if (!this.storage || events.length === 0) return [];
+    const timestamps = events
+      .map((event) => Date.parse(event.timestamp))
+      .filter((ts) => Number.isFinite(ts));
+    if (timestamps.length === 0) return [];
+
+    const from = new Date(Math.min(...timestamps) - 1_000).toISOString();
+    const to = new Date(Math.max(...timestamps) + 1_000).toISOString();
+    const frames = await this.storage.searchFrames({
+      from,
+      to,
+      limit: Math.max(500, events.length * 20),
+    });
+    const paths = new Set(
+      frames
+        .map((frame) => frame.entity_path)
+        .filter((path): path is string => Boolean(path)),
+    );
+    const out: EntityRecord[] = [];
+    for (const path of paths) {
+      const entity = await this.storage.getEntity(path);
+      if (entity) out.push(entity);
+    }
+    return out;
   }
 
   private async collectAllPagesAfterUpdate(
@@ -539,6 +664,8 @@ interface ActivityWindow {
 
 interface Evidence {
   windows: ActivityWindow[];
+  meetings: MeetingDigest[];
+  related: RelatedEntityDigest[];
   files: string[];
   urls: Array<{ url: string; title: string | null; lastSeen: string }>;
   textSnippets: string[];
@@ -546,12 +673,41 @@ interface Evidence {
   keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }>;
 }
 
+interface MeetingDigest {
+  id: string;
+  title: string;
+  startedAt: string;
+  endedAt: string;
+  durationMin: number;
+  summaryStatus: string;
+  tldr: string | null;
+  decisions: string[];
+  actionItems: string[];
+  openQuestions: string[];
+  attendees: string[];
+  links: string[];
+}
+
+interface RelatedEntityDigest {
+  path: string;
+  kind: EntityKind;
+  title: string;
+  sharedSessions: number;
+  sharedFocusedMs: number;
+  lastSharedAt: string;
+}
+
 const SESSION_GAP_MS = 60_000;
 const MAX_WINDOWS = 12;
 const MAX_TEXT_SNIPPETS = 8;
 const MAX_KEYFRAMES = 3;
 
-function buildEvidence(_entity: EntityRecord, frames: Frame[]): Evidence {
+function buildEvidence(
+  _entity: EntityRecord,
+  frames: Frame[],
+  meetings: MeetingDigest[] = [],
+  related: RelatedEntityDigest[] = [],
+): Evidence {
   const sorted = frames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
   // 1. Activity windows — group adjacent frames within `SESSION_GAP_MS`.
@@ -676,6 +832,8 @@ function buildEvidence(_entity: EntityRecord, frames: Frame[]): Evidence {
 
   return {
     windows: windows.slice(-MAX_WINDOWS).reverse(),
+    meetings,
+    related,
     files: [...files].slice(0, 20),
     urls: [...urlMap.entries()]
       .map(([url, info]) => ({ url, title: info.title, lastSeen: info.lastSeen }))
@@ -685,6 +843,93 @@ function buildEvidence(_entity: EntityRecord, frames: Frame[]): Evidence {
     apps,
     keyframes,
   };
+}
+
+function meetingToDigest(meeting: Meeting): MeetingDigest {
+  const summary = meeting.summary_json;
+  const rawTitle = summary?.title ?? meeting.title ?? fallbackTitleFromEntityPath(meeting.entity_path);
+  return {
+    id: meeting.id,
+    title: cleanMeetingTitle(rawTitle),
+    startedAt: meeting.started_at,
+    endedAt: meeting.ended_at,
+    durationMin: Math.max(1, Math.round(meeting.duration_ms / 60_000)),
+    summaryStatus: meeting.summary_status,
+    tldr: summary?.tldr || firstMarkdownParagraph(meeting.summary_md),
+    decisions: (summary?.decisions ?? []).map((d) => d.text).filter(Boolean).slice(0, 8),
+    actionItems: (summary?.action_items ?? [])
+      .map((item) => {
+        const owner = item.owner ? `${item.owner}: ` : '';
+        const due = item.due ? ` (due ${item.due})` : '';
+        return `${owner}${item.task}${due}`.trim();
+      })
+      .filter(Boolean)
+      .slice(0, 8),
+    openQuestions: (summary?.open_questions ?? []).map((q) => q.text).filter(Boolean).slice(0, 8),
+    attendees: uniqueStrings([...(meeting.attendees ?? []), ...(summary?.attendees_seen ?? [])]).slice(0, 12),
+    links: uniqueStrings([...(meeting.links ?? []), ...(summary?.links_shared ?? [])]).slice(0, 12),
+  };
+}
+
+function isSubstantiveMeeting(meeting: Meeting): boolean {
+  if (meeting.summary_status === 'ready') return true;
+  if (meeting.duration_ms >= 5 * 60_000) return true;
+  if (meeting.duration_ms >= 60_000 && meeting.screenshot_count >= 3) return true;
+  if (meeting.transcript_chars >= 500) return true;
+  if (meeting.audio_chunk_count >= 2) return true;
+  return false;
+}
+
+function entityForPage(entity: EntityRecord, meetings: MeetingDigest[]): EntityRecord {
+  if (entity.kind !== 'meeting' || meetings.length === 0) return entity;
+  const best = meetings
+    .slice()
+    .sort((a, b) => b.durationMin - a.durationMin)[0];
+  if (!best?.title) return entity;
+  return { ...entity, title: best.title };
+}
+
+function fallbackTitleFromEntityPath(entityPath: string): string {
+  const last = entityPath.split('/').pop() ?? entityPath;
+  return last
+    .replace(/^\d{4}-\d{2}-\d{2}-/, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+}
+
+function cleanMeetingTitle(title: string): string {
+  const cleaned = title.replace(/\s+/g, ' ').trim();
+  const parts = cleaned
+    .split(/\s+-\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !isMeetingTitleNoiseSegment(part));
+  const out = parts.length > 0 ? parts.join(' - ') : cleaned;
+  return truncate(out, 90);
+}
+
+function isMeetingTitleNoiseSegment(segment: string): boolean {
+  return /^(camera and microphone recording|microphone recording|audio playing|screen share|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i.test(segment);
+}
+
+function firstMarkdownParagraph(markdown: string | null): string | null {
+  if (!markdown) return null;
+  const paragraph = markdown
+    .split(/\n{2,}/)
+    .map((block) => block.replace(/^#+\s+/gm, '').trim())
+    .find((block) => block && !block.startsWith('- '));
+  return paragraph ? truncate(paragraph.replace(/\s+/g, ' '), 280) : null;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const out: string[] = [];
+  for (const value of values) {
+    const cleaned = value.trim();
+    if (!cleaned || out.includes(cleaned)) continue;
+    out.push(cleaned);
+  }
+  return out;
 }
 
 function buildEvidencePrompt(
@@ -707,8 +952,32 @@ function buildEvidencePrompt(
   if (evidence.apps.length) {
     lines.push(`APPS USED: ${evidence.apps.join(', ')}`);
   }
+  if (evidence.meetings.length) {
+    lines.push('MEETING SUMMARIES:');
+    for (const meeting of evidence.meetings.slice(0, 3)) {
+      const start = meeting.startedAt.slice(0, 16).replace('T', ' ');
+      lines.push(
+        `  - ${start}, ${meeting.durationMin}m, ${meeting.summaryStatus}: ${meeting.title}`,
+      );
+      if (meeting.tldr) lines.push(`    TLDR: ${truncate(meeting.tldr, 220)}`);
+      if (meeting.decisions.length) {
+        lines.push(`    Decisions: ${meeting.decisions.slice(0, 3).map((d) => truncate(d, 90)).join(' | ')}`);
+      }
+      if (meeting.actionItems.length) {
+        lines.push(`    Actions: ${meeting.actionItems.slice(0, 3).map((a) => truncate(a, 90)).join(' | ')}`);
+      }
+    }
+  }
   if (evidence.files.length) {
     lines.push(`FILES SEEN: ${evidence.files.slice(0, 10).join(', ')}`);
+  }
+  if (evidence.related.length) {
+    lines.push('RELATED CONTEXT:');
+    for (const rel of evidence.related.slice(0, 6)) {
+      lines.push(
+        `  - ${rel.title} (${rel.kind}, ${rel.sharedSessions} shared session${rel.sharedSessions === 1 ? '' : 's'}, ${Math.round(rel.sharedFocusedMs / 60_000)}m)`,
+      );
+    }
   }
   if (evidence.windows.length) {
     lines.push('RECENT ACTIVITY WINDOWS:');
@@ -764,6 +1033,9 @@ function renderDeterministicProse(
   const recent = evidence.windows[0];
   const recentTitles = recent?.windowTitles.slice(0, 2).map((t) => `"${truncate(t, 70)}"`).join(', ');
   const sample = [
+    evidence.meetings.length && evidence.meetings[0]?.tldr
+      ? `Meeting summary: ${truncate(evidence.meetings[0].tldr, 180)}.`
+      : null,
     evidence.files.length ? `Files seen: ${evidence.files.slice(0, 5).join(', ')}.` : null,
     evidence.urls.length
       ? `URLs visited: ${evidence.urls
@@ -772,6 +1044,9 @@ function renderDeterministicProse(
           .join(', ')}.`
       : null,
     recentTitles ? `Recent windows included ${recentTitles}.` : null,
+    evidence.related.length
+      ? `Related context: ${evidence.related.slice(0, 4).map((rel) => rel.title).join(', ')}.`
+      : null,
   ].filter(Boolean).join(' ');
   const headline =
     minutes > 0
@@ -828,11 +1103,33 @@ function renderEntityMarkdown(
   if (evidence.apps.length) lines.push(`- Apps: ${evidence.apps.slice(0, 6).join(', ')}`);
   if (evidence.files.length) lines.push(`- Files: ${evidence.files.slice(0, 6).map((f) => `\`${f}\``).join(', ')}`);
   if (evidence.urls.length) lines.push(`- URLs: ${evidence.urls.slice(0, 3).map((u) => `<${u.url}>`).join(', ')}`);
+  if (evidence.related.length) {
+    lines.push(`- Related: ${evidence.related.slice(0, 4).map((rel) => `[[${rel.path}]]`).join(', ')}`);
+  }
   lines.push('');
 
   lines.push('## Summary');
   lines.push(prose);
   lines.push('');
+
+  if (evidence.meetings.length) {
+    lines.push('## Meeting summary');
+    for (const meeting of evidence.meetings) {
+      const start = meeting.startedAt.slice(0, 16).replace('T', ' ');
+      lines.push(`- **${start}** (${meeting.durationMin}m, ${meeting.summaryStatus}) — ${meeting.title}`);
+      if (meeting.tldr) lines.push(`  - ${truncate(meeting.tldr, 220)}`);
+      for (const decision of meeting.decisions.slice(0, 3)) {
+        lines.push(`  - Decision: ${truncate(decision, 180)}`);
+      }
+      for (const action of meeting.actionItems.slice(0, 3)) {
+        lines.push(`  - Action: ${truncate(action, 180)}`);
+      }
+      for (const question of meeting.openQuestions.slice(0, 2)) {
+        lines.push(`  - Open: ${truncate(question, 180)}`);
+      }
+    }
+    lines.push('');
+  }
 
   // 3. Recent work — deterministic windows with representative evidence.
   lines.push('## Recent work');
@@ -862,6 +1159,18 @@ function renderEntityMarkdown(
     }
   }
   lines.push('');
+
+  // 4. Files & URLs.
+  if (evidence.related.length) {
+    lines.push('## Related context');
+    for (const rel of evidence.related) {
+      const minutes = Math.round(rel.sharedFocusedMs / 60_000);
+      lines.push(
+        `- [[${rel.path}]] (${rel.kind}, ${rel.sharedSessions} shared session${rel.sharedSessions === 1 ? '' : 's'}${minutes > 0 ? `, ${minutes}m overlap` : ''})`,
+      );
+    }
+    lines.push('');
+  }
 
   // 4. Files & URLs.
   if (evidence.files.length || evidence.urls.length) {
@@ -1008,7 +1317,7 @@ function readableEvidenceText(frame: Frame): string | null {
 }
 
 function isHighConfidenceTextSource(source: Frame['text_source']): boolean {
-  return source === 'accessibility' || source === 'audio';
+  return source === 'accessibility' || source === 'ocr_accessibility' || source === 'audio';
 }
 
 function contextGaps(entity: EntityRecord, evidence: Evidence): string[] {
@@ -1016,10 +1325,11 @@ function contextGaps(entity: EntityRecord, evidence: Evidence): string[] {
   if (entity.frameCount <= 3) {
     gaps.push('Very little evidence was captured; treat this page as a pointer, not a complete history.');
   }
-  if (evidence.textSnippets.length === 0) {
+  const hasMeetingSummary = evidence.meetings.some((meeting) => Boolean(meeting.tldr));
+  if (evidence.textSnippets.length === 0 && !hasMeetingSummary) {
     gaps.push('No reliable readable text was extracted, so screenshots and window titles carry most of the context.');
   }
-  if (entity.kind === 'contact' || entity.kind === 'channel') {
+  if ((entity.kind === 'contact' || entity.kind === 'channel') && !hasMeetingSummary) {
     gaps.push('Conversation substance may be incomplete unless Slack text was visible in the captured frames.');
   }
   return gaps;

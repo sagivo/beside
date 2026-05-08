@@ -9,9 +9,8 @@ import {
   XCircle,
   Zap,
 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
@@ -36,14 +35,12 @@ export function Connect({
   if (!overview || !config) {
     return (
       <div className="flex flex-col gap-6 pt-6">
-        <PageHeader title="Connect AI" description="Loading…" />
+        <PageHeader title="Connect" description="Loading…" />
         {Array.from({ length: 2 }).map((_, i) => (
           <Card key={i}>
-            <CardHeader>
-              <Skeleton className="h-5 w-56" />
-              <Skeleton className="h-3 w-80 mt-2" />
-            </CardHeader>
             <CardContent className="flex flex-col gap-3">
+              <Skeleton className="h-5 w-56" />
+              <Skeleton className="h-3 w-80" />
               <Skeleton className="h-24 w-full rounded-md" />
               <Skeleton className="h-9 w-32" />
             </CardContent>
@@ -64,7 +61,7 @@ export function Connect({
 
   async function copySnippet() {
     await window.cofounderos.copyText(snippet);
-    toast.success('MCP snippet copied', {
+    toast.success('Connection snippet copied', {
       description: 'Paste it into your AI app settings.',
     });
   }
@@ -101,9 +98,6 @@ function ConnectScreen({
 }) {
   const [test, setTest] = React.useState<TestState>({ status: 'idle' });
 
-  // Auto-clear successful test results after a few seconds so the badge
-  // doesn't lie if the runtime later changes state. Failures stick around
-  // until the user retries.
   React.useEffect(() => {
     if (test.status !== 'ok') return;
     const timer = window.setTimeout(() => setTest({ status: 'idle' }), 6000);
@@ -140,8 +134,8 @@ function ConnectScreen({
   return (
     <div className="flex flex-col gap-6 pt-6">
       <PageHeader
-        title="Connect AI"
-        description="Let your favorite AI app use your memory."
+        title="Connect"
+        description="Let your favorite AI app — Claude, Cursor, ChatGPT desktop — read your memory."
         actions={
           <Button variant="ghost" size="sm" onClick={onRefresh}>
             <RefreshCcw />
@@ -150,35 +144,34 @@ function ConnectScreen({
         }
       />
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Plug className="size-4" />
-                For Cursor, Claude & other AI apps
-              </CardTitle>
-              <CardDescription className="mt-1">
-                Copy this snippet and paste it into the app's MCP settings. Your AI can then ask
-                about anything you've worked on.
-              </CardDescription>
-            </div>
-            <Badge variant={mcpRunning ? 'success' : 'muted'}>
-              {mcpRunning ? 'Running' : 'Ready'}
-            </Badge>
+      {/* Primary card: the AI connection. Big copy CTA, status pill on top. */}
+      <Card className="overflow-hidden">
+        <div
+          className="border-b bg-gradient-brand-soft px-6 py-5 flex flex-wrap items-center gap-4"
+        >
+          <span
+            className="grid size-11 place-items-center rounded-xl text-white shadow-raised"
+            style={{ backgroundImage: 'var(--gradient-brand)' }}
+          >
+            <Plug className="size-5" />
+          </span>
+          <div className="flex-1 min-w-[220px]">
+            <h3 className="text-base font-semibold">For your AI apps</h3>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Copy the snippet below into the app's connection settings. Done.
+            </p>
           </div>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <pre className="rounded-md border bg-muted/50 p-4 font-mono text-xs overflow-x-auto">
-            {snippet}
-          </pre>
+          <StatusPill running={mcpRunning} />
+        </div>
+        <CardContent className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => void copySnippet()}>
+            <Button size="lg" onClick={() => void copySnippet()} className="btn-brand">
               <Copy />
               Copy snippet
             </Button>
             <Button
               variant="outline"
+              size="lg"
               onClick={() => void runPing()}
               disabled={test.status === 'pending'}
             >
@@ -187,43 +180,66 @@ function ConnectScreen({
             </Button>
             <TestResult test={test} url={url} />
           </div>
+
+          <details className="group rounded-lg border bg-muted/30">
+            <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+              Show snippet
+            </summary>
+            <pre className="border-t px-4 py-3 font-mono text-xs overflow-x-auto leading-relaxed">
+              {snippet}
+            </pre>
+          </details>
         </CardContent>
       </Card>
 
+      {/* Secondary card: the Markdown export. Less prominent — most users don't open this. */}
       <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <FolderOpen className="size-4" />
-                Read your memory as files
-              </CardTitle>
-              <CardDescription className="mt-1">
-                A friendly folder of daily journals you can open in Notion, Obsidian, or just
-                Finder.
-              </CardDescription>
-            </div>
-            <Badge variant={markdownRunning ? 'success' : 'muted'}>
-              {markdownRunning ? 'Running' : 'Ready'}
-            </Badge>
+        <CardContent className="flex flex-wrap items-center gap-4">
+          <span className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground">
+            <FolderOpen className="size-5" />
+          </span>
+          <div className="flex-1 min-w-[220px]">
+            <h3 className="font-semibold">Read your memory as files</h3>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              A friendly folder of daily journals you can open in Notion, Obsidian, or
+              Finder.
+            </p>
+            <code className="mt-2 inline-block rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground">
+              {markdownPath || '~/.cofounderOS/export/markdown'}
+            </code>
           </div>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <code className="rounded-md border bg-muted/50 px-3 py-2 font-mono text-xs text-muted-foreground">
-            {markdownPath || '~/.cofounderOS/export/markdown'}
-          </code>
-          <div>
-            <Button
-              variant="outline"
-              onClick={() => void window.cofounderos.openPath('markdown')}
-            >
-              <FolderOpen />
-              Open folder
-            </Button>
-          </div>
+          <StatusPill running={markdownRunning} />
+          <Button
+            variant="outline"
+            onClick={() => void window.cofounderos.openPath('markdown')}
+          >
+            <FolderOpen />
+            Open folder
+          </Button>
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function StatusPill({ running }: { running: boolean }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium',
+        running
+          ? 'bg-success/15 text-success'
+          : 'bg-muted text-muted-foreground',
+      )}
+    >
+      <span
+        className={cn(
+          'size-1.5 rounded-full',
+          running ? 'bg-success animate-pulse' : 'bg-muted-foreground/60',
+        )}
+      />
+      {running ? 'Running' : 'Ready'}
+    </span>
   );
 }
 

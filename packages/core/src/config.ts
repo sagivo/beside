@@ -294,14 +294,14 @@ const IndexSchema = z.object({
   // model adapter. Set `summarize: false` to disable the LLM step
   // and keep only the deterministic Stage A summary (still useful).
   meetings: z.object({
-    idle_threshold_sec: z.number().int().positive().default(90),
+    idle_threshold_sec: z.number().int().positive().default(300),
     min_duration_sec: z.number().int().nonnegative().default(180),
     audio_grace_sec: z.number().int().nonnegative().default(60),
     summarize: z.boolean().default(true),
     summarize_cooldown_sec: z.number().int().nonnegative().default(300),
     vision_attachments: z.number().int().nonnegative().default(4),
   }).default({
-    idle_threshold_sec: 90,
+    idle_threshold_sec: 300,
     min_duration_sec: 180,
     audio_grace_sec: 60,
     summarize: true,
@@ -607,7 +607,7 @@ index:
   # summarize: false keeps the deterministic Stage A summary
   # (attendees, links, key screens) but skips the LLM call.
   meetings:
-    idle_threshold_sec: 90      # gap that closes an active meeting
+    idle_threshold_sec: 300     # gap that closes an active meeting
     min_duration_sec: 180       # below this, the meeting is flagged short and skipped for summary
     audio_grace_sec: 60         # audio chunks arriving up to N sec after the meeting still attach
     summarize: true             # set false to skip the LLM step

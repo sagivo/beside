@@ -108,6 +108,7 @@ const MEETING_SUMMARIZER_JOB = 'meeting-summarizer';
 const MEETING_SUMMARIZER_INTERVAL_MS = 5 * 60_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
+const FULL_REINDEX_EVENT_BATCH_SIZE = 1000;
 
 /**
  * Debounce + max-wait used by the activity coalescer below. After 60s
@@ -663,6 +664,7 @@ async function runFullReindexLocked(
 
   // Rebuild frames + entities from scratch — both are derived tables and
   // the resolver rules may have improved between runs.
+  await storage.resetFrameDerivatives(opts);
   const fb = await frameBuilder.drain();
   if (fb.framesCreated > 0) {
     log.info(`rebuilt ${fb.framesCreated} frames from raw events`);
@@ -710,13 +712,10 @@ async function runFullReindexLocked(
   await strategy.getUnindexedEvents(storage);
 
   // Stream the requested raw event range through indexBatch in pages.
-  // Previously all events were collected into one array before a single
-  // indexBatch call (avoids redundant entity re-renders for cross-page
-  // entities) but that is an unbounded OOM hazard for large histories.
-  // We now process per page, accepting that entities spanning multiple
-  // pages may be re-rendered more than once — pages are idempotent so
-  // correctness is preserved and memory stays flat.
-  const batchSize = config.index.batch_size;
+  // Use a larger page than live incremental indexing: full reindex runs
+  // offline against a bounded query, and small pages repeatedly re-render
+  // the same cross-page entities as their source-event set grows.
+  const batchSize = Math.max(config.index.batch_size, FULL_REINDEX_EVENT_BATCH_SIZE);
   let offset = 0;
   let totalProcessed = 0;
 
@@ -1177,5 +1176,19 @@ export function useOfflineModel(handles: OrchestratorHandles): void {
   // (it's stateless) and means a single `unload` covers both.
   handles.model = offline;
   handles.indexerModel = offline;
+  handles.embeddingWorker.setModel(offline);
+  const exportServices: ExportServices = {
+    storage: handles.storage,
+    strategy: handles.strategy,
+    model: offline,
+    embeddingModelName: getEmbeddingModelName(handles.config),
+    dataDir: handles.loaded.dataDir,
+    triggerReindex: async (_full) => {
+      await handles.scheduler.runNow(INCREMENTAL_JOB);
+    },
+  };
+  for (const exp of handles.exports) {
+    exp.bindServices?.(exportServices);
+  }
   handles.logger.info('using offline deterministic model (no LLM calls).');
 }

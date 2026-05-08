@@ -77,10 +77,9 @@ export class PageStore {
       pageCount: state.pageCount,
       eventsCovered: state.eventsCovered,
     };
-    await fs.writeFile(
+    await this.writeTextIfChanged(
       path.join(this.root, STATE_FILENAME),
       JSON.stringify(persisted, null, 2),
-      'utf8',
     );
   }
 
@@ -94,7 +93,7 @@ export class PageStore {
 
   async writeRootIndex(content: string): Promise<void> {
     await ensureDir(this.root);
-    await fs.writeFile(path.join(this.root, ROOT_INDEX_FILENAME), content, 'utf8');
+    await this.writeTextIfChanged(path.join(this.root, ROOT_INDEX_FILENAME), content);
   }
 
   async appendLog(entry: string): Promise<void> {
@@ -131,20 +130,31 @@ export class PageStore {
   }
 
   async writePage(page: IndexPage): Promise<void> {
-    const abs = path.join(this.root, page.path);
-    await ensureDir(path.dirname(abs));
-    await fs.writeFile(abs, serialisePage(page), 'utf8');
-    await this.upsertManifestEntry(page);
+    await this.applyPageChanges([page], []);
   }
 
   async deletePage(pagePath: string): Promise<void> {
-    const abs = path.join(this.root, pagePath);
-    try {
-      await fs.unlink(abs);
-    } catch {
-      // ignore
+    await this.applyPageChanges([], [pagePath]);
+  }
+
+  async applyPageChanges(upserts: IndexPage[], deletes: string[]): Promise<void> {
+    if (upserts.length === 0 && deletes.length === 0) return;
+
+    for (const page of upserts) {
+      const abs = path.join(this.root, page.path);
+      await ensureDir(path.dirname(abs));
+      await this.writeTextIfChanged(abs, serialisePage(page));
     }
-    await this.deleteManifestEntry(pagePath);
+
+    for (const pagePath of deletes) {
+      try {
+        await fs.unlink(path.join(this.root, pagePath));
+      } catch {
+        // ignore
+      }
+    }
+
+    await this.updateManifestEntries(upserts, deletes);
   }
 
   async listPages(): Promise<IndexPage[]> {
@@ -210,10 +220,9 @@ export class PageStore {
 
   private async writeManifest(manifest: PageManifest): Promise<void> {
     await ensureDir(this.root);
-    await fs.writeFile(
+    await this.writeTextIfChanged(
       path.join(this.root, MANIFEST_FILENAME),
       JSON.stringify(manifest, null, 2),
-      'utf8',
     );
   }
 
@@ -225,26 +234,34 @@ export class PageStore {
     });
   }
 
-  private async upsertManifestEntry(page: IndexPage): Promise<void> {
+  private async updateManifestEntries(
+    upserts: IndexPage[],
+    deletes: string[],
+  ): Promise<void> {
     const manifest = await this.readManifest();
+    if (!manifest) {
+      await this.writeManifestFromPages(await this.walkPages());
+      return;
+    }
     const pages = new Map((manifest?.pages ?? []).map((entry) => [entry.path, entry]));
-    pages.set(page.path, pageToManifestEntry(page));
+    for (const page of upserts) pages.set(page.path, pageToManifestEntry(page));
+    for (const pagePath of deletes) pages.delete(pagePath);
+    const nextPages = [...pages.values()].sort((a, b) => a.path.localeCompare(b.path));
+    if (manifestEntriesEqual(manifest.pages, nextPages)) return;
     await this.writeManifest({
       version: 1,
       generatedAt: new Date().toISOString(),
-      pages: [...pages.values()].sort((a, b) => a.path.localeCompare(b.path)),
+      pages: nextPages,
     });
   }
 
-  private async deleteManifestEntry(pagePath: string): Promise<void> {
-    const manifest = await this.readManifest();
-    if (!manifest) return;
-    const pages = manifest.pages.filter((entry) => entry.path !== pagePath);
-    await this.writeManifest({
-      version: 1,
-      generatedAt: new Date().toISOString(),
-      pages,
-    });
+  private async writeTextIfChanged(abs: string, text: string): Promise<void> {
+    try {
+      if ((await fs.readFile(abs, 'utf8')) === text) return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    await fs.writeFile(abs, text, 'utf8');
   }
 }
 
@@ -298,6 +315,23 @@ function pageToManifestEntry(page: IndexPage): PageManifestEntry {
     summary: extractMarkdownSummary(page.content),
     lastUpdated: page.lastUpdated,
   };
+}
+
+function manifestEntriesEqual(a: PageManifestEntry[], b: PageManifestEntry[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i]!;
+    const right = b[i]!;
+    if (
+      left.path !== right.path ||
+      left.title !== right.title ||
+      left.summary !== right.summary ||
+      left.lastUpdated !== right.lastUpdated
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function extractMarkdownTitle(content: string): string | null {

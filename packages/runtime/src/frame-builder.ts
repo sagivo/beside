@@ -244,17 +244,36 @@ function buildFrame(
   const url = anchor.url ?? firstNonNull(related, (e) => e.url);
   const windowTitle =
     anchor.window_title || firstNonNull(related, (e) => e.window_title) || '';
-  const meta = (anchor.metadata ?? {}) as Record<string, unknown>;
+  const meta = normaliseEventMetadata(anchor.metadata ?? {});
   const sourceEventIds = [anchor.id, ...related.map((e) => e.id)];
 
   // Capture-time AX text wins over later OCR. We redact PII here exactly
   // like the OCR worker does — same scrub, same keyword list — so the
   // FTS index is never poisoned by raw secrets regardless of which path
   // produced the text.
+  //
+  // When the native helper has run Apple Vision OCR at capture time
+  // (`metadata.vision_text`), we treat it the same way the Tesseract
+  // worker would have written its result: merge with AX text via the
+  // same line-dedupe rule, mark `text_source` accordingly, and skip
+  // the Tesseract worker entirely (it only picks frames whose
+  // `text_source` is null).
   let text: string | null = null;
   let textSource: Frame['text_source'] = null;
-  if (typeof meta.ax_text === 'string' && meta.ax_text.length >= 8) {
-    text = redactPii(meta.ax_text, sensitiveKeywords);
+  const axText = typeof meta.ax_text === 'string' && meta.ax_text.length >= 8
+    ? redactPii(meta.ax_text, sensitiveKeywords)
+    : null;
+  const visionText = typeof meta.vision_text === 'string' && meta.vision_text.length >= 8
+    ? redactPii(meta.vision_text, sensitiveKeywords)
+    : null;
+  if (visionText && axText) {
+    text = mergeFrameVisualText(visionText, axText);
+    textSource = 'ocr_accessibility';
+  } else if (visionText) {
+    text = visionText;
+    textSource = 'ocr';
+  } else if (axText) {
+    text = axText;
     textSource = 'accessibility';
   }
 
@@ -322,6 +341,42 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     meeting_id: null,
     source_event_ids: group.map((e) => e.id),
   };
+}
+
+/**
+ * Line-level dedupe across two visual-text sources, exactly mirroring
+ * `mergeVisualText` in ocr-worker.ts. Used when the native helper
+ * supplies both Vision OCR and Accessibility text at capture time —
+ * we merge here so the Tesseract worker doesn't have to fire later.
+ */
+function mergeFrameVisualText(ocrText: string, accessibilityText: string): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const block of [ocrText, accessibilityText]) {
+    for (const rawLine of block.split(/\r?\n/)) {
+      const line = rawLine.replace(/\s+/g, ' ').trim();
+      if (!line) continue;
+      const key = line.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(line);
+    }
+  }
+  return lines.join('\n').trim();
+}
+
+function normaliseEventMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const nested = metadata.metadata;
+  if (!isRecord(nested)) return metadata;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (key !== 'metadata') out[key] = value;
+  }
+  return { ...out, ...nested };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function firstNonNull<T, R>(arr: T[], pick: (t: T) => R | null | undefined): R | null {

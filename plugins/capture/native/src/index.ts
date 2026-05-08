@@ -363,25 +363,82 @@ class NativeCapture implements ICapture {
     const originalAbs = path.isAbsolute(event.asset_path)
       ? event.asset_path
       : path.join(this.config.raw_root, event.asset_path);
+
+    // Fast path: native helper already produced the final-format asset
+    // and emitted a perceptual hash + (optionally) Vision OCR text. We
+    // can skip the entire sharp decode/resize/encode pipeline and just
+    // do the diff-based dedup using the helper-provided phash.
+    const helperPhash = typeof event.metadata?.perceptual_hash === 'string'
+      ? (event.metadata.perceptual_hash as string)
+      : null;
+    const helperFormat = typeof event.metadata?.actual_format === 'string'
+      ? (event.metadata.actual_format as string).toLowerCase()
+      : null;
+    const helperFastPath = !!helperPhash && helperFormat === this.config.screenshot_format;
+
+    if (helperFastPath) {
+      const previous = this.lastHashByScreen.get(event.screen_index);
+      const diff = hashDiff(previous ?? null, helperPhash);
+      const trigger = typeof event.metadata?.trigger === 'string' ? event.metadata.trigger : null;
+      if (
+        trigger === 'content_change' &&
+        previous &&
+        diff < this.config.screenshot_diff_threshold
+      ) {
+        await fs.rm(originalAbs, { force: true });
+        this.logger.debug(
+          `skip native content_change screenshot (diff ${diff.toFixed(3)} < ${this.config.screenshot_diff_threshold})`,
+        );
+        return null;
+      }
+      this.lastHashByScreen.set(event.screen_index, helperPhash);
+      return {
+        ...event,
+        metadata: {
+          ...event.metadata,
+          hash_diff_from_previous: diff,
+          requested_format: this.config.screenshot_format,
+        },
+      };
+    }
+
+    // Legacy path: helper produced JPEG; we still need to transcode
+    // to the user-requested format (typically WebP). When the helper
+    // already emitted a perceptual hash (`metadata.perceptual_hash`)
+    // we reuse it instead of running Sharp's dHash a second time —
+    // saves one full JPEG decode per screenshot.
     const input = await fs.readFile(originalAbs);
-    const phash = await dHash(input);
+    const phash = helperPhash ?? (await dHash(input));
     const previous = this.lastHashByScreen.get(event.screen_index);
     const diff = hashDiff(previous ?? null, phash);
     const trigger = typeof event.metadata?.trigger === 'string' ? event.metadata.trigger : null;
 
+    if (
+      trigger === 'content_change' &&
+      previous &&
+      diff < this.config.screenshot_diff_threshold
+    ) {
+      await fs.rm(originalAbs, { force: true });
+      this.logger.debug(
+        `skip native content_change screenshot (diff ${diff.toFixed(3)} < ${this.config.screenshot_diff_threshold})`,
+      );
+      return null;
+    }
+
     let output: Buffer;
     let assetPath = event.asset_path;
     let actualFormat = inferFormat(assetPath);
+    let pipeline = sharp(input);
+    if (this.config.screenshot_max_dim > 0) {
+      pipeline = pipeline.resize({
+        width: this.config.screenshot_max_dim,
+        height: this.config.screenshot_max_dim,
+        fit: 'inside',
+        withoutEnlargement: true,
+      });
+    }
     if (this.config.screenshot_format === 'webp') {
-      output = await sharp(input)
-        .resize({
-          width: this.config.screenshot_max_dim,
-          height: this.config.screenshot_max_dim,
-          fit: 'inside',
-          withoutEnlargement: true,
-        })
-        .webp({ quality: this.config.screenshot_quality })
-        .toBuffer();
+      output = await pipeline.webp({ quality: this.config.screenshot_quality }).toBuffer();
       const nextAssetPath = replaceExtension(assetPath, '.webp');
       const nextAbs = path.isAbsolute(nextAssetPath)
         ? nextAssetPath
@@ -393,28 +450,9 @@ class NativeCapture implements ICapture {
       assetPath = nextAssetPath;
       actualFormat = 'webp';
     } else {
-      output = await sharp(input)
-        .resize({
-          width: this.config.screenshot_max_dim,
-          height: this.config.screenshot_max_dim,
-          fit: 'inside',
-          withoutEnlargement: true,
-        })
-        .jpeg({ quality: this.config.screenshot_quality })
-        .toBuffer();
+      output = await pipeline.jpeg({ quality: this.config.screenshot_quality }).toBuffer();
       await fs.writeFile(originalAbs, output);
       actualFormat = 'jpeg';
-    }
-
-    if (trigger === 'content_change' && diff < this.config.screenshot_diff_threshold) {
-      const finalAbs = path.isAbsolute(assetPath)
-        ? assetPath
-        : path.join(this.config.raw_root, assetPath);
-      await fs.rm(finalAbs, { force: true });
-      this.logger.debug(
-        `skip native content_change screenshot (diff ${diff.toFixed(3)} < ${this.config.screenshot_diff_threshold})`,
-      );
-      return null;
     }
 
     this.lastHashByScreen.set(event.screen_index, phash);

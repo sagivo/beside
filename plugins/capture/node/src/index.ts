@@ -697,12 +697,10 @@ class NodeCapture implements ICapture {
     }
 
     // Periodically check for content change even when window/url didn't
-    // change — e.g. scrolling to new content, modal opens.
-    let perceptualTrigger = false;
-    if (!trigger) {
-      perceptualTrigger = await this.shouldShootForContentChange(win);
-      if (perceptualTrigger) trigger = 'content_change';
-    }
+    // change — e.g. scrolling to new content, modal opens. The soft
+    // trigger path captures the probe frame directly when it changed so
+    // we don't pay for a second screenshot of the same display.
+    if (!trigger && (await this.captureContentChanges(win))) return;
 
     if (trigger) {
       await this.captureScreenshot(win, trigger);
@@ -1431,13 +1429,14 @@ class NodeCapture implements ICapture {
     win: ActiveWindowInfo,
     trigger: string,
     display: DisplayInfo,
+    prefetchedRaw?: Buffer,
   ): Promise<void> {
-    const buf = await this.grabRawForDisplay(display);
+    const buf = prefetchedRaw ?? await this.grabRawForDisplay(display);
     if (!buf) return;
 
     // Re-query the focused window *after* the screenshot grab. Several
     // hundred ms can elapse between the start of `tick()` and this point
-    // (active-window query → optional perceptual probe grab → real grab),
+    // (active-window query → optional perceptual probe/capture grab),
     // and on a busy machine the user may have switched apps in that
     // window. We trust whatever was focused at the moment the pixels
     // were captured, since that's what the image actually reflects —
@@ -1448,13 +1447,14 @@ class NodeCapture implements ICapture {
     const effective: ActiveWindowInfo =
       winAtCapture.screenIndex === display.index ? winAtCapture : win;
 
-    // Kick the AX-text query off in parallel with screenshot encoding —
-    // both involve enough I/O that overlapping them shaves real wall-clock
-    // time off the capture path. The promise resolves to `null` when the
-    // reader is disabled or the app exposes nothing useful.
-    const axPromise = effective.pid && this.axReader
+    const queryAx = () => effective.pid && this.axReader
       ? this.axReader.query({ pid: effective.pid, app: effective.app }).catch(() => null)
       : Promise.resolve(null);
+    // Hard-trigger frames are nearly always kept, so overlap AX-text with
+    // image encoding there. Soft content-change frames may still be dropped
+    // by the final compressed-image hash, so defer their AX tree walk until
+    // after the duplicate check.
+    const axPromise = trigger === 'content_change' ? null : queryAx();
 
     const compressed = await encodeScreenshot(
       buf,
@@ -1498,7 +1498,7 @@ class NodeCapture implements ICapture {
 
     // Await the AX query *after* the file write so we don't gate disk
     // IO on a slow accessibility tree walk.
-    const axResult = await axPromise;
+    const axResult = axPromise ? await axPromise : await queryAx();
 
     const metadata: Record<string, unknown> = {
       session_id: this.sessionId,
@@ -1535,10 +1535,24 @@ class NodeCapture implements ICapture {
     });
   }
 
-  private async shouldShootForContentChange(win: ActiveWindowInfo): Promise<boolean> {
+  private async captureContentChanges(win: ActiveWindowInfo): Promise<boolean> {
     if (!this.screenshotMod) return false;
-    // Any display whose content has changed enough is reason to fire — and
-    // crucially, a display we haven't shot yet always counts as "changed".
+    // Capture each changed display using the already-grabbed probe buffer.
+    // The previous flow did a probe screenshot here, returned a boolean,
+    // then captureScreenshot() grabbed the same display again.
+    let captured = false;
+    const probeSet = this.displaysForTrigger(win, 'content_change');
+    for (const display of probeSet) {
+      if (await this.captureDisplayIfChanged(win, display)) captured = true;
+    }
+    return captured;
+  }
+
+  private async captureDisplayIfChanged(
+    win: ActiveWindowInfo,
+    display: DisplayInfo,
+  ): Promise<boolean> {
+    // Any display we haven't shot yet always counts as "changed".
     // We probe each display independently so a static external monitor
     // doesn't suppress capture of an active laptop screen, and vice versa.
     //
@@ -1546,21 +1560,14 @@ class NodeCapture implements ICapture {
     // both saves work and avoids spurious 'content_change' triggers fired
     // by background monitors the user isn't looking at — exactly the noise
     // active mode is meant to suppress.
-    const probeSet = this.displaysForTrigger(win, 'content_change');
-    for (const display of probeSet) {
-      if (await this.displayHasContentChange(display)) return true;
-    }
-    return false;
-  }
-
-  private async displayHasContentChange(display: DisplayInfo): Promise<boolean> {
-    if (!display.lastHash) return true;
+    //
     // Time-floor: if we shot this display very recently, don't even
     // bother re-screenshotting it for a soft-trigger probe. This is
     // cheap and bypasses the expensive `screenshot-desktop` round trip
     // for a static screen between two polls.
     const floor = this.config.content_change_min_interval_ms;
     if (
+      display.lastHash &&
       floor > 0 &&
       display.lastShotAt !== null &&
       Date.now() - display.lastShotAt < floor
@@ -1569,18 +1576,23 @@ class NodeCapture implements ICapture {
     }
     const buf = await this.grabRawForDisplay(display);
     if (!buf) return false;
-    try {
-      // Hash directly off raw pixels — no need to JPEG-encode just to
-      // throw the bytes away. dHash works on any sharp-compatible
-      // input, so we hand it the original buffer; captureForDisplay
-      // will redo the (resized + WebP) encode at full quality if this
-      // returns true.
-      const phash = await dHash(buf);
-      const diff = hashDiff(display.lastHash, phash);
-      return diff >= this.config.screenshot_diff_threshold;
-    } catch {
-      return false;
+
+    if (display.lastHash) {
+      try {
+        // Hash directly off raw pixels — no need to JPEG-encode just to
+        // throw the bytes away. dHash works on any sharp-compatible
+        // input, so we hand it the original buffer; captureForDisplay()
+        // will still compute the final hash from the encoded asset.
+        const phash = await dHash(buf);
+        const diff = hashDiff(display.lastHash, phash);
+        if (diff < this.config.screenshot_diff_threshold) return false;
+      } catch {
+        return false;
+      }
     }
+
+    await this.captureForDisplay(win, 'content_change', display, buf);
+    return true;
   }
 
   private async emitBlur(win: ActiveWindowInfo, durationMs: number): Promise<void> {

@@ -44,7 +44,7 @@ interface LocalStorageConfig {
   retention_days?: number;
 }
 
-const MAX_EMBEDDING_TEXT_CHARS = 3000;
+const MAX_EMBEDDING_TEXT_CHARS = 1200;
 const ASSET_BYTES_CACHE_TTL_MS = 5 * 60_000;
 const CACHEABLE_SCREENSHOT_EXTENSIONS = new Set(['.webp']);
 const FLAT_INTERNED_SCREENSHOT_RE =
@@ -55,6 +55,7 @@ interface FrameFtsFrameRow {
   text: string | null;
   text_source: string | null;
   window_title: string | null;
+  url: string | null;
   app: string | null;
   entity_path: string | null;
   entity_kind: string | null;
@@ -96,7 +97,8 @@ class LocalStorage implements IStorage {
   }
 
   async write(event: RawEvent): Promise<void> {
-    const storedEvent = await this.internScreenshotAsset(event);
+    const normalisedEvent = normaliseEventTimestamp(event);
+    const storedEvent = await this.internScreenshotAsset(normalisedEvent);
     if (storedEvent !== event) {
       // The orchestrator publishes the same object after storage.write().
       // Keep it in sync so downstream workers see the canonical asset path.
@@ -375,6 +377,7 @@ class LocalStorage implements IStorage {
         frameId: frame.id,
         text: frame.text ?? '',
         windowTitle: frame.window_title ?? '',
+        url: frame.url ?? '',
         app: frame.app ?? '',
         entitySearch: entityToFtsText(frame.entity_path, frame.entity_kind),
       });
@@ -437,7 +440,9 @@ class LocalStorage implements IStorage {
         sql.push('AND frames.text_source = @text_source');
         params.text_source = query.textSource;
       }
-      sql.push('ORDER BY frames.timestamp DESC');
+      sql.push(
+        'ORDER BY bm25(frame_text, 0.0, 1.2, 5.0, 0.4, 4.0) ASC, frames.timestamp DESC',
+      );
       sql.push(`LIMIT ${Math.max(1, Math.floor(query.limit ?? 25))}`);
       if (query.offset) sql.push(`OFFSET ${Math.max(0, Math.floor(query.offset))}`);
       return (this.db.prepare(sql.join(' ')).all(params) as RawFrameRow[]).map(rowToFrame);
@@ -611,6 +616,7 @@ class LocalStorage implements IStorage {
         frameId,
         text,
         windowTitle: row.window_title ?? '',
+        url: row.url ?? '',
         app: row.app ?? '',
         entitySearch: entityToFtsText(row.entity_path, row.entity_kind),
       });
@@ -628,11 +634,75 @@ class LocalStorage implements IStorage {
     tx(eventIds);
   }
 
+  async resetFrameDerivatives(query: { from?: string; to?: string } = {}): Promise<void> {
+    const hasRange = Boolean(query.from || query.to);
+    const frameWhere: string[] = ['1=1'];
+    const eventWhere: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.from) {
+      frameWhere.push('timestamp >= @from_ts');
+      eventWhere.push('timestamp >= @from_ts');
+      params.from_ts = query.from;
+    }
+    if (query.to) {
+      frameWhere.push('timestamp <= @to_ts');
+      eventWhere.push('timestamp <= @to_ts');
+      params.to_ts = query.to;
+    }
+
+    const frameIds = hasRange
+      ? (this.db
+          .prepare(`SELECT id FROM frames WHERE ${frameWhere.join(' AND ')}`)
+          .all(params) as Array<{ id: string }>).map((r) => r.id)
+      : [];
+
+    const tx = this.db.transaction(() => {
+      if (hasRange) {
+        this.deleteFrameRowsById(frameIds);
+      } else {
+        this.db.exec(`
+          DELETE FROM frame_text;
+          DELETE FROM frame_embeddings;
+          DELETE FROM frames;
+        `);
+      }
+
+      // These tables are derived from frames. Full reindex rebuilds them
+      // immediately after FrameBuilder/EntityResolver have run.
+      this.db.exec(`
+        DELETE FROM entities_fts;
+        DELETE FROM entities;
+        DELETE FROM sessions;
+        DELETE FROM meeting_turns;
+        DELETE FROM meetings;
+        UPDATE frames SET activity_session_id = NULL, meeting_id = NULL;
+      `);
+
+      this.db
+        .prepare(`UPDATE events SET framed_at = NULL WHERE ${eventWhere.join(' AND ')}`)
+        .run(params);
+    });
+    tx();
+  }
+
+  private deleteFrameRowsById(frameIds: string[]): void {
+    if (frameIds.length === 0) return;
+    for (let i = 0; i < frameIds.length; i += 500) {
+      const chunk = frameIds.slice(i, i + 500);
+      const placeholders = chunk.map((_, idx) => `@id_${idx}`).join(',');
+      const params = Object.fromEntries(chunk.map((id, idx) => [`id_${idx}`, id]));
+      this.db.prepare(`DELETE FROM frame_text WHERE frame_id IN (${placeholders})`).run(params);
+      this.db.prepare(`DELETE FROM frame_embeddings WHERE frame_id IN (${placeholders})`).run(params);
+      this.db.prepare(`DELETE FROM frames WHERE id IN (${placeholders})`).run(params);
+    }
+  }
+
   async listFramesNeedingEmbedding(
     model: string,
     limit: number,
   ): Promise<FrameEmbeddingTask[]> {
-    const rows = this.db
+    const cap = Math.max(1, Math.floor(limit));
+    const missingRows = this.db
       .prepare(
         `SELECT frames.*,
                 frame_embeddings.content_hash AS existing_hash
@@ -645,25 +715,56 @@ class LocalStorage implements IStorage {
            OR COALESCE(frames.window_title, '') != ''
            OR COALESCE(frames.url, '') != ''
          )
+           AND frame_embeddings.frame_id IS NULL
          ORDER BY frames.timestamp DESC
+         LIMIT @limit`,
+      )
+      .all({
+        model,
+        limit: cap,
+      }) as Array<RawFrameRow & { existing_hash: string | null }>;
+
+    const out: FrameEmbeddingTask[] = [];
+    for (const row of missingRows) {
+      const content = frameEmbeddingContent(rowToFrame(row));
+      if (!content) continue;
+      const hash = sha256(content);
+      out.push({ id: row.id, content_hash: hash, content });
+      if (out.length >= cap) break;
+    }
+    if (out.length >= cap) return out;
+
+    const staleRows = this.db
+      .prepare(
+        `SELECT frames.*,
+                frame_embeddings.content_hash AS existing_hash
+         FROM frames
+         JOIN frame_embeddings
+           ON frame_embeddings.frame_id = frames.id
+          AND frame_embeddings.model = @model
+         WHERE (
+           COALESCE(frames.text, '') != ''
+           OR COALESCE(frames.window_title, '') != ''
+           OR COALESCE(frames.url, '') != ''
+         )
+         ORDER BY frame_embeddings.created_at ASC
          LIMIT @scanLimit`,
       )
       .all({
         model,
-        // Scan a little beyond the requested batch so changed hashes can
-        // be filtered in JS without starving the worker on already-current
-        // rows near the top of the timeline.
-        scanLimit: Math.max(1, Math.floor(limit)) * 5,
+        scanLimit: Math.max(1, cap - out.length) * 10,
       }) as Array<RawFrameRow & { existing_hash: string | null }>;
 
-    const out: FrameEmbeddingTask[] = [];
-    for (const row of rows) {
+    const queuedIds = new Set(out.map((task) => task.id));
+    for (const row of staleRows) {
+      if (queuedIds.has(row.id)) continue;
       const content = frameEmbeddingContent(rowToFrame(row));
       if (!content) continue;
       const hash = sha256(content);
       if (row.existing_hash === hash) continue;
       out.push({ id: row.id, content_hash: hash, content });
-      if (out.length >= limit) break;
+      queuedIds.add(row.id);
+      if (out.length >= cap) break;
     }
     return out;
   }
@@ -909,7 +1010,7 @@ class LocalStorage implements IStorage {
       // 2. Pull the frame's contribution to the entity stats.
       const frameRow = this.db
         .prepare(
-          'SELECT timestamp, duration_ms, text, window_title, app FROM frames WHERE id = ?',
+          'SELECT timestamp, duration_ms, text, window_title, url, app FROM frames WHERE id = ?',
         )
         .get(frameId) as
         | {
@@ -917,6 +1018,7 @@ class LocalStorage implements IStorage {
             duration_ms: number | null;
             text: string | null;
             window_title: string | null;
+            url: string | null;
             app: string | null;
           }
         | undefined;
@@ -948,6 +1050,7 @@ class LocalStorage implements IStorage {
         frameId,
         text: frameRow.text ?? '',
         windowTitle: frameRow.window_title ?? '',
+        url: frameRow.url ?? '',
         app: frameRow.app ?? '',
         entitySearch: entityToFtsText(entity.path, entity.kind),
       });
@@ -978,6 +1081,7 @@ class LocalStorage implements IStorage {
       frameId,
       text: row.text ?? '',
       windowTitle: row.window_title ?? '',
+      url: row.url ?? '',
       app: row.app ?? '',
       entitySearch: entityToFtsText(entityPath, entityKind),
     });
@@ -987,13 +1091,14 @@ class LocalStorage implements IStorage {
     frameId: string;
     text: string;
     windowTitle: string;
+    url: string;
     app: string;
     entitySearch: string;
   }): boolean {
     this.getFrameFtsDeleteStmt().run(input.frameId);
     this.getFrameFtsInsertStmt().run(
       input.frameId,
-      input.text,
+      ftsBodyText(input.text, input.url),
       input.windowTitle,
       input.app,
       input.entitySearch,
@@ -1017,7 +1122,7 @@ class LocalStorage implements IStorage {
 
   private getFrameFtsFrameSelectStmt(): Database.Statement {
     this.frameFtsFrameSelectStmt ??= this.db.prepare(
-      'SELECT text, text_source, window_title, app, entity_path, entity_kind FROM frames WHERE id = ?',
+      'SELECT text, text_source, window_title, url, app, entity_path, entity_kind FROM frames WHERE id = ?',
     );
     return this.frameFtsFrameSelectStmt;
   }
@@ -1249,7 +1354,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos'
+          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
         )`;
     const rows = this.db
       .prepare(
@@ -2191,11 +2296,10 @@ class LocalStorage implements IStorage {
         created_at          TEXT NOT NULL
       );
 
-      -- frame_text: free-text search over a frame's body + window
-      -- title + app + the entity it was attributed to. URL is
-      -- intentionally excluded -- it lives in the indexed
-      -- frames.url_host column where it can be exact-matched without
-      -- polluting the porter stemmer.
+      -- frame_text: free-text search over a frame's body + URL hints +
+      -- window title + app + the entity it was attributed to. The canonical
+      -- URL still lives in frames.url/url_host for exact filtering; this FTS
+      -- copy only gives recall for page names, host tokens, and slugs.
       --
       -- entity_search holds a tokenised projection of the frame's
       -- entity_path + entity_kind (e.g. "cofounderos project" for
@@ -2231,6 +2335,8 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model
         ON frame_embeddings(model);
+      CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model_hash
+        ON frame_embeddings(model, content_hash);
 
       CREATE TABLE IF NOT EXISTS entities (
         path             TEXT PRIMARY KEY,
@@ -2270,7 +2376,7 @@ class LocalStorage implements IStorage {
         'apps/electron', 'apps/cloudflare-warp',
         'apps/spotlight', 'apps/window-server', 'apps/dock',
         'apps/control-center', 'apps/notification-center',
-        'apps/screencaptureui', 'apps/cofounderos'
+        'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
       )
       BEGIN
         INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
@@ -2288,7 +2394,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos'
+          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
         );
       END;
       CREATE TRIGGER IF NOT EXISTS entities_ad AFTER DELETE ON entities BEGIN
@@ -2391,6 +2497,7 @@ class LocalStorage implements IStorage {
     this.maybeAddColumn('frames', 'meeting_id', 'TEXT');
     this.maybeAddColumn('frames', 'url_host', 'TEXT');
     this.maybeAddColumn('meetings', 'title', 'TEXT');
+    this.repairInvalidTimestamps();
 
     // 2. Drop the dead `events_fts` virtual table. The free-text search
     //    path moved to `frames` / `frame_text` long ago; the FTS table
@@ -2421,14 +2528,15 @@ class LocalStorage implements IStorage {
         .prepare("SELECT id, url FROM frames WHERE url IS NOT NULL AND url != '' AND url_host IS NULL")
         .all() as Array<{ id: string; url: string }>;
       const upd = this.db.prepare('UPDATE frames SET url_host = ? WHERE id = ?');
+      let updated = 0;
       const tx = this.db.transaction(() => {
         for (const r of rows) {
-          const host = extractUrlHost(r.url);
-          if (host) upd.run(host, r.id);
+          upd.run(extractUrlHost(r.url) ?? '', r.id);
+          updated += 1;
         }
       });
       tx();
-      this.logger.info(`migrated: backfilled url_host for ${rows.length} frames`);
+      this.logger.info(`migrated: backfilled url_host for ${updated} frames`);
     }
 
     // 5. Indexes — composite & partial. Replace single-column indexes
@@ -2498,6 +2606,8 @@ class LocalStorage implements IStorage {
       CREATE INDEX IF NOT EXISTS idx_frames_pending_meeting
         ON frames(timestamp ASC)
         WHERE entity_kind = 'meeting' AND meeting_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model_hash
+        ON frame_embeddings(model, content_hash);
     `);
 
     // 6. Drop redundant single-column indexes now subsumed by the new
@@ -2545,7 +2655,7 @@ class LocalStorage implements IStorage {
         'apps/electron', 'apps/cloudflare-warp',
         'apps/spotlight', 'apps/window-server', 'apps/dock',
         'apps/control-center', 'apps/notification-center',
-        'apps/screencaptureui', 'apps/cofounderos'
+        'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
       )
       BEGIN
         INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
@@ -2563,7 +2673,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos'
+          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
         );
       END;
       CREATE TRIGGER entities_ad AFTER DELETE ON entities BEGIN
@@ -2582,7 +2692,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos'
+          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
         )`,
       )
       .run().changes;
@@ -2611,7 +2721,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos'
+          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
         );
       `);
       this.logger.info(`migrated: backfilled entities_fts with ${entCount} entity row(s)`);
@@ -2625,7 +2735,7 @@ class LocalStorage implements IStorage {
       | { user_version: number }
       | undefined;
     const currentVersion = versionRow?.user_version ?? 0;
-    const TARGET_VERSION = 6;
+    const TARGET_VERSION = 7;
     if (currentVersion < TARGET_VERSION) {
       try {
         this.db.exec('VACUUM');
@@ -2728,6 +2838,8 @@ class LocalStorage implements IStorage {
         ALTER TABLE frame_embeddings_new RENAME TO frame_embeddings;
         CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model
           ON frame_embeddings(model);
+        CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model_hash
+          ON frame_embeddings(model, content_hash);
       `);
     }
   }
@@ -2744,9 +2856,10 @@ class LocalStorage implements IStorage {
    * the storage adapter writes. FTS5 virtual tables don't support
    * `ALTER TABLE`, so we DROP + CREATE + repopulate from the canonical
    * `frames` table. Idempotent: a no-op once `frame_text` has the
-   * expected columns. Currently triggers when:
+   * expected columns/content. Currently triggers when:
    *   - the legacy `url` column is still present, or
-   *   - the `entity_search` column is missing (added later).
+   *   - the `entity_search` column is missing (added later), or
+   *   - the FTS body has not yet been rebuilt with URL hint text.
    */
   private maybeRebuildFrameTextFts(): void {
     const cols = this.db
@@ -2755,10 +2868,14 @@ class LocalStorage implements IStorage {
     const names = new Set(cols.map((c) => c.name));
     const hasUrl = names.has('url');
     const hasEntitySearch = names.has('entity_search');
-    if (!hasUrl && hasEntitySearch) return;
+    const versionRow = this.db.prepare('PRAGMA user_version').get() as
+      | { user_version: number }
+      | undefined;
+    const needsUrlHints = (versionRow?.user_version ?? 0) < 7;
+    if (!hasUrl && hasEntitySearch && !needsUrlHints) return;
 
     this.logger.info(
-      `migrating: rebuilding frame_text FTS (had url=${hasUrl}, had entity_search=${hasEntitySearch})`,
+      `migrating: rebuilding frame_text FTS (had url=${hasUrl}, had entity_search=${hasEntitySearch}, url_hints=${needsUrlHints})`,
     );
     const start = Date.now();
     this.db.exec(`
@@ -2777,12 +2894,13 @@ class LocalStorage implements IStorage {
     // name without waiting for the indexer to touch them again.
     const rows = this.db
       .prepare(
-        `SELECT id, text, window_title, app, entity_path, entity_kind FROM frames`,
+        `SELECT id, text, window_title, url, app, entity_path, entity_kind FROM frames`,
       )
       .all() as Array<{
       id: string;
       text: string | null;
       window_title: string | null;
+      url: string | null;
       app: string | null;
       entity_path: string | null;
       entity_kind: string | null;
@@ -2794,7 +2912,7 @@ class LocalStorage implements IStorage {
       for (const r of rows) {
         insert.run(
           r.id,
-          r.text ?? '',
+          ftsBodyText(r.text ?? '', r.url ?? ''),
           r.window_title ?? '',
           r.app ?? '',
           entityToFtsText(r.entity_path, r.entity_kind),
@@ -2814,6 +2932,71 @@ class LocalStorage implements IStorage {
     if (!cols.some((c) => c.name === column)) {
       this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
       this.logger.info(`migrated: added ${table}.${column}`);
+    }
+  }
+
+  /**
+   * Repair legacy rows written with empty/invalid timestamps. Their IDs carry
+   * the capture timestamp (`evt_<base36ms>_...` / `frm_<base36ms>_...`), so we
+   * can recover chronology without guessing from row order.
+   */
+  private repairInvalidTimestamps(): void {
+    const eventRows = this.db
+      .prepare(
+        `SELECT id, timestamp, day
+         FROM events
+         WHERE timestamp IS NULL
+            OR trim(timestamp) = ''
+            OR day IS NULL
+            OR trim(day) = ''
+            OR day LIKE 'NaN%'`,
+      )
+      .all() as Array<{ id: string; timestamp: string | null; day: string | null }>;
+    const frameRows = this.db
+      .prepare(
+        `SELECT id, timestamp, day
+         FROM frames
+         WHERE timestamp IS NULL
+            OR trim(timestamp) = ''
+            OR day IS NULL
+            OR trim(day) = ''
+            OR day LIKE 'NaN%'`,
+      )
+      .all() as Array<{ id: string; timestamp: string | null; day: string | null }>;
+
+    const updateEvents = this.db.prepare(
+      'UPDATE events SET timestamp = @timestamp, day = @day WHERE id = @id',
+    );
+    const updateFrames = this.db.prepare(
+      'UPDATE frames SET timestamp = @timestamp, day = @day WHERE id = @id',
+    );
+    let repairedEvents = 0;
+    let repairedFrames = 0;
+
+    const tx = this.db.transaction(() => {
+      for (const row of eventRows) {
+        const timestamp = normaliseTimestampValue(row.timestamp) ?? timestampFromRecordId(row.id);
+        if (!timestamp) continue;
+        const day = dayKey(new Date(timestamp));
+        if (row.timestamp === timestamp && row.day === day) continue;
+        updateEvents.run({ id: row.id, timestamp, day });
+        repairedEvents += 1;
+      }
+      for (const row of frameRows) {
+        const timestamp = normaliseTimestampValue(row.timestamp) ?? timestampFromRecordId(row.id);
+        if (!timestamp) continue;
+        const day = dayKey(new Date(timestamp));
+        if (row.timestamp === timestamp && row.day === day) continue;
+        updateFrames.run({ id: row.id, timestamp, day });
+        repairedFrames += 1;
+      }
+    });
+    tx();
+
+    if (repairedEvents > 0 || repairedFrames > 0) {
+      this.logger.info(
+        `migrated: repaired invalid timestamps (${repairedEvents} event(s), ${repairedFrames} frame(s))`,
+      );
     }
   }
 
@@ -3061,15 +3244,7 @@ interface RawEventRow {
 }
 
 function rowToEvent(r: RawEventRow): RawEvent {
-  let metadata: Record<string, unknown> = {};
-  if (r.extra_json) {
-    try {
-      const parsed = JSON.parse(r.extra_json) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object') metadata = parsed;
-    } catch {
-      // tolerate corruption — empty metadata is better than crashing read
-    }
-  }
+  const metadata = eventMetadataFromExtraJson(r.extra_json);
   return {
     id: r.id,
     timestamp: r.timestamp,
@@ -3088,6 +3263,54 @@ function rowToEvent(r: RawEventRow): RawEvent {
     privacy_filtered: r.privacy_filtered === 1,
     capture_plugin: r.capture_plugin ?? '',
   };
+}
+
+function eventMetadataFromExtraJson(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) return {};
+    const metadata: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key !== 'metadata') metadata[key] = value;
+    }
+    if (isRecord(parsed.metadata)) {
+      Object.assign(metadata, parsed.metadata);
+    }
+    return metadata;
+  } catch {
+    // tolerate corruption — empty metadata is better than crashing reads
+    return {};
+  }
+}
+
+function normaliseEventTimestamp(event: RawEvent): RawEvent {
+  if (isValidTimestamp(event.timestamp)) return event;
+  const timestamp = timestampFromRecordId(event.id) ?? new Date().toISOString();
+  return { ...event, timestamp };
+}
+
+function normaliseTimestampValue(value: string | null | undefined): string | null {
+  if (!isValidTimestamp(value)) return null;
+  return new Date(Date.parse(value!)).toISOString();
+}
+
+function isValidTimestamp(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+}
+
+function timestampFromRecordId(id: string | null | undefined): string | null {
+  if (!id) return null;
+  const parts = id.split('_');
+  if (parts.length < 2) return null;
+  const ms = Number.parseInt(parts[1]!, 36);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const timestamp = new Date(ms).toISOString();
+  return isValidTimestamp(timestamp) ? timestamp : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
@@ -3461,6 +3684,28 @@ function entityToFtsText(
   const tail = path.split('/').slice(-1)[0] ?? path;
   const tokens = tail.replace(/[-_/]+/g, ' ').trim();
   return kind ? `${tokens} ${kind}` : tokens;
+}
+
+function ftsBodyText(text: string, url: string | null | undefined): string {
+  const parts = [text.trim(), urlToFtsHints(url)].filter((part) => part.length > 0);
+  return parts.join('\n');
+}
+
+function urlToFtsHints(url: string | null | undefined): string {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+    const host = extractUrlHost(url);
+    const hostTokens = host ? host.replace(/[.-]+/g, ' ') : '';
+    const pathTokens = decodeURIComponent(parsed.pathname)
+      .replace(/\.[A-Za-z0-9]+$/g, ' ')
+      .replace(/[^A-Za-z0-9]+/g, ' ')
+      .trim();
+    return [host, hostTokens, pathTokens].filter(Boolean).join(' ');
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -667,6 +667,13 @@ export interface IStorage {
   markFramed(eventIds: string[]): Promise<void>;
 
   /**
+   * Clear derived frame/search/entity state and reopen matching raw events for
+   * FrameBuilder. Full reindex uses this so resolver/text extraction changes
+   * can be applied to already-captured history.
+   */
+  resetFrameDerivatives(query?: { from?: string; to?: string }): Promise<void>;
+
+  /**
    * Frames whose searchable content has no current embedding for the
    * requested model. Used by the EmbeddingWorker.
    */
