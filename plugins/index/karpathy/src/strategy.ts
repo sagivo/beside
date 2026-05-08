@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import type {
   EntityKind,
   EntityRecord,
@@ -19,6 +20,45 @@ import { slugify } from './bucketer.js';
 import { PageStore } from './page-store.js';
 
 const STRATEGY_NAME = 'karpathy';
+
+/**
+ * How many entity-page renders run concurrently against the model
+ * during `indexBatch`. `model.complete()` is the wall — gemma4:e4b
+ * takes 5–10s per call on Apple Silicon — and Ollama serves up to
+ * `OLLAMA_NUM_PARALLEL` (default 4 on systems with ≥6 GB free RAM)
+ * concurrent requests for the same model. Sequential renders left
+ * 3 of those slots idle. 4 matches the ollama default; raise via
+ * `system.indexer_render_concurrency` for hosts that can spare more
+ * VRAM/parallel slots.
+ */
+const DEFAULT_RENDER_CONCURRENCY = 4;
+
+/**
+ * Bounded concurrent-map without a runtime dep on p-limit. Preserves
+ * input order in the output. Errors propagate (Promise.all-style); the
+ * caller's renderEntityPage catches model errors and falls back to
+ * deterministic prose, so an in-flight LLM hiccup doesn't unwind the
+ * whole batch.
+ */
+async function pmap<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  if (items.length === 0) return results;
+  const lanes = Math.max(1, Math.min(concurrency, items.length));
+  let cursor = 0;
+  const workers = Array.from({ length: lanes }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i] as T, i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 const SYSTEM_PROMPT = `You write concise summaries for entries in a personal knowledge wiki.
 You receive STRUCTURED EVIDENCE about one entity (a project, repo, meeting, channel, doc, person, app, or webpage)
@@ -53,6 +93,12 @@ interface StrategyConfig {
   batch_size?: number;
   archive_after_days?: number;
   summary_threshold_pages?: number;
+  /**
+   * How many entity-page renders the strategy fans out per batch.
+   * Caps Ollama's parallel slot usage on a shared model. Default 4
+   * matches OLLAMA_NUM_PARALLEL's default on systems with >=6GB free.
+   */
+  render_concurrency?: number;
   /**
    * Minimum total focused minutes an `apps/<x>` entity needs before
    * it earns a wiki page of its own. After P1 entity lifting, what's
@@ -132,6 +178,7 @@ export class KarpathyStrategy implements IIndexStrategy {
   private readonly summaryThresholdPages: number;
   private readonly appPageMinMs: number;
   private readonly appPageMinFrames: number;
+  private readonly renderConcurrency: number;
   private store!: PageStore;
   /**
    * Captured on the first `getUnindexedEvents` call. We use it inside
@@ -147,6 +194,10 @@ export class KarpathyStrategy implements IIndexStrategy {
     this.summaryThresholdPages = config.summary_threshold_pages ?? 5;
     this.appPageMinMs = (config.app_page_min_minutes ?? 5) * 60_000;
     this.appPageMinFrames = config.app_page_min_frames ?? 20;
+    this.renderConcurrency = Math.max(
+      1,
+      config.render_concurrency ?? DEFAULT_RENDER_CONCURRENCY,
+    );
   }
 
   /**
@@ -248,29 +299,93 @@ export class KarpathyStrategy implements IIndexStrategy {
     const pagesToUpdate: IndexPage[] = [];
     const pagesToDelete: string[] = [];
     let skippedNoise = 0;
+    let skippedHashUnchanged = 0;
+    let modelCallsAvoided = 0;
 
+    type PreparedTask =
+      | {
+          kind: 'render';
+          entity: EntityRecord;
+          frames: Frame[];
+          existing: IndexPage | null;
+          pagePath: string;
+        }
+      | { kind: 'skip-noise'; pagePath: string; existed: boolean }
+      | { kind: 'skip-empty'; pagePath: string };
+
+    // Phase A: cheap, sequential prep pass — DB reads + filters. We
+    // intentionally keep this serial (better-sqlite3 is synchronous;
+    // running the queries concurrently doesn't help) and only fan out
+    // the LLM-bound `renderEntityPage` calls below.
+    const prepared: PreparedTask[] = [];
     for (const entity of dirtyByPath.values()) {
-      const frames = await this.storage.getEntityFrames(entity.path, 500);
-      if (frames.length === 0) continue;
-
       const pagePath = `${entity.path}.md`;
-      const existing = await this.store.readPage(pagePath);
-
-      // Apply the entity-page filter. If a previously-indexed entity
-      // has now slipped below the threshold (e.g. its real frames got
-      // lifted out by SessionBuilder), tear down the stale page so
-      // the wiki doesn't carry permanent dead pages around.
-      if (!(await this.shouldRenderEntityPage(entity))) {
-        skippedNoise += 1;
-        if (existing) pagesToDelete.push(pagePath);
+      const frames = await this.storage.getEntityFrames(entity.path, 500);
+      if (frames.length === 0) {
+        prepared.push({ kind: 'skip-empty', pagePath });
         continue;
       }
+      const existing = await this.store.readPage(pagePath);
+      if (!(await this.shouldRenderEntityPage(entity))) {
+        prepared.push({ kind: 'skip-noise', pagePath, existed: !!existing });
+        continue;
+      }
+      prepared.push({ kind: 'render', entity, frames, existing, pagePath });
+    }
 
-      const page = await this.renderEntityPage(entity, frames, existing, model);
-      if (existing) {
-        if (pageHasMeaningfulChanges(existing, page)) pagesToUpdate.push(page);
+    skippedNoise = prepared.reduce(
+      (n, t) => n + (t.kind === 'skip-noise' ? 1 : 0),
+      0,
+    );
+    for (const task of prepared) {
+      if (task.kind === 'skip-noise' && task.existed) {
+        pagesToDelete.push(task.pagePath);
+      }
+    }
+
+    // Phase B: render dirty entities in parallel against the model.
+    // `pmap` caps concurrency to `DEFAULT_RENDER_CONCURRENCY` so we
+    // never overwhelm Ollama's `num_parallel` slots; pages flow through
+    // independently. Each renderEntityPage internally hashes evidence
+    // first and returns the existing page unchanged when the hash
+    // matches — that's where we eliminate the bulk of redundant LLM
+    // calls on incremental + full reindex.
+    const renderTasks = prepared.filter(
+      (t): t is Extract<PreparedTask, { kind: 'render' }> => t.kind === 'render',
+    );
+    const concurrency = this.renderConcurrency;
+    const rendered = await pmap(renderTasks, concurrency, async (task) => {
+      try {
+        const result = await this.renderEntityPage(
+          task.entity,
+          task.frames,
+          task.existing,
+          model,
+        );
+        return { ...task, page: result.page, reused: result.reused };
+      } catch (err) {
+        this.logger.warn('renderEntityPage failed; skipping entity', {
+          path: task.entity.path,
+          err: String(err),
+        });
+        return { ...task, page: null, reused: false };
+      }
+    });
+
+    for (const out of rendered) {
+      if (!out.page) continue;
+      if (out.reused) modelCallsAvoided += 1;
+      if (out.existing) {
+        if (pageHasMeaningfulChanges(out.existing, out.page)) {
+          pagesToUpdate.push(out.page);
+        } else if (out.reused) {
+          // Evidence hash matched and no rendered diff — skip writes
+          // entirely to avoid re-touching the file (and the manifest)
+          // for a no-op update.
+          skippedHashUnchanged += 1;
+        }
       } else {
-        pagesToCreate.push(page);
+        pagesToCreate.push(out.page);
       }
     }
 
@@ -287,9 +402,13 @@ export class KarpathyStrategy implements IIndexStrategy {
     });
 
     const noiseSuffix = skippedNoise > 0 ? ` (skipped ${skippedNoise} below-threshold app entit${skippedNoise === 1 ? 'y' : 'ies'})` : '';
+    const cacheSuffix = modelCallsAvoided > 0
+      ? ` [cache: ${modelCallsAvoided} hash-skip${modelCallsAvoided === 1 ? '' : 's'}` +
+        `${skippedHashUnchanged > 0 ? `, ${skippedHashUnchanged} no-write` : ''}]`
+      : '';
     this.logger.info(
       `karpathy: ${pagesToCreate.length} new + ${pagesToUpdate.length} updated + ${pagesToDelete.length} deleted pages` +
-        ` from ${dirtyByPath.size} active entities${noiseSuffix}`,
+        ` from ${dirtyByPath.size} active entities${noiseSuffix}${cacheSuffix}`,
     );
 
     return {
@@ -498,11 +617,27 @@ export class KarpathyStrategy implements IIndexStrategy {
     frames: Frame[],
     existing: IndexPage | null,
     model: IModelAdapter,
-  ): Promise<IndexPage> {
+  ): Promise<{ page: IndexPage; reused: boolean }> {
     const meetingDigests = await this.listMeetingDigestsForEntity(entity);
     const pageEntity = entityForPage(entity, meetingDigests);
     const related = await this.listRelatedEntitiesForEntity(entity);
     const evidence = buildEvidence(pageEntity, frames, meetingDigests, related);
+
+    // Evidence-hash skip-cache. The dirty-set computation is coarse —
+    // any entity whose `last_seen` advanced lands in `dirtyByPath`,
+    // even if the new frames don't materially change what we'd
+    // summarise. By hashing the canonicalised evidence we can detect
+    // "nothing actually new here" and reuse the previous page without
+    // a model call. This is the primary lever that keeps incremental
+    // reindexes cheap once the initial pass has rendered everything.
+    const evidenceHash = computeEvidenceHash(pageEntity, evidence);
+    if (existing && existing.evidenceHash === evidenceHash) {
+      return {
+        page: { ...existing, lastUpdated: existing.lastUpdated },
+        reused: true,
+      };
+    }
+
     const isOfflineModel = model.getModelInfo().name === 'offline:fallback';
 
     let prose: string;
@@ -532,16 +667,20 @@ export class KarpathyStrategy implements IIndexStrategy {
     const content = renderEntityMarkdown(pageEntity, evidence, prose);
 
     return {
-      path: `${entity.path}.md`,
-      content,
-      // We no longer store the full per-event provenance in the page
-      // metadata block — the SQLite `frames`/`entities` tables are the
-      // source of truth. Keep an empty list to satisfy the IndexPage
-      // contract; reorg passes don't actually depend on it for entities
-      // built from frames.
-      sourceEventIds: existing?.sourceEventIds ?? [],
-      backlinks: existing?.backlinks ?? [],
-      lastUpdated: isoTimestamp(),
+      page: {
+        path: `${entity.path}.md`,
+        content,
+        // We no longer store the full per-event provenance in the page
+        // metadata block — the SQLite `frames`/`entities` tables are the
+        // source of truth. Keep an empty list to satisfy the IndexPage
+        // contract; reorg passes don't actually depend on it for entities
+        // built from frames.
+        sourceEventIds: existing?.sourceEventIds ?? [],
+        backlinks: existing?.backlinks ?? [],
+        lastUpdated: isoTimestamp(),
+        evidenceHash,
+      },
+      reused: false,
     };
   }
 
@@ -930,6 +1069,70 @@ function uniqueStrings(values: string[]): string[] {
     out.push(cleaned);
   }
   return out;
+}
+
+/**
+ * Hash the entity-scoped evidence buffer so we can short-circuit a
+ * page render when nothing material has changed since the last pass.
+ *
+ * The hash needs to be:
+ *  - **stable** — JSON.stringify on the freshly-built evidence struct,
+ *    which is deterministic in field order because we always build it
+ *    via the same `buildEvidence` output (ordered slices).
+ *  - **scoped to evidence-only** — we deliberately exclude metadata
+ *    that changes on every run (entity.lastSeen, entity.frameCount)
+ *    when those don't actually change the prose: focused-minute
+ *    rounding stays in the prompt context, but the per-second clock
+ *    drift would otherwise force a re-render every batch.
+ *  - **cheap** — sha1 over a few KB of JSON is sub-millisecond.
+ *
+ * If the hash matches `existing.evidenceHash`, we reuse the page and
+ * skip the LLM call. Older pages without a hash always re-render
+ * exactly once, which back-fills the field for next time.
+ */
+function computeEvidenceHash(entity: EntityRecord, evidence: Evidence): string {
+  const stable = {
+    kind: entity.kind,
+    path: entity.path,
+    title: entity.title,
+    // Round to whole minutes so a stale clock doesn't bust the cache.
+    totalFocusedMin: Math.round(entity.totalFocusedMs / 60_000),
+    frameCount: entity.frameCount,
+    apps: evidence.apps,
+    files: evidence.files,
+    urls: evidence.urls.map((u) => ({ url: u.url, title: u.title ?? null })),
+    related: evidence.related.map((r) => ({
+      title: r.title,
+      kind: r.kind,
+      sharedSessions: r.sharedSessions,
+      sharedFocusedMin: Math.round(r.sharedFocusedMs / 60_000),
+    })),
+    meetings: evidence.meetings.map((m) => ({
+      startedAt: m.startedAt,
+      durationMin: m.durationMin,
+      title: m.title,
+      tldr: m.tldr ?? null,
+      decisions: m.decisions,
+      actionItems: m.actionItems,
+      summaryStatus: m.summaryStatus,
+    })),
+    windows: evidence.windows.map((w) => ({
+      startedAt: w.startedAt,
+      durationMin: Math.max(1, Math.round(w.durationMs / 60_000)),
+      frameCount: w.frameCount,
+      apps: w.apps,
+      windowTitles: w.windowTitles,
+      textSnippets: w.textSnippets,
+    })),
+    textSnippets: evidence.textSnippets,
+    keyframes: evidence.keyframes.map((k) => ({
+      assetPath: k.assetPath,
+      // phash is the perceptual fingerprint; if it changes, the visual
+      // content of the screenshot did too (cache miss).
+      phash: k.phash ?? null,
+    })),
+  };
+  return createHash('sha1').update(JSON.stringify(stable)).digest('hex');
 }
 
 function buildEvidencePrompt(

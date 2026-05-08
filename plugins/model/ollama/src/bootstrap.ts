@@ -354,6 +354,24 @@ export async function startOllamaDaemon(): Promise<void> {
         // serve` would leave a permanent console window on the user's
         // desktop until the daemon exits.
         windowsHide: true,
+        // Bump parallelism + memory tuning on the spawned daemon. Only
+        // applies when *we* start the daemon (not when the user already
+        // has `ollama serve` running). The indexer fans out 4 entity
+        // renders per batch (KarpathyStrategy.renderConcurrency), so
+        // NUM_PARALLEL=4 keeps all four slots busy. FLASH_ATTENTION
+        // halves the KV-cache memory cost on Apple Silicon and is a
+        // pure speedup; KV_CACHE_TYPE=q8_0 trims another ~2x of KV
+        // memory at near-imperceptible quality cost. Users who want
+        // different tradeoffs can override via launchd/systemd or by
+        // pre-starting `ollama serve` with their own env.
+        env: {
+          ...process.env,
+          OLLAMA_NUM_PARALLEL: process.env.OLLAMA_NUM_PARALLEL ?? '4',
+          OLLAMA_FLASH_ATTENTION:
+            process.env.OLLAMA_FLASH_ATTENTION ?? '1',
+          OLLAMA_KV_CACHE_TYPE:
+            process.env.OLLAMA_KV_CACHE_TYPE ?? 'q8_0',
+        },
       });
       child.on('error', (err) => reject(err));
       child.unref();

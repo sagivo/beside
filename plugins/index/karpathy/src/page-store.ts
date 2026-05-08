@@ -272,6 +272,14 @@ interface PageMeta {
   sourceEventIds: string[];
   backlinks: string[];
   lastUpdated: string;
+  /**
+   * Optional content-addressed digest of the evidence buffer the page
+   * was rendered from. Persisted in the markdown frontmatter so a
+   * subsequent reindex can detect "evidence unchanged → skip the LLM
+   * call" across process restarts. Pages written by older versions
+   * lack this and will be re-rendered once.
+   */
+  evidenceHash?: string;
 }
 
 export function parsePage(pagePath: string, text: string): IndexPage {
@@ -296,6 +304,7 @@ export function parsePage(pagePath: string, text: string): IndexPage {
     sourceEventIds: meta.sourceEventIds,
     backlinks: meta.backlinks,
     lastUpdated: meta.lastUpdated,
+    evidenceHash: meta.evidenceHash,
   };
 }
 
@@ -304,6 +313,7 @@ export function serialisePage(page: IndexPage): string {
     sourceEventIds: page.sourceEventIds,
     backlinks: page.backlinks,
     lastUpdated: page.lastUpdated,
+    ...(page.evidenceHash ? { evidenceHash: page.evidenceHash } : {}),
   };
   return `${META_OPEN}\n${JSON.stringify(meta, null, 2)}\n${META_CLOSE}\n\n${page.content.trim()}\n`;
 }

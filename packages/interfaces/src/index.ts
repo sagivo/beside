@@ -1033,6 +1033,16 @@ export interface IStorage {
   runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }>;
 
   /**
+   * Force a WAL checkpoint. `PASSIVE` (the default) returns immediately
+   * if other readers/writers would block; `TRUNCATE` waits and then
+   * shrinks the WAL file back to zero bytes on disk. Used by the
+   * full-reindex pipeline between phases so the WAL doesn't grow into
+   * the hundreds of MB during a long run. Best-effort: implementations
+   * that don't use WAL (or aren't SQLite-backed) can no-op.
+   */
+  checkpointWal?(mode?: 'PASSIVE' | 'TRUNCATE'): Promise<void>;
+
+  /**
    * Retention sweep: delete events / frames / sessions / meetings
    * older than `retentionDays`, plus entities whose `last_seen` falls
    * before the same cutoff (those entities have no surviving frames;
@@ -1167,6 +1177,15 @@ export interface IndexPage {
   sourceEventIds: string[];
   backlinks: string[];
   lastUpdated: string;
+  /**
+   * Optional content-addressed digest of the canonicalised "evidence"
+   * the page was rendered from (frames, meeting digests, related
+   * entities, etc.). When the strategy can prove the evidence hasn't
+   * changed since the last render, it skips the LLM call and reuses
+   * the existing page. Older pages without this field force a render
+   * on the next pass — that's fine, the field self-populates over time.
+   */
+  evidenceHash?: string;
 }
 
 export interface ReorganisationSummary {

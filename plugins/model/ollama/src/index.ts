@@ -51,6 +51,33 @@ const COMPLETE_TIMEOUT_MS = 5 * 60_000;
 const UNLOAD_TIMEOUT_MS = 10_000;
 
 /**
+ * Wall-clock timeout for any awaitable that *can't* be cancelled (e.g.
+ * the npm `ollama` client's chat call, which doesn't accept an
+ * AbortSignal in the versions we depend on). The underlying request
+ * keeps running on the wire — that's unavoidable without first-class
+ * cancellation — but the caller stops waiting and surfaces a readable
+ * error so the strategy can fall back to deterministic prose.
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * `fetch` with an AbortSignal-backed timeout that surfaces a readable
  * error message rather than the generic "AbortError" from undici.
  * Returning a Response keeps the call sites identical.
@@ -129,17 +156,27 @@ class OllamaAdapter implements IModelAdapter {
     }
     messages.push({ role: 'user', content: prompt });
 
-    const res = await this.client.chat({
-      model: this.model,
-      messages,
-      stream: false,
-      format: options.responseFormat === 'json' ? 'json' : undefined,
-      keep_alive: this.keepAlive,
-      options: {
-        temperature: options.temperature ?? 0.2,
-        num_predict: options.maxTokens ?? 1024,
-      },
-    });
+    // The npm `ollama` client doesn't accept an AbortSignal in the
+    // versions we pin to, so we race the chat call against a
+    // wall-clock timeout. Without this, a wedged daemon (crash mid-
+    // request, dropped TCP, etc.) would hang the strategy forever —
+    // the strategy fans out N concurrent renders and one stuck call
+    // would block the whole batch's Promise.all.
+    const res = await raceWithTimeout(
+      this.client.chat({
+        model: this.model,
+        messages,
+        stream: false,
+        format: options.responseFormat === 'json' ? 'json' : undefined,
+        keep_alive: this.keepAlive,
+        options: {
+          temperature: options.temperature ?? 0.2,
+          num_predict: options.maxTokens ?? 1024,
+        },
+      }),
+      COMPLETE_TIMEOUT_MS,
+      'ollama /api/chat',
+    );
     this.scheduleIdleUnload();
     return res.message.content;
   }

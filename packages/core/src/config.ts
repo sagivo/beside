@@ -76,17 +76,13 @@ const CaptureSchema = z.object({
     // are dominated by container overhead and the rate metric is
     // noisy. Default 5000 (5 s).
     min_audio_rate_check_ms: z.number().int().nonnegative().default(5000),
-    // Live mic/input recording. OFF by default for two reasons:
-    //   1. Privacy. Continuous mic capture is a meaningfully more
-    //      sensitive surface than screenshots; users should opt in
-    //      explicitly rather than discover it post-install.
-    //   2. CPU. Whisper transcription runs every audio tick; on
-    //      machines without GPU acceleration it's the heaviest worker
-    //      in the system. Off-by-default keeps idle CPU near zero
-    //      until the user wants meeting capture.
-    // Set `enabled: true` in config.yaml to record (native plugin only).
+    // Live mic/input recording. ON by default for native meeting
+    // capture, but gated by `activation: other_process_input` so the
+    // recorder starts only while another process is actively using
+    // audio input. Users who want fully manual capture can turn this
+    // off in config.yaml or Settings.
     live_recording: z.object({
-      enabled: z.boolean().default(false),
+      enabled: z.boolean().default(true),
       chunk_seconds: z.number().int().positive().default(300),
       format: z.enum(['m4a']).default('m4a'),
       sample_rate: z.number().int().positive().default(16_000),
@@ -95,7 +91,7 @@ const CaptureSchema = z.object({
       system_audio_backend: z.enum(['core_audio_tap', 'screencapturekit', 'off']).default('core_audio_tap'),
       poll_interval_sec: z.number().int().positive().default(3),
     }).default({
-      enabled: false,
+      enabled: true,
       chunk_seconds: 300,
       format: 'm4a',
       sample_rate: 16_000,
@@ -116,7 +112,7 @@ const CaptureSchema = z.object({
     min_audio_bytes_per_sec: 4096,
     min_audio_rate_check_ms: 5000,
     live_recording: {
-      enabled: false,
+      enabled: true,
       chunk_seconds: 300,
       format: 'm4a',
       sample_rate: 16_000,
@@ -519,7 +515,7 @@ capture:
     min_audio_bytes_per_sec: 4096 # silence floor; chunks below this byte rate skip whisper and are deleted (0 = disable)
     min_audio_rate_check_ms: 5000 # skip the silence floor check for clips shorter than this (ms)
     live_recording:
-      enabled: false              # off by default — mic capture is opt-in (privacy + CPU). Set true on the native plugin to record mic/input chunks into the inbox.
+      enabled: true               # native plugin only; records mic/input chunks into the inbox while another process uses audio input
       # activation controls when microphone recording starts:
       #   other_process_input — record only while another process is actively using audio input
       #     (reliable on wired headsets; may miss Bluetooth/AirPods or virtual audio devices)

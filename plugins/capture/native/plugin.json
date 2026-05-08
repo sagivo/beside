@@ -30,7 +30,7 @@
           "live_recording": {
             "type": "object",
             "properties": {
-              "enabled": { "type": "boolean", "default": false },
+              "enabled": { "type": "boolean", "default": true },
               "chunk_seconds": { "type": "integer", "default": 300 },
               "format": { "type": "string", "enum": ["m4a"], "default": "m4a" },
               "sample_rate": { "type": "integer", "default": 16000 },

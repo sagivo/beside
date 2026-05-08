@@ -865,6 +865,13 @@ async function runFullReindexLocked(
       log.info(`rebuilt ${emb.processed} frame embedding(s)`);
     }
 
+    // Phase 3 wrote a lot — embedding rebuild + sessions/meetings
+    // rebuild produce thousands of inserts and deletes. Force a
+    // TRUNCATE checkpoint so the WAL is back to ~0 bytes on disk
+    // before the LLM-bound page walk starts, otherwise the WAL stays
+    // pinned at tens of MB through the entire run.
+    await checkpointWalIfSupported(storage, 'TRUNCATE', log);
+
     // Embedding model is done; unload only it so we free VRAM before the
     // (heavier) chat/indexer model has to handle summarisation. The chat
     // model stays loaded — that was the costly bug in the old version,
@@ -942,6 +949,16 @@ async function runFullReindexLocked(
       log.debug('model unload after full re-index failed', { err: String(err) });
     });
 
+    // Final WAL truncate + best-effort VACUUM. The page walk
+    // accumulates writes again (markIndexed + applyUpdate); without
+    // these the WAL ends the run at 30+ MB and the DB file holds
+    // pages freed by the embeddings/sessions/meetings clears earlier.
+    // VACUUM rewrites the file once — typically reclaims 30–40% on
+    // a freshly-reindexed DB. Best-effort: if VACUUM fails (e.g. the
+    // disk is tight), the run is still successful.
+    await checkpointWalIfSupported(storage, 'TRUNCATE', log);
+    await vacuumDbIfSupported(storage, log);
+
     const totalSec = Math.round((Date.now() - t0) / 1000);
     log.info(`full re-index complete — ${totalProcessed} events processed in ${totalSec}s`);
   } finally {
@@ -978,6 +995,49 @@ function applyKeepAliveOverride(
 function resetKeepAliveIfSupported(adapter: IModelAdapter): void {
   const fn = (adapter as { resetKeepAlive?: () => void }).resetKeepAlive;
   if (typeof fn === 'function') fn.call(adapter);
+}
+
+/**
+ * Force a SQLite WAL checkpoint via the optional `IStorage.checkpointWal`.
+ * Storage backends without WAL (or non-SQLite) don't expose the method
+ * and silently no-op. Used between full-reindex phases so the WAL
+ * doesn't stay pinned at tens of MB across an LLM-bound run.
+ */
+async function checkpointWalIfSupported(
+  storage: IStorage,
+  mode: 'PASSIVE' | 'TRUNCATE',
+  log: Logger,
+): Promise<void> {
+  const fn = (storage as { checkpointWal?: (m?: 'PASSIVE' | 'TRUNCATE') => Promise<void> })
+    .checkpointWal;
+  if (typeof fn !== 'function') return;
+  try {
+    await fn.call(storage, mode);
+  } catch (err) {
+    log.debug(`checkpointWal(${mode}) failed`, { err: String(err) });
+  }
+}
+
+/**
+ * Best-effort `runMaintenance()` invocation at the end of a full
+ * reindex. Runs ANALYZE + VACUUM (and the integrity_check). VACUUM
+ * rewrites the DB file once — typical reclaim is 30–40% after a
+ * full reindex deleted/replaced sessions, meetings, and embeddings.
+ * Failures are logged and swallowed so a tight-disk situation
+ * doesn't unwind a successful reindex.
+ */
+async function vacuumDbIfSupported(storage: IStorage, log: Logger): Promise<void> {
+  if (typeof storage.runMaintenance !== 'function') return;
+  try {
+    const start = Date.now();
+    const result = await storage.runMaintenance();
+    log.info(
+      `post-reindex maintenance: vacuumed=${result.vacuumed} ` +
+        `analyzed=${result.analyzed} (${Date.now() - start}ms)`,
+    );
+  } catch (err) {
+    log.warn('post-reindex maintenance failed (non-fatal)', { err: String(err) });
+  }
 }
 
 /**

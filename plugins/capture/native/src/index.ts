@@ -134,7 +134,7 @@ class NativeCapture implements ICapture {
         whisper_command: config.audio?.whisper_command ?? 'whisper',
         whisper_language: config.audio?.whisper_language,
         live_recording: {
-          enabled: config.audio?.live_recording?.enabled ?? false,
+          enabled: config.audio?.live_recording?.enabled ?? true,
           chunk_seconds: config.audio?.live_recording?.chunk_seconds ?? 300,
           format: config.audio?.live_recording?.format ?? 'm4a',
           sample_rate: config.audio?.live_recording?.sample_rate ?? 16_000,

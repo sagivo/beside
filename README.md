@@ -480,7 +480,9 @@ capture:
     batch_size: 5
     whisper_command: whisper
     live_recording:
-      enabled: false      # native capture plugin only; records mic/input chunks
+      enabled: true       # native capture plugin only; records mic/input chunks while another process uses audio input
+      activation: other_process_input
+      system_audio_backend: core_audio_tap
       chunk_seconds: 300
       format: m4a
       sample_rate: 16000
@@ -492,13 +494,10 @@ audio files, install a compatible `whisper` command first, for example
 OpenAI Whisper's CLI. Files that fail transcription are moved to
 `failed_path` with a `.error.txt` sidecar explaining why.
 
-When using `capture.plugin: native` on macOS, set
-`capture.audio.live_recording.enabled: true` to record microphone/input
-audio chunks directly into the inbox. The transcript worker will pick up
-those `.m4a` chunks on its next tick. This captures the selected input
-device; for remote meeting audio while wearing headphones, route system
-audio into an input/aggregate device (for example BlackHole) before
-enabling live recording.
+When using `capture.plugin: native` on macOS, live recording is enabled
+by default and starts only while another process is actively using audio
+input. The transcript worker will pick up finished `.m4a` / `.wav`
+chunks on its next tick.
 
 ### Meetings (Zoom / Google Meet / Microsoft Teams / Webex)
 
@@ -537,11 +536,11 @@ Query meetings via the MCP tools `list_meetings` / `get_meeting` /
 `summarize_meeting`, or read them inline at the top of every daily
 journal under the `## Meetings` section.
 
-For best summary quality, enable `capture.audio.live_recording` (native
-plugin) routed to a virtual input that captures system audio
-(e.g. BlackHole) so remote participants are transcribed too. Without
-system audio routing, only your microphone is captured and the summary
-is built from your half of the conversation plus the visible slides.
+For best summary quality, use the native plugin's default
+`core_audio_tap` backend on macOS 14.2+ so remote participants are
+transcribed too. If system output capture is disabled or unavailable,
+only your microphone is captured and the summary is built from your half
+of the conversation plus the visible slides.
 
 ### Two transports
 

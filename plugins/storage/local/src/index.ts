@@ -47,6 +47,11 @@ interface LocalStorageConfig {
 const MAX_EMBEDDING_TEXT_CHARS = 1200;
 const ASSET_BYTES_CACHE_TTL_MS = 5 * 60_000;
 const CACHEABLE_SCREENSHOT_EXTENSIONS = new Set(['.webp']);
+// Cap the in-memory parsed-meeting cache. Meetings are paginated 200
+// at a time in listMeetings, so 256 covers two pages plus headroom.
+// Each entry is the fully parsed Meeting object (summary_json,
+// attendees, links) -- a few KB each, bounded total memory.
+const MEETING_PARSE_CACHE_CAP = 256;
 const FLAT_INTERNED_SCREENSHOT_RE =
   /^raw\/\d{4}-\d{2}-\d{2}\/screenshots\/[a-f0-9]{64}\.webp$/i;
 const LEGACY_INTERNED_SCREENSHOT_MARKER = '/screenshots/_cache/sha256/';
@@ -72,6 +77,10 @@ class LocalStorage implements IStorage {
   private resolveFrameTagStmt: Database.Statement | null = null;
   private resolveFrameSelectStmt: Database.Statement | null = null;
   private resolveEntityUpsertStmt: Database.Statement | null = null;
+  // Parsed-Meeting LRU. Key: `${id}|${updated_at}`. Both meeting
+  // upsert paths bump updated_at on every write, so the key naturally
+  // shifts when the row mutates -- no separate invalidation needed.
+  private readonly meetingParseCache = new Map<string, Meeting>();
   private assetBytesCache: { value: number; expiresAt: number } | null = null;
 
   constructor(root: string, logger: Logger) {
@@ -1840,7 +1849,31 @@ class LocalStorage implements IStorage {
     const row = this.db
       .prepare(`SELECT * FROM meetings WHERE id = ?`)
       .get(id) as RawMeetingRow | undefined;
-    return row ? rowToMeeting(row) : null;
+    return row ? this.cachedRowToMeeting(row) : null;
+  }
+
+  // Parse-cache wrapper around rowToMeeting. summary_json is the
+  // expensive parse; attendees / links are smaller but parse on the
+  // same row, so we cache the full Meeting object to avoid repeating
+  // any of the work. Key includes updated_at so writes naturally
+  // invalidate without needing a separate invalidation hook.
+  private cachedRowToMeeting(row: RawMeetingRow): Meeting {
+    const key = `${row.id}|${row.updated_at}`;
+    const cached = this.meetingParseCache.get(key);
+    if (cached) {
+      // Refresh recency: re-insert at the tail of the Map.
+      this.meetingParseCache.delete(key);
+      this.meetingParseCache.set(key, cached);
+      return cached;
+    }
+    const parsed = rowToMeeting(row);
+    this.meetingParseCache.set(key, parsed);
+    while (this.meetingParseCache.size > MEETING_PARSE_CACHE_CAP) {
+      const oldest = this.meetingParseCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.meetingParseCache.delete(oldest);
+    }
+    return parsed;
   }
 
   async listMeetings(query: ListMeetingsQuery = {}): Promise<Meeting[]> {
@@ -1876,7 +1909,7 @@ class LocalStorage implements IStorage {
          LIMIT @limit`,
       )
       .all({ ...params, limit }) as RawMeetingRow[];
-    return rows.map(rowToMeeting);
+    return rows.map((r) => this.cachedRowToMeeting(r));
   }
 
   async listFramesNeedingMeetingAssignment(limit: number): Promise<Frame[]> {
@@ -2354,9 +2387,63 @@ class LocalStorage implements IStorage {
     return stream;
   }
 
+  // Opt-in slow-query logging. When COFOUNDEROS_DB_SLOW_QUERY_MS is set
+  // to a positive integer, wraps db.prepare so any subsequent
+  // .run / .get / .all that exceeds the threshold logs a one-line
+  // warning with the SQL preview, elapsed ms, and row count. Zero
+  // overhead when the env is unset (we skip wrapping entirely), so
+  // production installs are unaffected.
+  private installSlowQueryLogger(db: Database.Database): void {
+    const raw = process.env.COFOUNDEROS_DB_SLOW_QUERY_MS;
+    const threshold = raw ? Number.parseInt(raw, 10) : 0;
+    if (!Number.isFinite(threshold) || threshold <= 0) return;
+
+    const logger = this.logger;
+    const origPrepare = db.prepare.bind(db);
+    const previewSql = (sql: string): string =>
+      sql.replace(/\s+/g, ' ').trim().slice(0, 160);
+
+    (db as { prepare: typeof db.prepare }).prepare = function (sql: string) {
+      const stmt = origPrepare(sql);
+      const preview = previewSql(sql);
+      const time = <T,>(fn: () => T, kind: 'run' | 'get' | 'all'): T => {
+        const start = process.hrtime.bigint();
+        const result = fn();
+        const ms = Number(process.hrtime.bigint() - start) / 1_000_000;
+        if (ms >= threshold) {
+          const rowCount =
+            kind === 'all' && Array.isArray(result)
+              ? result.length
+              : kind === 'get'
+                ? result == null
+                  ? 0
+                  : 1
+                : null;
+          logger.warn(`slow query ${ms.toFixed(1)}ms`, {
+            sql: preview,
+            kind,
+            rowCount,
+          });
+        }
+        return result;
+      };
+      const origRun = stmt.run.bind(stmt);
+      const origGet = stmt.get.bind(stmt);
+      const origAll = stmt.all.bind(stmt);
+      stmt.run = ((...args: unknown[]) =>
+        time(() => origRun(...(args as [])), 'run')) as typeof stmt.run;
+      stmt.get = ((...args: unknown[]) =>
+        time(() => origGet(...(args as [])), 'get')) as typeof stmt.get;
+      stmt.all = ((...args: unknown[]) =>
+        time(() => origAll(...(args as [])), 'all')) as typeof stmt.all;
+      return stmt;
+    } as typeof db.prepare;
+  }
+
   private async openDb(): Promise<void> {
     const dbPath = path.join(this.root, 'cofounderOS.db');
     this.db = new Database(dbPath);
+    this.installSlowQueryLogger(this.db);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
@@ -2666,6 +2753,35 @@ class LocalStorage implements IStorage {
    * The orchestrator gates the call on idle/AC power; here we just do
    * the work and surface failures.
    */
+  /**
+   * Force a WAL checkpoint. PASSIVE returns quickly; TRUNCATE blocks
+   * until the WAL can be shrunk to zero on disk. The full-reindex
+   * pipeline calls this between phases so the WAL doesn't balloon
+   * during long, write-heavy runs (we observed it pinning at 30 MB+
+   * across reindexes despite `wal_autocheckpoint = 2000`, because
+   * passive checkpoints run but never truncate the file).
+   *
+   * Best-effort. A failure here is logged and swallowed — the next
+   * incremental tick will get another shot.
+   */
+  async checkpointWal(mode: 'PASSIVE' | 'TRUNCATE' = 'PASSIVE'): Promise<void> {
+    try {
+      const result = this.db.pragma(`wal_checkpoint(${mode})`) as Array<{
+        busy: number;
+        log: number;
+        checkpointed: number;
+      }>;
+      const r = result[0];
+      if (r) {
+        this.logger.debug(
+          `wal_checkpoint(${mode}): busy=${r.busy} log_pages=${r.log} checkpointed=${r.checkpointed}`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`wal_checkpoint(${mode}) failed`, { err: String(err) });
+    }
+  }
+
   async runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }> {
     let analyzed = false;
     let vacuumed = false;
