@@ -264,9 +264,36 @@ export type ConfigValidation =
   | { ok: false; issues: Array<{ path: string; message: string }> };
 
 export interface CofounderConfig {
+  app: {
+    name: string;
+    data_dir: string;
+    log_level: 'debug' | 'info' | 'warn' | 'error';
+    session_id?: string;
+  };
   capture: {
+    plugin: string;
+    poll_interval_ms: number;
+    idle_poll_interval_ms: number;
+    focus_settle_delay_ms: number;
+    screenshot_diff_threshold: number;
+    idle_threshold_sec: number;
+    screenshot_format: 'webp' | 'jpeg';
+    screenshot_quality: number;
+    jpeg_quality?: number;
+    screenshot_max_dim: number;
+    content_change_min_interval_ms: number;
+    multi_screen?: boolean;
+    screens?: number[] | null;
+    capture_mode?: 'active' | 'all';
     excluded_apps: string[];
     excluded_url_patterns: string[];
+    accessibility?: {
+      enabled?: boolean;
+      timeout_ms?: number;
+      max_chars?: number;
+      max_elements?: number;
+      excluded_apps?: string[];
+    };
     privacy: {
       blur_password_fields: boolean;
       pause_on_screen_lock: boolean;
@@ -284,40 +311,91 @@ export interface CofounderConfig {
       whisper_language?: string;
       delete_audio_after_transcribe?: boolean;
       max_audio_bytes?: number;
+      min_audio_bytes_per_sec?: number;
+      min_audio_rate_check_ms?: number;
       live_recording?: {
         enabled?: boolean;
         chunk_seconds?: number;
+        format?: 'm4a';
         sample_rate?: number;
         channels?: number;
         system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
-        activation?: 'other_process_input';
+        activation?: 'other_process_input' | 'always';
         poll_interval_sec?: number;
       };
     };
   };
   storage: {
+    plugin: string;
     local: {
+      path: string;
       max_size_gb: number;
       retention_days: number;
       vacuum: {
         compress_after_days: number;
+        compress_after_minutes?: number;
+        compress_quality: number;
         thumbnail_after_days: number;
+        thumbnail_after_minutes?: number;
+        thumbnail_max_dim: number;
         delete_after_days: number;
+        delete_after_minutes?: number;
+        tick_interval_min: number;
+        batch_size: number;
       };
     };
   };
   index: {
+    strategy: string;
+    index_path: string;
     incremental_interval_min: number;
+    reorganise_schedule: string;
+    reorganise_on_idle: boolean;
+    idle_trigger_min: number;
+    batch_size: number;
+    sessions: {
+      idle_threshold_sec: number;
+      afk_threshold_sec: number;
+      min_active_ms: number;
+      fallback_frame_attention_ms: number;
+    };
+    meetings: {
+      idle_threshold_sec: number;
+      min_duration_sec: number;
+      audio_grace_sec: number;
+      summarize: boolean;
+      summarize_cooldown_sec: number;
+      vision_attachments: number;
+    };
+    embeddings: {
+      enabled: boolean;
+      batch_size: number;
+      tick_interval_min: number;
+      search_weight: number;
+    };
     model: {
       plugin: string;
       ollama?: {
         model: string;
         embedding_model: string;
         host: string;
+        vision_model?: string;
+        indexer_model?: string;
         keep_alive?: string | number;
         unload_after_idle_min?: number;
         auto_install?: boolean;
         model_revision?: number;
+      };
+      openai?: {
+        api_key?: string;
+        base_url?: string;
+        model?: string;
+        vision_model?: string;
+        embedding_model?: string;
+      };
+      claude?: {
+        api_key?: string;
+        model?: string;
       };
     };
   };
@@ -328,7 +406,19 @@ export interface CofounderConfig {
       path?: string;
       host?: string;
       port?: number;
+      transport?: 'http' | 'stdio';
+      text_excerpt_chars?: number;
     }>;
+  };
+  system: {
+    background_model_jobs: 'manual' | 'scheduled';
+    load_guard: {
+      enabled: boolean;
+      threshold: number;
+      memory_threshold: number;
+      low_battery_threshold_pct: number;
+      max_consecutive_skips: number;
+    };
   };
 }
 

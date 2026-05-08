@@ -348,12 +348,12 @@ class MarkdownExport implements IExport {
         ? model.completeWithVision(prompt, images, {
             systemPrompt: JOURNAL_NARRATIVE_SYSTEM_PROMPT,
             temperature: 0.15,
-            maxTokens: 900,
+            maxTokens: 1200,
           })
         : model.complete(prompt, {
             systemPrompt: JOURNAL_NARRATIVE_SYSTEM_PROMPT,
             temperature: 0.15,
-            maxTokens: 900,
+            maxTokens: 1200,
           });
       const raw = await withTimeout(
         rawPromise,
@@ -366,7 +366,7 @@ class MarkdownExport implements IExport {
         this.logger.warn('discarding low-signal model journal narrative', { day });
         return markdown;
       }
-      return insertBeforeTimeline(markdown, `## Detailed narrative\n${narrative}\n`);
+      return insertBeforeTimeline(markdown, `## Detailed day story\n${narrative}\n`);
     } catch (err) {
       this.logger.warn('model journal narrative failed', { err: String(err), day });
       return markdown;
@@ -385,9 +385,10 @@ class MarkdownExport implements IExport {
     const images: Buffer[] = [];
     lines.push(`DAY: ${day}`);
     lines.push('');
-    lines.push('Write a detailed but grounded report of what the user appears to have done.');
+    lines.push('Write a story-like journal entry of what the user appears to have done.');
     lines.push('Important: infer actions across timeframes, but mark uncertainty when evidence is weak.');
-    lines.push('Improve on the baseline only when the evidence supports it. Keep concrete artifacts and communications.');
+    lines.push('Improve on the baseline only when the evidence supports it. Keep concrete artifacts, communications, files, URLs, and outcomes.');
+    lines.push('Lead with what happened and why it mattered, not app usage or percentages.');
     lines.push('');
     lines.push('BASELINE DETERMINISTIC REPORT:');
     lines.push(baseline || '(none)');
@@ -414,9 +415,9 @@ class MarkdownExport implements IExport {
       lines.push('');
     }
     lines.push('Return markdown only with these sections:');
-    lines.push('- `### Work arc` with 3-7 chronological bullets');
-    lines.push('- `### Handoffs and follow-ups` for transitions like coding -> Slack/Mail/calendar');
-    lines.push('- `### Evidence notes` explaining what evidence was strong/weak');
+    lines.push('- `### Day story` with 2-4 short paragraphs in second person ("you ...")');
+    lines.push('- `### Chronological notes` with 3-7 bullets that explain what happened in order');
+    lines.push('- `### Evidence and uncertainty` explaining which claims are strong, weak, or inferred');
     return { prompt: lines.join('\n'), images };
   }
 }
@@ -426,13 +427,14 @@ const JOURNAL_NARRATIVE_SYSTEM_PROMPT = `You write personal activity reports fro
 Rules:
 - Ground every claim in the supplied session metadata, titles, URLs, entities, files, and optional images.
 - Prefer concrete actions and outcomes over app names.
+- Write like a useful personal journal: "you worked through X, then checked Y, then followed up with Z".
 - Connect adjacent sessions when the evidence suggests a handoff or follow-up.
 - Do not invent relationships such as boss/manager/client unless explicitly present in the evidence.
 - Do not mention internal session ids.
 - Do not use vague phrases like "manage their work", "project management", or "various applications" unless the evidence says that exactly.
-- Every Work arc bullet must include at least one concrete artifact, communication target, URL/domain, file, or window title.
+- Every Chronological notes bullet must include at least one concrete artifact, communication target, URL/domain, file, or window title.
 - Use uncertainty language ("likely", "appears", "possibly") when evidence is weak.
-- Keep it concise: bullets, not long prose.`;
+- Keep it concise: short paragraphs plus scannable bullets.`;
 
 function stripMetaBlock(text: string): string {
   const start = text.indexOf('<!-- cofounderos:meta');
@@ -644,7 +646,7 @@ function insertBeforeTimeline(markdown: string, section: string): string {
 }
 
 function extractBaselineNarrative(markdown: string): string {
-  const start = markdown.indexOf('\n## Narrative\n');
+  const start = markdown.indexOf('\n## What happened\n');
   const end = markdown.indexOf('\n## Timeline\n');
   if (start === -1 || end === -1 || end <= start) return '';
   return markdown.slice(start, end).trim();
@@ -660,7 +662,8 @@ function cleanModelMarkdown(text: string): string {
 
 function isUsefulModelNarrative(markdown: string): boolean {
   const lower = markdown.toLowerCase();
-  if (!lower.includes('### work arc')) return false;
+  if (!lower.includes('### day story')) return false;
+  if (!lower.includes('### chronological notes')) return false;
   if (/\bact_[a-z0-9_]+\b/i.test(markdown)) return false;
   const vaguePhrases = [
     'manage their work',

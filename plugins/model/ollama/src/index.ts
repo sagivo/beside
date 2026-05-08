@@ -40,13 +40,51 @@ const DEFAULT_UNLOAD_AFTER_IDLE_MIN = 2;
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const PULL_FAMILIES_VISION_OK = ['gemma3', 'gemma4', 'llava', 'llama4', 'qwen2-vl'];
 
+// Per-request HTTP timeouts. Without these, a wedged ollama connection
+// (server crash mid-request, OS-level keep-alive desync, etc.) deadlocks
+// every caller forever — `EmbeddingWorker.drain` loops up to 10,000x
+// awaiting a single fetch, so one stuck request hangs the whole reindex.
+// `EMBED` is small (sub-second normally); `COMPLETE` accommodates the
+// occasional 8B-param summarisation call on CPU/MPS.
+const EMBED_TIMEOUT_MS = 60_000;
+const COMPLETE_TIMEOUT_MS = 5 * 60_000;
+const UNLOAD_TIMEOUT_MS = 10_000;
+
+/**
+ * `fetch` with an AbortSignal-backed timeout that surfaces a readable
+ * error message rather than the generic "AbortError" from undici.
+ * Returning a Response keeps the call sites identical.
+ */
+async function fetchWithTimeout(
+  url: URL,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if ((err as { name?: string }).name === 'AbortError') {
+      throw new Error(
+        `${label} timed out after ${Math.round(timeoutMs / 1000)}s (${url.toString()})`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class OllamaAdapter implements IModelAdapter {
   private readonly logger: Logger;
   readonly host: string;
   readonly model: string;
   readonly embeddingModel: string;
   readonly visionModel: string;
-  private readonly keepAlive: string | number;
+  private keepAlive: string | number;
+  private readonly defaultKeepAlive: string | number;
   private readonly unloadAfterIdleMs: number;
   private readonly autoInstall: boolean;
   private readonly client: Ollama;
@@ -60,6 +98,7 @@ class OllamaAdapter implements IModelAdapter {
     this.embeddingModel = config.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
     this.visionModel = config.vision_model ?? this.model;
     this.keepAlive = config.keep_alive ?? DEFAULT_KEEP_ALIVE;
+    this.defaultKeepAlive = this.keepAlive;
     this.unloadAfterIdleMs = Math.max(
       0,
       (config.unload_after_idle_min ?? DEFAULT_UNLOAD_AFTER_IDLE_MIN) * 60_000,
@@ -205,15 +244,20 @@ class OllamaAdapter implements IModelAdapter {
     // across releases, so call the local HTTP endpoint directly and keep
     // a fallback to the older /api/embeddings single-input endpoint.
     try {
-      const res = await fetch(new URL('/api/embed', this.host), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: this.embeddingModel,
-          input: texts,
-          keep_alive: this.keepAlive,
-        }),
-      });
+      const res = await fetchWithTimeout(
+        new URL('/api/embed', this.host),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model: this.embeddingModel,
+            input: texts,
+            keep_alive: this.keepAlive,
+          }),
+        },
+        EMBED_TIMEOUT_MS,
+        'ollama /api/embed',
+      );
       if (!res.ok) {
         throw new Error(`Ollama /api/embed ${res.status}: ${await res.text()}`);
       }
@@ -232,15 +276,20 @@ class OllamaAdapter implements IModelAdapter {
       });
       const out: number[][] = [];
       for (const text of texts) {
-        const res = await fetch(new URL('/api/embeddings', this.host), {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            model: this.embeddingModel,
-            prompt: text,
-            keep_alive: this.keepAlive,
-          }),
-        });
+        const res = await fetchWithTimeout(
+          new URL('/api/embeddings', this.host),
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              model: this.embeddingModel,
+              prompt: text,
+              keep_alive: this.keepAlive,
+            }),
+          },
+          EMBED_TIMEOUT_MS,
+          'ollama /api/embeddings',
+        );
         if (!res.ok) {
           throw new Error(`Ollama /api/embeddings ${res.status}: ${await res.text()}`);
         }
@@ -252,6 +301,24 @@ class OllamaAdapter implements IModelAdapter {
     }
   }
 
+  /**
+   * Override `keep_alive` for the duration of a long-running task (e.g.
+   * a full reindex). Without this, ollama's default 5-minute keep-alive
+   * causes the model to evict between batches, paying a ~10s reload on
+   * every burst of work. Pair with {@link resetKeepAlive} in a finally.
+   *
+   * Duck-typed call from the orchestrator (no IModelAdapter change).
+   */
+  setKeepAlive(value: string | number): void {
+    this.keepAlive = value;
+    this.logger.debug('keep_alive overridden', { value: String(value) });
+  }
+
+  resetKeepAlive(): void {
+    this.keepAlive = this.defaultKeepAlive;
+    this.logger.debug('keep_alive restored', { value: String(this.defaultKeepAlive) });
+  }
+
   async unload(): Promise<void> {
     this.clearUnloadTimer();
     const generationModels = Array.from(new Set([this.model, this.visionModel]));
@@ -259,6 +326,19 @@ class OllamaAdapter implements IModelAdapter {
       ...generationModels.map((model) => this.unloadGenerationModel(model)),
       this.unloadEmbeddingModel(this.embeddingModel),
     ]);
+  }
+
+  /**
+   * Unload *only* the embedding model. Used between phases of a full
+   * reindex: embeddings finish, but the indexer (chat) model is needed
+   * immediately afterwards for page summarisation, so we don't want to
+   * evict it from VRAM. Saves several seconds per pipeline run on Apple
+   * Silicon where the chat model is multi-GB.
+   *
+   * Duck-typed call site (orchestrator, no IModelAdapter change).
+   */
+  async unloadEmbeddings(): Promise<void> {
+    await this.unloadEmbeddingModel(this.embeddingModel);
   }
 
   /**
@@ -476,16 +556,21 @@ class OllamaAdapter implements IModelAdapter {
 
   private async unloadGenerationModel(model: string): Promise<void> {
     try {
-      const res = await fetch(new URL('/api/chat', this.host), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          messages: [],
-          stream: false,
-          keep_alive: 0,
-        }),
-      });
+      const res = await fetchWithTimeout(
+        new URL('/api/chat', this.host),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            messages: [],
+            stream: false,
+            keep_alive: 0,
+          }),
+        },
+        UNLOAD_TIMEOUT_MS,
+        'ollama unload (chat)',
+      );
       if (!res.ok) {
         this.logger.debug('ollama model unload returned non-OK status', {
           model,
@@ -503,15 +588,20 @@ class OllamaAdapter implements IModelAdapter {
 
   private async unloadEmbeddingModel(model: string): Promise<void> {
     try {
-      const res = await fetch(new URL('/api/embed', this.host), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          input: '',
-          keep_alive: 0,
-        }),
-      });
+      const res = await fetchWithTimeout(
+        new URL('/api/embed', this.host),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            model,
+            input: '',
+            keep_alive: 0,
+          }),
+        },
+        UNLOAD_TIMEOUT_MS,
+        'ollama unload (embed)',
+      );
       if (!res.ok) {
         this.logger.debug('ollama embedding model unload returned non-OK status', {
           model,

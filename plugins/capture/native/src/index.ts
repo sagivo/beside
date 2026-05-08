@@ -140,6 +140,8 @@ class NativeCapture implements ICapture {
           sample_rate: config.audio?.live_recording?.sample_rate ?? 16_000,
           channels: config.audio?.live_recording?.channels ?? 1,
           system_audio_backend: config.audio?.live_recording?.system_audio_backend ?? 'core_audio_tap',
+          activation: config.audio?.live_recording?.activation ?? 'other_process_input',
+          poll_interval_sec: config.audio?.live_recording?.poll_interval_sec ?? 3,
         },
       },
       raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),

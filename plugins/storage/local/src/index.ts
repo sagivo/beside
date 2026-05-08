@@ -66,9 +66,12 @@ class LocalStorage implements IStorage {
   private readonly logger: Logger;
   private db!: Database.Database;
   private readonly writeStreams = new Map<string, fs.WriteStream>();
-  private frameFtsDeleteStmt: Database.Statement | null = null;
   private frameFtsInsertStmt: Database.Statement | null = null;
+  private frameFtsUpdateStmt: Database.Statement | null = null;
   private frameFtsFrameSelectStmt: Database.Statement | null = null;
+  private resolveFrameTagStmt: Database.Statement | null = null;
+  private resolveFrameSelectStmt: Database.Statement | null = null;
+  private resolveEntityUpsertStmt: Database.Statement | null = null;
   private assetBytesCache: { value: number; expiresAt: number } | null = null;
 
   constructor(root: string, logger: Logger) {
@@ -998,64 +1001,103 @@ class LocalStorage implements IStorage {
 
   async resolveFrameToEntity(frameId: string, entity: EntityRef): Promise<void> {
     const tx = this.db.transaction(() => {
-      // 1. Tag the frame.
-      const updated = this.db
-        .prepare(
-          `UPDATE frames SET entity_path = ?, entity_kind = ?
-           WHERE id = ? AND entity_path IS NULL`,
-        )
-        .run(entity.path, entity.kind, frameId).changes;
-      if (updated === 0) return;
-
-      // 2. Pull the frame's contribution to the entity stats.
-      const frameRow = this.db
-        .prepare(
-          'SELECT timestamp, duration_ms, text, window_title, url, app FROM frames WHERE id = ?',
-        )
-        .get(frameId) as
-        | {
-            timestamp: string;
-            duration_ms: number | null;
-            text: string | null;
-            window_title: string | null;
-            url: string | null;
-            app: string | null;
-          }
-        | undefined;
-      if (!frameRow) return;
-      const ts = frameRow.timestamp;
-      const dur = frameRow.duration_ms ?? 0;
-
-      // 3. Upsert the entity. ON CONFLICT updates first_seen / last_seen
-      //    monotonically and accumulates the running totals.
-      this.db
-        .prepare(
-          `INSERT INTO entities (
-             path, kind, title, first_seen, last_seen, total_focused_ms, frame_count
-           ) VALUES (?, ?, ?, ?, ?, ?, 1)
-           ON CONFLICT(path) DO UPDATE SET
-             kind = excluded.kind,
-             title = excluded.title,
-             first_seen = MIN(entities.first_seen, excluded.first_seen),
-             last_seen = MAX(entities.last_seen, excluded.last_seen),
-             total_focused_ms = entities.total_focused_ms + excluded.total_focused_ms,
-             frame_count = entities.frame_count + 1`,
-        )
-        .run(entity.path, entity.kind, entity.title, ts, ts, dur);
-
-      // 4. Refresh the frame's FTS row so a search like "milan" or
-      //    "cofounderos" actually matches all the frames now attributed
-      //    to that entity, not just the ones that literally typed it.
-      this.refreshFrameFtsRow({
-        frameId,
-        text: frameRow.text ?? '',
-        windowTitle: frameRow.window_title ?? '',
-        url: frameRow.url ?? '',
-        app: frameRow.app ?? '',
-        entitySearch: entityToFtsText(entity.path, entity.kind),
-      });
+      this.resolveFrameToEntityInTx(frameId, entity);
     });
     tx();
+  }
+
+  async resolveFramesToEntities(
+    items: ReadonlyArray<{ frameId: string; entity: EntityRef }>,
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const tx = this.db.transaction(() => {
+      for (const item of items) {
+        this.resolveFrameToEntityInTx(item.frameId, item.entity);
+      }
+    });
+    tx();
+  }
+
+  // Shared body for single-frame and batched entity resolution. Must
+  // run inside a db.transaction so the frame tag, entity rollup, and
+  // FTS refresh commit atomically.
+  private resolveFrameToEntityInTx(frameId: string, entity: EntityRef): void {
+    // 1. Tag the frame.
+    const updated = this.getResolveFrameTagStmt().run(
+      entity.path,
+      entity.kind,
+      frameId,
+    ).changes;
+    if (updated === 0) return;
+
+    // 2. Pull the frame's contribution to the entity stats.
+    const frameRow = this.getResolveFrameSelectStmt().get(frameId) as
+      | {
+          timestamp: string;
+          duration_ms: number | null;
+          text: string | null;
+          window_title: string | null;
+          url: string | null;
+          app: string | null;
+        }
+      | undefined;
+    if (!frameRow) return;
+    const ts = frameRow.timestamp;
+    const dur = frameRow.duration_ms ?? 0;
+
+    // 3. Upsert the entity. ON CONFLICT updates first_seen / last_seen
+    //    monotonically and accumulates the running totals.
+    this.getResolveEntityUpsertStmt().run(
+      entity.path,
+      entity.kind,
+      entity.title,
+      ts,
+      ts,
+      dur,
+    );
+
+    // 4. Refresh the frame's FTS row so a search like "milan" or
+    //    "cofounderos" actually matches all the frames now attributed
+    //    to that entity, not just the ones that literally typed it.
+    this.refreshFrameFtsRow({
+      frameId,
+      text: frameRow.text ?? '',
+      windowTitle: frameRow.window_title ?? '',
+      url: frameRow.url ?? '',
+      app: frameRow.app ?? '',
+      entitySearch: entityToFtsText(entity.path, entity.kind),
+    });
+  }
+
+  private getResolveFrameTagStmt(): Database.Statement {
+    this.resolveFrameTagStmt ??= this.db.prepare(
+      `UPDATE frames SET entity_path = ?, entity_kind = ?
+       WHERE id = ? AND entity_path IS NULL`,
+    );
+    return this.resolveFrameTagStmt;
+  }
+
+  private getResolveFrameSelectStmt(): Database.Statement {
+    this.resolveFrameSelectStmt ??= this.db.prepare(
+      'SELECT timestamp, duration_ms, text, window_title, url, app FROM frames WHERE id = ?',
+    );
+    return this.resolveFrameSelectStmt;
+  }
+
+  private getResolveEntityUpsertStmt(): Database.Statement {
+    this.resolveEntityUpsertStmt ??= this.db.prepare(
+      `INSERT INTO entities (
+         path, kind, title, first_seen, last_seen, total_focused_ms, frame_count
+       ) VALUES (?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(path) DO UPDATE SET
+         kind = excluded.kind,
+         title = excluded.title,
+         first_seen = MIN(entities.first_seen, excluded.first_seen),
+         last_seen = MAX(entities.last_seen, excluded.last_seen),
+         total_focused_ms = entities.total_focused_ms + excluded.total_focused_ms,
+         frame_count = entities.frame_count + 1`,
+    );
+    return this.resolveEntityUpsertStmt;
   }
 
   /**
@@ -1063,10 +1105,6 @@ class LocalStorage implements IStorage {
    * Used after the per-frame resolver attaches an entity, after
    * SessionBuilder lifts a frame to a different entity, and after
    * any other path that mutates frames.entity_path.
-   *
-   * Implemented as DELETE + INSERT against frame_text -- FTS5 supports
-   * UPDATE in modern SQLite, but the codebase already standardises
-   * on delete+insert for FTS row mutations, so we stay consistent.
    */
   private refreshFrameFtsEntity(
     frameId: string,
@@ -1087,6 +1125,11 @@ class LocalStorage implements IStorage {
     });
   }
 
+  // FTS5 supports UPDATE on UNINDEXED columns since SQLite 3.33. Try
+  // it first and fall back to INSERT only when the row doesn't exist
+  // yet -- saves the second statement (and the FTS token re-index it
+  // implies) on every mutation of an existing row, which is the hot
+  // path during entity resolution and OCR backfill.
   private refreshFrameFtsRow(input: {
     frameId: string;
     text: string;
@@ -1095,22 +1138,24 @@ class LocalStorage implements IStorage {
     app: string;
     entitySearch: string;
   }): boolean {
-    this.getFrameFtsDeleteStmt().run(input.frameId);
-    this.getFrameFtsInsertStmt().run(
-      input.frameId,
-      ftsBodyText(input.text, input.url),
+    const body = ftsBodyText(input.text, input.url);
+    const changes = this.getFrameFtsUpdateStmt().run(
+      body,
       input.windowTitle,
       input.app,
       input.entitySearch,
-    );
+      input.frameId,
+    ).changes;
+    if (changes === 0) {
+      this.getFrameFtsInsertStmt().run(
+        input.frameId,
+        body,
+        input.windowTitle,
+        input.app,
+        input.entitySearch,
+      );
+    }
     return true;
-  }
-
-  private getFrameFtsDeleteStmt(): Database.Statement {
-    this.frameFtsDeleteStmt ??= this.db.prepare(
-      'DELETE FROM frame_text WHERE frame_id = ?',
-    );
-    return this.frameFtsDeleteStmt;
   }
 
   private getFrameFtsInsertStmt(): Database.Statement {
@@ -1118,6 +1163,13 @@ class LocalStorage implements IStorage {
       'INSERT INTO frame_text (frame_id, text, window_title, app, entity_search) VALUES (?, ?, ?, ?, ?)',
     );
     return this.frameFtsInsertStmt;
+  }
+
+  private getFrameFtsUpdateStmt(): Database.Statement {
+    this.frameFtsUpdateStmt ??= this.db.prepare(
+      'UPDATE frame_text SET text = ?, window_title = ?, app = ?, entity_search = ? WHERE frame_id = ?',
+    );
+    return this.frameFtsUpdateStmt;
   }
 
   private getFrameFtsFrameSelectStmt(): Database.Statement {
@@ -2037,6 +2089,99 @@ class LocalStorage implements IStorage {
     return { frames: ids.length, assetPaths };
   }
 
+  async deleteOldData(retentionDays: number): Promise<{
+    frames: number;
+    events: number;
+    sessions: number;
+    meetings: number;
+    entities: number;
+    assetPaths: string[];
+  }> {
+    if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+      return {
+        frames: 0,
+        events: 0,
+        sessions: 0,
+        meetings: 0,
+        entities: 0,
+        assetPaths: [],
+      };
+    }
+
+    const cutoff = new Date(
+      Date.now() - retentionDays * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
+    // Asset paths must be collected BEFORE the cascade so we still
+    // know which on-disk screenshots to unlink.
+    const assetPaths = (
+      this.db
+        .prepare(
+          'SELECT asset_path FROM frames WHERE timestamp < ? AND asset_path IS NOT NULL',
+        )
+        .all(cutoff) as Array<{ asset_path: string }>
+    ).map((r) => r.asset_path);
+
+    let frames = 0;
+    let events = 0;
+    let sessions = 0;
+    let meetings = 0;
+    let entities = 0;
+
+    const tx = this.db.transaction(() => {
+      // Cascade: child rows keyed by frame_id / meeting_id first, so
+      // when we delete the parents we don't leave orphans behind. Use
+      // subqueries so we don't pull thousands of IDs into JS just to
+      // shove them back into an IN-clause.
+      this.db
+        .prepare(
+          'DELETE FROM frame_text WHERE frame_id IN (SELECT id FROM frames WHERE timestamp < ?)',
+        )
+        .run(cutoff);
+      this.db
+        .prepare(
+          'DELETE FROM frame_embeddings WHERE frame_id IN (SELECT id FROM frames WHERE timestamp < ?)',
+        )
+        .run(cutoff);
+      this.db
+        .prepare(
+          'DELETE FROM meeting_turns WHERE meeting_id IN (SELECT id FROM meetings WHERE started_at < ?)',
+        )
+        .run(cutoff);
+
+      frames = this.db
+        .prepare('DELETE FROM frames WHERE timestamp < ?')
+        .run(cutoff).changes;
+      events = this.db
+        .prepare('DELETE FROM events WHERE timestamp < ?')
+        .run(cutoff).changes;
+      sessions = this.db
+        .prepare('DELETE FROM sessions WHERE started_at < ?')
+        .run(cutoff).changes;
+      meetings = this.db
+        .prepare('DELETE FROM meetings WHERE started_at < ?')
+        .run(cutoff).changes;
+      // Entities aren't time-series rows but their last_seen tracks
+      // the most recent frame that resolved to them. If that's before
+      // the cutoff, the entity has no surviving frames. Drop it; if
+      // the user returns to that work tomorrow the resolver will
+      // recreate it from scratch.
+      entities = this.db
+        .prepare('DELETE FROM entities WHERE last_seen < ?')
+        .run(cutoff).changes;
+    });
+    tx();
+
+    if (assetPaths.length > 0) {
+      for (const p of assetPaths) {
+        await this.unlinkAsset(p);
+      }
+      this.invalidateAssetBytesCache();
+    }
+
+    return { frames, events, sessions, meetings, entities, assetPaths };
+  }
+
   async deleteAllMemory(): Promise<{
     frames: number;
     events: number;
@@ -2215,6 +2360,24 @@ class LocalStorage implements IStorage {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('busy_timeout = 5000');
+    // Heavy-write tuning. Full reindex deletes thousands of rows and
+    // re-writes embeddings/sessions/meetings; without these the WAL
+    // grows unbounded mid-run, every commit pays an extra fsync, and
+    // temp tables (FTS rebuild, GROUP BY) spill to disk.
+    //
+    // wal_autocheckpoint: pages, default 1000 (~4 MB). Bumped to ~8 MB
+    //   so checkpoints batch more work but still fire well under the
+    //   31 MB+ WAL we observed mid-reindex.
+    // cache_size: negative = KB. -200000 = 200 MB page cache (was the
+    //   3 MB default — too small for the join-heavy entity rebuilds).
+    // temp_store: keep transient tables in RAM rather than spilling to
+    //   /var/folders. Cheap on machines with multi-GB free RAM.
+    // mmap_size: 256 MB read-side memory map skips one syscall per
+    //   page on hot reads (entity counts, FTS scans).
+    this.db.pragma('wal_autocheckpoint = 2000');
+    this.db.pragma('cache_size = -200000');
+    this.db.pragma('temp_store = MEMORY');
+    this.db.pragma('mmap_size = 268435456');
 
     // ---------------------------------------------------------------------
     // Base schema. Everything is `IF NOT EXISTS` so this runs cleanly on
@@ -2468,6 +2631,76 @@ class LocalStorage implements IStorage {
     `);
 
     this.runSchemaMigrations();
+    this.runStartupIntegrityCheck();
+  }
+
+  // PRAGMA quick_check on every cold start. quick_check covers the
+  // common corruption modes (page tree, free-list, out-of-order rows)
+  // and runs in well under a second even on multi-hundred-MB DBs --
+  // cheap insurance that surfaces hardware/journal corruption before
+  // it gets buried under more writes. The deeper PRAGMA integrity_check
+  // belongs in the weekly maintenance job (runMaintenance) where it
+  // can scan the entire database without holding up startup.
+  private runStartupIntegrityCheck(): void {
+    try {
+      const rows = this.db.pragma('quick_check') as Array<{ quick_check: string }>;
+      const result = rows[0]?.quick_check ?? '';
+      if (result !== 'ok') {
+        this.logger.error('database quick_check failed', {
+          result: rows.map((r) => r.quick_check).join('; ').slice(0, 500),
+        });
+      }
+    } catch (err) {
+      this.logger.warn('quick_check threw', { err: String(err) });
+    }
+  }
+
+  /**
+   * Periodic maintenance: deep integrity_check, ANALYZE to refresh
+   * planner statistics, then VACUUM to reclaim freed pages and
+   * defragment. Driven by the orchestrator's weekly STORAGE_MAINTENANCE
+   * tick under LoadGuard + AC-power gating.
+   *
+   * VACUUM cannot run inside a transaction and rewrites the entire DB
+   * file, so it can take seconds and briefly holds an exclusive lock.
+   * The orchestrator gates the call on idle/AC power; here we just do
+   * the work and surface failures.
+   */
+  async runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }> {
+    let analyzed = false;
+    let vacuumed = false;
+
+    try {
+      const rows = this.db.pragma('integrity_check') as Array<{
+        integrity_check: string;
+      }>;
+      const result = rows[0]?.integrity_check ?? '';
+      if (result !== 'ok') {
+        this.logger.error('database integrity_check failed', {
+          result: rows.map((r) => r.integrity_check).join('; ').slice(0, 1000),
+        });
+      }
+    } catch (err) {
+      this.logger.warn('integrity_check threw', { err: String(err) });
+    }
+
+    try {
+      this.db.exec('ANALYZE');
+      analyzed = true;
+    } catch (err) {
+      this.logger.warn('ANALYZE failed', { err: String(err) });
+    }
+
+    try {
+      const start = Date.now();
+      this.db.exec('VACUUM');
+      vacuumed = true;
+      this.logger.info(`VACUUM reclaimed pages in ${Date.now() - start}ms`);
+    } catch (err) {
+      this.logger.warn('VACUUM failed', { err: String(err) });
+    }
+
+    return { vacuumed, analyzed };
   }
 
   /**
@@ -2596,6 +2829,13 @@ class LocalStorage implements IStorage {
         ON frames(vacuum_tier, timestamp) WHERE asset_path IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_frames_activity_session
         ON frames(activity_session_id);
+      -- Composite (activity_session_id, entity_path) — narrows the
+      -- co-occurrence self-join in listEntityCoOccurrences so the
+      -- partner side doesn't visit frames missing an entity. Partial
+      -- on activity_session_id IS NOT NULL keeps it tiny.
+      CREATE INDEX IF NOT EXISTS idx_frames_session_entity
+        ON frames(activity_session_id, entity_path)
+        WHERE activity_session_id IS NOT NULL AND entity_path IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_frames_session
         ON frames(session_id);
       CREATE INDEX IF NOT EXISTS idx_frames_meeting

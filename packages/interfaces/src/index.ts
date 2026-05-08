@@ -757,6 +757,14 @@ export interface IStorage {
   /** Attach an entity to a frame and (atomically) bump the entity's stats. */
   resolveFrameToEntity(frameId: string, entity: EntityRef): Promise<void>;
 
+  /**
+   * Batch variant: attach entities to many frames inside one transaction so
+   * the resolver can drain a tick's worth of frames with a single commit.
+   */
+  resolveFramesToEntities(
+    items: ReadonlyArray<{ frameId: string; entity: EntityRef }>,
+  ): Promise<void>;
+
   /** Frames whose entity is known but for which no entity record exists. */
   rebuildEntityCounts(): Promise<void>;
 
@@ -1014,6 +1022,32 @@ export interface IStorage {
    * the action ("deleted N moments, ~M GB on disk").
    */
   deleteAllMemory(): Promise<{ frames: number; events: number; assetBytes: number }>;
+
+  /**
+   * Periodic database maintenance: deep integrity_check, ANALYZE to
+   * refresh planner statistics, and VACUUM to reclaim freed pages.
+   * Called from a low-frequency scheduler tick gated on idle / AC
+   * power. Failures are logged but never thrown — maintenance is
+   * best-effort.
+   */
+  runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }>;
+
+  /**
+   * Retention sweep: delete events / frames / sessions / meetings
+   * older than `retentionDays`, plus entities whose `last_seen` falls
+   * before the same cutoff (those entities have no surviving frames;
+   * the resolver will recreate them if the user returns to that work).
+   * `retentionDays <= 0` is a no-op so callers can pass the config
+   * value directly without guarding.
+   */
+  deleteOldData(retentionDays: number): Promise<{
+    frames: number;
+    events: number;
+    sessions: number;
+    meetings: number;
+    entities: number;
+    assetPaths: string[];
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,77 +1736,46 @@ function renderDayOverview(
   sessions: ActivitySession[],
   lines: string[],
 ): void {
-  const topEntities = topValues(frames, (f) => f.entity_path, 5)
-    .map((x) => `[[${x.value}]]`);
-  const topApps = topValues(frames, (f) => f.app, 5)
-    .map((x) => `${x.value} (${x.count})`);
-  const orderedSessions = sessions
+  const framesBySession = groupFramesByActivitySession(frames);
+  const insights = sessions
     .slice()
-    .sort((a, b) => b.active_ms - a.active_ms)
-    .slice(0, 5);
+    .sort((a, b) => a.started_at.localeCompare(b.started_at))
+    .map((session) => buildSessionInsight(session, framesBySession.get(session.id) ?? []))
+    .filter((insight) => insight.frames.length > 0);
 
-  lines.push('## Day overview');
-  if (topEntities.length > 0) {
-    lines.push(`- Main entities: ${topEntities.join(', ')}.`);
+  lines.push('## What happened');
+  if (insights.length > 0) {
+    lines.push(...renderDayStoryParagraphs(insights, frames));
+    const trail = renderConcreteTrail(insights, frames);
+    if (trail.length > 0) {
+      lines.push('');
+      lines.push('### Concrete trail');
+      lines.push(...trail);
+    }
+    lines.push('');
+    return;
   }
-  if (topApps.length > 0) {
-    lines.push(`- App mix: ${topApps.join(', ')}.`);
-  }
-  const focusMix = renderFocusMix(frames);
-  if (focusMix.length > 0) {
-    lines.push(`- Focus mix: ${focusMix.join(', ')}.`);
-  }
-  const topFiles = extractFilesFromFrames(frames, 8);
-  if (topFiles.length > 0) {
-    lines.push(`- Artifacts: ${topFiles.map((file) => `\`${file}\``).join(', ')}.`);
-  }
-  const topCommunications = topValues(
-    frames,
-    (frame) => {
-      if (frame.entity_path?.startsWith('contacts/') || frame.entity_path?.startsWith('channels/')) {
-        return frame.entity_path;
-      }
-      if (frame.app === 'Mail') return 'apps/mail';
-      return null;
-    },
-    6,
-  ).map((x) => `[[${x.value}]] (${x.count})`);
-  if (topCommunications.length > 0) {
-    lines.push(`- Communication surfaces: ${topCommunications.join(', ')}.`);
-  }
-  const topDomains = topValues(frames, (frame) => domainFromUrl(frame.url), 5)
-    .map((x) => `${x.value} (${x.count})`);
-  if (topDomains.length > 0) {
-    lines.push(`- Web domains: ${topDomains.join(', ')}.`);
-  }
-  if (orderedSessions.length > 0) {
-    const sessionBits = orderedSessions.map((session) => {
-      const target = session.primary_entity_path
-        ? `[[${session.primary_entity_path}]]`
-        : session.primary_app ?? '(unknown)';
-      return `${session.started_at.slice(11, 16)} ${target} (${humaniseDuration(session.active_ms)})`;
-    });
-    lines.push(`- Longest active sessions: ${sessionBits.join('; ')}.`);
-    const inferred = orderedSessions
-      .map((session) => {
-        const sessionFrames = frames.filter((frame) => frame.activity_session_id === session.id);
-        const action = inferSessionAction(sessionFrames);
-        return action
-          ? `${session.started_at.slice(11, 16)} ${action} (${humaniseDuration(session.active_ms)})`
-          : null;
-      })
-      .filter((x): x is string => Boolean(x));
-    if (inferred.length > 0) lines.push(`- Likely activity: ${inferred.join('; ')}.`);
+
+  const action = inferSessionAction(frames);
+  const topEntities = topValues(frames, (f) => f.entity_path, 3)
+    .map((x) => `[[${x.value}]]`);
+  const artifacts = extractFilesFromFrames(frames, 5);
+  const domains = topValues(frames, (frame) => domainFromUrl(frame.url), 3).map((x) => x.value);
+  const context = compactEvidence([
+    topEntities.length ? `centered on ${joinNatural(topEntities)}` : null,
+    artifacts.length ? `with artifacts ${artifacts.map((file) => `\`${file}\``).join(', ')}` : null,
+    domains.length ? `using web context from ${joinNatural(domains)}` : null,
+  ]);
+  if (action) {
+    lines.push(`The captured frames suggest you were ${action}${context ? `, ${context}` : ''}.`);
+  } else if (context) {
+    lines.push(`The captured frames do not form a strong session story, but they do show activity ${context}.`);
   } else {
-    const action = inferSessionAction(frames);
-    if (action) lines.push(`- Likely activity: ${action}.`);
+    lines.push('The capture does not contain enough structured signal to tell a reliable story yet; use the timeline below as raw evidence.');
   }
   const readable = firstReadableExcerpt(frames);
   if (readable) {
-    lines.push(`- Representative readable signal: "${readable}"`);
-  }
-  if (topEntities.length === 0 && topApps.length === 0 && orderedSessions.length === 0) {
-    lines.push('- No strong activity clusters were available; use the frame evidence below.');
+    lines.push(`Representative readable signal: "${readable}"`);
   }
   lines.push('');
 }
@@ -1803,24 +1806,19 @@ function renderCrossSessionReport(
     .filter((insight) => insight.frames.length > 0);
   if (insights.length === 0) return;
 
-  lines.push('## Narrative');
-  const brief = renderBrief(insights);
-  if (brief.length > 0) {
-    lines.push(...brief);
-    lines.push('');
-  }
+  lines.push('## Chronological story');
   lines.push(...renderWorkArc(insights));
 
   const workstreams = renderWorkstreams(insights);
   if (workstreams.length > 0) {
     lines.push('');
-    lines.push('### Workstreams');
+    lines.push('### Supporting threads');
     lines.push(...workstreams);
   }
   const transitions = renderTransitions(insights);
   if (transitions.length > 0) {
     lines.push('');
-    lines.push('### Handoffs');
+    lines.push('### Transitions');
     lines.push(...transitions);
   }
   const followUps = renderFollowUpCandidates(insights);
@@ -1862,6 +1860,125 @@ function renderBrief(insights: SessionInsight[]): string[] {
     lines.push(`- Communication touched: ${comms.map((target) => `[[${target}]]`).join(', ')}.`);
   }
   return lines;
+}
+
+function renderDayStoryParagraphs(insights: SessionInsight[], frames: Frame[]): string[] {
+  const workstreams = summarizeWorkstreams(insights)
+    .filter((item) => item.activeMs >= 5 * 60_000 || item.files.length > 0 || item.communications.length > 0)
+    .sort((a, b) => b.activeMs - a.activeMs);
+  const primary = workstreams[0];
+  const first = insights[0]!;
+  const last = insights[insights.length - 1]!;
+  const paragraphs: string[] = [];
+
+  if (primary) {
+    const actions = primary.actions.length
+      ? joinNatural(primary.actions.slice(0, 3))
+      : `focused work around ${primary.target}`;
+    const evidence = compactEvidence([
+      primary.files.length
+        ? `the files ${primary.files.slice(0, 5).map((file) => `\`${file}\``).join(', ')}`
+        : null,
+      primary.domains.length
+        ? `web context from ${joinNatural(primary.domains.slice(0, 3))}`
+        : null,
+      primary.communications.length
+        ? `communication with ${joinNatural(primary.communications.slice(0, 4).map((target) => `[[${target}]]`))}`
+        : null,
+    ]);
+    paragraphs.push(
+      `The captured part of the day was centered on ${actions}.` +
+        `${evidence ? ` The strongest evidence is ${evidence}` : ` The strongest entity signal is ${primary.target}`}` +
+        `${evidence ? `, tied to ${primary.target}.` : '.'}`,
+    );
+  }
+
+  const arc = selectNarrativeBeats(insights, 4).map(describeInsightBeat);
+  if (arc.length > 0) {
+    paragraphs.push(`Chronologically, ${joinNatural(arc)}.`);
+  } else {
+    paragraphs.push(`Chronologically, ${describeInsightBeat(first)}.`);
+  }
+
+  const communications = [...new Set(insights.flatMap((insight) => insight.communicationTargets))];
+  if (communications.length > 0) {
+    paragraphs.push(
+      `The communication thread touched ${joinNatural(communications.slice(0, 5).map((target) => `[[${target}]]`))}. ` +
+        `Given the nearby work context, those look like coordination or follow-up rather than standalone app usage.`,
+    );
+  } else if (first !== last) {
+    paragraphs.push(
+      `The story ends around ${last.session.started_at.slice(11, 16)}: you ${describeInsightAction(last)}; ` +
+        `the evidence is mostly window titles, files, and entity attribution, so weaker claims stay tentative below.`,
+    );
+  }
+
+  const readable = firstReadableExcerpt(frames);
+  if (readable) {
+    paragraphs.push(`A readable snippet from the capture says: "${readable}"`);
+  }
+
+  return paragraphs;
+}
+
+function renderConcreteTrail(insights: SessionInsight[], frames: Frame[]): string[] {
+  const files = [...new Set(insights.flatMap((insight) => insight.files))].slice(0, 8);
+  const communications = [...new Set(insights.flatMap((insight) => insight.communicationTargets))].slice(0, 6);
+  const domains = [...new Set(insights.flatMap((insight) => insight.domains))].slice(0, 5);
+  const titles = representativeTitles(frames, 5);
+  const lines: string[] = [];
+  if (files.length > 0) lines.push(`- Artifacts: ${files.map((file) => `\`${file}\``).join(', ')}.`);
+  if (communications.length > 0) {
+    lines.push(`- People/channels: ${communications.map((target) => `[[${target}]]`).join(', ')}.`);
+  }
+  if (domains.length > 0) lines.push(`- Web context: ${domains.join(', ')}.`);
+  if (titles.length > 0) lines.push(`- Window evidence: ${titles.map((title) => `"${title}"`).join('; ')}.`);
+  return lines;
+}
+
+function selectNarrativeBeats(insights: SessionInsight[], limit: number): SessionInsight[] {
+  if (insights.length <= limit) return insights;
+  const selected = new Set<SessionInsight>();
+  selected.add(insights[0]!);
+  selected.add(insights[insights.length - 1]!);
+  const middle = insights
+    .slice(1, -1)
+    .sort((a, b) => insightImportance(b) - insightImportance(a));
+  for (const insight of middle) {
+    if (selected.size >= limit) break;
+    selected.add(insight);
+  }
+  return insights.filter((insight) => selected.has(insight));
+}
+
+function insightImportance(insight: SessionInsight): number {
+  return (insight.session.active_ms / 60_000) +
+    insight.files.length * 2 +
+    insight.communicationTargets.length * 3 +
+    insight.domains.length +
+    (insight.confidence === 'high' ? 2 : insight.confidence === 'medium' ? 1 : 0);
+}
+
+function describeInsightBeat(insight: SessionInsight): string {
+  return `around ${insight.session.started_at.slice(11, 16)} you ${describeInsightAction(insight)}`;
+}
+
+function describeInsightAction(insight: SessionInsight): string {
+  const action = formatActionTarget(insight.action, insight.primaryTarget);
+  const evidence = compactEvidence([
+    insight.files.length ? `files ${insight.files.map((file) => `\`${file}\``).join(', ')}` : null,
+    insight.domains.length ? `domains ${insight.domains.join(', ')}` : null,
+    insight.communicationTargets.length
+      ? `comms ${insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')}`
+      : null,
+  ]);
+  return `were ${action}${evidence ? ` (${evidence})` : ''}`;
+}
+
+function joinNatural(values: string[]): string {
+  if (values.length <= 1) return values[0] ?? '';
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`;
 }
 
 interface WorkstreamSummary {
@@ -2010,14 +2127,13 @@ function renderWorkArc(insights: SessionInsight[]): string[] {
     const artifacts = compactEvidence([
       insight.files.length ? `files ${insight.files.map((file) => `\`${file}\``).join(', ')}` : null,
       insight.domains.length ? `domains ${insight.domains.join(', ')}` : null,
+      insight.communicationTargets.length
+        ? `communication ${insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')}`
+        : null,
     ]);
-    const communications = insight.communicationTargets.length
-      ? insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')
-      : null;
-    return `- **${window}**: goal ${formatActionTarget(insight.action, insight.primaryTarget)}` +
-      ` _(confidence: ${insight.confidence}; basis: ${insight.basis.join(', ')})_` +
-      `${artifacts ? ` Artifacts: ${artifacts}.` : ''}` +
-      `${communications ? ` Communications: ${communications}.` : ''}`;
+    return `- **${window}** You ${describeInsightAction(insight)}.` +
+      `${artifacts ? ` Evidence: ${artifacts}.` : ''}` +
+      ` _Confidence: ${insight.confidence}; based on ${insight.basis.join(', ')}._`;
   });
 }
 
@@ -2163,6 +2279,16 @@ function inferFallbackAction(frames: Frame[]): string | null {
   const primaryEntity = topValues(frames, (f) => f.entity_path, 1)[0]?.value;
   const primaryApp = topValues(frames, (f) => f.app, 1)[0]?.value;
   const files = extractFilesFromFrames(frames, 2);
+  const projectEntities = topValues(
+    frames,
+    (f) => f.entity_path?.startsWith('projects/') ? f.entity_path : null,
+    2,
+  ).map((x) => x.value);
+  const project = projectEntities[0] ? titleFromPath(projectEntities[0]) : null;
+
+  if (files.length > 0 && project) {
+    return `working on ${project} files (${files.map((f) => `\`${f}\``).join(', ')})`;
+  }
 
   if (primaryEntity?.startsWith('projects/')) {
     const project = titleFromPath(primaryEntity);
@@ -2224,6 +2350,17 @@ interface RuleScore {
 }
 
 const INFERENCE_RULES: InferenceRule[] = [
+  {
+    test: ['indexed journal', 'journal narrative', 'what happened', 'day story'],
+    label: 'improving the indexed journal narrative',
+    minRatio: 0.08,
+    primaryEntityPrefixes: ['projects/cofounderos'],
+  },
+  {
+    test: ['redesign app interface for modern ux', 'modern ux', 'app interface'],
+    label: 'redesigning the CofounderOS app interface',
+    minRatio: 0.08,
+  },
   {
     test: ['karpathy wiki proposal', 'llm wiki'],
     label: 'reviewing the Karpathy/wiki indexing proposal',

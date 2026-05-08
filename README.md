@@ -113,9 +113,8 @@ pnpm cli doctor
 pnpm cli stats         # or: pnpm cli info  (alias)
 pnpm cli stats --json  # machine-readable
 
-# Start the desktop tray. It launches quietly; use Start Capture from the
-# app/tray when you want recording, or set COFOUNDEROS_DESKTOP_AUTOSTART=1
-# to restore start-on-launch behavior.
+# Start the desktop tray. It starts capturing on launch by default; set
+# COFOUNDEROS_DESKTOP_AUTOSTART=0 if you want the app to launch idle.
 pnpm start
 
 # Headless/server mode: start the runtime through the CLI interface.

@@ -110,6 +110,17 @@ const MEETING_SUMMARIZER_JOB = 'meeting-summarizer';
 const MEETING_SUMMARIZER_INTERVAL_MS = 5 * 60_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
+const STORAGE_MAINTENANCE_JOB = 'storage-maintenance';
+// Weekly. ANALYZE refreshes planner stats; VACUUM rewrites the DB
+// file to reclaim free pages and defragment. Both are I/O heavy and
+// briefly hold an exclusive lock, so we gate the job on AC power +
+// LoadGuard. Daily would be overkill on a desktop install; monthly
+// lets fragmentation and stale stats drift too far on heavy users.
+const STORAGE_MAINTENANCE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const STORAGE_RETENTION_JOB = 'storage-retention';
+// Daily. The retention cutoff moves at 24h/day, so a missed tick just
+// means the next run deletes a slightly larger batch — no urgency.
+const STORAGE_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const IDLE_POWER_CATCHUP_JOB = 'idle-power-catchup';
 const FULL_REINDEX_EVENT_BATCH_SIZE = 1000;
 
@@ -538,6 +549,17 @@ export async function buildOrchestrator(
     bus,
     logger.child('activity-coalescer'),
     async () => {
+      // The full coalescer chain — including frame/entity/session
+      // builders — must be skipped while a maintenance job (full
+      // reindex / reorganise) is running. Previously only the LLM
+      // embedding step was gated; the lighter builders kept ticking
+      // and clobbered the very tables the maintenance job was
+      // rebuilding (clearAllSessions + sessionBuilder.drain races
+      // with sessionBuilder.tick from a freshly captured frame).
+      // Unconditional gate at the top of the chain is the simplest
+      // correct fix — the coalescer fires again after the lock
+      // releases.
+      if (await hasActiveIndexMaintenanceLock(loaded.dataDir)) return;
       await frameBuilder.tick();
       await entityResolver.tick();
       await sessionBuilder.tick();
@@ -748,116 +770,229 @@ async function runFullReindexLocked(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
+  const { capture, storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
   const log = logger.child('full-reindex');
   const range = [
     opts.from ? `from=${opts.from}` : null,
     opts.to ? `to=${opts.to}` : null,
   ].filter(Boolean).join(', ');
+  const t0 = Date.now();
   log.info(
     `full re-index starting (strategy=${strategy.name}${range ? `, ${range}` : ''})`,
   );
 
-  await strategy.reset();
-  await storage.clearIndexCheckpoint(strategy.name);
+  // Hold ollama models in VRAM for the duration of the reindex. Without
+  // this override, the default `keep_alive` (30s in our config) drops
+  // the chat/indexer model between batches; on a multi-GB Gemma model
+  // every reload costs several seconds of pure latency. Restored in
+  // `finally` so live chat reverts to the snappy default.
+  // Duck-typed: only ollama-backed adapters expose `setKeepAlive`.
+  const keepAliveOverride = '30m';
+  applyKeepAliveOverride(model, keepAliveOverride);
+  if (indexerModel !== model) applyKeepAliveOverride(indexerModel, keepAliveOverride);
 
-  const audio = await audioTranscriptWorker.drain();
-  if (audio.processed > 0) {
-    log.info(`ingested ${audio.processed} audio transcript(s) before full re-index`);
-  }
-
-  // Rebuild frames + entities from scratch — both are derived tables and
-  // the resolver rules may have improved between runs.
-  await storage.resetFrameDerivatives(opts);
-  const fb = await frameBuilder.drain();
-  if (fb.framesCreated > 0) {
-    log.info(`rebuilt ${fb.framesCreated} frames from raw events`);
-  }
-  const er = await entityResolver.drain();
-  if (er.resolved > 0) {
-    log.info(`resolved ${er.resolved} frames to entities`);
-  }
-  // Recompute entity counts from the freshly resolved frames so any
-  // resolver-rule changes take effect for all of history, not just new data.
-  await storage.rebuildEntityCounts();
-  // Sessions are derived from frames + entities, so they need to be
-  // rebuilt last and from scratch. A change to idle_threshold_sec or to
-  // entity rules can change session boundaries; clearing first means
-  // the new config takes effect on every frame, not just future ones.
-  await storage.clearAllSessions();
-  const sb = await sessionBuilder.drain();
-  if (sb.framesProcessed > 0) {
-    log.info(
-      `rebuilt ${sb.sessionsCreated} session(s) from ${sb.framesProcessed} frames`,
-    );
-  }
-  await storage.clearAllMeetings();
-  const mb = await meetingBuilder.drain();
-  if (mb.framesProcessed > 0) {
-    log.info(
-      `rebuilt ${mb.meetingsCreated} meeting(s) from ${mb.framesProcessed} frames ` +
-        `(${mb.audioFramesAttached} audio chunks, ${mb.turnsBuilt} transcript turns)`,
-    );
-  }
-  await storage.clearFrameEmbeddings(getEmbeddingModelName(config));
-  const emb = await embeddingWorker.drain();
-  if (emb.processed > 0) {
-    log.info(`rebuilt ${emb.processed} frame embedding(s)`);
-  }
-  await model.unload?.().catch((err: unknown) => {
-    log.debug('model unload after full-reindex embeddings failed', { err: String(err) });
-  });
-
-  await startPassiveExports(exports, log);
-
-  // KarpathyStrategy captures the storage handle when getUnindexedEvents()
-  // is called. Full reindex walks explicit date ranges instead, so bind once
-  // up front before calling indexBatch directly.
-  await strategy.getUnindexedEvents(storage);
-
-  // Stream the requested raw event range through indexBatch in pages.
-  // Use a larger page than live incremental indexing: full reindex runs
-  // offline against a bounded query, and small pages repeatedly re-render
-  // the same cross-page entities as their source-event set grows.
-  const batchSize = Math.max(config.index.batch_size, FULL_REINDEX_EVENT_BATCH_SIZE);
-  let offset = 0;
-  let totalProcessed = 0;
-
-  while (true) {
-    const events = await storage.readEvents({
-      from: opts.from,
-      to: opts.to,
-      limit: batchSize,
-      offset,
-    });
-    if (events.length === 0) break;
-
-    const state = await strategy.getState();
-    const update = await strategy.indexBatch(events, state, indexerModel);
-    await strategy.applyUpdate(update);
-    for (const exp of exports) {
-      for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
-      for (const p of update.pagesToUpdate) await exp.onPageUpdate(p);
-      for (const d of update.pagesToDelete) await exp.onPageDelete(d);
+  // Pause capture for the duration of the reindex. The native binary
+  // keeps writing screenshots + events.jsonl into raw/ otherwise, which
+  // (a) burns CPU we'd rather give to ollama, and (b) lets the desktop
+  // runtime's ActivityCoalescer race with our drains. Track the
+  // pre-reindex running state so we don't accidentally start capture in
+  // contexts that had it stopped (e.g. CLI one-shots).
+  const captureWasRunning = capture.getStatus?.()?.running === true;
+  if (captureWasRunning) {
+    try {
+      await capture.stop();
+      log.info('capture paused for reindex');
+    } catch (err) {
+      log.warn('failed to pause capture; reindex will continue', { err: String(err) });
     }
-    await storage.markIndexed(strategy.name, events.map((e) => e.id));
-
-    totalProcessed += events.length;
-    offset += events.length;
-    if (events.length < batchSize) break;
   }
 
-  const finalState = await strategy.getState();
-  for (const exp of exports) {
-    if (exp.name === 'mcp') continue;
-    await exp.fullSync(finalState, strategy);
+  try {
+    await strategy.reset();
+    await storage.clearIndexCheckpoint(strategy.name);
+
+    // Phase 1: ingest. Audio (file-backed inbox) is independent of the
+    // frame-derivatives reset (raw-event-backed); run them in parallel.
+    const [audio] = await Promise.all([
+      audioTranscriptWorker.drain(),
+      storage.resetFrameDerivatives(opts),
+    ]);
+    if (audio.processed > 0) {
+      log.info(`ingested ${audio.processed} audio transcript(s) before full re-index`);
+    }
+    const fb = await frameBuilder.drain();
+    if (fb.framesCreated > 0) {
+      log.info(`rebuilt ${fb.framesCreated} frames from raw events`);
+    }
+
+    // Phase 2: entity assignment. Frames must exist before resolution.
+    const er = await entityResolver.drain();
+    if (er.resolved > 0) {
+      log.info(`resolved ${er.resolved} frames to entities`);
+    }
+    // Recompute entity counts from the freshly resolved frames so any
+    // resolver-rule changes take effect for all of history, not just new data.
+    await storage.rebuildEntityCounts();
+
+    // Phase 3: derived tables. Sessions, meetings, and embeddings are
+    // independent now that frames+entities are rebuilt. They share the
+    // SQLite write lock (better-sqlite3 serialises commits), but they
+    // hit different model surfaces (embeddings → embedding model;
+    // sessions+meetings → CPU/DB only) and overlapping their DB phases
+    // shaves wall time.
+    await Promise.all([
+      storage.clearAllSessions(),
+      storage.clearAllMeetings(),
+      storage.clearFrameEmbeddings(getEmbeddingModelName(config)),
+    ]);
+    const [sb, mb, emb] = await Promise.all([
+      sessionBuilder.drain(),
+      meetingBuilder.drain(),
+      embeddingWorker.drain(),
+    ]);
+    if (sb.framesProcessed > 0) {
+      log.info(
+        `rebuilt ${sb.sessionsCreated} session(s) from ${sb.framesProcessed} frames`,
+      );
+    }
+    if (mb.framesProcessed > 0) {
+      log.info(
+        `rebuilt ${mb.meetingsCreated} meeting(s) from ${mb.framesProcessed} frames ` +
+          `(${mb.audioFramesAttached} audio chunks, ${mb.turnsBuilt} transcript turns)`,
+      );
+    }
+    if (emb.processed > 0) {
+      log.info(`rebuilt ${emb.processed} frame embedding(s)`);
+    }
+
+    // Embedding model is done; unload only it so we free VRAM before the
+    // (heavier) chat/indexer model has to handle summarisation. The chat
+    // model stays loaded — that was the costly bug in the old version,
+    // which unloaded everything and then paid a multi-GB reload on the
+    // very next batch.
+    await unloadEmbeddingsOnly(model, log);
+    if (indexerModel !== model) await unloadEmbeddingsOnly(indexerModel, log);
+
+    await startPassiveExports(exports, log);
+
+    // KarpathyStrategy captures the storage handle when getUnindexedEvents()
+    // is called. Full reindex walks explicit date ranges instead, so bind once
+    // up front before calling indexBatch directly.
+    await strategy.getUnindexedEvents(storage);
+
+    // Stream the requested raw event range through indexBatch in pages.
+    // Use a larger page than live incremental indexing: full reindex runs
+    // offline against a bounded query, and small pages repeatedly re-render
+    // the same cross-page entities as their source-event set grows.
+    const batchSize = Math.max(config.index.batch_size, FULL_REINDEX_EVENT_BATCH_SIZE);
+    let offset = 0;
+    let totalProcessed = 0;
+    let batchIndex = 0;
+    let lastHeartbeatAt = Date.now();
+    const HEARTBEAT_MS = 30_000;
+
+    while (true) {
+      const events = await storage.readEvents({
+        from: opts.from,
+        to: opts.to,
+        limit: batchSize,
+        offset,
+      });
+      if (events.length === 0) break;
+
+      const batchStart = Date.now();
+      const state = await strategy.getState();
+      const update = await strategy.indexBatch(events, state, indexerModel);
+      await strategy.applyUpdate(update);
+      for (const exp of exports) {
+        for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
+        for (const p of update.pagesToUpdate) await exp.onPageUpdate(p);
+        for (const d of update.pagesToDelete) await exp.onPageDelete(d);
+      }
+      await storage.markIndexed(strategy.name, events.map((e) => e.id));
+
+      totalProcessed += events.length;
+      offset += events.length;
+      batchIndex += 1;
+
+      // Heartbeat so a stuck reindex is distinguishable from a slow one.
+      // Always print the first batch (so the user sees the pipeline did
+      // move past phase 3), then again on a 30s cadence.
+      const now = Date.now();
+      if (batchIndex === 1 || now - lastHeartbeatAt >= HEARTBEAT_MS) {
+        const elapsedSec = Math.round((now - t0) / 1000);
+        const lastBatchSec = ((now - batchStart) / 1000).toFixed(1);
+        log.info(
+          `reindex progress: batch=${batchIndex} events=${totalProcessed} ` +
+            `last_batch=${lastBatchSec}s elapsed=${elapsedSec}s`,
+        );
+        lastHeartbeatAt = now;
+      }
+
+      if (events.length < batchSize) break;
+    }
+
+    const finalState = await strategy.getState();
+    for (const exp of exports) {
+      if (exp.name === 'mcp') continue;
+      await exp.fullSync(finalState, strategy);
+    }
+
+    await indexerModel.unload?.().catch((err: unknown) => {
+      log.debug('model unload after full re-index failed', { err: String(err) });
+    });
+
+    const totalSec = Math.round((Date.now() - t0) / 1000);
+    log.info(`full re-index complete — ${totalProcessed} events processed in ${totalSec}s`);
+  } finally {
+    // Restore keep_alive so live chat/recall don't pin the model in VRAM
+    // for 30 minutes after the reindex finishes.
+    resetKeepAliveIfSupported(model);
+    if (indexerModel !== model) resetKeepAliveIfSupported(indexerModel);
+
+    // Resume capture if we paused it. Best-effort: a failure here is
+    // logged but doesn't unwind the (already-completed) reindex.
+    if (captureWasRunning) {
+      try {
+        await capture.start();
+        log.info('capture resumed');
+      } catch (err) {
+        log.warn('failed to resume capture after reindex', { err: String(err) });
+      }
+    }
   }
+}
 
-  await indexerModel.unload?.().catch((err: unknown) => {
-    log.debug('model unload after full re-index failed', { err: String(err) });
-  });
+/**
+ * Duck-typed override hook — only the ollama adapter exposes
+ * `setKeepAlive`. Other adapters (offline fallback, openai) silently no-op.
+ */
+function applyKeepAliveOverride(
+  adapter: IModelAdapter,
+  value: string | number,
+): void {
+  const fn = (adapter as { setKeepAlive?: (v: string | number) => void }).setKeepAlive;
+  if (typeof fn === 'function') fn.call(adapter, value);
+}
 
-  log.info(`full re-index complete — ${totalProcessed} events processed`);
+function resetKeepAliveIfSupported(adapter: IModelAdapter): void {
+  const fn = (adapter as { resetKeepAlive?: () => void }).resetKeepAlive;
+  if (typeof fn === 'function') fn.call(adapter);
+}
+
+/**
+ * Drop just the embedding model from VRAM. Adapters that don't expose
+ * a separate handle (e.g. OpenAI) no-op — they don't manage local
+ * memory anyway.
+ */
+async function unloadEmbeddingsOnly(adapter: IModelAdapter, log: Logger): Promise<void> {
+  const fn = (adapter as { unloadEmbeddings?: () => Promise<void> }).unloadEmbeddings;
+  if (typeof fn !== 'function') return;
+  try {
+    await fn.call(adapter);
+  } catch (err) {
+    log.debug('embedding-only unload failed', { err: String(err) });
+  }
 }
 
 const INDEX_MAINTENANCE_LOCK = '.index-maintenance.lock';
@@ -1015,7 +1150,7 @@ async function runIdlePowerCatchup(handles: OrchestratorHandles): Promise<void> 
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer, idlePowerCatchup } =
+  const { scheduler, config, storage, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer, idlePowerCatchup } =
     handles;
   const backgroundModelJobsScheduled = config.system.background_model_jobs === 'scheduled';
 
@@ -1162,6 +1297,71 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       }
     })),
   );
+  scheduler.every(
+    STORAGE_MAINTENANCE_JOB,
+    STORAGE_MAINTENANCE_INTERVAL_MS,
+    skipDuringIndexMaintenance(STORAGE_MAINTENANCE_JOB, async () => {
+      // Stricter than the default `guarded` wrapper: VACUUM rewrites
+      // the entire DB file and we don't want to spin disks on battery.
+      const decision = loadGuard.check(STORAGE_MAINTENANCE_JOB, {
+        requireAcPower: true,
+        allowForced: false,
+      });
+      if (!decision.proceed) {
+        logGuardSkip(logger, STORAGE_MAINTENANCE_JOB, decision, config);
+        return;
+      }
+      try {
+        await storage.runMaintenance();
+      } catch (err) {
+        logger.child(STORAGE_MAINTENANCE_JOB).warn('tick failed', {
+          err: String(err),
+        });
+      }
+    }),
+  );
+  // Honor config.storage.local.retention_days. 0 means "keep forever"
+  // -- the storage method is a no-op in that case, but skipping the
+  // schedule entirely avoids waking the timer.
+  const retentionDays = config.storage.local.retention_days;
+  if (retentionDays > 0) {
+    scheduler.every(
+      STORAGE_RETENTION_JOB,
+      STORAGE_RETENTION_INTERVAL_MS,
+      skipDuringIndexMaintenance(STORAGE_RETENTION_JOB, async () => {
+        // Mass deletes can churn many MB of WAL; gate on AC power so
+        // we don't drain a laptop battery on housekeeping work.
+        const decision = loadGuard.check(STORAGE_RETENTION_JOB, {
+          requireAcPower: true,
+          allowForced: false,
+        });
+        if (!decision.proceed) {
+          logGuardSkip(logger, STORAGE_RETENTION_JOB, decision, config);
+          return;
+        }
+        try {
+          const result = await storage.deleteOldData(retentionDays);
+          if (
+            result.frames > 0 ||
+            result.events > 0 ||
+            result.sessions > 0 ||
+            result.meetings > 0 ||
+            result.entities > 0
+          ) {
+            logger.child(STORAGE_RETENTION_JOB).info(
+              `retention swept ${result.frames} frames, ${result.events} events, ` +
+                `${result.sessions} sessions, ${result.meetings} meetings, ` +
+                `${result.entities} entities (cutoff ${retentionDays}d)`,
+            );
+          }
+        } catch (err) {
+          logger.child(STORAGE_RETENTION_JOB).warn('tick failed', {
+            err: String(err),
+          });
+        }
+      }),
+    );
+  }
   scheduler.every(
     INCREMENTAL_JOB,
     config.index.incremental_interval_min * 60 * 1000,

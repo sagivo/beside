@@ -53,23 +53,27 @@ export class EntityResolverWorker {
   async tick(): Promise<{ resolved: number; remaining: number }> {
     const frames = await this.storage.listFramesNeedingResolution(this.batchSize);
     if (frames.length === 0) return { resolved: 0, remaining: 0 };
-    let resolved = 0;
+    const items: Array<{ frameId: string; entity: EntityRef }> = [];
     for (const f of frames) {
       const ref = resolveEntity(f);
-      if (!ref) continue;
-      try {
-        await this.storage.resolveFrameToEntity(f.id, ref);
-        resolved += 1;
-      } catch (err) {
-        this.logger.debug(`failed to resolve frame ${f.id}`, { err: String(err) });
-      }
+      if (ref) items.push({ frameId: f.id, entity: ref });
     }
-    if (resolved > 0) {
-      this.logger.debug(
-        `resolved ${resolved}/${frames.length} frames to entities`,
-      );
+    if (items.length === 0) return { resolved: 0, remaining: frames.length };
+    try {
+      await this.storage.resolveFramesToEntities(items);
+    } catch (err) {
+      this.logger.debug(`failed to resolve ${items.length} frames`, {
+        err: String(err),
+      });
+      return { resolved: 0, remaining: frames.length };
     }
-    return { resolved, remaining: Math.max(0, frames.length - resolved) };
+    this.logger.debug(
+      `resolved ${items.length}/${frames.length} frames to entities`,
+    );
+    return {
+      resolved: items.length,
+      remaining: Math.max(0, frames.length - items.length),
+    };
   }
 
   /** Drain the resolution backlog. Used by `--full-reindex`. */

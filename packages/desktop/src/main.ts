@@ -739,8 +739,8 @@ async function startRuntime(): Promise<void> {
 }
 
 async function startDaemonIfNeeded(): Promise<void> {
-  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART !== '1') {
-    appendLog('Desktop autostart disabled by default. Set COFOUNDEROS_DESKTOP_AUTOSTART=1 to start capture on launch.');
+  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART === '0') {
+    appendLog('Desktop autostart disabled by COFOUNDEROS_DESKTOP_AUTOSTART=0; launch will stay idle.');
     await refreshTray();
     return;
   }
