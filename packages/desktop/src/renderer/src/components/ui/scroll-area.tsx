@@ -14,7 +14,7 @@ export const ScrollArea = React.forwardRef<
   >
     <ScrollAreaPrimitive.Viewport
       data-slot="scroll-area-viewport"
-      className="size-full rounded-[inherit] outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      className="size-full max-h-[inherit] rounded-[inherit] outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
     >
       {children}
     </ScrollAreaPrimitive.Viewport>
