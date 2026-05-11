@@ -572,49 +572,34 @@ export class EventExtractor {
       return 0;
     }
 
-    // The MeetingBuilder splits a single conceptual meeting into
-    // multiple `Meeting` rows when the user's capture pipeline has a
-    // gap longer than `idle_threshold_sec` (5 min default). For the
-    // event log, the user perceives them as one item — merge here.
-    const clusters = clusterMeetings(meetings);
-
     let liftedNow = 0;
-    for (const cluster of clusters) {
-      const primary = cluster.primary;
-      const id = `evt_mtg_${primary.id}`;
+    for (const meeting of meetings) {
+      const id = `evt_mtg_${meeting.id}`;
       const existing = await this.storage.getDayEvent(id).catch(() => null);
-      const hash = clusterContentHash(cluster);
+      const hash = meetingContentHash(meeting);
       if (existing && existing.content_hash === hash) continue;
 
       const now = new Date().toISOString();
-      const mergedAttendees = uniqueStrings(cluster.all.flatMap((m) => m.attendees ?? []));
-      const mergedLinks = uniqueStrings(cluster.all.flatMap((m) => m.links ?? []));
-      const totalDurationMs = cluster.all.reduce((s, m) => s + m.duration_ms, 0);
       const tldr =
-        (primary.summary_json?.tldr ?? '').trim() ||
-        deterministicMeetingContext({
-          ...primary,
-          duration_ms: totalDurationMs,
-          attendees: mergedAttendees,
-          links: mergedLinks,
-        });
+        (meeting.summary_json?.tldr ?? '').trim() ||
+        deterministicMeetingContext(meeting);
 
       const event: DayEvent = {
         id,
-        day: cluster.day,
-        starts_at: cluster.startedAt,
-        ends_at: cluster.endedAt,
+        day: meeting.day,
+        starts_at: meeting.started_at,
+        ends_at: meeting.ended_at,
         kind: 'meeting',
         source: 'meeting_capture',
         title:
-          (primary.title ?? '').trim() ||
-          (primary.summary_json?.title ?? '').trim() ||
-          `${platformLabel(primary.platform)} meeting`,
-        source_app: platformLabel(primary.platform),
+          (meeting.title ?? '').trim() ||
+          (meeting.summary_json?.title ?? '').trim() ||
+          `${platformLabel(meeting.platform)} meeting`,
+        source_app: platformLabel(meeting.platform),
         context_md: tldr || null,
-        attendees: mergedAttendees,
-        links: mergedLinks,
-        meeting_id: primary.id,
+        attendees: meeting.attendees,
+        links: meeting.links,
+        meeting_id: meeting.id,
         evidence_frame_ids: [],
         content_hash: hash,
         status: 'ready',
@@ -626,41 +611,8 @@ export class EventExtractor {
       try {
         await this.storage.upsertDayEvent(event);
         liftedNow += 1;
-
-        // Tombstone the duplicate sibling DayEvents so they vanish from
-        // the timeline. We don't ALTER the canonical row id of the
-        // primary, but the secondaries collapse into nothing.
-        for (const sibling of cluster.all) {
-          if (sibling.id === primary.id) continue;
-          const siblingEventId = `evt_mtg_${sibling.id}`;
-          const tombstone = await this.storage
-            .getDayEvent(siblingEventId)
-            .catch(() => null);
-          if (!tombstone) continue;
-          try {
-            // The cheapest "soft delete" we have right now is rewriting
-            // the row under a content hash that future ticks will see
-            // matches, so re-runs never resurrect it; plus marking it
-            // as part of the canonical cluster via meeting_id.
-            // Storage doesn't yet expose a per-row delete on day_events;
-            // dropping content + zero-duration keeps the row hidden
-            // by the UI's `eventDuration` heuristic.
-            await this.storage.upsertDayEvent({
-              ...tombstone,
-              starts_at: cluster.startedAt,
-              ends_at: cluster.startedAt,
-              title: '__merged__',
-              context_md: null,
-              status: 'ready',
-              content_hash: hash,
-              updated_at: now,
-            });
-          } catch {
-            /* best effort */
-          }
-        }
       } catch (err) {
-        this.logger.warn(`upsertDayEvent failed for meeting ${primary.id}`, {
+        this.logger.warn(`upsertDayEvent failed for meeting ${meeting.id}`, {
           err: String(err),
         });
       }
@@ -1134,86 +1086,6 @@ function localDayKey(d: Date): string {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   return `${yyyy}-${mm}-${dd}`;
-}
-
-// The MeetingBuilder defaults split a meeting if there's >5min of
-// capture gap. We treat anything within 30 min of the previous segment
-// — same entity_path, same title — as the same conceptual meeting.
-const MEETING_MERGE_GAP_MS = 30 * 60_000;
-
-interface MeetingCluster {
-  primary: Meeting;
-  all: Meeting[];
-  startedAt: string;
-  endedAt: string;
-  day: string;
-}
-
-function clusterMeetings(meetings: Meeting[]): MeetingCluster[] {
-  const sorted = meetings
-    .slice()
-    .sort((a, b) => a.started_at.localeCompare(b.started_at));
-  const buckets = new Map<string, MeetingCluster>();
-  for (const m of sorted) {
-    const key = `${m.day}|${m.entity_path}|${normaliseMeetingTitle(m)}`;
-    const existing = buckets.get(key);
-    if (existing && Date.parse(m.started_at) - Date.parse(existing.endedAt) <= MEETING_MERGE_GAP_MS) {
-      existing.all.push(m);
-      existing.endedAt = maxIso(existing.endedAt, m.ended_at);
-      // Promote the richer one as primary so summary/title/etc. survive.
-      if (meetingRichnessRank(m) > meetingRichnessRank(existing.primary)) {
-        existing.primary = m;
-      }
-      continue;
-    }
-    buckets.set(key, {
-      primary: m,
-      all: [m],
-      startedAt: m.started_at,
-      endedAt: m.ended_at,
-      day: m.day,
-    });
-  }
-  return Array.from(buckets.values());
-}
-
-function normaliseMeetingTitle(m: Meeting): string {
-  const t = (m.title ?? m.summary_json?.title ?? '').toLowerCase();
-  return t.replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-function meetingRichnessRank(m: Meeting): number {
-  let score = 0;
-  if (m.summary_status === 'ready') score += 100;
-  else if (m.summary_status === 'running') score += 50;
-  else if (m.summary_status === 'pending') score += 10;
-  score += Math.min(40, Math.floor(m.duration_ms / 60_000));
-  score += Math.min(20, m.transcript_chars / 200);
-  score += Math.min(10, m.attendees.length * 2);
-  return score;
-}
-
-function maxIso(a: string, b: string): string {
-  return Date.parse(a) >= Date.parse(b) ? a : b;
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values.filter(Boolean))];
-}
-
-function clusterContentHash(cluster: MeetingCluster): string {
-  const parts = cluster.all.flatMap((m) => [
-    m.id,
-    m.title ?? '',
-    m.summary_json?.title ?? '',
-    m.summary_json?.tldr ?? '',
-    m.started_at,
-    m.ended_at,
-    m.duration_ms,
-    m.summary_status,
-    m.content_hash,
-  ]);
-  return sha1(parts.join('|')).slice(0, 16);
 }
 
 function meetingContentHash(meeting: Meeting): string {

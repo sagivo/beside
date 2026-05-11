@@ -204,11 +204,16 @@ function dedupeEvents(events: DayEvent[]): DayEvent[] {
     // placeholders with a sentinel title.
     if (ev.title === '__merged__') continue;
     const minute = Math.floor(Date.parse(ev.starts_at) / 60_000);
-    // 30-min bucket for meetings (covers the meeting-builder split),
-    // 5-min bucket for everything else.
-    const bucketSize = ev.kind === 'meeting' ? 30 : 5;
+    // Keep captured meetings distinct: the runtime already decides
+    // meeting identity via meeting_id, and separate calls can share a
+    // title within the same half-hour. Other sources still get a small
+    // bucket to collapse repeated OCR observations of the same item.
+    const bucketSize = ev.kind === 'meeting' ? 1 : 5;
     const bucket = Math.floor(minute / bucketSize) * bucketSize;
-    const key = [ev.day, ev.kind, bucket, ev.title.trim().toLowerCase()].join('|');
+    const key =
+      ev.kind === 'meeting'
+        ? [ev.day, ev.kind, ev.meeting_id ?? ev.id].join('|')
+        : [ev.day, ev.kind, bucket, ev.title.trim().toLowerCase()].join('|');
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, ev);

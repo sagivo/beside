@@ -117,18 +117,37 @@ async function main() {
       updated_at: `${day}T10:00:00.000Z`,
     };
     await storage.upsertMeeting(meeting);
+    const meeting2 = {
+      ...meeting,
+      id: `mtg_test_${randomUUID().slice(0, 8)}`,
+      started_at: `${day}T10:05:00.000Z`,
+      ended_at: `${day}T10:15:00.000Z`,
+      duration_ms: 10 * 60_000,
+      frame_count: 2,
+      screenshot_count: 2,
+      audio_chunk_count: 0,
+      transcript_chars: 0,
+      content_hash: 'def456',
+      summary_md: null,
+      summary_json: null,
+      attendees: [],
+      links: [],
+      updated_at: `${day}T10:16:00.000Z`,
+    };
+    await storage.upsertMeeting(meeting2);
 
     const extractor = new EventExtractor(storage, stubModel, logger, {
       llmEnabled: true,
     });
 
     const r1 = await extractor.tick();
-    assert(r1.meetingsLifted === 1, `first tick lifted 1 meeting (got ${r1.meetingsLifted})`);
+    assert(r1.meetingsLifted === 2, `first tick lifted 2 meetings (got ${r1.meetingsLifted})`);
     assert(r1.llmExtracted === 0, 'LLM pass short-circuited when model unavailable');
 
     const events = await storage.listDayEvents({ day, order: 'chronological' });
-    assert(events.length === 1, `listDayEvents returned 1 event (got ${events.length})`);
-    const evt = events[0];
+    assert(events.length === 2, `listDayEvents returned 2 events (got ${events.length})`);
+    assert(events.every((event) => event.title !== '__merged__'), 'meeting lift preserves sibling meetings');
+    const evt = events.find((event) => event.meeting_id === meetingId) ?? events[0];
     assert(evt.kind === 'meeting', `event kind = meeting (got ${evt.kind})`);
     assert(evt.source === 'meeting_capture', `source = meeting_capture (got ${evt.source})`);
     assert(evt.meeting_id === meetingId, `event linked to meeting id`);
@@ -150,11 +169,11 @@ async function main() {
     const r2 = await extractor.tick();
     assert(r2.meetingsLifted === 0, `second tick lifted 0 (got ${r2.meetingsLifted})`);
     const events2 = await storage.listDayEvents({ day });
-    assert(events2.length === 1, `still exactly 1 event after re-tick (got ${events2.length})`);
+    assert(events2.length === 2, `still exactly 2 events after re-tick (got ${events2.length})`);
 
     // listDayEvents kind filter works.
     const meetingEvents = await storage.listDayEvents({ kind: 'meeting', day });
-    assert(meetingEvents.length === 1, 'kind=meeting filter returns the event');
+    assert(meetingEvents.length === 2, 'kind=meeting filter returns both meeting events');
     const calendarEvents = await storage.listDayEvents({ kind: 'calendar', day });
     assert(calendarEvents.length === 0, 'kind=calendar filter excludes the meeting event');
 
