@@ -54,6 +54,13 @@ import type {
 
 import '@/lib/thumbnail-cache';
 
+const AGENDA_REFRESH_JOBS = new Set([
+  'audio-transcript-worker',
+  'meeting-builder',
+  'meeting-summarizer',
+  'event-extractor',
+]);
+
 export function App() {
   return (
     <ThemeProvider>
@@ -85,6 +92,7 @@ function AppInner() {
     null,
   );
   const searchRequestId = React.useRef(0);
+  const agendaRefreshKeyRef = React.useRef('');
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => {
     try {
       return localStorage.getItem(ONBOARDING_KEY) !== '1';
@@ -121,6 +129,18 @@ function AppInner() {
     }, 60000);
     return () => window.clearInterval(timer);
   }, []);
+
+  React.useEffect(() => {
+    if (screen !== 'meetings' || !overview) return;
+    const key = (overview.backgroundJobs ?? [])
+      .filter((job) => AGENDA_REFRESH_JOBS.has(job.name))
+      .map((job) => `${job.name}:${job.lastCompletedAt ?? ''}:${job.runCount}`)
+      .join('|');
+    if (!key || key === agendaRefreshKeyRef.current) return;
+    agendaRefreshKeyRef.current = key;
+    void loadScreen('meetings');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, overview?.system?.overviewGeneratedAt]);
 
   async function loadScreen(next: Screen) {
     try {

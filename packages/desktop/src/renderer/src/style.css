@@ -13,6 +13,13 @@
 :root {
   --radius: 0.875rem;
 
+  /* Tell Chromium / WebKit to theme native controls (date pickers,
+     scrollbars, form widgets) in light mode by default. Overridden to
+     "dark" inside `.dark` below. Without this the OS-native calendar
+     popover Electron uses for <input type="date"> reads white-on-white
+     in dark mode. */
+  color-scheme: light;
+
   /* Light surfaces (kept available for users who flip the toggle) */
   --background: oklch(0.985 0.005 285);
   --foreground: oklch(0.16 0.018 285);
@@ -112,6 +119,9 @@
 }
 
 .dark {
+  /* Flip native controls (date pickers, scrollbars, etc.) to dark. */
+  color-scheme: dark;
+
   /* Deep ink, near-black base. Single-most-impactful change to feel modern. */
   --background: oklch(0.135 0.012 285);
   --foreground: oklch(0.97 0.005 285);

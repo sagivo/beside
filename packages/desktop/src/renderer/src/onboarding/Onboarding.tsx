@@ -1430,6 +1430,7 @@ function AudioStep({
       }
       await window.cofounderos.saveConfigPatch({
         capture: {
+          ...(turnOn ? { plugin: 'native' } : {}),
           capture_audio: turnOn,
           audio: {
             live_recording: {

@@ -256,6 +256,8 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.listDayEvents(
         req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
       );
+    case 'triggerEventExtractor':
+      return await runtime.triggerEventExtractor();
     case 'searchFrames':
       return await runtime.searchFrames(req.params as never);
     case 'explainSearchResults':

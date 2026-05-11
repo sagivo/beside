@@ -203,6 +203,8 @@ const OVERVIEW_SLOW_LOG_MS = 500;
  * are stored in insertion order so we evict the oldest first.
  */
 const EXPLAIN_SEARCH_CACHE_MAX = 256;
+const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
+const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
 export class CofounderRuntime {
   private readonly logger: Logger;
@@ -577,6 +579,7 @@ export class CofounderRuntime {
     to?: string;
     kind?: DayEventKind;
     limit?: number;
+    order?: 'recent' | 'chronological';
   } = {}): Promise<DayEvent[]> {
     return await this.withHandles(async (handles) => {
       try {
@@ -585,8 +588,12 @@ export class CofounderRuntime {
           from: query.from,
           to: query.to,
           kind: query.kind,
-          order: 'chronological',
-          limit: query.limit ?? 500,
+          // Default `recent`: when no day filter is provided we want the
+          // newest events to fit under the row cap. Per-day calls
+          // override with `chronological` since within a single day the
+          // event list reads top-to-bottom.
+          order: query.order ?? (query.day ? 'chronological' : 'recent'),
+          limit: query.limit ?? (query.day ? 500 : 2000),
         });
       } catch {
         return [];
@@ -857,6 +864,215 @@ export class CofounderRuntime {
         assertHeavyWorkAllowed(handles, 'index-reorganise');
         return runReorganisation(handles);
       });
+    });
+  }
+
+  /**
+   * Focused, fast manual trigger for the EventExtractor.
+   *
+   * The scheduler runs the same job every 15 min; this is the "make it
+   * happen now" path the Event log Scan-now button hits.
+   *
+   * Critically, the extractor only sees `frames` rows with OCR text,
+   * so we drain the upstream workers in order first:
+   *
+   *   1. AudioTranscriptWorker — finished audio chunks → audio_transcript events
+   *   2. FrameBuilder  — raw capture events  → Frame rows
+   *                      (without this, a calendar screenshot taken
+   *                       30 s ago hasn't been promoted yet)
+   *   3. OcrWorker     — Frame rows          → Frame rows + text
+   *                      (Apple Calendar AX text typically lands at
+   *                       frame-build time, but web calendars need
+   *                       Tesseract here)
+   *   4. EntityResolver — assigns `entity_kind` (not required by the
+   *                       extractor's bucketing, but cheap and keeps
+   *                       the rest of the substrate fresh)
+   *   5. MeetingBuilder — turns newly-resolved live-call frames into
+   *                       Meeting rows so the extractor can lift them
+   *   6. MeetingSummarizer — fills summaries for closed meetings
+   *   7. EventExtractor — finally produces the day_events rows
+   *
+   * OCR is intentionally bounded: users click this button to update
+   * the current Event log, not to pay down every old un-OCR'd frame in
+   * the database. The scheduler/full reindex paths still own deep
+   * backlog cleanup.
+   * Returns a small summary that the renderer surfaces as a toast.
+   */
+  async triggerEventExtractor(): Promise<{
+    meetingsLifted: number;
+    llmExtracted: number;
+    contextEnriched: number;
+    daysScanned: number;
+    bucketsScanned: number;
+    framesScanned: number;
+    framesBuilt: number;
+    framesOcrd: number;
+    audioProcessed: number;
+    audioTranscribed: number;
+    audioImported: number;
+    audioSilent: number;
+    audioFailed: number;
+    meetingFramesProcessed: number;
+    meetingsCreated: number;
+    meetingsExtended: number;
+    summariesAttempted: number;
+    summariesSucceeded: number;
+    summariesFailed: number;
+    summariesSkipped: number;
+    modelAvailable: boolean;
+    failed: number;
+  }> {
+    return await this.withHandles(async (handles) => {
+      let framesBuilt = 0;
+      let framesOcrd = 0;
+      let audioProcessed = 0;
+      let audioTranscribed = 0;
+      let audioImported = 0;
+      let audioSilent = 0;
+      let audioFailed = 0;
+      let meetingFramesProcessed = 0;
+      let meetingsCreated = 0;
+      let meetingsExtended = 0;
+      let summariesAttempted = 0;
+      let summariesSucceeded = 0;
+      let summariesFailed = 0;
+      let summariesSkipped = 0;
+
+      try {
+        const audio = await handles.audioTranscriptWorker.drain();
+        audioProcessed = audio.processed ?? 0;
+        audioTranscribed = audio.transcribed ?? 0;
+        audioImported = audio.imported ?? 0;
+        audioSilent = audio.silent ?? 0;
+        audioFailed = audio.failed ?? 0;
+        if (audioProcessed + audioSilent + audioFailed > 0) {
+          handles.logger.info(
+            `scan: processed ${audioProcessed} audio transcript(s), ${audioSilent} silent, ${audioFailed} failed`,
+          );
+        }
+      } catch (err) {
+        handles.logger.warn('scan: audioTranscriptWorker.drain failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        const fb = await handles.frameBuilder.drain();
+        framesBuilt = fb.framesCreated ?? 0;
+        if (framesBuilt > 0) {
+          handles.logger.info(`scan: built ${framesBuilt} new frame(s) from raw events`);
+        }
+      } catch (err) {
+        handles.logger.warn('scan: frameBuilder.drain failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        const ocr = await handles.ocrWorker.drain(MANUAL_EVENT_SCAN_OCR_TICKS);
+        framesOcrd = ocr.processed ?? 0;
+        if (framesOcrd > 0) {
+          handles.logger.info(`scan: ran OCR over ${framesOcrd} frame(s)`);
+        }
+      } catch (err) {
+        handles.logger.warn('scan: ocrWorker.drain failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        await handles.entityResolver.drain();
+      } catch (err) {
+        handles.logger.warn('scan: entityResolver.drain failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        const mb = await handles.meetingBuilder.drain();
+        meetingFramesProcessed = mb.framesProcessed ?? 0;
+        meetingsCreated = mb.meetingsCreated ?? 0;
+        meetingsExtended = mb.meetingsExtended ?? 0;
+        if (meetingsCreated + meetingsExtended > 0) {
+          handles.logger.info(
+            `scan: materialised ${meetingsCreated} new + ${meetingsExtended} extended meeting(s)`,
+          );
+        }
+      } catch (err) {
+        handles.logger.warn('scan: meetingBuilder.drain failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        const summaries = await handles.meetingSummarizer.tick();
+        summariesAttempted = summaries.attempted ?? 0;
+        summariesSucceeded = summaries.succeeded ?? 0;
+        summariesFailed = summaries.failed ?? 0;
+        summariesSkipped = summaries.skipped ?? 0;
+        if (summariesAttempted > 0) {
+          handles.logger.info(
+            `scan: summarised ${summariesSucceeded} meeting(s), ${summariesFailed} failed, ${summariesSkipped} skipped`,
+          );
+        }
+      } catch (err) {
+        handles.logger.warn('scan: meetingSummarizer.tick failed (continuing)', {
+          err: String(err),
+        });
+      }
+
+      try {
+        const result = await handles.eventExtractor.tick({
+          lookbackDays: MANUAL_EVENT_SCAN_LOOKBACK_DAYS,
+          sources: ['calendar_screen'],
+          enrichContexts: false,
+        });
+        return {
+          ...result,
+          framesBuilt,
+          framesOcrd,
+          audioProcessed,
+          audioTranscribed,
+          audioImported,
+          audioSilent,
+          audioFailed,
+          meetingFramesProcessed,
+          meetingsCreated,
+          meetingsExtended,
+          summariesAttempted,
+          summariesSucceeded,
+          summariesFailed,
+          summariesSkipped,
+        };
+      } catch (err) {
+        handles.logger.warn('manual event extractor tick failed', {
+          err: String(err),
+        });
+        return {
+          meetingsLifted: 0,
+          llmExtracted: 0,
+          contextEnriched: 0,
+          daysScanned: 0,
+          bucketsScanned: 0,
+          framesScanned: 0,
+          framesBuilt,
+          framesOcrd,
+          audioProcessed,
+          audioTranscribed,
+          audioImported,
+          audioSilent,
+          audioFailed,
+          meetingFramesProcessed,
+          meetingsCreated,
+          meetingsExtended,
+          summariesAttempted,
+          summariesSucceeded,
+          summariesFailed,
+          summariesSkipped,
+          modelAvailable: false,
+          failed: 1,
+        };
+      }
     });
   }
 

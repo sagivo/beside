@@ -46,6 +46,8 @@ export interface MeetingBuilderOptions {
   minDurationMs?: number;
   /** Audio frames whose timestamp falls within `ended_at + audioGraceMs` are attached. Default 60s. */
   audioGraceMs?: number;
+  /** Look this far before `started_at` for audio chunks that overlap the meeting. Default 5 min. */
+  audioLeadMs?: number;
   /** Pending meeting frames per tick. Default 1000 — meetings are cheap to build. */
   batchSize?: number;
 }
@@ -224,6 +226,7 @@ export class MeetingBuilder {
   private readonly meetingIdleMs: number;
   private readonly minDurationMs: number;
   private readonly audioGraceMs: number;
+  private readonly audioLeadMs: number;
   private readonly batchSize: number;
 
   constructor(
@@ -235,6 +238,7 @@ export class MeetingBuilder {
     this.meetingIdleMs = opts.meetingIdleMs ?? 5 * 60_000;
     this.minDurationMs = opts.minDurationMs ?? 3 * 60_000;
     this.audioGraceMs = opts.audioGraceMs ?? 60_000;
+    this.audioLeadMs = opts.audioLeadMs ?? 5 * 60_000;
     this.batchSize = opts.batchSize ?? 1000;
   }
 
@@ -500,11 +504,26 @@ export class MeetingBuilder {
     const durationMs = Math.max(0, Date.parse(endedAt) - Date.parse(startedAt));
     const platform = acc.platformHint ?? inferPlatform(screens);
 
-    // Find audio frames whose timestamp overlaps the meeting window
-    // (with a grace tail so a chunk arriving a few seconds after we
-    // last saw the meeting window is still pulled in).
-    const audioWindowEnd = new Date(Date.parse(endedAt) + this.audioGraceMs).toISOString();
-    const audioFrames = await this.storage.listAudioFramesInRange(startedAt, audioWindowEnd);
+    // Find audio chunks whose recording interval overlaps the meeting
+    // window. Native chunks may start before the first visible meeting
+    // screenshot, so we query a lead window and filter by chunk end.
+    const startedMs = Date.parse(startedAt);
+    const audioWindowEndMs = Date.parse(endedAt) + this.audioGraceMs;
+    const audioWindowStart = new Date(startedMs - this.audioLeadMs).toISOString();
+    const audioWindowEnd = new Date(audioWindowEndMs).toISOString();
+    const candidateAudioFrames = await this.storage.listAudioFramesInRange(audioWindowStart, audioWindowEnd);
+    const audioMetadata = new Map<string, Record<string, unknown> | null>();
+    const audioFrames: Frame[] = [];
+    for (const audio of candidateAudioFrames) {
+      const audioMeta = await this.readAudioMetadata(audio);
+      audioMetadata.set(audio.id, audioMeta);
+      const audioStartMs = Date.parse(audio.timestamp);
+      if (!Number.isFinite(audioStartMs)) continue;
+      const audioEndMs = audioStartMs + Math.max(1000, audioDurationMs(audio, audioMeta));
+      if (audioStartMs <= audioWindowEndMs && audioEndMs >= startedMs) {
+        audioFrames.push(audio);
+      }
+    }
 
     if (screens.length === 0 && audioFrames.length === 0) {
       return { audioFramesAttached: 0, turnsBuilt: 0 };
@@ -516,7 +535,9 @@ export class MeetingBuilder {
     const turns: Array<Omit<MeetingTurn, 'id' | 'meeting_id'>> = [];
     let transcriptChars = 0;
     for (const audio of audioFrames) {
-      const audioMeta = await this.readAudioMetadata(audio);
+      const audioMeta = audioMetadata.has(audio.id)
+        ? audioMetadata.get(audio.id)!
+        : await this.readAudioMetadata(audio);
       const audioTurns = extractTurnsFromAudioFrame(audio, audioMeta);
       transcriptChars += (audio.text ?? '').length;
       for (const t of audioTurns) {

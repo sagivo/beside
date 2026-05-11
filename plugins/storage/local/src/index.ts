@@ -1875,14 +1875,28 @@ class LocalStorage implements IStorage {
            transcript_chars = excluded.transcript_chars,
            content_hash = excluded.content_hash,
            summary_status = CASE
+             WHEN meetings.content_hash != excluded.content_hash
+             THEN excluded.summary_status
              WHEN meetings.summary_status = 'skipped_short'
               AND excluded.summary_status <> 'skipped_short'
              THEN excluded.summary_status
              ELSE meetings.summary_status
            END,
+           summary_md = CASE
+             WHEN meetings.content_hash != excluded.content_hash
+             THEN excluded.summary_md
+             ELSE meetings.summary_md
+           END,
+           summary_json = CASE
+             WHEN meetings.content_hash != excluded.content_hash
+             THEN excluded.summary_json
+             ELSE meetings.summary_json
+           END,
            attendees_json = excluded.attendees_json,
            links_json = excluded.links_json,
            failure_reason = CASE
+             WHEN meetings.content_hash != excluded.content_hash
+             THEN excluded.failure_reason
              WHEN meetings.summary_status = 'skipped_short'
               AND excluded.summary_status <> 'skipped_short'
              THEN NULL

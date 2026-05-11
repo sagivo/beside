@@ -34,7 +34,7 @@ interface NavItem {
 const NAV_PRIMARY: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: LayoutDashboard, shortcut: '1' },
   { id: 'timeline', label: 'Timeline', icon: Calendar, shortcut: '2' },
-  { id: 'meetings', label: 'Meetings', icon: Video, shortcut: '3' },
+  { id: 'meetings', label: 'Agenda', icon: Video, shortcut: '3' },
   { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
   { id: 'chat', label: 'Ask AI', icon: MessageSquare, shortcut: '5' },
 ];

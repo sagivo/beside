@@ -47,7 +47,7 @@ export interface MeetingSummarizerOptions {
   maxTranscriptChars?: number;
   /** Number of vision attachments to send. 0 disables. Default 4. */
   visionAttachments?: number;
-  /** Whether to enable Stage B (LLM) at all. Default true. */
+  /** Whether to enable Stage B (LLM) at all. Stage A still runs. Default true. */
   enabled?: boolean;
 }
 
@@ -114,7 +114,6 @@ export class MeetingSummarizer {
       failed: 0,
       skipped: 0,
     };
-    if (!this.enabled) return empty;
     const candidates = await this.findCandidates(this.batchSize);
     for (const meeting of candidates) {
       empty.attempted += 1;
@@ -227,6 +226,7 @@ export class MeetingSummarizer {
     screens: Frame[],
     fallback: MeetingSummaryJson,
   ): Promise<MeetingSummaryJson | null> {
+    if (!this.enabled) return null;
     const prompt = buildPrompt(meeting, turns, screens, this.maxTranscriptChars);
 
     const visionImages = await this.loadVisionImages(meeting, screens);

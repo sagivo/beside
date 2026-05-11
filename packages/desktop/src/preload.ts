@@ -78,6 +78,7 @@ const api = {
     kind?: string;
     limit?: number;
   }) => ipcRenderer.invoke('cofounderos:list-day-events', query),
+  triggerEventExtractor: () => ipcRenderer.invoke('cofounderos:trigger-event-extractor'),
 };
 
 contextBridge.exposeInMainWorld('cofounderos', api);

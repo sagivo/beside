@@ -996,6 +996,7 @@ export function Settings({
 
         <TabsContent value="audio">
           <AudioSettings
+            capturePlugin={draft.capturePlugin}
             captureAudio={draft.captureAudio}
             liveRecordingEnabled={draft.liveRecordingEnabled}
             systemAudioBackend={draft.systemAudioBackend}
@@ -1417,6 +1418,7 @@ const WHISPER_MODELS: Array<{ id: string; label: string; size: string; quality: 
 ];
 
 function AudioSettings({
+  capturePlugin,
   captureAudio,
   liveRecordingEnabled,
   systemAudioBackend,
@@ -1440,6 +1442,7 @@ function AudioSettings({
   liveRecordingPollIntervalSec,
   set,
 }: {
+  capturePlugin: string;
   captureAudio: boolean;
   liveRecordingEnabled: boolean;
   systemAudioBackend: SystemAudioBackend;
@@ -1495,6 +1498,23 @@ function AudioSettings({
     setMic(after);
   }
 
+  const liveCaptureNeedsNative =
+    captureAudio && liveRecordingEnabled && capturePlugin.trim() !== 'native';
+  const setCaptureAudio = (enabled: boolean) => {
+    set('captureAudio', enabled);
+    if (!enabled) set('liveRecordingEnabled', false);
+    else if (liveRecordingEnabled && capturePlugin.trim() !== 'native') {
+      set('capturePlugin', 'native');
+    }
+  };
+  const setLiveRecordingEnabled = (enabled: boolean) => {
+    set('liveRecordingEnabled', enabled);
+    if (enabled) {
+      set('captureAudio', true);
+      if (capturePlugin.trim() !== 'native') set('capturePlugin', 'native');
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <Card>
@@ -1504,17 +1524,30 @@ function AudioSettings({
             description="Import audio files from the inbox and transcribe them locally with Whisper."
             typeLabel="boolean"
             checked={captureAudio}
-            onChange={(v) => set('captureAudio', v)}
+            onChange={setCaptureAudio}
           />
           {captureAudio && (
             <>
+              {liveCaptureNeedsNative && (
+                <>
+                  <Separator className="my-4" />
+                  <Alert>
+                    <AlertTriangle className="size-4" />
+                    <AlertTitle>Native capture required</AlertTitle>
+                    <AlertDescription>
+                      Live meeting audio uses the native capture plugin. Enabling live recording
+                      switches the capture plugin to native when you save.
+                    </AlertDescription>
+                  </Alert>
+                </>
+              )}
               <Separator className="my-4" />
               <ToggleRow
                 title="Live microphone recording"
                 description="Record short chunks from the microphone while capture is running."
                 typeLabel="boolean"
                 checked={liveRecordingEnabled}
-                onChange={(v) => set('liveRecordingEnabled', v)}
+                onChange={setLiveRecordingEnabled}
               />
               <Separator className="my-4" />
               <div className="flex flex-col gap-3">
@@ -3520,7 +3553,10 @@ function configPatchFromDraft(draft: SettingsDraft) {
       session_id: optionalString(draft.sessionId),
     },
     capture: {
-      plugin: draft.capturePlugin.trim() || 'node',
+      plugin:
+        draft.captureAudio && draft.liveRecordingEnabled
+          ? 'native'
+          : draft.capturePlugin.trim() || 'node',
       poll_interval_ms: clampInt(draft.pollIntervalMs, 1),
       idle_poll_interval_ms: clampInt(draft.idlePollIntervalMs, 1),
       focus_settle_delay_ms: clampInt(draft.focusSettleDelayMs, 0),

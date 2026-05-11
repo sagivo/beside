@@ -75,6 +75,30 @@ declare global {
         kind?: DayEventKind;
         limit?: number;
       }) => Promise<DayEvent[]>;
+      triggerEventExtractor: () => Promise<{
+        meetingsLifted: number;
+        llmExtracted: number;
+        contextEnriched: number;
+        daysScanned: number;
+        bucketsScanned: number;
+        framesScanned: number;
+        framesBuilt: number;
+        framesOcrd: number;
+        audioProcessed: number;
+        audioTranscribed: number;
+        audioImported: number;
+        audioSilent: number;
+        audioFailed: number;
+        meetingFramesProcessed: number;
+        meetingsCreated: number;
+        meetingsExtended: number;
+        summariesAttempted: number;
+        summariesSucceeded: number;
+        summariesFailed: number;
+        summariesSkipped: number;
+        modelAvailable: boolean;
+        failed: number;
+      }>;
     };
   }
 }

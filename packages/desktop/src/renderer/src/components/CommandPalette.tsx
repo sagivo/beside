@@ -91,7 +91,7 @@ export function CommandPalette({
             <Calendar /> Timeline
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('meetings'))}>
-            <Video /> Meetings
+            <Video /> Agenda
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search

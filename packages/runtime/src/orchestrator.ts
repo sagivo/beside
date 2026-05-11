@@ -168,7 +168,7 @@ const COALESCE_MAX_WAIT_MS = 240_000;
 
 /**
  * Bus-driven coalescer that runs the lightweight worker chain
- * (frame → entity → session, plus embeddings only in scheduled mode)
+ * (frame → entity → session → meeting, plus embeddings only in scheduled mode)
  * shortly after a burst of capture activity settles. Replaces the
  * fixed-cadence ticks as the primary freshness mechanism: when the user
  * is active, search results update within ~60s of the latest capture;
@@ -558,6 +558,7 @@ export async function buildOrchestrator(
     max_frames_per_bucket: number;
   } }).events;
   const eventExtractor = new EventExtractor(storage, model, logger, {
+    dataDir,
     lookbackDays: eventsCfg.lookback_days,
     minTextChars: eventsCfg.min_text_chars,
     maxFramesPerBucket: eventsCfg.max_frames_per_bucket,
@@ -594,7 +595,7 @@ export async function buildOrchestrator(
     bus,
     logger.child('activity-coalescer'),
     async () => {
-      // The full coalescer chain — including frame/entity/session
+      // The full coalescer chain — including frame/entity/session/meeting
       // builders — must be skipped while a maintenance job (full
       // reindex / reorganise) is running. Previously only the LLM
       // embedding step was gated; the lighter builders kept ticking
@@ -608,6 +609,7 @@ export async function buildOrchestrator(
       await frameBuilder.tick();
       await entityResolver.tick();
       await sessionBuilder.tick();
+      await meetingBuilder.tick();
       if (config.system.background_model_jobs !== 'scheduled') return;
       // Embedding worker runs the LLM; gate it the same way
       // `scheduleAll` does (load guard + index-maintenance lock) so
@@ -1322,7 +1324,7 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   const backgroundModelJobsScheduled = config.system.background_model_jobs === 'scheduled';
 
   // Wrap heavier jobs so they skip when the machine is busy. Cheap jobs
-  // (frame builder, entity resolver, session builder) are intentionally
+  // (frame builder, entity resolver, session builder, meeting builder) are intentionally
   // not gated — they're small and keep the captured substrate fresh.
   const guarded = (jobName: string, run: () => Promise<unknown>) => async () => {
     const decision = loadGuard.check(jobName, { allowForced: false });
@@ -1463,20 +1465,19 @@ export function scheduleAll(handles: OrchestratorHandles): void {
       logger.child('meeting-builder').warn('tick failed', { err: String(err) });
     }
   }));
-  // Meeting summarizer: heavier (calls the model). Runs every 5 min
-  // and gates on the load guard so it never fights the user during
-  // active work. In the default `manual` model-jobs mode, the scheduled
-  // tick is a no-op; explicit summarize actions still run it.
+  // Meeting summarizer: runs every 5 min and gates on the load guard
+  // so it never fights the user during active work. Stage A is
+  // deterministic; the LLM stage is controlled by index.meetings.summarize.
   scheduler.every(
     MEETING_SUMMARIZER_JOB,
     MEETING_SUMMARIZER_INTERVAL_MS,
-    modelJob(MEETING_SUMMARIZER_JOB, skipDuringIndexMaintenance(MEETING_SUMMARIZER_JOB, guarded(MEETING_SUMMARIZER_JOB, async () => {
+    skipDuringIndexMaintenance(MEETING_SUMMARIZER_JOB, guarded(MEETING_SUMMARIZER_JOB, async () => {
       try {
         await meetingSummarizer.tick();
       } catch (err) {
         logger.child('meeting-summarizer').warn('tick failed', { err: String(err) });
       }
-    }))),
+    })),
   );
   // Event extractor: lifts every captured meeting into a DayEvent
   // (deterministic, always runs) and -- when the model is online --

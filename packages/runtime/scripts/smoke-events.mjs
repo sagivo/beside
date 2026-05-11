@@ -68,6 +68,13 @@ const stubModel = {
   }),
 };
 
+function localDayKey(date = new Date()) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 async function main() {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-events-smoke-'));
   try {
@@ -155,6 +162,139 @@ async function main() {
     await storage.clearAllDayEvents();
     const events3 = await storage.listDayEvents({ day });
     assert(events3.length === 0, `clearAllDayEvents wiped the table (got ${events3.length})`);
+
+    // LLM calendar extraction should trust the event date visible on
+    // the calendar, not filter by proximity to "now". One calendar
+    // screenshot can legitimately show past, current, and future items.
+    const captureDay = localDayKey();
+    await storage.upsertFrame({
+      id: `frame_calendar_${randomUUID().slice(0, 8)}`,
+      timestamp: `${captureDay}T09:00:00.000Z`,
+      day: captureDay,
+      monitor: 0,
+      app: 'Calendar',
+      app_bundle_id: 'com.apple.iCal',
+      window_title: 'Calendar — month view',
+      url: null,
+      text:
+        'Calendar May 2026 Sun Mon Tue 12 Wed 13 Thu 14 Fri 15 Sat 16 8 AM 9 AM 10 AM ' +
+        'Past Strategy Review Today Sync Future Planning',
+      text_source: 'ocr',
+      asset_path: null,
+      perceptual_hash: `cal_${randomUUID().slice(0, 8)}`,
+      trigger: 'screenshot',
+      session_id: 'sess_calendar_smoke',
+      duration_ms: null,
+      entity_path: null,
+      entity_kind: null,
+      activity_session_id: null,
+      meeting_id: null,
+      source_event_ids: [],
+    });
+    await storage.upsertDayEvent({
+      id: `event_stale_calendar_${randomUUID().slice(0, 8)}`,
+      day: captureDay,
+      starts_at: `${captureDay}T08:00:00.000Z`,
+      ends_at: `${captureDay}T08:30:00.000Z`,
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title: 'Stale Calendar Item',
+      source_app: 'Calendar',
+      context_md: 'This row should be removed when the visible calendar day is rescanned.',
+      attendees: [],
+      links: [],
+      meeting_id: null,
+      evidence_frame_ids: [],
+      content_hash: 'stale-calendar-row',
+      status: 'ready',
+      failure_reason: null,
+      created_at: `${captureDay}T08:00:00.000Z`,
+      updated_at: `${captureDay}T08:00:00.000Z`,
+    });
+    await storage.upsertDayEvent({
+      id: `event_stale_visible_calendar_${randomUUID().slice(0, 8)}`,
+      day: '2026-05-12',
+      starts_at: '2026-05-12T08:00:00.000Z',
+      ends_at: '2026-05-12T08:30:00.000Z',
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title: 'Stale Visible Calendar Item',
+      source_app: 'Calendar',
+      context_md: 'This row should be removed because May 12 is visible in the rescanned calendar.',
+      attendees: [],
+      links: [],
+      meeting_id: null,
+      evidence_frame_ids: [],
+      content_hash: 'stale-visible-calendar-row',
+      status: 'ready',
+      failure_reason: null,
+      created_at: '2026-05-12T08:00:00.000Z',
+      updated_at: '2026-05-12T08:00:00.000Z',
+    });
+
+    const availableModel = {
+      ...stubModel,
+      isAvailable: async () => true,
+      complete: async () =>
+        JSON.stringify({
+          events: [
+            {
+              title: 'Past Strategy Review',
+              kind: 'calendar',
+              starts_at: '1999-12-31T10:00:00',
+              ends_at: '1999-12-31T11:00:00',
+              attendees: [],
+              context: 'A dated calendar event in the past.',
+            },
+            {
+              title: 'Today Sync',
+              kind: 'calendar',
+              starts_at: `${captureDay}T12:30:00`,
+              ends_at: `${captureDay}T13:00:00`,
+              attendees: [],
+              context: 'A dated calendar event for the capture day.',
+            },
+            {
+              title: 'Future Planning',
+              kind: 'calendar',
+              starts_at: '2050-01-02T15:00:00',
+              ends_at: '2050-01-02T16:00:00',
+              attendees: [],
+              context: 'A dated calendar event in the future.',
+            },
+          ],
+        }),
+    };
+    const llmExtractor = new EventExtractor(storage, availableModel, logger, {
+      llmEnabled: true,
+      minTextChars: 20,
+    });
+    const r3 = await llmExtractor.tick();
+    assert(r3.llmExtracted >= 3, `calendar extraction accepted past/today/future dates (got ${r3.llmExtracted})`);
+    const pastEvents = await storage.listDayEvents({ day: '1999-12-31', kind: 'calendar' });
+    const todayEvents = await storage.listDayEvents({ day: captureDay, kind: 'calendar' });
+    const visibleDayEvents = await storage.listDayEvents({ day: '2026-05-12', kind: 'calendar' });
+    const futureEvents = await storage.listDayEvents({ day: '2050-01-02', kind: 'calendar' });
+    assert(
+      pastEvents.some((e) => e.title === 'Past Strategy Review'),
+      'calendar extraction stores past-dated events',
+    );
+    assert(
+      todayEvents.some((e) => e.title === 'Today Sync'),
+      'calendar extraction stores current-day events',
+    );
+    assert(
+      !todayEvents.some((e) => e.title === 'Stale Calendar Item'),
+      'calendar extraction replaces stale events from the rescanned calendar day',
+    );
+    assert(
+      !visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
+      'calendar extraction clears stale events from visible days with no fresh candidate',
+    );
+    assert(
+      futureEvents.some((e) => e.title === 'Future Planning'),
+      'calendar extraction stores future-dated events',
+    );
 
     if (failures === 0) {
       console.log('All event extractor checks passed.');

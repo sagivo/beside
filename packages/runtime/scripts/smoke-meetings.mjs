@@ -106,7 +106,11 @@ async function main() {
     // explicit per-turn offsets in metadata.turns. The MeetingBuilder
     // reads metadata via storage.readEvents on the frame's source_event_ids.
     const audioEventId = `evt_audio_${randomUUID().slice(0, 8)}`;
-    const audioStartIso = new Date(now.getTime() + 30_000).toISOString();
+    // Native chunks are 5 minutes by default, so a chunk may start
+    // before the first meeting screenshot while still overlapping the
+    // meeting. The builder should attach by interval overlap, not just
+    // by chunk start timestamp.
+    const audioStartIso = new Date(now.getTime() - 120_000).toISOString();
     const audioEvent = {
       id: audioEventId,
       timestamp: audioStartIso,
@@ -127,9 +131,9 @@ async function main() {
         whisper_model: 'base',
         duration_ms: 480_000,
         turns: [
-          { offset_ms: 0, end_ms: 5000, speaker: 'Alice', text: 'kicking off Q3 roadmap', source: 'whisper' },
-          { offset_ms: 60_000, end_ms: 64_000, speaker: 'Bob', text: 'pricing slide is the key change', source: 'whisper' },
-          { offset_ms: 240_000, end_ms: 248_000, speaker: 'Alice', text: 'see the link in chat', source: 'whisper' },
+          { offset_ms: 150_000, end_ms: 155_000, speaker: 'Alice', text: 'kicking off Q3 roadmap', source: 'whisper' },
+          { offset_ms: 210_000, end_ms: 214_000, speaker: 'Bob', text: 'pricing slide is the key change', source: 'whisper' },
+          { offset_ms: 360_000, end_ms: 368_000, speaker: 'Alice', text: 'see the link in chat', source: 'whisper' },
         ],
       },
       privacy_filtered: false,
@@ -223,6 +227,97 @@ async function main() {
     const md = renderSummaryMarkdown(meeting, stageA, turns, screens);
     assert(md.includes('**TL;DR.**'), 'rendered markdown contains TL;DR header');
     assert(md.includes(meeting.entity_path), 'rendered markdown links the meeting entity');
+
+    await storage.setMeetingSummary(meeting.id, {
+      status: 'ready',
+      md,
+      json: stageA,
+      contentHash: meeting.content_hash,
+      failureReason: null,
+    });
+
+    // Late transcript arrival after a summary was already ready should
+    // invalidate the summary, attach the audio, and put the meeting
+    // back into the pending queue.
+    const lateAudioEventId = `evt_audio_${randomUUID().slice(0, 8)}`;
+    const lateAudioStart = new Date(now.getTime() + 3 * 60_000).toISOString();
+    const lateAudioEvent = {
+      id: lateAudioEventId,
+      timestamp: lateAudioStart,
+      session_id: 'sess_demo_late',
+      type: 'audio_transcript',
+      app: 'Audio',
+      app_bundle_id: 'cofounderos.audio',
+      window_title: 'native-2026-05-07-15-33-00-000-2.m4a',
+      url: null,
+      content: 'Carol: add launch-risk follow-up to the Q3 roadmap.',
+      asset_path: null,
+      duration_ms: 60_000,
+      idle_before_ms: null,
+      screen_index: 0,
+      metadata: {
+        source: 'whisper',
+        original_filename: 'native-2026-05-07-15-33-00-000-2.m4a',
+        whisper_model: 'base',
+        duration_ms: 60_000,
+        turns: [
+          { offset_ms: 0, end_ms: 5000, speaker: 'Carol', text: 'add launch-risk follow-up to the Q3 roadmap', source: 'whisper' },
+        ],
+        recording_context: {
+          source: 'nearby_screen',
+          confidence: 100,
+          reason: 'resolved_meeting_frame',
+          observed_at: screens[2].timestamp,
+          frame_id: screens[2].id,
+          app: screens[2].app,
+          window_title: screens[2].window_title,
+          url: screens[2].url,
+          entity_path: meetingEntity,
+          entity_kind: 'meeting',
+          meeting_id: meeting.id,
+          platform: 'zoom',
+          title: 'Q3 Roadmap',
+          meeting_url: null,
+        },
+      },
+      privacy_filtered: false,
+      capture_plugin: 'audio-transcript-worker',
+    };
+    await storage.write(lateAudioEvent);
+    const lateAudioFrameId = `frm_audio_${randomUUID().slice(0, 8)}`;
+    await storage.upsertFrame({
+      id: lateAudioFrameId,
+      timestamp: lateAudioStart,
+      day: lateAudioStart.slice(0, 10),
+      monitor: 0,
+      app: 'Audio',
+      app_bundle_id: 'cofounderos.audio',
+      window_title: lateAudioEvent.window_title,
+      url: null,
+      text: lateAudioEvent.content,
+      text_source: 'audio',
+      asset_path: null,
+      perceptual_hash: null,
+      trigger: 'audio',
+      session_id: 'sess_demo_late',
+      duration_ms: 60_000,
+      entity_path: 'apps/audio',
+      entity_kind: 'app',
+      activity_session_id: 'act_demo',
+      meeting_id: null,
+      source_event_ids: [lateAudioEventId],
+    });
+    await storage.resolveFrameToEntity(lateAudioFrameId, {
+      kind: 'app',
+      path: 'apps/audio',
+      title: 'Audio',
+    });
+    const lateResult = await builder.drain();
+    assert(lateResult.audioFramesAttached >= 2, `late audio reattached meeting audio (got ${lateResult.audioFramesAttached})`);
+    const [updatedMeeting] = await storage.listMeetings({ day: '2026-05-07' });
+    assert(updatedMeeting.audio_chunk_count === 2, `late audio raised audio chunk count to 2 (got ${updatedMeeting.audio_chunk_count})`);
+    assert(updatedMeeting.summary_status === 'pending', `late audio invalidated ready summary (got ${updatedMeeting.summary_status})`);
+    assert(updatedMeeting.summary_md === null, 'late audio cleared stale summary markdown');
 
     // Idempotency: re-running drain shouldn't double up.
     const result2 = await builder.drain();

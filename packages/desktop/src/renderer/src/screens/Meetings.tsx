@@ -2,7 +2,9 @@ import * as React from 'react';
 import {
   Calendar,
   CalendarClock,
+  CalendarDays,
   CheckSquare,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Inbox,
@@ -10,6 +12,7 @@ import {
   MessageSquare,
   Mic,
   RefreshCcw,
+  ScanLine,
   Sparkles,
   Users,
   Video,
@@ -19,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { Markdown } from '@/components/Markdown';
 import { formatLocalTime, prettyDay } from '@/lib/format';
@@ -32,8 +36,36 @@ import type {
 } from '@/global';
 
 // ---------------------------------------------------------------------------
-// Time / duration helpers (kept around because the meeting-detail panel
-// still needs them when a `kind=meeting` event is selected).
+// Day-key helpers. The runtime stamps events with `day = YYYY-MM-DD`
+// keyed to *local* time (see `dayKey` in @cofounderos/core), so the UI
+// must match — using UTC slicing would drift by a day on either side of
+// midnight depending on the user's timezone.
+// ---------------------------------------------------------------------------
+
+function localDayKey(date: Date = new Date()): string {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function dayKeyToDate(day: string): Date {
+  // Anchor at noon to dodge DST edge cases when we add/subtract days.
+  return new Date(`${day}T12:00:00`);
+}
+
+function shiftDay(day: string, deltaDays: number): string {
+  const d = dayKeyToDate(day);
+  d.setDate(d.getDate() + deltaDays);
+  return localDayKey(d);
+}
+
+function compareDays(a: string, b: string): number {
+  return a.localeCompare(b);
+}
+
+// ---------------------------------------------------------------------------
+// Duration / platform helpers (kept for the meeting-detail body).
 // ---------------------------------------------------------------------------
 
 function formatDuration(ms: number): string {
@@ -58,7 +90,7 @@ function platformLabel(platform: MeetingPlatform): string {
 }
 
 // ---------------------------------------------------------------------------
-// DayEvent presentation helpers.
+// DayEvent presentation tables.
 // ---------------------------------------------------------------------------
 
 const KIND_LABELS: Record<DayEventKind, string> = {
@@ -116,46 +148,80 @@ function eventDuration(event: DayEvent): number | null {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
-function groupByDay(events: DayEvent[]): Array<{ day: string; items: DayEvent[] }> {
-  const map = new Map<string, DayEvent[]>();
-  for (const ev of events) {
-    const bucket = map.get(ev.day);
-    if (bucket) bucket.push(ev);
-    else map.set(ev.day, [ev]);
+function useMinuteClock(): Date {
+  const [now, setNow] = React.useState(() => new Date());
+
+  React.useEffect(() => {
+    let interval: number | null = null;
+    const timeout = window.setTimeout(() => {
+      setNow(new Date());
+      interval = window.setInterval(() => setNow(new Date()), 60_000);
+    }, 60_000 - (Date.now() % 60_000));
+
+    return () => {
+      window.clearTimeout(timeout);
+      if (interval !== null) window.clearInterval(interval);
+    };
+  }, []);
+
+  return now;
+}
+
+function eventBelongsBeforeNowIndicator(event: DayEvent, nowMs: number): boolean {
+  const startMs = Date.parse(event.starts_at);
+  const endMs = event.ends_at ? Date.parse(event.ends_at) : Number.NaN;
+  const durationMs = Number.isFinite(endMs) && Number.isFinite(startMs)
+    ? endMs - startMs
+    : null;
+
+  // All-day items should stay at the top of the agenda, but they
+  // should not keep the live time marker above every timed event.
+  if (durationMs !== null && durationMs >= 20 * 60 * 60_000) {
+    return startMs <= nowMs;
   }
-  const days = Array.from(map.entries()).sort((a, b) => b[0].localeCompare(a[0]));
-  return days.map(([day, items]) => ({
-    day,
-    items: items.slice().sort((a, b) => a.starts_at.localeCompare(b.starts_at)),
-  }));
+
+  if (Number.isFinite(endMs)) return endMs <= nowMs;
+  return Number.isFinite(startMs) && startMs <= nowMs;
+}
+
+function nowIndicatorIndex(events: DayEvent[], now: Date): number {
+  const nowMs = now.getTime();
+  const idx = events.findIndex((event) => !eventBelongsBeforeNowIndicator(event, nowMs));
+  return idx === -1 ? events.length : idx;
 }
 
 /**
- * Hide near-duplicate events the same day-bucket can accumulate over
- * many extraction passes: identical title + same hour ± 5 minutes is
- * almost certainly the same underlying calendar entry surfaced twice.
+ * Snap near-duplicates inside a day (same title within ±5 minutes) so
+ * the same calendar entry surfaced by multiple OCR passes doesn't show
+ * up twice. Prefers the meeting-sourced row if titles collide across
+ * sources.
  */
 function dedupeEvents(events: DayEvent[]): DayEvent[] {
   const seen = new Map<string, DayEvent>();
   for (const ev of events) {
+    // Hide tombstoned events that the extractor used to collapse
+    // duplicate-meeting rows. They survive the table as zero-duration
+    // placeholders with a sentinel title.
+    if (ev.title === '__merged__') continue;
     const minute = Math.floor(Date.parse(ev.starts_at) / 60_000);
-    // Snap to a 5-minute bucket so the same event captured a few
-    // refreshes apart still collides.
-    const bucket = Math.round(minute / 5) * 5;
-    const key = [
-      ev.day,
-      ev.kind,
-      bucket,
-      ev.title.trim().toLowerCase(),
-    ].join('|');
+    // 30-min bucket for meetings (covers the meeting-builder split),
+    // 5-min bucket for everything else.
+    const bucketSize = ev.kind === 'meeting' ? 30 : 5;
+    const bucket = Math.floor(minute / bucketSize) * bucketSize;
+    const key = [ev.day, ev.kind, bucket, ev.title.trim().toLowerCase()].join('|');
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, ev);
       continue;
     }
-    // Prefer the meeting-sourced event (richest data) when titles
-    // collide across sources.
-    if (existing.kind !== 'meeting' && ev.kind === 'meeting') {
+    // For meetings, prefer the row with audio + summary. For other
+    // kinds, prefer the meeting-sourced row when titles collide.
+    if (existing.kind === 'meeting' && ev.kind === 'meeting') {
+      const score = (e: DayEvent) =>
+        (e.context_md && e.context_md.length > 20 ? 2 : 0) +
+        (e.meeting_id ? 1 : 0);
+      if (score(ev) > score(existing)) seen.set(key, ev);
+    } else if (existing.kind !== 'meeting' && ev.kind === 'meeting') {
       seen.set(key, ev);
     }
   }
@@ -175,101 +241,293 @@ export function Meetings({
   events: DayEvent[];
   meetings: Meeting[];
   loading: boolean;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
 }) {
-  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  // Manual "scan now" — triggers the EventExtractor immediately so the
+  // user doesn't wait 15 min for the next scheduled tick.
+  const [scanning, setScanning] = React.useState(false);
+  const runScan = React.useCallback(async () => {
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const r = await window.cofounderos.triggerEventExtractor();
+      const surfaced =
+        r.meetingsLifted + r.llmExtracted + r.contextEnriched;
+      const preparedMeetings = r.meetingsCreated + r.meetingsExtended;
+      const processedAudio = r.audioTranscribed + r.audioImported;
+      const summaryWork = r.summariesSucceeded + r.summariesFailed + r.summariesSkipped;
+      if (surfaced > 0 || processedAudio > 0 || r.summariesSucceeded > 0) {
+        toast.success('Event scan complete', {
+          description: [
+            processedAudio > 0 &&
+              `${processedAudio} audio transcript${processedAudio === 1 ? '' : 's'} processed`,
+            preparedMeetings > 0 &&
+              `${preparedMeetings} meeting record${preparedMeetings === 1 ? '' : 's'} prepared`,
+            r.summariesSucceeded > 0 &&
+              `${r.summariesSucceeded} meeting summar${r.summariesSucceeded === 1 ? 'y' : 'ies'} ready`,
+            r.meetingsLifted > 0 && `${r.meetingsLifted} meeting${r.meetingsLifted === 1 ? '' : 's'} lifted`,
+            r.llmExtracted > 0 && `${r.llmExtracted} event${r.llmExtracted === 1 ? '' : 's'} extracted`,
+            r.contextEnriched > 0 && `${r.contextEnriched} context${r.contextEnriched === 1 ? '' : 's'} added`,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        });
+      } else if (!r.modelAvailable) {
+        toast.info('Event scan skipped', {
+          description:
+            'Model is offline. Captured meetings still surface; calendar / inbox extraction needs a running model.',
+        });
+      } else if (r.bucketsScanned === 0) {
+        const prep = [
+          r.framesBuilt > 0 && `built ${r.framesBuilt} frame${r.framesBuilt === 1 ? '' : 's'}`,
+          r.framesOcrd > 0 && `OCR'd ${r.framesOcrd}`,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        toast.info('No calendar captures yet', {
+          description: `${prep ? `Prepped ${prep}. ` : ''}No calendar frames detected on the days scanned. Open the calendar app for a few seconds, then click Scan now again.`,
+        });
+      } else {
+        const prep = [
+          r.framesBuilt > 0 && `built ${r.framesBuilt} frame${r.framesBuilt === 1 ? '' : 's'}`,
+          r.framesOcrd > 0 && `OCR'd ${r.framesOcrd}`,
+          processedAudio > 0 && `processed ${processedAudio} audio transcript${processedAudio === 1 ? '' : 's'}`,
+          preparedMeetings > 0 && `prepared ${preparedMeetings} meeting record${preparedMeetings === 1 ? '' : 's'}`,
+          summaryWork > 0 && `checked ${summaryWork} meeting summar${summaryWork === 1 ? 'y' : 'ies'}`,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        toast.info('No new events found', {
+          description: `${prep ? `Prepped ${prep}. ` : ''}Scanned ${r.framesScanned} frame${r.framesScanned === 1 ? '' : 's'} across ${r.bucketsScanned} surface${r.bucketsScanned === 1 ? '' : 's'} — the model returned nothing new.`,
+        });
+      }
+      await onRefresh();
+    } catch (err) {
+      toast.error('Event scan failed', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setScanning(false);
+    }
+  }, [scanning, onRefresh]);
 
+  // Per-day cache that the day-picker writes into. When the user
+  // navigates to a day we already pulled in the initial prop, we just
+  // filter; when they jump to an older / empty day we still issue a
+  // targeted fetch so the badge counts stay honest.
+  const [dayOverrides, setDayOverrides] = React.useState<
+    Map<string, DayEvent[]>
+  >(() => new Map());
+  const [perDayLoading, setPerDayLoading] = React.useState<string | null>(null);
+
+  // A global refresh (including after Scan now) returns the freshest
+  // event list. Drop targeted day caches so newly extracted events on
+  // past, current, or future days become visible immediately.
+  React.useEffect(() => {
+    setDayOverrides(new Map());
+  }, [events]);
+
+  const currentTime = useMinuteClock();
+  const today = React.useMemo(() => localDayKey(currentTime), [currentTime]);
   const meetingsById = React.useMemo(() => {
     const map = new Map<string, Meeting>();
     for (const m of meetings) map.set(m.id, m);
     return map;
   }, [meetings]);
 
-  const visible = React.useMemo(() => dedupeEvents(events), [events]);
-  const groups = React.useMemo(() => groupByDay(visible), [visible]);
-  const selected = visible.find((e) => e.id === selectedId) ?? null;
+  // Universe of days the props gave us, sorted descending.
+  const daysFromProps = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const ev of events) set.add(ev.day);
+    return Array.from(set).sort((a, b) => compareDays(b, a));
+  }, [events]);
 
+  const [selectedDay, setSelectedDay] = React.useState<string>(() => {
+    // Initial pick: today if it has events, else most recent day with
+    // events, else today (we'll just show an empty state).
+    return today;
+  });
+
+  // Once the props arrive, if today is empty but a recent day has data,
+  // auto-jump there so the user sees something on first paint. Only
+  // happens once — the user can navigate back to today freely.
+  const autoJumpedRef = React.useRef(false);
   React.useEffect(() => {
-    if (selectedId && !visible.find((e) => e.id === selectedId)) {
+    if (autoJumpedRef.current) return;
+    if (daysFromProps.length === 0) return;
+    autoJumpedRef.current = true;
+    const todayHasEvents = events.some((ev) => ev.day === today);
+    if (!todayHasEvents) {
+      setSelectedDay(daysFromProps[0]);
+    }
+  }, [daysFromProps, events, today]);
+
+  // Resolve the visible events for the selected day. Prefer the
+  // override (most fresh) and fall back to filtering the props.
+  const visibleEvents = React.useMemo(() => {
+    const fromOverride = dayOverrides.get(selectedDay);
+    const raw = fromOverride ?? events.filter((ev) => ev.day === selectedDay);
+    return dedupeEvents(raw).sort((a, b) =>
+      a.starts_at.localeCompare(b.starts_at),
+    );
+  }, [selectedDay, events, dayOverrides]);
+
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    // Clear selection when day changes; auto-pick the first event so the
+    // detail pane isn't empty when the day has data.
+    if (visibleEvents.length === 0) {
       setSelectedId(null);
+    } else if (!selectedId || !visibleEvents.find((e) => e.id === selectedId)) {
+      setSelectedId(visibleEvents[0].id);
     }
-  }, [visible, selectedId]);
+  }, [selectedDay, visibleEvents, selectedId]);
 
-  // First load auto-selects the most recent event so the detail panel
-  // isn't a wall of "Select an event…".
+  // Lazy-load a specific day's events if it isn't in the prop set yet.
+  // This is what makes "go back 30 days" actually work without bumping
+  // the initial fetch limit forever.
+  const loadDay = React.useCallback(
+    async (day: string) => {
+      // Already have fresh data via prop? Skip.
+      if (daysFromProps.includes(day) && !dayOverrides.has(day)) return;
+      if (perDayLoading === day) return;
+      setPerDayLoading(day);
+      try {
+        const fresh =
+          (await window.cofounderos.listDayEvents({ day })) ?? [];
+        setDayOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(day, fresh);
+          return next;
+        });
+      } catch {
+        // Surface failures by writing an empty bucket so the UI shows
+        // a real empty state instead of spinning forever.
+        setDayOverrides((prev) => {
+          const next = new Map(prev);
+          if (!next.has(day)) next.set(day, []);
+          return next;
+        });
+      } finally {
+        setPerDayLoading((current) => (current === day ? null : current));
+      }
+    },
+    [daysFromProps, dayOverrides, perDayLoading],
+  );
+
+  // Whenever the user lands on a day that isn't already part of the
+  // initial prop set, kick off a targeted fetch. Refreshing the global
+  // list is reserved for the explicit refresh button.
   React.useEffect(() => {
-    if (!selectedId && visible.length > 0) {
-      const today = groups[0]?.items;
-      const pick = today?.[today.length - 1] ?? visible[0];
-      if (pick) setSelectedId(pick.id);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible.length]);
+    if (!selectedDay) return;
+    if (daysFromProps.includes(selectedDay)) return;
+    if (dayOverrides.has(selectedDay)) return;
+    void loadDay(selectedDay);
+  }, [selectedDay, daysFromProps, dayOverrides, loadDay]);
+
+  const dayIsLoading = perDayLoading === selectedDay;
+  const showNowIndicator = selectedDay === today && visibleEvents.length > 0;
+  const nowIndex = showNowIndicator
+    ? nowIndicatorIndex(visibleEvents, currentTime)
+    : -1;
+
+  const goPrev = () => setSelectedDay((d) => shiftDay(d, -1));
+  const goNext = () => setSelectedDay((d) => shiftDay(d, 1));
+  const goToday = () => setSelectedDay(today);
 
   return (
-    <div className="flex flex-col gap-6 pt-6">
+    <div className="flex flex-col gap-5 pt-6 min-h-0">
       <PageHeader
-        title="Event log"
+        title="Agenda"
         description="Meetings, calendar entries, and events extracted from what you've seen on screen."
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRefresh}
-            disabled={loading}
-            className="gap-1.5"
-          >
-            {loading ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <RefreshCcw className="size-3.5" />
-            )}
-            Refresh
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void runScan()}
+              disabled={scanning}
+              className="gap-1.5"
+              title="Run the event extractor over recent screen captures right now"
+            >
+              {scanning ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <ScanLine className="size-3.5" />
+              )}
+              Scan now
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={loading}
+              className="gap-1.5"
+            >
+              {loading ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCcw className="size-3.5" />
+              )}
+              Refresh
+            </Button>
+          </>
         }
       />
 
-      {loading && visible.length === 0 ? (
+      <DayPicker
+        selectedDay={selectedDay}
+        today={today}
+        loading={dayIsLoading}
+        eventCount={visibleEvents.length}
+        onPrev={goPrev}
+        onNext={goNext}
+        onToday={goToday}
+        onPick={setSelectedDay}
+      />
+
+      {loading && visibleEvents.length === 0 && dayOverrides.size === 0 ? (
         <div className="grid min-h-[30vh] place-items-center text-muted-foreground text-sm gap-2">
           <Loader2 className="size-5 animate-spin" />
           Loading events…
         </div>
-      ) : visible.length === 0 ? (
-        <EmptyState />
       ) : (
-        <div className="flex gap-4 min-h-0">
-          {/* Left: per-day event list */}
+        <div className="flex gap-4 min-h-0 flex-1">
+          {/* Left: events for the selected day */}
           <div className="w-80 shrink-0 flex flex-col gap-2">
-            <ScrollArea className="h-[calc(100vh-14rem)]">
-              <div className="flex flex-col gap-5 pr-2">
-                {groups.map(({ day, items }) => (
-                  <div key={day} className="flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2 px-1 mb-1 sticky top-0 bg-background/95 backdrop-blur py-1">
-                      <Calendar className="size-3 text-muted-foreground" />
-                      <span className="text-xs font-medium text-muted-foreground">
-                        {prettyDay(day)}
-                      </span>
-                      <span className="ml-auto text-[10px] text-muted-foreground/60">
-                        {items.length} {items.length === 1 ? 'event' : 'events'}
-                      </span>
-                    </div>
-                    {items.map((event) => (
-                      <EventRow
-                        key={event.id}
-                        event={event}
-                        active={event.id === selectedId}
-                        onClick={() =>
-                          setSelectedId(event.id === selectedId ? null : event.id)
-                        }
-                        meeting={
-                          event.meeting_id
-                            ? meetingsById.get(event.meeting_id) ?? null
-                            : null
-                        }
-                      />
+            <ScrollArea className="h-[calc(100vh-17rem)]">
+              <div className="flex flex-col gap-1.5 pr-2">
+                {visibleEvents.length === 0 ? (
+                  <DayEmptyState
+                    day={selectedDay}
+                    loading={dayIsLoading}
+                    onScan={runScan}
+                    scanning={scanning}
+                  />
+                ) : (
+                  <>
+                    {visibleEvents.map((event, index) => (
+                      <React.Fragment key={event.id}>
+                        {index === nowIndex && <NowIndicator now={currentTime} />}
+                        <EventRow
+                          event={event}
+                          active={event.id === selectedId}
+                          onClick={() =>
+                            setSelectedId(event.id === selectedId ? null : event.id)
+                          }
+                          meeting={
+                            event.meeting_id
+                              ? meetingsById.get(event.meeting_id) ?? null
+                              : null
+                          }
+                        />
+                      </React.Fragment>
                     ))}
-                  </div>
-                ))}
+                    {nowIndex === visibleEvents.length && (
+                      <NowIndicator now={currentTime} />
+                    )}
+                  </>
+                )}
               </div>
             </ScrollArea>
           </div>
@@ -278,20 +536,28 @@ export function Meetings({
 
           {/* Right: detail */}
           <div className="flex-1 min-w-0">
-            {selected ? (
-              <EventDetail
-                event={selected}
-                meeting={
-                  selected.meeting_id
-                    ? meetingsById.get(selected.meeting_id) ?? null
-                    : null
-                }
-              />
-            ) : (
-              <div className="grid h-full place-items-center text-muted-foreground text-sm">
-                Select an event to see its details
-              </div>
-            )}
+            {(() => {
+              const selected = visibleEvents.find((e) => e.id === selectedId) ?? null;
+              if (!selected) {
+                return (
+                  <div className="grid h-full place-items-center text-muted-foreground text-sm">
+                    {visibleEvents.length === 0
+                      ? 'Nothing to show for this day.'
+                      : 'Select an event to see its details'}
+                  </div>
+                );
+              }
+              return (
+                <EventDetail
+                  event={selected}
+                  meeting={
+                    selected.meeting_id
+                      ? meetingsById.get(selected.meeting_id) ?? null
+                      : null
+                  }
+                />
+              );
+            })()}
           </div>
         </div>
       )}
@@ -300,8 +566,228 @@ export function Meetings({
 }
 
 // ---------------------------------------------------------------------------
+// Day picker — two-piece control:
+//
+//  1. Nav pill: [<  Today  >]
+//     The centre label is always "Today" and acts as a shortcut button
+//     that jumps the selection back to today. The chevrons step ±1 day
+//     from the currently-selected day regardless of label.
+//
+//  2. Calendar button: shows just the icon when we ARE on today, and
+//     expands to "[icon] Wed, May 13" when the user has navigated to a
+//     different day. Clicking it opens the native date picker (via
+//     `showPicker()`) so the user can jump to any date directly. The
+//     button doubles as the "you are here" indicator — it's the only
+//     surface that ever names the non-today day.
+//
+// `color-scheme` is set on :root / .dark in style.css so the
+// OS-rendered date popover follows the active light/dark theme.
+// ---------------------------------------------------------------------------
+
+function DayPicker({
+  selectedDay,
+  today,
+  loading,
+  eventCount,
+  onPrev,
+  onNext,
+  onToday,
+  onPick,
+}: {
+  selectedDay: string;
+  today: string;
+  loading: boolean;
+  eventCount: number;
+  onPrev: () => void;
+  onNext: () => void;
+  onToday: () => void;
+  onPick: (day: string) => void;
+}) {
+  const dateInputRef = React.useRef<HTMLInputElement>(null);
+  const isToday = selectedDay === today;
+
+  const openPicker = () => {
+    const input = dateInputRef.current;
+    if (!input) return;
+    try {
+      if (typeof input.showPicker === 'function') {
+        input.showPicker();
+        return;
+      }
+    } catch {
+      /* fall through */
+    }
+    input.focus();
+    input.click();
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="inline-flex items-center gap-1 rounded-full border border-border bg-card p-1 shadow-sm">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onPrev}
+          aria-label="Previous day"
+          className="rounded-full size-8 text-foreground/80 hover:text-foreground"
+        >
+          <ChevronLeft className="size-4" />
+        </Button>
+
+        <button
+          type="button"
+          onClick={onToday}
+          disabled={isToday}
+          title={
+            isToday
+              ? `${prettyDay(selectedDay)} (${selectedDay})`
+              : `Jump to today (currently viewing ${prettyDay(selectedDay)})`
+          }
+          className={cn(
+            'inline-flex items-center justify-center rounded-full px-4 h-8 text-sm font-medium',
+            'min-w-20 transition-colors',
+            isToday
+              ? 'text-foreground cursor-default'
+              : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+          )}
+        >
+          Today
+        </button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onNext}
+          aria-label="Next day"
+          className="rounded-full size-8 text-foreground/80 hover:text-foreground"
+        >
+          <ChevronRight className="size-4" />
+        </Button>
+      </div>
+
+      {/* Calendar button. Collapses to just an icon on today, expands to
+          show the active selected day (Wed, May 13) when navigated away.
+          Either way, clicking opens the native date picker. */}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={openPicker}
+          aria-label={isToday ? 'Pick a date' : `Viewing ${prettyDay(selectedDay)} — pick another date`}
+          title={isToday ? 'Pick a date' : `${prettyDay(selectedDay)} (${selectedDay}) — click to pick another date`}
+          className={cn(
+            'inline-flex items-center gap-2 h-9 rounded-full border border-border bg-card shadow-sm',
+            'transition-colors hover:bg-accent hover:text-accent-foreground',
+            // Square when collapsed (today), pill when showing the date.
+            isToday ? 'size-9 justify-center' : 'px-3.5 tabular-nums',
+          )}
+        >
+          {loading ? (
+            <Loader2 className="size-4 animate-spin text-muted-foreground" />
+          ) : (
+            <CalendarDays className="size-4 text-foreground/80" />
+          )}
+          {!isToday && (
+            <span className="text-sm font-medium text-foreground">
+              {prettyDay(selectedDay)}
+            </span>
+          )}
+        </button>
+        {/* Native date input lives under the icon button so click-fallback
+            (when showPicker isn't available) still hits a real input.
+            color-scheme on :root drives whether the OS-rendered picker
+            popover is light or dark. */}
+        <input
+          ref={dateInputRef}
+          type="date"
+          value={selectedDay}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v) onPick(v);
+          }}
+          tabIndex={-1}
+          aria-hidden="true"
+          className="absolute inset-0 opacity-0 pointer-events-none"
+        />
+      </div>
+
+      {eventCount > 0 && (
+        <span className="ml-1 text-xs text-muted-foreground">
+          {eventCount} {eventCount === 1 ? 'event' : 'events'}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function DayEmptyState({
+  day,
+  loading,
+  onScan,
+  scanning,
+}: {
+  day: string;
+  loading: boolean;
+  onScan: () => void;
+  scanning: boolean;
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-12 px-3 text-muted-foreground text-sm justify-center">
+        <Loader2 className="size-4 animate-spin" />
+        Loading {prettyDay(day)}…
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col items-center text-center gap-3 py-12 px-3 text-muted-foreground">
+      <CalendarClock className="size-8 opacity-30" />
+      <p className="text-sm font-medium">No events on {prettyDay(day)}</p>
+      <p className="text-xs max-w-[16rem] leading-relaxed">
+        The event extractor runs on a 15-min cadence. If you just opened the
+        app or want to refresh now from recent screen captures, scan it
+        manually.
+      </p>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={onScan}
+        disabled={scanning}
+        className="gap-1.5 mt-1"
+      >
+        {scanning ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <ScanLine className="size-3.5" />
+        )}
+        Scan now
+      </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Left-pane list row.
 // ---------------------------------------------------------------------------
+
+function NowIndicator({ now }: { now: Date }) {
+  return (
+    <div
+      className="grid grid-cols-[3rem_1fr] items-center gap-2 px-1 py-1.5"
+      aria-label={`Current time ${formatLocalTime(now.toISOString())}`}
+    >
+      <span className="text-[10px] font-semibold tabular-nums text-primary">
+        {formatLocalTime(now.toISOString())}
+      </span>
+      <div className="flex items-center gap-2">
+        <span className="size-2 rounded-full bg-primary shadow-[0_0_0_3px_hsl(var(--primary)/0.16)]" />
+        <span className="h-px flex-1 bg-primary/55" />
+        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-primary">
+          Now
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function EventRow({
   event,
@@ -407,7 +893,7 @@ function EventDetail({
   meeting: Meeting | null;
 }) {
   return (
-    <ScrollArea className="h-[calc(100vh-14rem)]">
+    <ScrollArea className="h-[calc(100vh-17rem)]">
       <div className="flex flex-col gap-5 pr-2">
         <EventDetailHeader event={event} meeting={meeting} />
         <Separator />
@@ -633,9 +1119,6 @@ function MeetingBody({
 function NonMeetingBody({ event }: { event: DayEvent }) {
   return (
     <div className="flex flex-col gap-5">
-      {/* "Why this is here" line — explain that the event was extracted
-          from screen capture, not pulled from a calendar API. Lets the
-          user calibrate trust. */}
       <div className="text-xs text-muted-foreground/80 italic">
         Extracted from {event.evidence_frame_ids.length || 'recent'} screen capture
         {event.evidence_frame_ids.length === 1 ? '' : 's'} of {event.source_app ?? 'your screen'}.
@@ -735,19 +1218,4 @@ function MeetingStatusBadge({ status }: { status: Meeting['summary_status'] }) {
       </Badge>
     );
   return null;
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center gap-4 py-16 text-muted-foreground">
-      <CalendarClock className="size-10 opacity-30" />
-      <div className="text-center max-w-md">
-        <p className="text-sm font-medium">No events yet</p>
-        <p className="text-xs mt-1">
-          Once we&apos;ve seen your calendar, inbox, Slack, or you&apos;ve sat through a
-          recorded meeting, your day&apos;s events will appear here.
-        </p>
-      </div>
-    </div>
-  );
 }
