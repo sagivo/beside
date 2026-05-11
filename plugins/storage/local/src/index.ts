@@ -33,6 +33,11 @@ import type {
   MeetingSummaryUpdate,
   MeetingTurn,
   ListMeetingsQuery,
+  DayEvent,
+  DayEventKind,
+  DayEventSource,
+  DayEventStatus,
+  ListDayEventsQuery,
   PluginFactory,
   Logger,
 } from '@cofounderos/interfaces';
@@ -64,6 +69,58 @@ interface FrameFtsFrameRow {
   app: string | null;
   entity_path: string | null;
   entity_kind: string | null;
+}
+
+interface DayEventRow {
+  id: string;
+  day: string;
+  starts_at: string;
+  ends_at: string | null;
+  kind: string;
+  source: string;
+  title: string;
+  source_app: string | null;
+  context_md: string | null;
+  attendees_json: string;
+  links_json: string;
+  meeting_id: string | null;
+  evidence_frame_ids_json: string;
+  content_hash: string;
+  status: string;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function dayEventFromRow(row: DayEventRow): DayEvent {
+  const parseJsonArr = (raw: string): string[] => {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: row.id,
+    day: row.day,
+    starts_at: row.starts_at,
+    ends_at: row.ends_at,
+    kind: row.kind as DayEventKind,
+    source: row.source as DayEventSource,
+    title: row.title,
+    source_app: row.source_app,
+    context_md: row.context_md,
+    attendees: parseJsonArr(row.attendees_json),
+    links: parseJsonArr(row.links_json),
+    meeting_id: row.meeting_id,
+    evidence_frame_ids: parseJsonArr(row.evidence_frame_ids_json),
+    content_hash: row.content_hash,
+    status: row.status as DayEventStatus,
+    failure_reason: row.failure_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
 class LocalStorage implements IStorage {
@@ -1808,15 +1865,29 @@ class LocalStorage implements IStorage {
            @updated_at)
          ON CONFLICT(id) DO UPDATE SET
            title = COALESCE(excluded.title, meetings.title),
+           started_at = excluded.started_at,
            ended_at = excluded.ended_at,
+           day = excluded.day,
            duration_ms = excluded.duration_ms,
            frame_count = excluded.frame_count,
            screenshot_count = excluded.screenshot_count,
            audio_chunk_count = excluded.audio_chunk_count,
            transcript_chars = excluded.transcript_chars,
            content_hash = excluded.content_hash,
+           summary_status = CASE
+             WHEN meetings.summary_status = 'skipped_short'
+              AND excluded.summary_status <> 'skipped_short'
+             THEN excluded.summary_status
+             ELSE meetings.summary_status
+           END,
            attendees_json = excluded.attendees_json,
            links_json = excluded.links_json,
+           failure_reason = CASE
+             WHEN meetings.summary_status = 'skipped_short'
+              AND excluded.summary_status <> 'skipped_short'
+             THEN NULL
+             ELSE meetings.failure_reason
+           END,
            updated_at = excluded.updated_at`,
       )
       .run({
@@ -2043,6 +2114,114 @@ class LocalStorage implements IStorage {
   }
 
   // -------------------------------------------------------------------------
+  // Day events (cross-source event log).
+  // -------------------------------------------------------------------------
+
+  async upsertDayEvent(event: DayEvent): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO day_events (
+        id, day, starts_at, ends_at, kind, source, title, source_app,
+        context_md, attendees_json, links_json, meeting_id,
+        evidence_frame_ids_json, content_hash, status, failure_reason,
+        created_at, updated_at
+      ) VALUES (
+        @id, @day, @starts_at, @ends_at, @kind, @source, @title, @source_app,
+        @context_md, @attendees_json, @links_json, @meeting_id,
+        @evidence_frame_ids_json, @content_hash, @status, @failure_reason,
+        @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        day = excluded.day,
+        starts_at = excluded.starts_at,
+        ends_at = excluded.ends_at,
+        kind = excluded.kind,
+        source = excluded.source,
+        title = excluded.title,
+        source_app = excluded.source_app,
+        context_md = excluded.context_md,
+        attendees_json = excluded.attendees_json,
+        links_json = excluded.links_json,
+        meeting_id = excluded.meeting_id,
+        evidence_frame_ids_json = excluded.evidence_frame_ids_json,
+        content_hash = excluded.content_hash,
+        status = excluded.status,
+        failure_reason = excluded.failure_reason,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run({
+      id: event.id,
+      day: event.day,
+      starts_at: event.starts_at,
+      ends_at: event.ends_at,
+      kind: event.kind,
+      source: event.source,
+      title: event.title,
+      source_app: event.source_app,
+      context_md: event.context_md,
+      attendees_json: JSON.stringify(event.attendees ?? []),
+      links_json: JSON.stringify(event.links ?? []),
+      meeting_id: event.meeting_id,
+      evidence_frame_ids_json: JSON.stringify(event.evidence_frame_ids ?? []),
+      content_hash: event.content_hash,
+      status: event.status,
+      failure_reason: event.failure_reason,
+      created_at: event.created_at,
+      updated_at: event.updated_at,
+    });
+  }
+
+  async getDayEvent(id: string): Promise<DayEvent | null> {
+    const row = this.db
+      .prepare('SELECT * FROM day_events WHERE id = ?')
+      .get(id) as DayEventRow | undefined;
+    return row ? dayEventFromRow(row) : null;
+  }
+
+  async listDayEvents(query: ListDayEventsQuery = {}): Promise<DayEvent[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.day) {
+      where.push('day = ?');
+      params.push(query.day);
+    }
+    if (query.from) {
+      where.push('starts_at >= ?');
+      params.push(query.from);
+    }
+    if (query.to) {
+      where.push('starts_at <= ?');
+      params.push(query.to);
+    }
+    if (query.kind) {
+      where.push('kind = ?');
+      params.push(query.kind);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const orderSql =
+      query.order === 'chronological'
+        ? 'ORDER BY starts_at ASC'
+        : 'ORDER BY starts_at DESC';
+    const limit = Math.max(1, Math.min(query.limit ?? 500, 5000));
+    const rows = this.db
+      .prepare(`SELECT * FROM day_events ${whereSql} ${orderSql} LIMIT ?`)
+      .all(...params, limit) as DayEventRow[];
+    return rows.map(dayEventFromRow);
+  }
+
+  async deleteDayEventsBySourceForDay(
+    day: string,
+    source: DayEventSource,
+  ): Promise<void> {
+    this.db
+      .prepare('DELETE FROM day_events WHERE day = ? AND source = ?')
+      .run(day, source);
+  }
+
+  async clearAllDayEvents(): Promise<void> {
+    this.db.exec('DELETE FROM day_events');
+  }
+
+  // -------------------------------------------------------------------------
   // Deletion (privacy-driven)
   //
   // We always remove DB rows and disk assets together, in that order, so a
@@ -2095,6 +2274,8 @@ class LocalStorage implements IStorage {
       this.db.prepare('DELETE FROM frames WHERE day = ?').run(day);
       // Sessions never span midnight, so a day-scoped delete is well-defined.
       this.db.prepare('DELETE FROM sessions WHERE day = ?').run(day);
+      // Day events live on the same day axis — wipe them too.
+      this.db.prepare('DELETE FROM day_events WHERE day = ?').run(day);
       // Raw events: events.timestamp + events.day live together; depending on
       // schema age, `day` may not be a column on events. Filter by ISO prefix
       // on `timestamp` for portability.
@@ -2194,6 +2375,9 @@ class LocalStorage implements IStorage {
       meetings = this.db
         .prepare('DELETE FROM meetings WHERE started_at < ?')
         .run(cutoff).changes;
+      this.db
+        .prepare('DELETE FROM day_events WHERE starts_at < ?')
+        .run(cutoff);
       // Entities aren't time-series rows but their last_seen tracks
       // the most recent frame that resolved to them. If that's before
       // the cutoff, the entity has no surviving frames. Drop it; if
@@ -2236,6 +2420,9 @@ class LocalStorage implements IStorage {
       'frames',
       'sessions',
       'entities',
+      'meetings',
+      'meeting_turns',
+      'day_events',
       'events',
       'index_state',
       'index_marks',
@@ -2715,6 +2902,41 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_meeting_turns_meeting
         ON meeting_turns(meeting_id, t_start);
+
+      -- Day events: the unified "event log" surface. One row per item
+      -- the EventExtractor materialised onto a day -- a live meeting we
+      -- captured, a calendar entry the OCR pass pulled off Google
+      -- Calendar, a Slack thread it judged notable, etc. Rows are
+      -- upserted under deterministic ids so re-running extraction over
+      -- the same evidence is a no-op.
+      CREATE TABLE IF NOT EXISTS day_events (
+        id                       TEXT PRIMARY KEY,
+        day                      TEXT NOT NULL,
+        starts_at                TEXT NOT NULL,
+        ends_at                  TEXT,
+        kind                     TEXT NOT NULL,
+        source                   TEXT NOT NULL,
+        title                    TEXT NOT NULL,
+        source_app               TEXT,
+        context_md               TEXT,
+        attendees_json           TEXT NOT NULL DEFAULT '[]',
+        links_json               TEXT NOT NULL DEFAULT '[]',
+        meeting_id               TEXT,
+        evidence_frame_ids_json  TEXT NOT NULL DEFAULT '[]',
+        content_hash             TEXT NOT NULL,
+        status                   TEXT NOT NULL DEFAULT 'ready',
+        failure_reason           TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_day_events_day_starts
+        ON day_events(day, starts_at);
+      CREATE INDEX IF NOT EXISTS idx_day_events_starts
+        ON day_events(starts_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_day_events_source_day
+        ON day_events(source, day);
+      CREATE INDEX IF NOT EXISTS idx_day_events_meeting
+        ON day_events(meeting_id) WHERE meeting_id IS NOT NULL;
     `);
 
     this.runSchemaMigrations();

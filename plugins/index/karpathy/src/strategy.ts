@@ -211,6 +211,13 @@ export class KarpathyStrategy implements IIndexStrategy {
    * contract doesn't pass `IStorage` into that method directly.
    */
   private storage: IStorage | null = null;
+  /**
+   * Per-batch cache of `storage.getEntity()` lookups. Reset at the top of
+   * every `indexBatch` so we don't grow unbounded across a full reindex.
+   * `null` entries cache misses too — many entity paths queried by
+   * `listEntitiesTouchedByEvents` are transient apps that never get a row.
+   */
+  private entityLookupCache = new Map<string, EntityRecord | null>();
 
   constructor(private readonly config: StrategyConfig, logger: Logger) {
     this.logger = logger.child(`index-${STRATEGY_NAME}`);
@@ -294,6 +301,11 @@ export class KarpathyStrategy implements IIndexStrategy {
         reorganisationNotes: '',
       };
     }
+
+    // Reset per-batch entity cache so the dedupe in
+    // listEntitiesTouchedByEvents kicks in for this batch but doesn't
+    // grow unbounded across a long-running reindex.
+    this.entityLookupCache.clear();
 
     // Determine which entities saw new activity. Two paths:
     //   1. If we have a checkpoint (lastIncrementalRun), use the entities
@@ -791,13 +803,23 @@ export class KarpathyStrategy implements IIndexStrategy {
 
   private async listEntitiesTouchedByEvents(events: RawEvent[]): Promise<EntityRecord[]> {
     if (!this.storage || events.length === 0) return [];
-    const timestamps = events
-      .map((event) => Date.parse(event.timestamp))
-      .filter((ts) => Number.isFinite(ts));
-    if (timestamps.length === 0) return [];
+    // Date.parse is faster than the spread+Math.min pattern, which builds a
+    // throwaway array and applies Math.min via apply(); for batches of a few
+    // thousand timestamps this matters during heavy reindex.
+    let minTs = Number.POSITIVE_INFINITY;
+    let maxTs = Number.NEGATIVE_INFINITY;
+    let any = false;
+    for (const event of events) {
+      const t = Date.parse(event.timestamp);
+      if (!Number.isFinite(t)) continue;
+      if (t < minTs) minTs = t;
+      if (t > maxTs) maxTs = t;
+      any = true;
+    }
+    if (!any) return [];
 
-    const from = new Date(Math.min(...timestamps) - 1_000).toISOString();
-    const to = new Date(Math.max(...timestamps) + 1_000).toISOString();
+    const from = new Date(minTs - 1_000).toISOString();
+    const to = new Date(maxTs + 1_000).toISOString();
     const frames = await this.storage.searchFrames({
       from,
       to,
@@ -808,9 +830,20 @@ export class KarpathyStrategy implements IIndexStrategy {
         .map((frame) => frame.entity_path)
         .filter((path): path is string => Boolean(path)),
     );
+    // De-duplicate getEntity() calls within a single batch. The same entity
+    // path is frequently touched by many events (Slack thread, recurring
+    // meeting URL, IDE project) and re-fetching its row from SQLite for
+    // every occurrence multiplies index batches' DB cost. The lookup is
+    // already O(1) on the SQLite side but the round-trip is non-trivial.
     const out: EntityRecord[] = [];
     for (const path of paths) {
+      const cached = this.entityLookupCache.get(path);
+      if (cached !== undefined) {
+        if (cached) out.push(cached);
+        continue;
+      }
       const entity = await this.storage.getEntity(path);
+      this.entityLookupCache.set(path, entity ?? null);
       if (entity) out.push(entity);
     }
     return out;
@@ -973,39 +1006,59 @@ function buildEvidence(
   const apps = [...new Set(sorted.map((f) => f.app).filter(Boolean))];
 
   // 6. Keyframes — visually distinct screenshots (greedy max-min Hamming).
+  //
+  // The naive implementation re-scanned every keyframe for every candidate
+  // on every iteration (O(MAX_KEYFRAMES² · N)) and also did a linear
+  // `keyframes.some()` containment check per candidate. We instead keep an
+  // incremental `bestDist[i]` array (each candidate's min distance to *any*
+  // already-selected keyframe) plus a Set for the seen asset_paths. Adding
+  // a keyframe costs O(N) work; selecting the next one costs O(N) — total
+  // O(MAX_KEYFRAMES · N). For high-evidence entities with hundreds of
+  // candidate frames this turns the inner block from ~hundreds of thousands
+  // of hammingDistance calls into ~thousands.
   const candidates = sorted.filter(
     (f): f is Frame & { asset_path: string } =>
       Boolean(f.asset_path) && Boolean(f.perceptual_hash),
   );
   const keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }> = [];
   if (candidates.length > 0) {
-    keyframes.push({
-      assetPath: candidates[0]!.asset_path,
-      timestamp: candidates[0]!.timestamp,
-      phash: candidates[0]!.perceptual_hash,
-    });
-    while (keyframes.length < MAX_KEYFRAMES && keyframes.length < candidates.length) {
-      let bestIdx = -1;
-      let bestMin = -1;
-      for (let i = 0; i < candidates.length; i++) {
-        const c = candidates[i]!;
-        if (keyframes.some((k) => k.assetPath === c.asset_path)) continue;
-        const minDist = keyframes.reduce(
-          (acc, k) => Math.min(acc, hammingDistance(k.phash, c.perceptual_hash)),
-          Number.POSITIVE_INFINITY,
-        );
-        if (minDist > bestMin) {
-          bestMin = minDist;
-          bestIdx = i;
-        }
-      }
-      if (bestIdx === -1) break;
-      const c = candidates[bestIdx]!;
+    const phashes = candidates.map((c) => c.perceptual_hash);
+    const seenPaths = new Set<string>();
+    const bestDist: number[] = new Array(candidates.length).fill(
+      Number.POSITIVE_INFINITY,
+    );
+
+    const selectKeyframe = (idx: number): void => {
+      const c = candidates[idx]!;
+      if (seenPaths.has(c.asset_path)) return;
       keyframes.push({
         assetPath: c.asset_path,
         timestamp: c.timestamp,
         phash: c.perceptual_hash,
       });
+      seenPaths.add(c.asset_path);
+      const newPhash = phashes[idx]!;
+      for (let i = 0; i < candidates.length; i++) {
+        if (seenPaths.has(candidates[i]!.asset_path)) continue;
+        const d = hammingDistance(newPhash, phashes[i]!);
+        if (d < bestDist[i]!) bestDist[i] = d;
+      }
+    };
+
+    // Seed with the first candidate (preserves prior behaviour).
+    selectKeyframe(0);
+    while (keyframes.length < MAX_KEYFRAMES) {
+      let bestIdx = -1;
+      let bestMin = -1;
+      for (let i = 0; i < candidates.length; i++) {
+        if (seenPaths.has(candidates[i]!.asset_path)) continue;
+        if (bestDist[i]! > bestMin) {
+          bestMin = bestDist[i]!;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === -1) break;
+      selectKeyframe(bestIdx);
     }
   } else {
     // Fall back to *any* frame with an asset_path even if no phash.

@@ -4,7 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import type { IStorage, Logger, RawEvent } from '@cofounderos/interfaces';
+import type { Frame, IStorage, Logger, MeetingPlatform, RawEvent } from '@cofounderos/interfaces';
 import { ensureDir, expandPath, newEventId, newSessionId } from '@cofounderos/core';
 import { redactPii } from './pii.js';
 
@@ -111,6 +111,23 @@ interface ExtractedTurn {
 interface TranscribeResult {
   text: string;
   turns: ExtractedTurn[];
+}
+
+interface RecordingContextCandidate {
+  source: 'nearby_screen';
+  confidence: number;
+  reason: string;
+  observed_at: string;
+  frame_id: string;
+  app: string;
+  window_title: string;
+  url: string | null;
+  entity_path: string | null;
+  entity_kind: string | null;
+  meeting_id: string | null;
+  platform: MeetingPlatform | null;
+  title: string | null;
+  meeting_url: string | null;
 }
 
 /**
@@ -522,6 +539,10 @@ export class AudioTranscriptWorker {
     // imports we have nothing to probe. Null is preferable to a wrong
     // value — downstream consumers already handle null.
     const durationMs = source === 'whisper' ? await this.probeDurationMs(sourcePath) : null;
+    const recordingContext =
+      source === 'whisper'
+        ? await this.findRecordingContext(startedAt, durationMs)
+        : null;
 
     return {
       id: newEventId(startedAt),
@@ -554,10 +575,40 @@ export class AudioTranscriptWorker {
         // Empty when whisper didn't emit a JSON sidecar and the input
         // was a plain `.txt` (no timing info to preserve).
         turns: turns.length > 0 ? turns : undefined,
+        // Best-effort attribution: what screen/calendar/browser/app
+        // evidence was visible when the audio recorder was running.
+        // MeetingBuilder uses this to attach transcripts to the
+        // concrete Meet/Zoom/Teams event even when the audio frame
+        // itself is just "Audio".
+        recording_context: recordingContext ?? undefined,
       },
       privacy_filtered: false,
       capture_plugin: 'audio-transcript-worker',
     };
+  }
+
+  private async findRecordingContext(
+    startedAt: Date,
+    durationMs: number | null,
+  ): Promise<RecordingContextCandidate | null> {
+    const startMs = startedAt.getTime();
+    const endMs = startMs + Math.max(durationMs ?? 0, 2 * 60_000);
+    const from = new Date(startMs - 10 * 60_000).toISOString();
+    const to = new Date(endMs + 2 * 60_000).toISOString();
+    let frames: Frame[] = [];
+    try {
+      frames = await this.storage.searchFrames({ from, to, limit: 120 });
+    } catch {
+      return null;
+    }
+    const candidates = frames
+      .filter((f) => f.text_source !== 'audio')
+      .map((frame) => scoreRecordingContextFrame(frame, startMs))
+      .filter((c): c is RecordingContextCandidate => c !== null)
+      .sort((a, b) => b.confidence - a.confidence);
+    const best = candidates[0];
+    if (!best || best.confidence < 45) return null;
+    return best;
   }
 
   /**
@@ -614,6 +665,174 @@ export class AudioTranscriptWorker {
     });
     await fs.writeFile(`${dest}.error.txt`, String(err), 'utf8');
   }
+}
+
+function scoreRecordingContextFrame(
+  frame: Frame,
+  audioStartMs: number,
+): RecordingContextCandidate | null {
+  const haystack = frameHaystack(frame);
+  const platform = inferRecordingPlatform(haystack, frame);
+  const meetingUrl = extractMeetingUrl(haystack);
+  const title = extractRecordingTitle(haystack, frame, platform);
+  const reasons: string[] = [];
+  let confidence = 0;
+
+  if (frame.entity_kind === 'meeting') {
+    confidence += 65;
+    reasons.push('resolved_meeting_frame');
+  }
+  if (meetingUrl) {
+    confidence += 45;
+    reasons.push('meeting_url');
+  }
+  if (hasLiveMeetingTitleLine(haystack)) {
+    confidence += 40;
+    reasons.push('meeting_title_line');
+  }
+  if (platform) {
+    confidence += 18;
+    reasons.push(`platform_${platform}`);
+  }
+  if (isCalendarPlannedMeetingFrame(frame, haystack, title, platform)) {
+    confidence += 38;
+    reasons.push('calendar_or_meet_landing_event');
+  }
+  if (hasLiveMeetingUi(haystack)) {
+    confidence += 22;
+    reasons.push('live_meeting_ui');
+  }
+
+  const deltaMs = Math.abs(Date.parse(frame.timestamp) - audioStartMs);
+  const proximity = Math.max(0, 25 - Math.floor(deltaMs / 60_000));
+  confidence += proximity;
+
+  if (confidence < 35) return null;
+  return {
+    source: 'nearby_screen',
+    confidence,
+    reason: reasons.join(',') || 'nearby_screen',
+    observed_at: frame.timestamp,
+    frame_id: frame.id,
+    app: frame.app,
+    window_title: frame.window_title,
+    url: frame.url,
+    entity_path: frame.entity_path,
+    entity_kind: frame.entity_kind,
+    meeting_id: frame.meeting_id,
+    platform,
+    title,
+    meeting_url: meetingUrl,
+  };
+}
+
+function frameHaystack(frame: Frame): string {
+  return [
+    frame.app,
+    frame.window_title,
+    frame.url,
+    frame.entity_path,
+    frame.text,
+  ].filter(Boolean).join('\n');
+}
+
+function inferRecordingPlatform(haystack: string, frame: Frame): MeetingPlatform | null {
+  const app = frame.app ?? '';
+  if (/\bzoom\b/i.test(app) || /\bzoom\.us\/(?:j|my|wc)\//i.test(haystack)) return 'zoom';
+  if (/google meet/i.test(app) || /\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(haystack) || /(?:^|\n)\s*(?:Google\s+)?Meet\s*[-–—]/i.test(haystack)) return 'meet';
+  if (/microsoft teams/i.test(app) || /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(haystack) || /(?:^|\n)\s*(?:Microsoft\s+)?Teams\s*[-–—]/i.test(haystack)) return 'teams';
+  if (/webex/i.test(app) || /\bwebex\.com\b/i.test(haystack)) return 'webex';
+  if (/whereby/i.test(app) || /\bwhereby\.com\b/i.test(haystack)) return 'whereby';
+  if (/around/i.test(app) || /\baround\.co\b/i.test(haystack)) return 'around';
+  return null;
+}
+
+function extractMeetingUrl(haystack: string): string | null {
+  const patterns = [
+    /\bhttps?:\/\/meet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i,
+    /\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i,
+    /\bhttps?:\/\/(?:[\w.-]+\.)?zoom\.us\/(?:j|my|wc)\/[^\s"'<>]+/i,
+    /\b(?:[\w.-]+\.)?zoom\.us\/(?:j|my|wc)\/[^\s"'<>]+/i,
+    /\bhttps?:\/\/teams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)[^\s"'<>]+/i,
+    /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)[^\s"'<>]+/i,
+  ];
+  for (const pattern of patterns) {
+    const match = haystack.match(pattern);
+    if (match?.[0]) return match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
+  }
+  return null;
+}
+
+function extractRecordingTitle(
+  haystack: string,
+  frame: Frame,
+  platform: MeetingPlatform | null,
+): string | null {
+  const lines = haystack
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[\s•*·-]+/, '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const titled = line.match(/^(?:(?:Google\s+)?Meet|Zoom(?:\s+Meeting)?|(?:Microsoft\s+)?Teams|Webex|Whereby|Around)\s*[-–—]\s*(.{3,80})$/i);
+    if (titled?.[1]) return cleanRecordingTitle(titled[1]);
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    if (/^now$/i.test(lines[i] ?? '')) {
+      const prev = lines[i - 1];
+      if (prev && !looksLikeClock(prev)) return cleanRecordingTitle(prev);
+    }
+  }
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (looksLikeClock(lines[i] ?? '')) {
+      const next = lines[i + 1];
+      if (next && !/^now$/i.test(next)) return cleanRecordingTitle(next);
+    }
+  }
+
+  const windowTitle = cleanRecordingTitle(frame.window_title);
+  if (windowTitle && !isGenericRecordingTitle(windowTitle, platform)) return windowTitle;
+  return null;
+}
+
+function cleanRecordingTitle(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .replace(/\s+[—–-]\s+(Google Chrome|Chrome|Mozilla Firefox|Firefox|Safari|Brave|Arc|Edge).*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.length >= 3 ? cleaned : null;
+}
+
+function looksLikeClock(value: string): boolean {
+  return /^(?:\d{1,2}:\d{2}\s*(?:AM|PM)?|\d{1,2}\s*(?:AM|PM))$/i.test(value.trim());
+}
+
+function isGenericRecordingTitle(title: string, platform: MeetingPlatform | null): boolean {
+  if (/^(google meet|meet|zoom|zoom meeting|microsoft teams|teams|calendar|google calendar|profile|chrome|firefox)$/i.test(title)) {
+    return true;
+  }
+  return platform === 'meet' && /^meetings?$/i.test(title);
+}
+
+function hasLiveMeetingTitleLine(haystack: string): boolean {
+  return /(?:^|\n)\s*(?:(?:Google\s+)?Meet|Zoom(?:\s+Meeting)?|(?:Microsoft\s+)?Teams|Webex|Whereby|Around)\s*[-–—]\s*.{3,80}/i.test(haystack);
+}
+
+function hasLiveMeetingUi(haystack: string): boolean {
+  return /\b(join now|leave call|leave meeting|meeting details|present now|captions|participants|people|raise hand|waiting room|join with computer audio|use gemini to take notes|share notes and transcript)\b/i.test(haystack);
+}
+
+function isCalendarPlannedMeetingFrame(
+  frame: Frame,
+  haystack: string,
+  title: string | null,
+  platform: MeetingPlatform | null,
+): boolean {
+  const calendarish = /calendar/i.test(frame.app) || /google calendar|from your google calendar account|meetings\s+calls/i.test(haystack);
+  if (!calendarish) return false;
+  return Boolean(title && (platform || /\b(now|join|meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(haystack)));
 }
 
 /**

@@ -568,6 +568,83 @@ export interface MeetingSummaryUpdate {
   title?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Day events — the unified "event log" surface.
+//
+// A `DayEvent` is anything that belongs on the user's daily calendar —
+// detected automatically from screen / audio capture:
+//
+//  * `meeting`        — links to a `Meeting` record (real online call we
+//                       fused from frames + audio).
+//  * `calendar`       — a scheduled item the EventExtractor pulled off the
+//                       user's calendar app / web calendar / email invite.
+//                       May or may not have actually happened.
+//  * `communication`  — a notable Slack / Discord / email exchange the
+//                       extractor judged worth surfacing on the timeline.
+//  * `task`           — a TODO or task tile the user worked on (Linear,
+//                       Jira, Notion, GitHub issue, …).
+//  * `other`          — anything else the extractor flagged with enough
+//                       confidence (e.g. a doc the user actively edited).
+//
+// Events are derived from frames + the meetings table; full reindex
+// clears them with `clearAllDayEvents()` and the EventExtractor rebuilds
+// from scratch.
+// ---------------------------------------------------------------------------
+
+export type DayEventKind = 'meeting' | 'calendar' | 'communication' | 'task' | 'other';
+
+export type DayEventSource =
+  | 'meeting_capture'   // derived from a Meeting row (audio + screens)
+  | 'calendar_screen'   // OCR'd off a calendar app/website
+  | 'email_screen'      // OCR'd off a mail client / web mail
+  | 'slack_screen'      // OCR'd off Slack/Discord
+  | 'task_screen'       // OCR'd off Linear/Jira/Notion/etc.
+  | 'other_screen';     // generic LLM-flagged event
+
+export type DayEventStatus = 'pending' | 'ready' | 'failed';
+
+export interface DayEvent {
+  id: string;
+  /** YYYY-MM-DD bucket. Events never span midnight. */
+  day: string;
+  /** ISO timestamp the event starts at. */
+  starts_at: string;
+  /** ISO timestamp the event ends at, when knowable. */
+  ends_at: string | null;
+  kind: DayEventKind;
+  source: DayEventSource;
+  title: string;
+  /** Foreground app / website surface the event was extracted from. */
+  source_app: string | null;
+  /**
+   * LLM- (or heuristic-) generated 1-4 sentence context about the event.
+   * For meeting events this is the meeting's TL;DR. For everything else
+   * it's a short summary of what the OCR / surrounding capture said.
+   */
+  context_md: string | null;
+  attendees: string[];
+  links: string[];
+  /** When `kind='meeting'`, the linked Meeting row id. */
+  meeting_id: string | null;
+  /** Frame ids the extractor cited as evidence. */
+  evidence_frame_ids: string[];
+  /** Stable hash of the inputs that produced this event — drives idempotency. */
+  content_hash: string;
+  status: DayEventStatus;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ListDayEventsQuery {
+  day?: string;
+  from?: string;
+  to?: string;
+  kind?: DayEventKind;
+  limit?: number;
+  order?: 'recent' | 'chronological';
+}
+
 export interface StorageStats {
   totalEvents: number;
   totalAssetBytes: number;
@@ -990,6 +1067,25 @@ export interface IStorage {
    * `--full-reindex`.
    */
   clearAllMeetings(): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Day events — the cross-source event log materialised by the
+  // EventExtractor. Implementations may throw `not_implemented` if they
+  // don't support events; the orchestrator gracefully degrades.
+  // -------------------------------------------------------------------------
+
+  upsertDayEvent(event: DayEvent): Promise<void>;
+  getDayEvent(id: string): Promise<DayEvent | null>;
+  listDayEvents(query?: ListDayEventsQuery): Promise<DayEvent[]>;
+  /**
+   * Remove every day-event row attached to a specific source app /
+   * day pair. Used by the EventExtractor when re-extracting a window —
+   * the new rows are upserted under deterministic ids so anything left
+   * over from a prior pass with different inputs gets cleaned up.
+   */
+  deleteDayEventsBySourceForDay(day: string, source: DayEventSource): Promise<void>;
+  /** Wipe every day-event row. Called from `--full-reindex`. */
+  clearAllDayEvents(): Promise<void>;
 
   // -------------------------------------------------------------------------
   // Deletion (privacy-driven). Implementations MUST also remove on-disk

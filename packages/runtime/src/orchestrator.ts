@@ -28,6 +28,7 @@ import { FrameBuilder } from './frame-builder.js';
 import { SessionBuilder } from './session-builder.js';
 import { MeetingBuilder } from './meeting-builder.js';
 import { MeetingSummarizer } from './meeting-summarizer.js';
+import { EventExtractor } from './event-extractor.js';
 import { EmbeddingWorker } from './embedding-worker.js';
 import { AudioTranscriptWorker } from './audio-transcript-worker.js';
 import { OcrWorker } from './ocr-worker.js';
@@ -72,6 +73,7 @@ export interface OrchestratorHandles {
   sessionBuilder: SessionBuilder;
   meetingBuilder: MeetingBuilder;
   meetingSummarizer: MeetingSummarizer;
+  eventExtractor: EventExtractor;
   embeddingWorker: EmbeddingWorker;
   vacuum: StorageVacuum;
   loadGuard: LoadGuard;
@@ -93,7 +95,24 @@ const FRAME_BUILDER_JOB = 'frame-builder';
 const FRAME_BUILDER_INTERVAL_MS = 5 * 60_000;
 const FRAME_BUILDER_BATCH_SIZE = 25;
 const OCR_WORKER_JOB = 'ocr-worker';
-const OCR_WORKER_INTERVAL_MS = 30_000;
+// OCR is the single biggest CPU draw in the runtime — ~1–3s of Tesseract
+// CPU per frame. Was 30s; doubled to 60s. The user-visible impact is that
+// search-indexed text from a fresh screenshot appears within ≤60s instead
+// of ≤30s, which is well under the 5-min FRAME_BUILDER backstop and the
+// ENTITY_RESOLVER cadence that actually surfaces text into the wiki. In
+// practice we still get OCR'd well before any meaningful reindex tick.
+// During active capture the ActivityCoalescer also drains the OCR queue
+// alongside the worker chain, so freshness during real work is bounded by
+// the coalescer (~60s) rather than this backstop.
+const OCR_WORKER_INTERVAL_MS = 60_000;
+// Adaptive back-off. After this many consecutive no-work ticks (e.g.
+// machine locked, user away from keyboard, no fresh screenshots) we
+// retune the scheduler to the idle interval below so a quiescent
+// machine doesn't keep waking the Node main loop every minute just to
+// hit an empty DB query. The very next `screenshot` event on the bus
+// snaps us back to the base interval (see `wireAdaptiveOcrCadence`).
+const OCR_WORKER_IDLE_INTERVAL_MS = 5 * 60_000;
+const OCR_WORKER_EMPTY_STREAK_TO_BACKOFF = 3;
 const AUDIO_TRANSCRIPT_JOB = 'audio-transcript-worker';
 const ENTITY_RESOLVER_JOB = 'entity-resolver';
 // Same coalescer-vs-backstop logic as FRAME_BUILDER_INTERVAL_MS. Was 90s.
@@ -105,9 +124,20 @@ const SESSION_BUILDER_JOB = 'session-builder';
 const SESSION_BUILDER_INTERVAL_MS = 10 * 60_000;
 const SESSION_BUILDER_BATCH_SIZE = 100;
 const MEETING_BUILDER_JOB = 'meeting-builder';
-const MEETING_BUILDER_INTERVAL_MS = 60_000;
+// Meetings are a retrospective surface (timeline, summaries) — they don't
+// need sub-minute freshness. Bumped from 60s → 120s; the meeting
+// summariser still runs every 5min and the activity coalescer drains the
+// builder alongside frames during real work, so post-meeting recap latency
+// is unchanged.
+const MEETING_BUILDER_INTERVAL_MS = 120_000;
 const MEETING_SUMMARIZER_JOB = 'meeting-summarizer';
 const MEETING_SUMMARIZER_INTERVAL_MS = 5 * 60_000;
+const EVENT_EXTRACTOR_JOB = 'event-extractor';
+// Event extractor runs the LLM over the day's calendar / mail / chat OCR.
+// Slower cadence than meeting summarisation -- the user-visible artefact
+// only needs to refresh a few times an hour, and the LLM call has the
+// same cost as a meeting summary (~2-4s on local Ollama, less on hosted).
+const EVENT_EXTRACTOR_INTERVAL_MS = 15 * 60_000;
 const EMBEDDING_WORKER_JOB = 'embedding-worker';
 const VACUUM_JOB = 'storage-vacuum';
 const STORAGE_MAINTENANCE_JOB = 'storage-maintenance';
@@ -518,6 +548,21 @@ export async function buildOrchestrator(
     cooldownMs: meetingsCfg.summarize_cooldown_sec * 1000,
     visionAttachments: meetingsCfg.vision_attachments,
   });
+  // Event extractor uses the configured `index.events` block (typed
+  // via Zod with sane defaults, so it's always populated even on a
+  // bare config).
+  const eventsCfg = (config.index as unknown as { events: {
+    llm_enabled: boolean;
+    lookback_days: number;
+    min_text_chars: number;
+    max_frames_per_bucket: number;
+  } }).events;
+  const eventExtractor = new EventExtractor(storage, model, logger, {
+    lookbackDays: eventsCfg.lookback_days,
+    minTextChars: eventsCfg.min_text_chars,
+    maxFramesPerBucket: eventsCfg.max_frames_per_bucket,
+    llmEnabled: eventsCfg.llm_enabled,
+  });
   const embeddingsCfg = config.index.embeddings;
   const embeddingWorker = new EmbeddingWorker(storage, model, logger, {
     enabled: embeddingsCfg.enabled,
@@ -608,6 +653,7 @@ export async function buildOrchestrator(
     sessionBuilder,
     meetingBuilder,
     meetingSummarizer,
+    eventExtractor,
     embeddingWorker,
     vacuum,
     loadGuard,
@@ -629,7 +675,7 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   pagesCreated: number;
   pagesUpdated: number;
 }> {
-  const { storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
+  const { storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, eventExtractor, embeddingWorker } = handles;
   const log = logger.child('index-runner');
 
   // Materialise frames + resolve entities + group into sessions before
@@ -663,6 +709,18 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
         `materialised ${mbResult.meetingsCreated} new + ${mbResult.meetingsExtended} extended meeting(s) ` +
           `(${mbResult.audioFramesAttached} audio chunks, ${mbResult.turnsBuilt} transcript turns)`,
       );
+    }
+    // Lift meetings → DayEvents (deterministic; runs even with the LLM off).
+    try {
+      const evResult = await eventExtractor.tick();
+      if (evResult.meetingsLifted + evResult.llmExtracted > 0) {
+        log.info(
+          `materialised ${evResult.meetingsLifted} meeting + ${evResult.llmExtracted} extracted day event(s) ` +
+            `across ${evResult.daysScanned} day(s)`,
+        );
+      }
+    } catch (err) {
+      log.warn('event extractor failed (continuing)', { err: String(err) });
     }
     const embResult = await embeddingWorker.drain();
     if (embResult.processed > 0) {
@@ -770,7 +828,7 @@ async function runFullReindexLocked(
   handles: OrchestratorHandles,
   opts: { from?: string; to?: string } = {},
 ): Promise<void> {
-  const { capture, storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, embeddingWorker } = handles;
+  const { capture, storage, strategy, model, indexerModel, exports, logger, config, audioTranscriptWorker, frameBuilder, entityResolver, sessionBuilder, meetingBuilder, eventExtractor, embeddingWorker } = handles;
   const log = logger.child('full-reindex');
   const range = [
     opts.from ? `from=${opts.from}` : null,
@@ -854,6 +912,7 @@ async function runFullReindexLocked(
     await Promise.all([
       storage.clearAllSessions(),
       storage.clearAllMeetings(),
+      storage.clearAllDayEvents().catch(() => undefined),
       storage.clearFrameEmbeddings(getEmbeddingModelName(config)),
     ]);
     const [sb, mb, emb] = await Promise.all([
@@ -874,6 +933,17 @@ async function runFullReindexLocked(
     }
     if (emb.processed > 0) {
       log.info(`rebuilt ${emb.processed} frame embedding(s)`);
+    }
+    try {
+      const ev = await eventExtractor.tick();
+      if (ev.meetingsLifted + ev.llmExtracted > 0) {
+        log.info(
+          `rebuilt ${ev.meetingsLifted} meeting + ${ev.llmExtracted} extracted day event(s) ` +
+            `(${ev.daysScanned} days scanned)`,
+        );
+      }
+    } catch (err) {
+      log.warn('event extractor pass during full reindex failed', { err: String(err) });
     }
 
     // Phase 3 wrote a lot — embedding rebuild + sessions/meetings
@@ -1243,10 +1313,11 @@ async function runIdlePowerCatchup(handles: OrchestratorHandles): Promise<void> 
     await runJob(EMBEDDING_WORKER_JOB);
   }
   await runJob(MEETING_SUMMARIZER_JOB);
+  await runJob(EVENT_EXTRACTOR_JOB);
 }
 
 export function scheduleAll(handles: OrchestratorHandles): void {
-  const { scheduler, config, storage, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer, idlePowerCatchup } =
+  const { scheduler, config, storage, bus, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, eventExtractor, embeddingWorker, vacuum, logger, loadGuard, activityCoalescer, idlePowerCatchup } =
     handles;
   const backgroundModelJobsScheduled = config.system.background_model_jobs === 'scheduled';
 
@@ -1304,9 +1375,48 @@ export function scheduleAll(handles: OrchestratorHandles): void {
   // when the user's machine is already under load we skip the tick and
   // catch up later. The frame builder + entity resolver intentionally
   // are NOT gated; they're tiny and keep search results fresh.
+  // Adaptive cadence state. `ocrEmptyStreak` counts consecutive ticks
+  // where `ocrWorker.tick()` returned no work; once we cross the
+  // back-off threshold we retune the scheduler to the slow cadence.
+  // A new `screenshot` bus event resets us to the fast cadence.
+  let ocrEmptyStreak = 0;
+  let ocrIntervalIsSlow = false;
+  const setOcrSlow = (slow: boolean): void => {
+    if (slow === ocrIntervalIsSlow) return;
+    const next = slow ? OCR_WORKER_IDLE_INTERVAL_MS : OCR_WORKER_INTERVAL_MS;
+    if (scheduler.setIntervalMs(OCR_WORKER_JOB, next)) {
+      ocrIntervalIsSlow = slow;
+      logger.child(OCR_WORKER_JOB).debug(
+        slow
+          ? `idle: backed off to ${Math.round(next / 60_000)}m cadence after ${OCR_WORKER_EMPTY_STREAK_TO_BACKOFF} empty ticks`
+          : `activity resumed: restored ${Math.round(next / 1000)}s cadence`,
+      );
+    }
+  };
+  // Reset to the fast cadence the moment a new screenshot lands. Other
+  // event types (focus, url_change, audio_transcript) don't directly
+  // produce OCR work — only screenshots do — so we filter to keep the
+  // listener cheap.
+  bus.on((event) => {
+    if (event.type !== 'screenshot') return;
+    if (ocrEmptyStreak !== 0 || ocrIntervalIsSlow) {
+      ocrEmptyStreak = 0;
+      setOcrSlow(false);
+    }
+  });
   scheduler.every(OCR_WORKER_JOB, OCR_WORKER_INTERVAL_MS, skipDuringIndexMaintenance(OCR_WORKER_JOB, guarded(OCR_WORKER_JOB, async () => {
     try {
-      await ocrWorker.tick();
+      const result = await ocrWorker.tick();
+      const didWork = (result.processed + result.failed) > 0;
+      if (didWork) {
+        ocrEmptyStreak = 0;
+        setOcrSlow(false);
+      } else {
+        ocrEmptyStreak += 1;
+        if (ocrEmptyStreak >= OCR_WORKER_EMPTY_STREAK_TO_BACKOFF) {
+          setOcrSlow(true);
+        }
+      }
     } catch (err) {
       logger.child('ocr-worker').warn('tick failed', { err: String(err) });
     }
@@ -1367,6 +1477,23 @@ export function scheduleAll(handles: OrchestratorHandles): void {
         logger.child('meeting-summarizer').warn('tick failed', { err: String(err) });
       }
     }))),
+  );
+  // Event extractor: lifts every captured meeting into a DayEvent
+  // (deterministic, always runs) and -- when the model is online --
+  // OCR-extracts calendar entries / Slack threads / mail items into
+  // the same timeline. The deterministic side is cheap so we don't gate
+  // it behind the load guard / manual-model setting; only the LLM side
+  // (inside `eventExtractor.tick()`) skips when the model isn't ready.
+  scheduler.every(
+    EVENT_EXTRACTOR_JOB,
+    EVENT_EXTRACTOR_INTERVAL_MS,
+    skipDuringIndexMaintenance(EVENT_EXTRACTOR_JOB, async () => {
+      try {
+        await eventExtractor.tick();
+      } catch (err) {
+        logger.child('event-extractor').warn('tick failed', { err: String(err) });
+      }
+    }),
   );
   scheduler.every(
     EMBEDDING_WORKER_JOB,

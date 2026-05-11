@@ -11,6 +11,8 @@ import {
 import type {
   ActivitySession,
   CaptureStatus,
+  DayEvent,
+  DayEventKind,
   ExportStatus,
   Frame,
   FrameQuery,
@@ -562,6 +564,29 @@ export class CofounderRuntime {
           to: query.to,
           order: 'recent',
           limit: query.limit ?? 200,
+        });
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  async listDayEvents(query: {
+    day?: string;
+    from?: string;
+    to?: string;
+    kind?: DayEventKind;
+    limit?: number;
+  } = {}): Promise<DayEvent[]> {
+    return await this.withHandles(async (handles) => {
+      try {
+        return await handles.storage.listDayEvents({
+          day: query.day,
+          from: query.from,
+          to: query.to,
+          kind: query.kind,
+          order: 'chronological',
+          limit: query.limit ?? 500,
         });
       } catch {
         return [];

@@ -241,6 +241,7 @@ func runMacCapture(config: HelperConfig) {
   let focusSettleDelay = max(0, Double(config.focus_settle_delay_ms ?? 900) / 1000.0)
   let idleThreshold = Double(config.idle_threshold_sec ?? 60)
   let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 60_000) / 1000.0)
+  let meetingEvidenceGrace = max(600.0, contentChangeInterval * 2)
   let displays = enumerateDisplays()
   let selectedDisplays = selectDisplays(displays: displays, config: config)
   let audioChunker = AudioChunker(config: config)
@@ -285,6 +286,7 @@ func runMacCapture(config: HelperConfig) {
   var lastUrl: String? = nil
   var lastSoftCaptureAt = Date.distantPast
   var pendingFocusCapture: PendingFocusCapture? = nil
+  var lastMeetingEvidenceAt: Date? = nil
   // Throttle the periodic status emit. Previously fired every poll
   // (every 3 s when active = 20/min), waking the Node-side stdout
   // reader and recomputing memory via mach_task_basic_info each time.
@@ -295,27 +297,35 @@ func runMacCapture(config: HelperConfig) {
   var lastStatusMemoryMB = 0
   let statusEmitMinInterval: TimeInterval = 10
 
+  // Outer iteration is wrapped in an autoreleasepool below. Swift's
+  // `continue` / `return` keywords can't cross a closure boundary, so
+  // we communicate "skip the rest of this tick" / "exit the loop" via
+  // a small enum and act on it after the pool drains.
+  enum TickAction { case next, stop }
+
   while true {
+    let action: TickAction = autoreleasepool { () -> TickAction in
     while let command = readStdinLineNonBlocking() {
       if command.contains("\"kind\":\"stop\"") {
         audioChunker.stop()
         sysAudio?.stop()
-        return
+        return .stop
       }
       if command.contains("\"kind\":\"pause\"") {
         paused = true
         audioChunker.stop()
         sysAudio?.stop()
         pendingFocusCapture = nil
+        lastMeetingEvidenceAt = nil
       }
       if command.contains("\"kind\":\"resume\"") { paused = false }
     }
 
     if paused {
-      audioChunker.tick(paused: true)
+      audioChunker.tick(paused: true, meetingVisible: false)
       // sysAudio is already stopped on pause; nothing to tick
       Thread.sleep(forTimeInterval: idlePollInterval)
-      continue
+      return .next
     }
 
     let idleSeconds = secondsSinceLastInput()
@@ -350,19 +360,24 @@ func runMacCapture(config: HelperConfig) {
         metadata: ["source": "native-macos"]
       )
       if let lastWindow {
-        captureScreenshots(
+        if captureScreenshots(
           trigger: "idle_end",
           window: lastWindow,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        )
+        ) {
+          lastMeetingEvidenceAt = Date()
+        }
       }
     }
 
     var currentWindow: ActiveWindow? = nil
     if let current = queryActiveWindow(displays: displays) {
       currentWindow = current
+      if liveMeetingEvidence(window: current, text: nil) {
+        lastMeetingEvidenceAt = Date()
+      }
       if lastWindow?.focusKey != current.focusKey {
         if let previous = lastWindow {
           emitEvent(
@@ -420,36 +435,42 @@ func runMacCapture(config: HelperConfig) {
             "source": "native-macos"
           ]
         )
-        captureScreenshots(
+        if captureScreenshots(
           trigger: "url_change",
           window: current,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        )
+        ) {
+          lastMeetingEvidenceAt = Date()
+        }
         lastSoftCaptureAt = Date()
         pendingFocusCapture = nil
         lastUrl = current.url
       } else if !idle && pendingFocusCapture == nil && contentChangeInterval > 0 && Date().timeIntervalSince(lastSoftCaptureAt) >= contentChangeInterval {
-        captureScreenshots(
+        if captureScreenshots(
           trigger: "content_change",
           window: current,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        )
+        ) {
+          lastMeetingEvidenceAt = Date()
+        }
         lastSoftCaptureAt = Date()
       }
     }
 
     if !idle, let pending = pendingFocusCapture, Date() >= pending.dueAt {
-      captureScreenshots(
+      if captureScreenshots(
         trigger: "window_focus",
         window: currentWindow ?? pending.window,
         sessionId: sessionId,
         displays: selectedDisplays,
         config: config
-      )
+      ) {
+        lastMeetingEvidenceAt = Date()
+      }
       lastSoftCaptureAt = Date()
       pendingFocusCapture = nil
     }
@@ -463,9 +484,13 @@ func runMacCapture(config: HelperConfig) {
       }
       lastStatusEmitAt = nowTs
     }
-    audioChunker.tick(paused: false)
-    sysAudio?.tick()
+    let meetingVisible = lastMeetingEvidenceAt.map { Date().timeIntervalSince($0) <= meetingEvidenceGrace } ?? false
+    audioChunker.tick(paused: false, meetingVisible: meetingVisible)
+    sysAudio?.tick(meetingVisible)
     Thread.sleep(forTimeInterval: idle ? idlePollInterval : pollInterval)
+    return .next
+    }
+    if case .stop = action { return }
   }
 }
 
@@ -606,17 +631,85 @@ func displaysForScreenshot(window: ActiveWindow, selected: [DisplayInfo], config
   return selected.first.map { [$0] } ?? []
 }
 
+func liveMeetingEvidence(window: ActiveWindow, text: String?) -> Bool {
+  let metadata = [
+    window.app,
+    window.title,
+    window.url ?? ""
+  ].joined(separator: "\n")
+
+  if hasActualMeetingUrl(metadata) || hasMeetingTitleLine(metadata) {
+    return true
+  }
+
+  let app = window.app.lowercased()
+  if app.contains("zoom") || app.contains("microsoft teams") || app == "teams" || app.contains("webex") {
+    return true
+  }
+  if app.contains("google meet") {
+    return true
+  }
+
+  guard let text, !text.isEmpty else { return false }
+  if hasMeetingTitleLine(text) {
+    return true
+  }
+  if hasActualMeetingUrl(text) && hasMeetingUiText(text) {
+    return true
+  }
+  return false
+}
+
+func hasActualMeetingUrl(_ text: String) -> Bool {
+  regexMatch(#"meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}"#, text)
+    || regexMatch(#"zoom\.us/(?:j|my|wc)/"#, text)
+    || regexMatch(#"teams\.microsoft\.com/(?:l/meetup-join|_#/meetup)"#, text)
+    || regexMatch(#"webex\.com/(?:meet|join)/"#, text)
+    || regexMatch(#"whereby\.com/[A-Za-z0-9_-]{3,}"#, text)
+    || regexMatch(#"around\.co/(?:app/)?[A-Za-z0-9_-]{3,}"#, text)
+}
+
+func hasMeetingTitleLine(_ text: String) -> Bool {
+  for rawLine in text.components(separatedBy: .newlines) {
+    let line = rawLine
+      .trimmingCharacters(in: CharacterSet(charactersIn: " \t•*·-"))
+      .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    if line.isEmpty { continue }
+    if regexMatch(#"^(?:Google\s+)?Meet\s*[-–—]\s*.{3,80}$"#, line) { return true }
+    if regexMatch(#"^Zoom(?:\s+Meeting)?\s*[-–—]\s*.{3,80}$"#, line) { return true }
+    if regexMatch(#"^(?:Microsoft\s+)?Teams\s*[-–—]\s*.{3,80}$"#, line) { return true }
+    if regexMatch(#"^Webex\s*[-–—]\s*.{3,80}$"#, line) { return true }
+    if regexMatch(#"^Whereby\s*[-–—]\s*.{3,80}$"#, line) { return true }
+    if regexMatch(#"^Around\s*[-–—]\s*.{3,80}$"#, line) { return true }
+  }
+  return false
+}
+
+func hasMeetingUiText(_ text: String) -> Bool {
+  regexMatch(#"(join now|leave call|leave meeting|meeting details|present now|captions|participants|people|raise hand|camera is starting|other ways to join|use gemini to take notes|share notes and transcript|waiting room|join with computer audio)"#, text)
+}
+
+func regexMatch(_ pattern: String, _ text: String) -> Bool {
+  text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+}
+
 func captureScreenshots(
   trigger: String,
   window: ActiveWindow,
   sessionId: String,
   displays: [DisplayInfo],
   config: HelperConfig
-) {
+) -> Bool {
   let targets = displaysForScreenshot(window: window, selected: displays, config: config)
+  var sawMeeting = liveMeetingEvidence(window: window, text: nil)
   for display in targets {
     if let asset = captureScreenshot(display: display, appName: window.app, config: config) {
       let ax = accessibilityText(window: window, config: config)
+      let combinedText = [asset.visionText, ax?.text].compactMap { $0 }.joined(separator: "\n")
+      let meetingEvidence = liveMeetingEvidence(window: window, text: combinedText)
+      if meetingEvidence {
+        sawMeeting = true
+      }
       var metadata: [String: Any] = [
         "trigger": trigger,
         "source": "native-macos",
@@ -628,6 +721,9 @@ func captureScreenshots(
         "actual_format": asset.actualFormat ?? "jpeg",
         "postprocessed_by": "capture-native-helper"
       ]
+      if meetingEvidence {
+        metadata["meeting_evidence"] = true
+      }
       if let phash = asset.perceptualHash, !phash.isEmpty {
         metadata["perceptual_hash"] = phash
       }
@@ -660,6 +756,7 @@ func captureScreenshots(
       emit(["kind": "status", "storageBytesToday": asset.bytes])
     }
   }
+  return sawMeeting
 }
 
 struct ScreenshotAsset {
@@ -861,99 +958,114 @@ func childrenOf(_ element: AXUIElement) -> [AXUIElement] {
 }
 
 func captureScreenshot(display: DisplayInfo, appName: String, config: HelperConfig) -> ScreenshotAsset? {
-  let root = NSString(string: config.raw_root ?? NSHomeDirectory() + "/.cofounderOS").expandingTildeInPath
-  let now = Date()
-  let day = dayString(now)
-  let time = timeString(now)
-  let safeApp = safeFilename(appName)
-  let suffix = display.index == 0 ? "" : "_s\(display.index)"
+  // Wrap the whole body in an autoreleasepool. This is a CLI binary
+  // running `while true { Thread.sleep }`, not an NSApplication-based
+  // app — there's no main runloop to drain the outer autorelease pool,
+  // so every CF/NS object autoreleased downstream (CGImage backing
+  // stores from decodeJpeg, CGImageDestination from encodeJpeg, the
+  // VNImageRequestHandler + VNRecognizedTextObservation results from
+  // recognizeVisionText, the Process/Pipe FileHandles for the
+  // screencapture invocation, etc.) accumulates for the lifetime of
+  // the process. Externally observed RSS climbed from ~16 MB at startup
+  // to 300–400 MB after a few hours of normal capture activity. The
+  // pool below drains once per screenshot tick (and once per display
+  // when multi_screen is on), capping the steady-state RSS instead of
+  // letting it grow with uptime.
+  return autoreleasepool {
+    let root = NSString(string: config.raw_root ?? NSHomeDirectory() + "/.cofounderOS").expandingTildeInPath
+    let now = Date()
+    let day = dayString(now)
+    let time = timeString(now)
+    let safeApp = safeFilename(appName)
+    let suffix = display.index == 0 ? "" : "_s\(display.index)"
 
-  // screencapture always produces JPEG. macOS's CGImageDestination
-  // does not include a WebP encoder (only a decoder), so we cannot
-  // produce a final-format `.webp` asset here without bundling
-  // libwebp. We always write JPEG; the Node-side shim transcodes to
-  // WebP when the user requested it. What we *can* skip on the Node
-  // side: the Sharp dHash pass (we already emit a perceptual hash
-  // here) and the Tesseract OCR worker (we attach Vision OCR text
-  // here too).
-  let relative = "raw/\(day)/screenshots/\(time)_\(safeApp)\(suffix).jpg"
-  let abs = URL(fileURLWithPath: root).appendingPathComponent(relative).path
+    // screencapture always produces JPEG. macOS's CGImageDestination
+    // does not include a WebP encoder (only a decoder), so we cannot
+    // produce a final-format `.webp` asset here without bundling
+    // libwebp. We always write JPEG; the Node-side shim transcodes to
+    // WebP when the user requested it. What we *can* skip on the Node
+    // side: the Sharp dHash pass (we already emit a perceptual hash
+    // here) and the Tesseract OCR worker (we attach Vision OCR text
+    // here too).
+    let relative = "raw/\(day)/screenshots/\(time)_\(safeApp)\(suffix).jpg"
+    let abs = URL(fileURLWithPath: root).appendingPathComponent(relative).path
 
-  do {
-    try FileManager.default.createDirectory(
-      atPath: URL(fileURLWithPath: abs).deletingLastPathComponent().path,
-      withIntermediateDirectories: true
-    )
-  } catch {
-    emit(["kind": "error", "code": "screenshot_dir_failed", "message": String(describing: error)])
-    return nil
-  }
-
-  let process = Process()
-  process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-  process.arguments = ["-x", "-t", "jpg", "-D", "\(display.index + 1)", abs]
-  process.standardOutput = Pipe()
-  process.standardError = Pipe()
-  do {
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      emit(["kind": "error", "code": "screenshot_failed",
-            "message": "screencapture exited \(process.terminationStatus)"])
+    do {
+      try FileManager.default.createDirectory(
+        atPath: URL(fileURLWithPath: abs).deletingLastPathComponent().path,
+        withIntermediateDirectories: true
+      )
+    } catch {
+      emit(["kind": "error", "code": "screenshot_dir_failed", "message": String(describing: error)])
       return nil
     }
-  } catch {
-    emit(["kind": "error", "code": "screenshot_failed", "message": String(describing: error)])
-    return nil
-  }
 
-  let maxDim = max(0, config.screenshot_max_dim ?? 0)
-  let qualityRaw = max(1, min(100, config.screenshot_quality ?? 75))
-  let quality = Double(qualityRaw) / 100.0
-
-  // Decode the screencapture output once via ImageIO, optionally
-  // downsizing during decode. We hand the same CGImage to dHash and
-  // Vision so we don't pay the JPEG decode cost twice.
-  let cgImage = decodeJpeg(at: abs, maxDim: maxDim)
-  var phash: String? = nil
-  var visionText: String? = nil
-  var visionDurationMs: Int? = nil
-
-  if let img = cgImage {
-    phash = computeDHashHex(img)
-
-    // Vision OCR: runs on the Neural Engine on Apple Silicon, where
-    // it's dramatically more power-efficient than the Tesseract WASM
-    // worker on the Node side. Frames carrying `vision_text` are
-    // skipped by the OCR worker.
-    if config.accessibility?.enabled != false, #available(macOS 13.0, *) {
-      if let r = recognizeVisionText(img, languages: nil) {
-        visionText = r.text
-        visionDurationMs = r.durationMs
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    process.arguments = ["-x", "-t", "jpg", "-D", "\(display.index + 1)", abs]
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    do {
+      try process.run()
+      process.waitUntilExit()
+      guard process.terminationStatus == 0 else {
+        emit(["kind": "error", "code": "screenshot_failed",
+              "message": "screencapture exited \(process.terminationStatus)"])
+        return nil
       }
+    } catch {
+      emit(["kind": "error", "code": "screenshot_failed", "message": String(describing: error)])
+      return nil
     }
 
-    // Re-encode JPEG via ImageIO so the on-disk asset reflects the
-    // user-configured quality/maxDim. screencapture's default quality
-    // is high (large files); ImageIO at the same source CGImage gives
-    // us deterministic output with one decode and one encode.
-    _ = encodeJpeg(img, to: abs, quality: quality)
-  } else {
-    emit(["kind": "log", "level": "warn",
-          "message": "ImageIO could not decode screencapture output; emitting raw JPEG without phash/Vision",
-          "data": ["path": abs]])
-  }
+    let maxDim = max(0, config.screenshot_max_dim ?? 0)
+    let qualityRaw = max(1, min(100, config.screenshot_quality ?? 75))
+    let quality = Double(qualityRaw) / 100.0
 
-  let attrs = (try? FileManager.default.attributesOfItem(atPath: abs)) ?? [:]
-  let bytes = (attrs[.size] as? NSNumber)?.intValue ?? 0
-  return ScreenshotAsset(
-    relativePath: relative,
-    bytes: bytes,
-    perceptualHash: phash,
-    actualFormat: "jpeg",
-    visionText: visionText,
-    visionDurationMs: visionDurationMs
-  )
+    // Decode the screencapture output once via ImageIO, optionally
+    // downsizing during decode. We hand the same CGImage to dHash and
+    // Vision so we don't pay the JPEG decode cost twice.
+    let cgImage = decodeJpeg(at: abs, maxDim: maxDim)
+    var phash: String? = nil
+    var visionText: String? = nil
+    var visionDurationMs: Int? = nil
+
+    if let img = cgImage {
+      phash = computeDHashHex(img)
+
+      // Vision OCR: runs on the Neural Engine on Apple Silicon, where
+      // it's dramatically more power-efficient than the Tesseract WASM
+      // worker on the Node side. Frames carrying `vision_text` are
+      // skipped by the OCR worker.
+      if config.accessibility?.enabled != false, #available(macOS 13.0, *) {
+        if let r = recognizeVisionText(img, languages: nil) {
+          visionText = r.text
+          visionDurationMs = r.durationMs
+        }
+      }
+
+      // Re-encode JPEG via ImageIO so the on-disk asset reflects the
+      // user-configured quality/maxDim. screencapture's default quality
+      // is high (large files); ImageIO at the same source CGImage gives
+      // us deterministic output with one decode and one encode.
+      _ = encodeJpeg(img, to: abs, quality: quality)
+    } else {
+      emit(["kind": "log", "level": "warn",
+            "message": "ImageIO could not decode screencapture output; emitting raw JPEG without phash/Vision",
+            "data": ["path": abs]])
+    }
+
+    let attrs = (try? FileManager.default.attributesOfItem(atPath: abs)) ?? [:]
+    let bytes = (attrs[.size] as? NSNumber)?.intValue ?? 0
+    return ScreenshotAsset(
+      relativePath: relative,
+      bytes: bytes,
+      perceptualHash: phash,
+      actualFormat: "jpeg",
+      visionText: visionText,
+      visionDurationMs: visionDurationMs
+    )
+  }
 }
 
 func resizeImageInPlace(_ path: String, maxDim: Int) {
@@ -1112,7 +1224,10 @@ func browserUrl(appName: String, pid: pid_t, title: String) -> String? {
     let resolved = (out?.isEmpty == false) ? out : nil
     browserUrlCache[pid] = BrowserUrlCacheEntry(title: title, url: resolved, queriedAt: now)
     if browserUrlCache.count > 8 {
-      for (p, e) in browserUrlCache where now.timeIntervalSince(e.queriedAt) > browserUrlBackstopTtl * 4 {
+      let expired = browserUrlCache.compactMap { (p, e) in
+        now.timeIntervalSince(e.queriedAt) > browserUrlBackstopTtl * 4 ? p : nil
+      }
+      for p in expired {
         browserUrlCache.removeValue(forKey: p)
       }
     }
@@ -1211,7 +1326,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
-  func tick(paused: Bool) {
+  func tick(paused: Bool, meetingVisible: Bool) {
     guard enabled, prepared else { return }
     if paused {
       stop()
@@ -1222,7 +1337,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
       return
     }
     nextInputCheckAt = Date().addingTimeInterval(pollInterval)
-    let shouldRecord = shouldRecordNow()
+    let shouldRecord = shouldRecordNow(meetingVisible: meetingVisible)
     if !shouldRecord {
       stop()
       return
@@ -1248,12 +1363,12 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
-  private func shouldRecordNow() -> Bool {
+  private func shouldRecordNow(meetingVisible: Bool) -> Bool {
     switch activation {
     case "always":
       return true
     case "other_process_input":
-      return inputDetector.isOtherProcessUsingInput()
+      return meetingVisible || inputDetector.isOtherProcessUsingInput()
     default:
       emit([
         "kind": "error",
@@ -1525,7 +1640,7 @@ final class OtherProcessAudioInputDetector {
 /// Wraps the availability-gated SystemAudioChunker behind plain closures so
 /// runMacCapture can call tick/stop without sprinkling @available guards everywhere.
 struct SystemAudioHandle {
-  let tick: () -> Void
+  let tick: (Bool) -> Void
   let stop: () -> Void
 }
 
@@ -1552,7 +1667,7 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     let chunker = CoreAudioSystemAudioChunker(config: config)
     chunker.startIfEnabled()
     return SystemAudioHandle(
-      tick: { chunker.tick() },
+      tick: { meetingVisible in chunker.tick(meetingVisible: meetingVisible) },
       stop: { chunker.stop() }
     )
   case "screencapturekit":
@@ -1564,7 +1679,7 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     let chunker = SystemAudioChunker(config: config)
     chunker.startIfEnabled()
     return SystemAudioHandle(
-      tick: { chunker.tick() },
+      tick: { meetingVisible in chunker.tick(meetingVisible: meetingVisible) },
       stop: { chunker.stop() }
     )
   default:
@@ -1627,21 +1742,21 @@ final class CoreAudioSystemAudioChunker {
       emit(["kind": "log", "level": "info",
             "message": "native Core Audio system output capture armed",
             "data": ["chunk_seconds": chunkSeconds, "backend": "core_audio_tap", "activation": activation]])
-      tick()
+      tick(meetingVisible: false)
     } catch {
       emit(["kind": "error", "code": "core_audio_tap_prepare_failed",
             "message": String(describing: error), "fatal": false])
     }
   }
 
-  func tick() {
+  func tick(meetingVisible: Bool) {
     guard enabled, prepared else { return }
     guard Date() >= nextInputCheckAt else {
       rotateIfNeeded()
       return
     }
     nextInputCheckAt = Date().addingTimeInterval(pollInterval)
-    guard shouldRecordNow() else {
+    guard shouldRecordNow(meetingVisible: meetingVisible) else {
       stop()
       return
     }
@@ -1678,12 +1793,12 @@ final class CoreAudioSystemAudioChunker {
     }
   }
 
-  private func shouldRecordNow() -> Bool {
+  private func shouldRecordNow(meetingVisible: Bool) -> Bool {
     switch activation {
     case "always":
       return true
     case "other_process_input":
-      return inputDetector.isOtherProcessUsingInput()
+      return meetingVisible || inputDetector.isOtherProcessUsingInput()
     default:
       emit(["kind": "error", "code": "audio_activation_unsupported",
             "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",
@@ -1935,7 +2050,7 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
     startStream()
   }
 
-  func tick() {
+  func tick(meetingVisible: Bool) {
     q.async { [weak self] in
       guard let self, self.capturing, let started = self.currentStartedAt else { return }
       if Date().timeIntervalSince(started) >= self.chunkSeconds { self.rotate() }

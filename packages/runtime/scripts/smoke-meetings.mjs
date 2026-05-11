@@ -229,6 +229,147 @@ async function main() {
     assert(result2.framesProcessed === 0, 'second drain processes 0 frames (idempotent)');
     const meetings2 = await storage.listMeetings({ day: '2026-05-07' });
     assert(meetings2.length === 1, 'still exactly 1 meeting after re-drain');
+
+    // Audio-first attribution: if a native audio chunk was captured while
+    // the screen showed a planned/current calendar or Meet context, the
+    // transcript should still become a meeting even when no visual frame
+    // was pre-resolved as entity_kind=meeting.
+    const contextTs = '2026-05-11T16:00:00.000Z';
+    const contextFrameId = `frm_context_${randomUUID().slice(0, 8)}`;
+    const contextFrame = {
+      id: contextFrameId,
+      timestamp: contextTs,
+      day: '2026-05-11',
+      monitor: 0,
+      app: 'Google Chrome',
+      app_bundle_id: 'com.google.Chrome',
+      window_title: 'Google Calendar - Google Chrome',
+      url: 'https://meet.google.com/landing',
+      text: [
+        '11:00 AM',
+        'openbox sync',
+        'Now',
+        'Join with Google Meet',
+        'meet.google.com/abc-defg-hij',
+      ].join('\n'),
+      text_source: 'ocr',
+      asset_path: 'raw/2026-05-11/screenshots/calendar_openbox.webp',
+      perceptual_hash: null,
+      trigger: 'screenshot',
+      session_id: 'sess_audio_context',
+      duration_ms: 30_000,
+      entity_path: null,
+      entity_kind: null,
+      activity_session_id: 'act_audio_context',
+      meeting_id: null,
+      source_event_ids: [],
+    };
+    await storage.upsertFrame(contextFrame);
+    await storage.resolveFrameToEntity(contextFrame.id, {
+      kind: 'app',
+      path: 'apps/google-chrome',
+      title: 'Google Chrome',
+    });
+
+    const contextualAudioEventId = `evt_audio_${randomUUID().slice(0, 8)}`;
+    const contextualAudioStart = '2026-05-11T16:01:00.000Z';
+    const contextualAudioEvent = {
+      id: contextualAudioEventId,
+      timestamp: contextualAudioStart,
+      session_id: 'sess_audio_context',
+      type: 'audio_transcript',
+      app: 'Audio',
+      app_bundle_id: 'cofounderos.audio',
+      window_title: 'native-2026-05-11-11-01-00-000-1.m4a',
+      url: null,
+      content: 'Alice: openbox sync standup is starting. Bob: I will review the GitHub sync follow-up.',
+      asset_path: null,
+      duration_ms: 240_000,
+      idle_before_ms: null,
+      screen_index: 0,
+      metadata: {
+        source: 'whisper',
+        original_filename: 'native-2026-05-11-11-01-00-000-1.m4a',
+        whisper_model: 'base',
+        duration_ms: 240_000,
+        turns: [
+          { offset_ms: 0, end_ms: 5000, speaker: 'Alice', text: 'openbox sync standup is starting', source: 'whisper' },
+          { offset_ms: 90_000, end_ms: 94_000, speaker: 'Bob', text: 'I will review the GitHub sync follow-up', source: 'whisper' },
+        ],
+        recording_context: {
+          source: 'nearby_screen',
+          confidence: 98,
+          reason: 'calendar_or_meet_landing_event,platform_meet,meeting_url',
+          observed_at: contextTs,
+          frame_id: contextFrameId,
+          app: contextFrame.app,
+          window_title: contextFrame.window_title,
+          url: contextFrame.url,
+          entity_path: null,
+          entity_kind: 'app',
+          meeting_id: null,
+          platform: 'meet',
+          title: 'openbox sync',
+          meeting_url: 'https://meet.google.com/abc-defg-hij',
+        },
+      },
+      privacy_filtered: false,
+      capture_plugin: 'audio-transcript-worker',
+    };
+    await storage.write(contextualAudioEvent);
+
+    const contextualAudioFrameId = `frm_audio_${randomUUID().slice(0, 8)}`;
+    const contextualAudioFrame = {
+      id: contextualAudioFrameId,
+      timestamp: contextualAudioStart,
+      day: '2026-05-11',
+      monitor: 0,
+      app: 'Audio',
+      app_bundle_id: 'cofounderos.audio',
+      window_title: 'native-2026-05-11-11-01-00-000-1.m4a',
+      url: null,
+      text: contextualAudioEvent.content,
+      text_source: 'audio',
+      asset_path: null,
+      perceptual_hash: null,
+      trigger: 'audio',
+      session_id: 'sess_audio_context',
+      duration_ms: 240_000,
+      entity_path: 'apps/audio',
+      entity_kind: 'app',
+      activity_session_id: 'act_audio_context',
+      meeting_id: null,
+      source_event_ids: [contextualAudioEventId],
+    };
+    await storage.upsertFrame(contextualAudioFrame);
+    await storage.resolveFrameToEntity(contextualAudioFrame.id, {
+      kind: 'app',
+      path: 'apps/audio',
+      title: 'Audio',
+    });
+
+    const contextualResult = await builder.drain();
+    assert(
+      contextualResult.meetingsCreated === 1,
+      `contextual audio created exactly 1 meeting (got ${contextualResult.meetingsCreated})`,
+    );
+    assert(
+      contextualResult.audioFramesAttached === 1,
+      `contextual audio attached exactly 1 audio frame (got ${contextualResult.audioFramesAttached})`,
+    );
+    assert(contextualResult.turnsBuilt >= 2, `contextual audio built >= 2 turns (got ${contextualResult.turnsBuilt})`);
+
+    const contextualMeetings = await storage.listMeetings({ day: '2026-05-11' });
+    assert(contextualMeetings.length === 1, `contextual day has 1 meeting (got ${contextualMeetings.length})`);
+    const contextualMeeting = contextualMeetings[0];
+    assert(
+      contextualMeeting.entity_path === 'meetings/2026-05-11-openbox-sync',
+      `contextual meeting entity_path == meetings/2026-05-11-openbox-sync (got ${contextualMeeting.entity_path})`,
+    );
+    assert(contextualMeeting.title === 'openbox sync', `contextual meeting title inferred from screen (got ${contextualMeeting.title})`);
+    assert(contextualMeeting.platform === 'meet', `contextual meeting platform inferred as meet (got ${contextualMeeting.platform})`);
+    assert(contextualMeeting.screenshot_count === 1, `contextual meeting kept 1 context screenshot (got ${contextualMeeting.screenshot_count})`);
+    assert(contextualMeeting.audio_chunk_count === 1, `contextual meeting has 1 audio chunk (got ${contextualMeeting.audio_chunk_count})`);
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

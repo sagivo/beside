@@ -43,6 +43,7 @@ const Onboarding = React.lazy(() =>
   import('@/onboarding/Onboarding').then((mod) => ({ default: mod.Onboarding })),
 );
 import type {
+  DayEvent,
   DoctorCheck,
   JournalDay,
   LoadedConfig,
@@ -77,6 +78,7 @@ function AppInner() {
   const [logs, setLogs] = React.useState('');
   const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
   const [meetings, setMeetings] = React.useState<Meeting[]>([]);
+  const [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]);
   const [meetingsLoading, setMeetingsLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(
@@ -149,7 +151,16 @@ function AppInner() {
       if (next === 'meetings') {
         setMeetingsLoading(true);
         try {
-          setMeetings(await window.cofounderos.listMeetings());
+          // Pull events + meetings in parallel; meetings are still
+          // shown inline on the event-log detail panel for kind=meeting
+          // events (TL;DR / action items / transcript chars come from
+          // the Meeting row, not the DayEvent row).
+          const [evList, mtgList] = await Promise.all([
+            window.cofounderos.listDayEvents().catch(() => [] as DayEvent[]),
+            window.cofounderos.listMeetings().catch(() => [] as Meeting[]),
+          ]);
+          setDayEvents(evList);
+          setMeetings(mtgList);
         } finally {
           setMeetingsLoading(false);
         }
@@ -379,6 +390,7 @@ function AppInner() {
     />
   ) : screen === 'meetings' ? (
     <Meetings
+      events={dayEvents}
       meetings={meetings}
       loading={meetingsLoading}
       onRefresh={() => loadScreen('meetings')}

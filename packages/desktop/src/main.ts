@@ -1423,6 +1423,9 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:list-meetings', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('listMeetings', query);
   });
+  ipcMain.handle('cofounderos:list-day-events', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('listDayEvents', query);
+  });
   ipcMain.handle('cofounderos:search-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('searchFrames', query);
   });

@@ -321,6 +321,13 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
     .join('\n\n')
     .trim();
   const isAudio = audioText.length > 0;
+  const audioDurationMs = isAudio
+    ? group
+        .filter((e) => e.type === 'audio_transcript')
+        .map((e) => e.duration_ms)
+        .filter((n): n is number => typeof n === 'number' && n > 0)
+        .reduce((max, n) => Math.max(max, n), 0) || null
+    : null;
   return {
     id: `frm_${head.id.slice(4)}`,
     timestamp: head.timestamp,
@@ -340,7 +347,7 @@ function buildTextOnlyFrame(group: RawEvent[]): Frame {
         ? 'url'
         : 'focus',
     session_id: head.session_id,
-    duration_ms: null,
+    duration_ms: audioDurationMs,
     entity_path: null,
     entity_kind: null,
     activity_session_id: null,

@@ -120,6 +120,34 @@ export class Scheduler {
     await this.run(job, 'manual');
   }
 
+  /**
+   * Retune the cadence of an existing interval job. The current pending
+   * tick is dropped (clearInterval) and a fresh timer is armed with the
+   * new interval, so the next run lands `newMs` from now — callers using
+   * this for back-off / catch-up should expect that "slow" transitions
+   * don't fire immediately. Returns `false` if the job doesn't exist or
+   * isn't an interval job. No-op if the interval is already `newMs`.
+   */
+  setIntervalMs(name: string, newMs: number): boolean {
+    const job = this.jobs.get(name);
+    if (!job || job.kind !== 'interval') return false;
+    if (this.stopped) return false;
+    if (!Number.isFinite(newMs) || newMs <= 0) return false;
+    if (job.intervalMs === newMs) return true;
+    if (job.timer) clearInterval(job.timer);
+    job.intervalMs = newMs;
+    job.timer = setInterval(() => void this.run(job), newMs);
+    this.logger.debug(`retuned "${name}" to every ${newMs}ms`);
+    return true;
+  }
+
+  /** Current interval, in ms, of an interval job (null if not an interval job). */
+  getIntervalMs(name: string): number | null {
+    const job = this.jobs.get(name);
+    if (!job || job.kind !== 'interval') return null;
+    return job.intervalMs;
+  }
+
   has(name: string): boolean {
     return this.jobs.has(name);
   }

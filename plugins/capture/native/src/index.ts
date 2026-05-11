@@ -50,10 +50,11 @@ interface NativeCaptureConfig {
       system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
       /**
        * When to start the microphone recorder:
-       *   'other_process_input' — only record when another process is actively
-       *     using the microphone (e.g. Zoom, Meet). Privacy-preserving but
-       *     unreliable with Bluetooth headsets or virtual audio devices that
-       *     CoreAudio does not register as `kAudioProcessPropertyIsRunningInput`.
+       *   'other_process_input' — record when another process is actively
+       *     using the microphone, or when the native helper sees a live meeting
+       *     UI/URL in the captured screen evidence. The visual meeting fallback
+       *     covers Bluetooth headsets, muted mics, and virtual audio devices that
+       *     CoreAudio does not report via `kAudioProcessPropertyIsRunningInput`.
        *   'always' — record whenever capture is running (recommended for calls).
        *     Pairs well with `delete_audio_after_transcribe: true` so only the
        *     redacted transcript is retained.

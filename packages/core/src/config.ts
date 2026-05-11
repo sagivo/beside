@@ -77,10 +77,11 @@ const CaptureSchema = z.object({
     // noisy. Default 5000 (5 s).
     min_audio_rate_check_ms: z.number().int().nonnegative().default(5000),
     // Live mic/input recording. ON by default for native meeting
-    // capture, but gated by `activation: other_process_input` so the
-    // recorder starts only while another process is actively using
-    // audio input. Users who want fully manual capture can turn this
-    // off in config.yaml or Settings.
+    // capture. `activation: other_process_input` starts recording
+    // while another process is actively using audio input, or while
+    // the native helper sees a real meeting UI/URL in the captured
+    // screen evidence. Users who want fully manual capture can turn
+    // this off in config.yaml or Settings.
     live_recording: z.object({
       enabled: z.boolean().default(true),
       chunk_seconds: z.number().int().positive().default(300),
@@ -227,8 +228,14 @@ const StorageSchema = z.object({
       // small batches keep it from starving capture.
       batch_size: z.number().int().positive().default(50),
     }).default({
+      // Dropped from 240 → 60 minutes: by the 60-minute mark every
+      // downstream consumer (OCR, embeddings, AX-text merge, vision
+      // recall) has finished with the original-quality WebP, and the
+      // disk savings on continuous capture are linear in how soon we
+      // compress. Vacuum is throttled per-batch and AC-gated, so this
+      // doesn't add user-perceptible CPU.
       compress_after_days: 0,
-      compress_after_minutes: 240,
+      compress_after_minutes: 60,
       compress_quality: 40,
       thumbnail_after_days: 3,
       thumbnail_max_dim: 480,
@@ -242,7 +249,7 @@ const StorageSchema = z.object({
     retention_days: 365,
     vacuum: {
       compress_after_days: 0,
-      compress_after_minutes: 240,
+      compress_after_minutes: 60,
       compress_quality: 40,
       thumbnail_after_days: 3,
       thumbnail_max_dim: 480,
@@ -307,6 +314,23 @@ const IndexSchema = z.object({
     summarize: true,
     summarize_cooldown_sec: 300,
     vision_attachments: 4,
+  }),
+  // Day events (V2). The EventExtractor lifts every captured meeting
+  // into a `DayEvent` (deterministic; runs without the LLM) and -- when
+  // the model is online -- OCR-extracts calendar entries / Slack
+  // threads / mail items into the same daily timeline. Set
+  // `llm_enabled: false` to keep only the deterministic meeting lift
+  // (useful on machines where the model is paused).
+  events: z.object({
+    llm_enabled: z.boolean().default(true),
+    lookback_days: z.number().int().positive().default(7),
+    min_text_chars: z.number().int().nonnegative().default(80),
+    max_frames_per_bucket: z.number().int().positive().default(30),
+  }).default({
+    llm_enabled: true,
+    lookback_days: 7,
+    min_text_chars: 80,
+    max_frames_per_bucket: 30,
   }),
   // Semantic embeddings (V2). Embeddings are derived from frame
   // text/title/url and blended into MCP search for conceptual matches
@@ -515,10 +539,10 @@ capture:
     min_audio_bytes_per_sec: 4096 # silence floor; chunks below this byte rate skip whisper and are deleted (0 = disable)
     min_audio_rate_check_ms: 5000 # skip the silence floor check for clips shorter than this (ms)
     live_recording:
-      enabled: true               # native plugin only; records mic/input chunks into the inbox while another process uses audio input
+      enabled: true               # native plugin only; records mic/input chunks into the inbox while calls are detected
       # activation controls when microphone recording starts:
-      #   other_process_input — record only while another process is actively using audio input
-      #     (reliable on wired headsets; may miss Bluetooth/AirPods or virtual audio devices)
+      #   other_process_input — record while another process uses audio input OR a real meeting UI/URL is visible
+      #     (covers Bluetooth/AirPods, muted mics, and virtual devices that CoreAudio may not report)
       #   always              — record whenever capture is running (recommended for calls)
       activation: other_process_input
       # Remote participant audio:
@@ -583,11 +607,12 @@ storage:
       # screenshot mostly serves OCR + embeddings + occasional vision
       # recall": OCR/AX text is extracted within ~60-90s, embeddings
       # within minutes, so the original-quality WebP loses most of its
-      # information value after a few hours. Compressing at 4h saves
-      # gigabytes/month vs the previous 1-day window without affecting
+      # information value after a few hours. Compressing at 1h saves
+      # the most gigabytes/month — by then OCR, AX-merge and embeddings
+      # have finished with the original-quality WebP — without affecting
       # any indexing path; thumbnailing at 3 days matches typical
       # search/recall horizons.
-      compress_after_minutes: 240  # re-encode older originals at lower quality (~4h)
+      compress_after_minutes: 60   # re-encode older originals at lower quality (~1h)
       compress_quality: 40
       thumbnail_after_days: 3      # downscale once an asset is this old
       thumbnail_max_dim: 480

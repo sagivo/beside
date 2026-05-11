@@ -66,25 +66,63 @@ interface MeetingAccumulator {
   day: string;
   /** Screenshot/meeting frames in chronological order. */
   screenFrames: Frame[];
+  titleHint?: string | null;
+  platformHint?: MeetingPlatform | null;
   isExisting: boolean;
 }
 
-const PLATFORM_HINTS: Array<{ test: (f: Frame) => boolean; platform: MeetingPlatform }> = [
-  { test: (f) => /\bzoom\b/i.test(f.app) || (f.url?.includes('zoom.us') ?? false), platform: 'zoom' },
-  { test: (f) => /google meet/i.test(f.app) || (f.url?.includes('meet.google.com') ?? false), platform: 'meet' },
-  { test: (f) => /microsoft teams/i.test(f.app) || (f.url?.includes('teams.microsoft.com') ?? false), platform: 'teams' },
-  { test: (f) => /webex/i.test(f.app) || (f.url?.includes('webex.com') ?? false), platform: 'webex' },
-  { test: (f) => /whereby/i.test(f.app) || (f.url?.includes('whereby.com') ?? false), platform: 'whereby' },
-  { test: (f) => /around/i.test(f.app) || (f.url?.includes('around.co') ?? false), platform: 'around' },
+interface RecordingContextMeta {
+  confidence: number;
+  frame_id: string | null;
+  platform: MeetingPlatform | null;
+  title: string | null;
+  meeting_url: string | null;
+  entity_path: string | null;
+  entity_kind: string | null;
+}
+
+interface ScheduledMeetingWindow {
+  startedAt: string;
+  endedAt: string;
+  title: string | null;
+  sourceFrameId: string | null;
+}
+
+const METADATA_PLATFORM_HINTS: Array<{ test: (f: Frame) => boolean; platform: MeetingPlatform }> = [
+  { test: (f) => /\bzoom\b/i.test(f.app) || /zoom\.us/i.test(meetingMetadataHaystack(f)), platform: 'zoom' },
+  { test: (f) => /google meet/i.test(f.app) || /meet\.google\.com/i.test(meetingMetadataHaystack(f)), platform: 'meet' },
+  { test: (f) => /microsoft teams/i.test(f.app) || /teams\.microsoft\.com/i.test(meetingMetadataHaystack(f)), platform: 'teams' },
+  { test: (f) => /webex/i.test(f.app) || /webex\.com/i.test(meetingMetadataHaystack(f)), platform: 'webex' },
+  { test: (f) => /whereby/i.test(f.app) || /whereby\.com/i.test(meetingMetadataHaystack(f)), platform: 'whereby' },
+  { test: (f) => /around/i.test(f.app) || /around\.co/i.test(meetingMetadataHaystack(f)), platform: 'around' },
+];
+
+const TEXT_PLATFORM_HINTS: Array<{ test: (f: Frame) => boolean; platform: MeetingPlatform }> = [
+  { test: (f) => /(?:^|\n)[\s•*·-]*(?:google\s+)?meet\s*[-–—]/i.test(f.text ?? '') || /\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(f.text ?? ''), platform: 'meet' },
+  { test: (f) => /(?:^|\n)[\s•*·-]*zoom(?:\s+meeting)?\s*[-–—]/i.test(f.text ?? '') || /\bzoom\.us\/(?:j|my|wc)\//i.test(f.text ?? ''), platform: 'zoom' },
+  { test: (f) => /(?:^|\n)[\s•*·-]*(?:microsoft\s+)?teams\s*[-–—]/i.test(f.text ?? '') || /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(f.text ?? ''), platform: 'teams' },
+  { test: (f) => /\bwebex\.com\b/i.test(f.text ?? ''), platform: 'webex' },
+  { test: (f) => /\bwhereby\.com\b/i.test(f.text ?? ''), platform: 'whereby' },
+  { test: (f) => /\baround\.co\b/i.test(f.text ?? ''), platform: 'around' },
 ];
 
 function inferPlatform(frames: Frame[]): MeetingPlatform {
-  for (const f of frames) {
-    for (const hint of PLATFORM_HINTS) {
-      if (hint.test(f)) return hint.platform;
+  for (const hints of [METADATA_PLATFORM_HINTS, TEXT_PLATFORM_HINTS]) {
+    for (const f of frames) {
+      for (const hint of hints) {
+        if (hint.test(f)) return hint.platform;
+      }
     }
   }
   return 'other';
+}
+
+function meetingMetadataHaystack(frame: Frame): string {
+  return [
+    frame.app,
+    frame.window_title,
+    frame.url,
+  ].filter(Boolean).join('\n');
 }
 
 // Patterns stripped from window titles to find the meeting topic.
@@ -124,11 +162,17 @@ function extractTopicFromTitle(raw: string): string | null {
 function inferTitle(screens: Frame[]): string | null {
   const freq = new Map<string, number>();
   for (const f of screens) {
-    const raw = (f.window_title ?? '').replace(/\s+/g, ' ').trim();
-    if (!raw) continue;
-    const topic = extractTopicFromTitle(raw);
-    if (!topic) continue;
-    freq.set(topic, (freq.get(topic) ?? 0) + 1);
+    const candidates = [
+      f.window_title,
+      ...extractMeetingTitleHints(f.text),
+    ];
+    for (const rawCandidate of candidates) {
+      const raw = (rawCandidate ?? '').replace(/\s+/g, ' ').trim();
+      if (!raw) continue;
+      const topic = extractTopicFromTitle(raw);
+      if (!topic) continue;
+      freq.set(topic, (freq.get(topic) ?? 0) + 1);
+    }
   }
   if (freq.size === 0) return null;
   // Return the most common topic (ties: first seen wins due to insertion order).
@@ -141,6 +185,19 @@ function inferTitle(screens: Frame[]): string | null {
     }
   }
   return best;
+}
+
+function extractMeetingTitleHints(text: string | null): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/^[\s•*·-]+/, '').replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    if (/^(?:(?:Google\s+)?Meet|Zoom(?:\s+Meeting)?|(?:Microsoft\s+)?Teams|Webex|Whereby|Around)\s*[-–—]\s*.{3,80}$/i.test(line)) {
+      out.push(line);
+    }
+  }
+  return out;
 }
 
 /**
@@ -190,7 +247,6 @@ export class MeetingBuilder {
       turnsBuilt: 0,
     };
     const pending = await this.storage.listFramesNeedingMeetingAssignment(this.batchSize);
-    if (pending.length === 0) return empty;
 
     // Open accumulators keyed by entity_path. We may see two interleaving
     // meeting entities in a single batch (rare — a user has Zoom and
@@ -247,6 +303,8 @@ export class MeetingBuilder {
             endedAt: existing.ended_at,
             day: existing.day,
             screenFrames: await this.storage.getMeetingFrames(existing.id),
+            titleHint: existing.title,
+            platformHint: existing.platform,
             isExisting: true,
           };
           // Drop already-attached audio frames; we'll re-attach below.
@@ -260,6 +318,8 @@ export class MeetingBuilder {
             endedAt: frame.timestamp,
             day: frame.day,
             screenFrames: [],
+            titleHint: null,
+            platformHint: null,
             isExisting: false,
           };
           meetingsCreated += 1;
@@ -280,12 +340,14 @@ export class MeetingBuilder {
       await flush(acc);
     }
 
+    const contextualAudio = await this.persistContextualAudioMeetings();
+
     return {
-      framesProcessed: pending.length,
-      meetingsCreated,
-      meetingsExtended,
-      audioFramesAttached: empty.audioFramesAttached,
-      turnsBuilt: empty.turnsBuilt,
+      framesProcessed: pending.length + contextualAudio.audioFramesProcessed,
+      meetingsCreated: meetingsCreated + contextualAudio.meetingsCreated,
+      meetingsExtended: meetingsExtended + contextualAudio.meetingsExtended,
+      audioFramesAttached: empty.audioFramesAttached + contextualAudio.audioFramesAttached,
+      turnsBuilt: empty.turnsBuilt + contextualAudio.turnsBuilt,
     };
   }
 
@@ -333,16 +395,110 @@ export class MeetingBuilder {
     return null;
   }
 
+  private async persistContextualAudioMeetings(): Promise<{
+    audioFramesProcessed: number;
+    meetingsCreated: number;
+    meetingsExtended: number;
+    audioFramesAttached: number;
+    turnsBuilt: number;
+  }> {
+    const result = {
+      audioFramesProcessed: 0,
+      meetingsCreated: 0,
+      meetingsExtended: 0,
+      audioFramesAttached: 0,
+      turnsBuilt: 0,
+    };
+    const audioFrames = await this.storage.searchFrames({
+      textSource: 'audio',
+      limit: this.batchSize,
+    }).catch(() => []);
+    const unassigned = audioFrames
+      .filter((f) => !f.meeting_id)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    for (const audio of unassigned) {
+      const meta = await this.readAudioMetadata(audio);
+      const context = parseRecordingContext(meta?.recording_context);
+      if (!context || context.confidence < 45) continue;
+
+      const entityPath = entityPathFromRecordingContext(context, audio.day);
+      if (!entityPath) continue;
+
+      const durationMs = audioDurationMs(audio, meta);
+      const audioEnd = new Date(Date.parse(audio.timestamp) + Math.max(durationMs, 60_000)).toISOString();
+      const existing = await this.findExtensibleMeeting(entityPath, audio.timestamp);
+      const contextFrames = await this.findContextFramesForAudio(audio, context, audioEnd);
+
+      const acc: MeetingAccumulator = existing
+        ? {
+            id: existing.id,
+            entityPath,
+            startedAt: existing.started_at,
+            endedAt: maxIso(existing.ended_at, audioEnd),
+            day: existing.day,
+            screenFrames: dedupeFrames([
+              ...(await this.storage.getMeetingFrames(existing.id)).filter((f) => f.text_source !== 'audio'),
+              ...contextFrames,
+            ]),
+            titleHint: existing.title ?? context.title,
+            platformHint: existing.platform !== 'other' ? existing.platform : context.platform,
+            isExisting: true,
+          }
+        : {
+            id: meetingIdFor(entityPath, audio.timestamp),
+            entityPath,
+            startedAt: audio.timestamp,
+            endedAt: audioEnd,
+            day: audio.day,
+            screenFrames: contextFrames,
+            titleHint: context.title,
+            platformHint: context.platform,
+            isExisting: false,
+          };
+
+      const persisted = await this.persist(acc);
+      result.audioFramesProcessed += 1;
+      result.audioFramesAttached += persisted.audioFramesAttached;
+      result.turnsBuilt += persisted.turnsBuilt;
+      if (existing) result.meetingsExtended += 1;
+      else result.meetingsCreated += 1;
+    }
+
+    return result;
+  }
+
+  private async findContextFramesForAudio(
+    audio: Frame,
+    context: RecordingContextMeta,
+    audioEnd: string,
+  ): Promise<Frame[]> {
+    const startMs = Date.parse(audio.timestamp);
+    const frames = await this.storage.searchFrames({
+      from: new Date(startMs - 10 * 60_000).toISOString(),
+      to: new Date(Date.parse(audioEnd) + 2 * 60_000).toISOString(),
+      limit: 80,
+    }).catch(() => []);
+    const relevant = frames
+      .filter((f) => f.text_source !== 'audio')
+      .filter((f) => isContextFrameRelevant(f, context))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return dedupeFrames(relevant).slice(-16);
+  }
+
   private async persist(
     acc: MeetingAccumulator,
   ): Promise<{ audioFramesAttached: number; turnsBuilt: number }> {
-    if (acc.screenFrames.length === 0) {
-      return { audioFramesAttached: 0, turnsBuilt: 0 };
-    }
-    const startedAt = acc.startedAt;
-    const endedAt = acc.endedAt;
+    // Sort screens & build the ordered visual list once (cheap; small N).
+    const screens = acc.screenFrames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const inferredTitle = acc.titleHint ?? inferTitle(screens);
+    const scheduledWindow = await this.findScheduledWindow(acc, screens, inferredTitle);
+    const startedAt = scheduledWindow?.startedAt ?? acc.startedAt;
+    const endedAt = scheduledWindow
+      ? maxIso(scheduledWindow.endedAt, acc.endedAt)
+      : acc.endedAt;
     const durationMs = Math.max(0, Date.parse(endedAt) - Date.parse(startedAt));
-    const platform = inferPlatform(acc.screenFrames);
+    const platform = acc.platformHint ?? inferPlatform(screens);
 
     // Find audio frames whose timestamp overlaps the meeting window
     // (with a grace tail so a chunk arriving a few seconds after we
@@ -350,8 +506,9 @@ export class MeetingBuilder {
     const audioWindowEnd = new Date(Date.parse(endedAt) + this.audioGraceMs).toISOString();
     const audioFrames = await this.storage.listAudioFramesInRange(startedAt, audioWindowEnd);
 
-    // Sort screens & build the ordered visual list once (cheap; small N).
-    const screens = acc.screenFrames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    if (screens.length === 0 && audioFrames.length === 0) {
+      return { audioFramesAttached: 0, turnsBuilt: 0 };
+    }
 
     // Build turns by extracting per-utterance breakdowns from each
     // audio frame's source raw event metadata when present, otherwise
@@ -392,7 +549,7 @@ export class MeetingBuilder {
     const meeting: Meeting = {
       id: acc.id,
       entity_path: acc.entityPath,
-      title: inferTitle(screens),
+      title: inferredTitle ?? scheduledWindow?.title ?? null,
       platform,
       started_at: startedAt,
       ended_at: endedAt,
@@ -472,6 +629,37 @@ export class MeetingBuilder {
       return null;
     }
   }
+
+  private async findScheduledWindow(
+    acc: MeetingAccumulator,
+    screens: Frame[],
+    title: string | null,
+  ): Promise<ScheduledMeetingWindow | null> {
+    const startMs = Date.parse(acc.startedAt);
+    const endMs = Date.parse(acc.endedAt);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+
+    const frames = await this.storage.searchFrames({
+      from: new Date(startMs - 2 * 60 * 60_000).toISOString(),
+      to: new Date(Math.max(startMs, endMs) + 2 * 60 * 60_000).toISOString(),
+      limit: 300,
+    }).catch(() => []);
+    const candidates = dedupeFrames([...screens, ...frames])
+      .filter((f) => f.text_source !== 'audio')
+      .filter((f) => f.text || f.window_title || f.url);
+
+    let best: { window: ScheduledMeetingWindow; score: number } | null = null;
+    for (const frame of candidates) {
+      for (const window of extractScheduledWindowsFromFrame(frame)) {
+        const score = scoreScheduledWindow(window, acc, title);
+        if (score <= 0) continue;
+        if (!best || score > best.score) {
+          best = { window, score };
+        }
+      }
+    }
+    return best?.window ?? null;
+  }
 }
 
 /**
@@ -488,6 +676,258 @@ function flattenEventMetadata(metadata: Record<string, unknown>): Record<string,
     Object.entries(metadata).filter(([key]) => key !== 'metadata'),
   );
   return { ...nested, ...topLevel };
+}
+
+function parseRecordingContext(raw: unknown): RecordingContextMeta | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  const confidence = typeof obj.confidence === 'number' ? obj.confidence : 0;
+  const platform = isMeetingPlatform(obj.platform) ? obj.platform : null;
+  return {
+    confidence,
+    frame_id: typeof obj.frame_id === 'string' ? obj.frame_id : null,
+    platform,
+    title: typeof obj.title === 'string' && obj.title.trim() ? obj.title.trim() : null,
+    meeting_url: typeof obj.meeting_url === 'string' && obj.meeting_url.trim() ? obj.meeting_url.trim() : null,
+    entity_path: typeof obj.entity_path === 'string' && obj.entity_path.trim() ? obj.entity_path.trim() : null,
+    entity_kind: typeof obj.entity_kind === 'string' && obj.entity_kind.trim() ? obj.entity_kind.trim() : null,
+  };
+}
+
+function isMeetingPlatform(value: unknown): value is MeetingPlatform {
+  return value === 'zoom' ||
+    value === 'meet' ||
+    value === 'teams' ||
+    value === 'webex' ||
+    value === 'whereby' ||
+    value === 'around' ||
+    value === 'other';
+}
+
+function entityPathFromRecordingContext(context: RecordingContextMeta, day: string): string | null {
+  if (context.entity_kind === 'meeting' && context.entity_path) return context.entity_path;
+  const title = context.title ?? titleFromMeetingUrl(context.meeting_url) ?? context.platform ?? 'meeting';
+  const slug = slugifyMeetingTitle(title);
+  return slug ? `meetings/${day}-${slug}` : null;
+}
+
+function titleFromMeetingUrl(url: string | null): string | null {
+  if (!url) return null;
+  if (/meet\.google\.com/i.test(url)) return 'Google Meet';
+  if (/zoom\.us/i.test(url)) return 'Zoom';
+  if (/teams\.microsoft\.com/i.test(url)) return 'Microsoft Teams';
+  return null;
+}
+
+function slugifyMeetingTitle(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function audioDurationMs(audio: Frame, meta: Record<string, unknown> | null): number {
+  if (typeof audio.duration_ms === 'number' && audio.duration_ms > 0) return audio.duration_ms;
+  if (typeof meta?.duration_ms === 'number' && meta.duration_ms > 0) return meta.duration_ms;
+  return Math.max(60_000, Math.round((audio.text ?? '').length * 80));
+}
+
+function maxIso(a: string, b: string): string {
+  return Date.parse(a) >= Date.parse(b) ? a : b;
+}
+
+function dedupeFrames(frames: Frame[]): Frame[] {
+  const seen = new Set<string>();
+  const out: Frame[] = [];
+  for (const frame of frames) {
+    if (seen.has(frame.id)) continue;
+    seen.add(frame.id);
+    out.push(frame);
+  }
+  return out;
+}
+
+function isContextFrameRelevant(frame: Frame, context: RecordingContextMeta): boolean {
+  if (context.frame_id && frame.id === context.frame_id) return true;
+  if (frame.entity_kind === 'meeting') return true;
+  if (context.entity_path && frame.entity_path === context.entity_path) return true;
+  const haystack = [
+    frame.app,
+    frame.window_title,
+    frame.url,
+    frame.text,
+  ].filter(Boolean).join('\n');
+  if (context.meeting_url && haystack.includes(stripProtocol(context.meeting_url))) return true;
+  if (context.title && haystack.toLowerCase().includes(context.title.toLowerCase())) return true;
+  if (context.platform === 'meet' && /meet\.google\.com|google meet/i.test(haystack)) return true;
+  if (context.platform === 'zoom' && /zoom(?:\.us|\s+meeting)?/i.test(haystack)) return true;
+  if (context.platform === 'teams' && /teams\.microsoft\.com|microsoft teams/i.test(haystack)) return true;
+  return false;
+}
+
+function stripProtocol(url: string): string {
+  return url.replace(/^https?:\/\//i, '');
+}
+
+const SCHEDULED_MEETING_LINE_RE =
+  /^\s*(?<title>.+?)\.\s*Starts on (?<startDate>[A-Za-z]+ \d{1,2}, \d{4}) at (?<startTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM)) and ends (?:on (?<endDate>[A-Za-z]+ \d{1,2}, \d{4}) at |at )(?<endTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM))/i;
+const SCHEDULED_MEETING_TEXT_RE =
+  /(?<title>[A-Za-z0-9][^.\n]{2,120}?)\.\s*Starts on (?<startDate>[A-Za-z]+ \d{1,2}, \d{4}) at (?<startTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM)) and ends (?:on (?<endDate>[A-Za-z]+ \d{1,2}, \d{4}) at |at )(?<endTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM))/gi;
+
+const MONTH_INDEX: Record<string, number> = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11,
+};
+
+function extractScheduledWindowsFromFrame(frame: Frame): ScheduledMeetingWindow[] {
+  const text = frame.text;
+  if (!text || !/\bStarts on\b/i.test(text) || !/\bends\b/i.test(text)) return [];
+
+  const out: ScheduledMeetingWindow[] = [];
+  const seen = new Set<string>();
+  const pushMatch = (groups: Record<string, string | undefined>): void => {
+    const title = cleanScheduledTitle(groups.title);
+    const startDate = groups.startDate;
+    const startTime = groups.startTime;
+    const endTime = groups.endTime;
+    if (!title || !startDate || !startTime || !endTime) return;
+
+    const startedAt = parseLocalDateTime(startDate, startTime);
+    const endedAt = parseLocalDateTime(groups.endDate ?? startDate, endTime);
+    if (!startedAt || !endedAt) return;
+    const endMs = Date.parse(endedAt);
+    const startMs = Date.parse(startedAt);
+    const normalisedEnd = endMs <= startMs
+      ? new Date(endMs + 24 * 60 * 60_000).toISOString()
+      : endedAt;
+    const key = `${title.toLowerCase()}|${startedAt}|${normalisedEnd}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      title,
+      startedAt,
+      endedAt: normalisedEnd,
+      sourceFrameId: frame.id,
+    });
+  };
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+/g, ' ').trim();
+    const match = line.match(SCHEDULED_MEETING_LINE_RE);
+    if (match?.groups) pushMatch(match.groups);
+  }
+
+  const flattened = text.replace(/\s+/g, ' ').trim();
+  for (const match of flattened.matchAll(SCHEDULED_MEETING_TEXT_RE)) {
+    if (match.groups) pushMatch(match.groups);
+  }
+
+  return out;
+}
+
+function scoreScheduledWindow(
+  window: ScheduledMeetingWindow,
+  acc: MeetingAccumulator,
+  title: string | null,
+): number {
+  const startMs = Date.parse(window.startedAt);
+  const endMs = Date.parse(window.endedAt);
+  const observedStartMs = Date.parse(acc.startedAt);
+  const observedEndMs = Date.parse(acc.endedAt);
+  if (
+    !Number.isFinite(startMs) ||
+    !Number.isFinite(endMs) ||
+    !Number.isFinite(observedStartMs) ||
+    !Number.isFinite(observedEndMs) ||
+    endMs <= startMs
+  ) {
+    return 0;
+  }
+  if (!scheduledTitleMatches(window.title, title, acc.entityPath)) return 0;
+
+  const toleranceMs = 15 * 60_000;
+  const overlapsObserved =
+    startMs <= observedEndMs + toleranceMs &&
+    endMs >= observedStartMs - toleranceMs;
+  const startsNearObserved = Math.abs(startMs - observedStartMs) <= 45 * 60_000;
+  if (!overlapsObserved && !startsNearObserved) return 0;
+
+  let score = 70;
+  if (overlapsObserved) score += 40;
+  if (startMs <= observedStartMs && endMs >= observedEndMs) score += 20;
+  if (window.sourceFrameId) score += 5;
+  return score;
+}
+
+function scheduledTitleMatches(
+  scheduledTitle: string | null,
+  inferredTitle: string | null,
+  entityPath: string,
+): boolean {
+  const scheduled = normaliseTitleForMatch(scheduledTitle);
+  if (!scheduled) return false;
+  const candidates = [
+    inferredTitle,
+    entityPath.replace(/^meetings\/\d{4}-\d{2}-\d{2}-/, '').replace(/-/g, ' '),
+  ]
+    .map(normaliseTitleForMatch)
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (scheduled === candidate) return true;
+    if (scheduled.length >= 8 && candidate.length >= 8) {
+      if (scheduled.includes(candidate) || candidate.includes(scheduled)) return true;
+    }
+  }
+  return false;
+}
+
+function normaliseTitleForMatch(value: string | null | undefined): string {
+  return (value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function cleanScheduledTitle(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const cleaned = value
+    .replace(/^[\s•*·\-:|,;.]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length < 3 || cleaned.length > 120) return null;
+  return cleaned;
+}
+
+function parseLocalDateTime(dateLabel: string, timeLabel: string): string | null {
+  const date = dateLabel.match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})$/);
+  const time = timeLabel.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!date || !time) return null;
+
+  const month = MONTH_INDEX[date[1]!.toLowerCase()];
+  if (month === undefined) return null;
+
+  let hour = Number(time[1]);
+  const minute = Number(time[2] ?? '0');
+  const ampm = time[3]!.toLowerCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return null;
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+
+  const parsed = new Date(Number(date[3]), month, Number(date[2]), hour, minute, 0, 0);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 /**

@@ -119,17 +119,34 @@ function resolveMeeting(frame: Frame): EntityRef | null {
   const app = frame.app ?? '';
   const url = frame.url ?? '';
   const inMeetingApp = MEETING_APPS.has(app);
-  const inMeetingDomain = MEETING_DOMAINS.some((d) => url.includes(d));
-  if (!inMeetingApp && !inMeetingDomain) return null;
+  const inMeetingDomain = hasMeetingUrl(url);
+  const textEvidence = meetingEvidenceFromText(frame.text);
+  if (!inMeetingApp && !inMeetingDomain && !textEvidence) return null;
 
   const day = frame.timestamp.slice(0, 10);
-  const title = cleanMeetingEntityTitle(frame.window_title || '', frame);
+  const title = cleanMeetingEntityTitle(
+    textEvidence?.title ?? frame.window_title ?? textEvidence?.fallbackTitle ?? '',
+    frame,
+    textEvidence?.fallbackTitle,
+  );
   const slug = slugify(title) || 'untitled';
   return {
     kind: 'meeting',
     path: `meetings/${day}-${slug}`,
     title: `${title} (${day})`,
   };
+}
+
+function hasMeetingUrl(url: string): boolean {
+  if (!url) return false;
+  if (/\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(url)) {
+    return true;
+  }
+  if (/\bzoom\.us\/(?:j|my|wc)\//i.test(url)) return true;
+  if (/\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(url)) return true;
+  return MEETING_DOMAINS
+    .filter((d) => d !== 'meet.google.com' && d !== 'zoom.us' && d !== 'teams.microsoft.com')
+    .some((d) => url.includes(d));
 }
 
 const REPO_HOSTS = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org']);
@@ -426,7 +443,11 @@ function stripMeetingSuffix(title: string): string {
 const MEETING_TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
 const GENERIC_MEETING_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s+meet|meet|microsoft\s+teams|teams|webex|whereby|around|you have ended the meeting|camera and microphone recording|microphone recording|audio playing|google chrome|chrome|profile)$/i;
 
-function cleanMeetingEntityTitle(rawTitle: string, frame: Frame): string {
+function cleanMeetingEntityTitle(
+  rawTitle: string,
+  frame: Frame,
+  fallbackTitle?: string,
+): string {
   let title = stripMeetingSuffix(stripBrowserSuffixes(rawTitle || '')).replace(/\s+/g, ' ').trim();
   const parts = title
     .split(/\s+[-–—]\s+/)
@@ -437,20 +458,53 @@ function cleanMeetingEntityTitle(rawTitle: string, frame: Frame): string {
   if (parts.length > 0) title = parts.join(' - ');
   else title = '';
 
-  if (!title || GENERIC_MEETING_TITLE_RE.test(title)) return fallbackMeetingTitle(frame);
+  if (!title || GENERIC_MEETING_TITLE_RE.test(title)) return fallbackTitle ?? fallbackMeetingTitle(frame);
   return title;
 }
 
 function fallbackMeetingTitle(frame: Frame): string {
   const app = frame.app ?? '';
   const url = frame.url ?? '';
+  const text = frame.text ?? '';
   if (/zoom/i.test(app) || url.includes('zoom.us')) return 'Zoom';
-  if (/google meet/i.test(app) || url.includes('meet.google.com')) return 'Google Meet';
-  if (/microsoft teams/i.test(app) || url.includes('teams.microsoft.com')) return 'Microsoft Teams';
-  if (/webex/i.test(app) || url.includes('webex.com')) return 'Webex';
-  if (/whereby/i.test(app) || url.includes('whereby.com')) return 'Whereby';
-  if (/around/i.test(app) || url.includes('around.co')) return 'Around';
+  if (/google meet/i.test(app) || url.includes('meet.google.com') || /meet\.google\.com/i.test(text)) return 'Google Meet';
+  if (/microsoft teams/i.test(app) || url.includes('teams.microsoft.com') || /teams\.microsoft\.com/i.test(text)) return 'Microsoft Teams';
+  if (/webex/i.test(app) || url.includes('webex.com') || /webex\.com/i.test(text)) return 'Webex';
+  if (/whereby/i.test(app) || url.includes('whereby.com') || /whereby\.com/i.test(text)) return 'Whereby';
+  if (/around/i.test(app) || url.includes('around.co') || /around\.co/i.test(text)) return 'Around';
   return 'Meeting';
+}
+
+function meetingEvidenceFromText(text: string | null): { title?: string; fallbackTitle: string } | null {
+  if (!text) return null;
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[\s•*·-]+/, '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const haystack = lines.join('\n');
+
+  for (const line of lines) {
+    const meet = line.match(/^(?:Google\s+)?Meet\s*[-–—]\s*(.{3,80})$/i);
+    if (meet?.[1]) return { title: meet[1].trim(), fallbackTitle: 'Google Meet' };
+    const zoom = line.match(/^Zoom(?:\s+Meeting)?\s*[-–—]\s*(.{3,80})$/i);
+    if (zoom?.[1]) return { title: zoom[1].trim(), fallbackTitle: 'Zoom' };
+    const teams = line.match(/^(?:Microsoft\s+)?Teams\s*[-–—]\s*(.{3,80})$/i);
+    if (teams?.[1]) return { title: teams[1].trim(), fallbackTitle: 'Microsoft Teams' };
+  }
+
+  const hasMeetUrl = /\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(haystack);
+  const hasMeetUi = /\b(join now|ask gemini|use gemini to take notes|share notes and transcript|camera is starting|other ways to join|leave call|meeting details)\b/i.test(haystack);
+  if (hasMeetUrl && hasMeetUi) return { fallbackTitle: 'Google Meet' };
+
+  const hasZoomUrl = /\b(?:[\w.-]+\.)?zoom\.us\/(?:j|my|wc)\//i.test(haystack);
+  const hasZoomUi = /\b(join(?: with)? computer audio|start video|participants|leave meeting|waiting room)\b/i.test(haystack);
+  if (hasZoomUrl && hasZoomUi) return { fallbackTitle: 'Zoom' };
+
+  const hasTeamsUrl = /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(haystack);
+  const hasTeamsUi = /\b(join now|leave|people|raise|camera|microphone)\b/i.test(haystack);
+  if (hasTeamsUrl && hasTeamsUi) return { fallbackTitle: 'Microsoft Teams' };
+
+  return null;
 }
 
 function stripBrowserSuffixes(title: string): string {

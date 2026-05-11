@@ -68,6 +68,13 @@ declare global {
       cancelChat: (turnId: string) => Promise<{ cancelled: boolean }>;
       onChatEvent?: (callback: (event: ChatStreamEvent) => void) => (() => void);
       listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
+      listDayEvents: (query?: {
+        day?: string;
+        from?: string;
+        to?: string;
+        kind?: DayEventKind;
+        limit?: number;
+      }) => Promise<DayEvent[]>;
     };
   }
 }
@@ -544,5 +551,36 @@ export interface Meeting {
   attendees: string[];
   links: string[];
   failure_reason: string | null;
+  updated_at: string;
+}
+
+export type DayEventKind = 'meeting' | 'calendar' | 'communication' | 'task' | 'other';
+export type DayEventSource =
+  | 'meeting_capture'
+  | 'calendar_screen'
+  | 'email_screen'
+  | 'slack_screen'
+  | 'task_screen'
+  | 'other_screen';
+export type DayEventStatus = 'pending' | 'ready' | 'failed';
+
+export interface DayEvent {
+  id: string;
+  day: string;
+  starts_at: string;
+  ends_at: string | null;
+  kind: DayEventKind;
+  source: DayEventSource;
+  title: string;
+  source_app: string | null;
+  context_md: string | null;
+  attendees: string[];
+  links: string[];
+  meeting_id: string | null;
+  evidence_frame_ids: string[];
+  content_hash: string;
+  status: DayEventStatus;
+  failure_reason: string | null;
+  created_at: string;
   updated_at: string;
 }

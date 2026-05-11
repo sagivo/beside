@@ -87,8 +87,25 @@ let heartbeatMs = ACTIVE_HEARTBEAT_MS;
 // overview so heartbeat ticks are no-ops when nothing has changed.
 let lastOverviewFingerprint: string | null = null;
 
+// Fields that change on every overview build but don't carry information
+// the renderer actually cares about between heartbeats (timestamps of when
+// the overview was generated, transient load samples, runtime durations).
+// Stripping them lets the fingerprint dedupe actually fire — otherwise the
+// heartbeat pushes a new payload every 5s purely because `overviewGeneratedAt`
+// just ticked, even on a completely idle machine.
+const VOLATILE_OVERVIEW_KEYS = new Set([
+  'overviewGeneratedAt',
+  'overviewDurationMs',
+  'overviewTimings',
+  'load',
+  'memory',
+]);
+
 function fingerprintOverview(overview: unknown): string {
-  return JSON.stringify(overview);
+  return JSON.stringify(overview, (key, value) => {
+    if (VOLATILE_OVERVIEW_KEYS.has(key)) return undefined;
+    return value;
+  });
 }
 
 async function pushOverview(mode: 'full' | 'fast' = 'full', force = false): Promise<void> {
@@ -233,6 +250,10 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.getIndexedJournalDay(String(req.params));
     case 'listMeetings':
       return await runtime.listMeetings(
+        req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
+      );
+    case 'listDayEvents':
+      return await runtime.listDayEvents(
         req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
       );
     case 'searchFrames':

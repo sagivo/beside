@@ -10,3 +10,8 @@ export type {
   MeetingSummarizerOptions,
   MeetingSummarizerResult,
 } from './meeting-summarizer.js';
+export { EventExtractor } from './event-extractor.js';
+export type {
+  EventExtractorOptions,
+  EventExtractorResult,
+} from './event-extractor.js';
