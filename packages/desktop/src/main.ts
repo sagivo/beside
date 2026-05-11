@@ -303,6 +303,19 @@ if (process.platform === 'darwin') {
 }
 
 app.whenReady().then(async () => {
+  // Snapshot Screen Recording status at launch. The OS only honours a
+  // freshly-granted Screen Recording permission after the next launch,
+  // so we need the launch-time value to decide whether the renderer
+  // should offer a one-click relaunch after the user grants it.
+  if (process.platform === 'darwin') {
+    try {
+      const raw = systemPreferences.getMediaAccessStatus('screen');
+      initialScreenStatus = raw === 'unknown' ? 'unsupported' : (raw as ScreenStatus);
+      appendLog(`Launch-time Screen Recording permission: ${initialScreenStatus}`);
+    } catch {
+      initialScreenStatus = 'unsupported';
+    }
+  }
   registerAssetProtocol();
   registerRuntimeIpc();
   applyBrandDockIcon();
@@ -1203,6 +1216,185 @@ async function requestMicPermission(): Promise<{ status: MicStatus }> {
   return probeMicPermission();
 }
 
+/**
+ * Screen Recording is a hard requirement on macOS for screenshots and
+ * the perceptual-hash content-change probe. Linux/Windows don't gate
+ * desktop capture behind a per-app permission, so we report
+ * `unsupported` and let the UI hide the row there.
+ *
+ * macOS quirk: once the user toggles Screen Recording on for a running
+ * app, the OS only honours the new grant after the next launch. We
+ * detect a stale grant (transition from denied → granted within the
+ * same process) so the renderer can offer a one-click relaunch.
+ */
+type ScreenStatus = 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unsupported';
+
+let initialScreenStatus: ScreenStatus | null = null;
+
+function probeScreenPermission(): { status: ScreenStatus; needsRelaunch: boolean } {
+  if (process.platform !== 'darwin') {
+    return { status: 'unsupported', needsRelaunch: false };
+  }
+  let status: ScreenStatus = 'unsupported';
+  try {
+    const raw = systemPreferences.getMediaAccessStatus('screen');
+    status = raw === 'unknown' ? 'unsupported' : (raw as ScreenStatus);
+  } catch {
+    status = 'unsupported';
+  }
+  // Fall back to the current value if `whenReady` hadn't snapshotted
+  // yet (e.g. an early renderer probe). After this point the launch-
+  // time value is locked.
+  if (initialScreenStatus === null) initialScreenStatus = status;
+  // A relaunch is required when the app started without Screen Recording
+  // and the user has since granted it. Existing screencapture/AVFoundation
+  // sessions still see the old denial until the process restarts.
+  const needsRelaunch =
+    initialScreenStatus !== 'granted' && status === 'granted';
+  return { status, needsRelaunch };
+}
+
+/**
+ * Triggers the macOS Screen Recording prompt by issuing a one-shot
+ * `CGRequestScreenCaptureAccess`-equivalent call via `desktopCapturer`.
+ * The first time this runs in a process lifetime, macOS shows the
+ * Privacy & Security toggle for the app. On subsequent calls (or after
+ * the user has chosen) it's a no-op. We always follow up by opening
+ * System Settings so the user can complete the grant.
+ */
+async function requestScreenPermission(): Promise<{
+  status: ScreenStatus;
+  needsRelaunch: boolean;
+  openedSettings: boolean;
+}> {
+  if (process.platform !== 'darwin') {
+    return { status: 'unsupported', needsRelaunch: false, openedSettings: false };
+  }
+  try {
+    // Lazy import to avoid pulling desktopCapturer into the cold-start
+    // path on platforms where it's not used. Calling getSources is the
+    // canonical way to register the app in TCC for Screen Recording —
+    // an empty/error result is fine, the side-effect is what matters.
+    const { desktopCapturer } = await import('electron');
+    await desktopCapturer
+      .getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+      .catch(() => undefined);
+  } catch {
+    /* ignore — we'll still open System Settings below */
+  }
+  let openedSettings = false;
+  try {
+    await shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    );
+    openedSettings = true;
+  } catch (err) {
+    appendLog(`Could not open Screen Recording settings: ${String(err)}`);
+  }
+  const probe = probeScreenPermission();
+  return { ...probe, openedSettings };
+}
+
+/**
+ * Accessibility permission is recommended (not required) for the Node
+ * capture plugin: it powers `active-win` (focused window metadata) and
+ * AX text extraction. macOS only — other platforms report
+ * `unsupported`.
+ */
+type AccessibilityStatus = 'granted' | 'denied' | 'unsupported';
+
+function probeAccessibilityPermission(): { status: AccessibilityStatus } {
+  if (process.platform !== 'darwin') return { status: 'unsupported' };
+  try {
+    return {
+      status: systemPreferences.isTrustedAccessibilityClient(false)
+        ? 'granted'
+        : 'denied',
+    };
+  } catch {
+    return { status: 'unsupported' };
+  }
+}
+
+async function requestAccessibilityPermission(): Promise<{
+  status: AccessibilityStatus;
+  openedSettings: boolean;
+}> {
+  if (process.platform !== 'darwin') {
+    return { status: 'unsupported', openedSettings: false };
+  }
+  let granted = false;
+  try {
+    // Passing `prompt: true` triggers the native "App would like to
+    // control this computer using accessibility features" dialog the
+    // first time. Subsequent calls just return the current status.
+    granted = systemPreferences.isTrustedAccessibilityClient(true);
+  } catch {
+    granted = false;
+  }
+  let openedSettings = false;
+  if (!granted) {
+    try {
+      await shell.openExternal(
+        'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+      );
+      openedSettings = true;
+    } catch (err) {
+      appendLog(`Could not open Accessibility settings: ${String(err)}`);
+    }
+  }
+  return { status: granted ? 'granted' : 'denied', openedSettings };
+}
+
+/**
+ * Open the macOS System Settings → Privacy & Security pane for the
+ * given permission category. No-op on other platforms.
+ */
+async function openPermissionSettings(
+  kind: 'screen' | 'accessibility' | 'microphone' | 'automation',
+): Promise<{ opened: boolean }> {
+  if (process.platform !== 'darwin') return { opened: false };
+  const targets: Record<typeof kind, string> = {
+    screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+    microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+    automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+  };
+  try {
+    await shell.openExternal(targets[kind]);
+    return { opened: true };
+  } catch (err) {
+    appendLog(`Could not open ${kind} settings: ${String(err)}`);
+    return { opened: false };
+  }
+}
+
+/**
+ * Relaunch the Electron process. Used by onboarding after the user
+ * grants Screen Recording so the freshly TCC-approved process picks up
+ * the permission. We tear the runtime service down cleanly first to
+ * avoid orphaned Ollama/SQLite handles.
+ */
+function relaunchApp(): { relaunching: true } {
+  appendLog('Relaunching CofounderOS to refresh OS permissions…');
+  if (statusItemHelper && !statusItemHelper.killed) {
+    statusItemHelper.kill('SIGTERM');
+  }
+  if (managedRuntime) {
+    try {
+      managedRuntime.close();
+    } catch {
+      /* ignore */
+    }
+    managedRuntime = null;
+  }
+  app.relaunch();
+  // exit(0) instead of quit() so before-quit handlers don't try to
+  // re-tear down the already-closed runtime/helpers.
+  setTimeout(() => app.exit(0), 100);
+  return { relaunching: true };
+}
+
 function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:overview', async () => {
     return await getOverviewForRequest();
@@ -1325,6 +1517,27 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:request-mic-permission', async () => {
     return await requestMicPermission();
+  });
+  ipcMain.handle('cofounderos:probe-screen-permission', async () => {
+    return probeScreenPermission();
+  });
+  ipcMain.handle('cofounderos:request-screen-permission', async () => {
+    return await requestScreenPermission();
+  });
+  ipcMain.handle('cofounderos:probe-accessibility-permission', async () => {
+    return probeAccessibilityPermission();
+  });
+  ipcMain.handle('cofounderos:request-accessibility-permission', async () => {
+    return await requestAccessibilityPermission();
+  });
+  ipcMain.handle(
+    'cofounderos:open-permission-settings',
+    async (_event, kind: 'screen' | 'accessibility' | 'microphone' | 'automation') => {
+      return await openPermissionSettings(kind);
+    },
+  );
+  ipcMain.handle('cofounderos:relaunch-app', async () => {
+    return relaunchApp();
   });
   ipcMain.handle('cofounderos:chat-start', async (_event, params: unknown) => {
     // Fire-and-forget on the IPC side: chat events stream over the

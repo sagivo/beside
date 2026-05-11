@@ -1508,7 +1508,7 @@ function renderSession(
   const activeMin = Math.max(1, Math.round(session.active_ms / 60_000));
   const headerBits: string[] = [];
   if (session.primary_entity_path) {
-    headerBits.push(`[[${session.primary_entity_path}]]`);
+    headerBits.push(formatJournalEntityReference(session.primary_entity_path));
   } else if (session.primary_app) {
     headerBits.push(session.primary_app);
   }
@@ -1520,7 +1520,7 @@ function renderSession(
   if (session.entities.length > 1) {
     const tail = session.entities
       .slice(1, 4)
-      .map((p) => `[[${p}]]`)
+      .map(formatJournalEntityReference)
       .join(', ');
     if (tail) lines.push(`_also touched: ${tail}_`);
   }
@@ -1570,7 +1570,7 @@ function renderFrame(f: Frame, lines: string[], assetUrlPrefix: string): void {
   ]
     .filter(Boolean)
     .join(' · ');
-  const entityLink = f.entity_path ? ` → [[${f.entity_path}]]` : '';
+  const entityLink = f.entity_path ? ` → ${formatJournalEntityReference(f.entity_path)}` : '';
   lines.push(`- **${time}**${dur} — ${target || '(no title)'}${entityLink}`);
   // OCR, accessibility, mixed visual extraction, and audio are equally
   // valid sources of human-readable text — all pass through a PII redactor
@@ -1703,7 +1703,7 @@ function renderSessionPhase(phase: SessionPhase): string {
       )[0]?.value
     : topValues(frames, (frame) => frame.entity_path, 1)[0]?.value;
   const primaryApp = topValues(frames, (frame) => frame.app, 1)[0]?.value;
-  const target = primaryEntity ? `[[${primaryEntity}]]` : primaryApp ?? '(unknown)';
+  const target = primaryEntity ? formatJournalEntityReference(primaryEntity) : primaryApp ?? '(unknown)';
   const evidence = compactEvidence([
     extractFilesFromFrames(frames, 2).length
       ? `files ${extractFilesFromFrames(frames, 2).map((file) => `\`${file}\``).join(', ')}`
@@ -1715,9 +1715,23 @@ function renderSessionPhase(phase: SessionPhase): string {
       ? `windows ${representativeTitles(frames, 2).map((title) => `"${title}"`).join(', ')}`
       : null,
   ]);
-  return `**${timeRange}** ${action} via ${target}` +
+  const targetSuffix = shouldRenderPhaseTarget(action, target) ? ` via ${target}` : '';
+  return `**${timeRange}** ${action}${targetSuffix}` +
     `${duration >= 30_000 ? ` _(${humaniseDuration(duration)})_` : ''}` +
     `${evidence ? ` (${evidence})` : ''}.`;
+}
+
+function shouldRenderPhaseTarget(action: string, target: string): boolean {
+  if (!target || target === '(unknown)') return false;
+  const actionText = action.toLowerCase();
+  const targetText = target
+    .replace(/^\[\[/, '')
+    .replace(/\]\]$/, '')
+    .split('/')
+    .pop()
+    ?.replace(/-/g, ' ')
+    .toLowerCase();
+  return Boolean(targetText && !actionText.includes(targetText));
 }
 
 function phaseTimeRange(first: Frame, last: Frame): string {
@@ -1777,7 +1791,7 @@ function renderDayOverview(
 
   const action = inferSessionAction(frames);
   const topEntities = topValues(frames, (f) => f.entity_path, 3)
-    .map((x) => `[[${x.value}]]`);
+    .map((x) => formatJournalEntityReference(x.value));
   const artifacts = extractFilesFromFrames(frames, 5);
   const domains = topValues(frames, (frame) => domainFromUrl(frame.url), 3).map((x) => x.value);
   const context = compactEvidence([
@@ -1876,7 +1890,7 @@ function renderBrief(insights: SessionInsight[]): string[] {
     lines.push(`- Key artifacts: ${artifacts.map((file) => `\`${file}\``).join(', ')}.`);
   }
   if (comms.length > 0) {
-    lines.push(`- Communication touched: ${comms.map((target) => `[[${target}]]`).join(', ')}.`);
+    lines.push(`- Communication touched: ${comms.map(formatJournalEntityReference).join(', ')}.`);
   }
   return lines;
 }
@@ -1902,7 +1916,7 @@ function renderDayStoryParagraphs(insights: SessionInsight[], frames: Frame[]): 
         ? `web context from ${joinNatural(primary.domains.slice(0, 3))}`
         : null,
       primary.communications.length
-        ? `communication with ${joinNatural(primary.communications.slice(0, 4).map((target) => `[[${target}]]`))}`
+        ? `communication with ${joinNatural(primary.communications.slice(0, 4).map(formatJournalEntityReference))}`
         : null,
     ]);
     paragraphs.push(
@@ -1922,7 +1936,7 @@ function renderDayStoryParagraphs(insights: SessionInsight[], frames: Frame[]): 
   const communications = [...new Set(insights.flatMap((insight) => insight.communicationTargets))];
   if (communications.length > 0) {
     paragraphs.push(
-      `The communication thread touched ${joinNatural(communications.slice(0, 5).map((target) => `[[${target}]]`))}. ` +
+      `The communication thread touched ${joinNatural(communications.slice(0, 5).map(formatJournalEntityReference))}. ` +
         `Given the nearby work context, those look like coordination or follow-up rather than standalone app usage.`,
     );
   } else if (first !== last) {
@@ -1948,7 +1962,7 @@ function renderConcreteTrail(insights: SessionInsight[], frames: Frame[]): strin
   const lines: string[] = [];
   if (files.length > 0) lines.push(`- Artifacts: ${files.map((file) => `\`${file}\``).join(', ')}.`);
   if (communications.length > 0) {
-    lines.push(`- People/channels: ${communications.map((target) => `[[${target}]]`).join(', ')}.`);
+    lines.push(`- People/channels: ${communications.map(formatJournalEntityReference).join(', ')}.`);
   }
   if (domains.length > 0) lines.push(`- Web context: ${domains.join(', ')}.`);
   if (titles.length > 0) lines.push(`- Window evidence: ${titles.map((title) => `"${title}"`).join('; ')}.`);
@@ -1988,7 +2002,7 @@ function describeInsightAction(insight: SessionInsight): string {
     insight.files.length ? `files ${insight.files.map((file) => `\`${file}\``).join(', ')}` : null,
     insight.domains.length ? `domains ${insight.domains.join(', ')}` : null,
     insight.communicationTargets.length
-      ? `comms ${insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')}`
+      ? `comms ${insight.communicationTargets.map(formatJournalEntityReference).join(', ')}`
       : null,
   ]);
   return `were ${action}${evidence ? ` (${evidence})` : ''}`;
@@ -2019,7 +2033,7 @@ function renderWorkstreams(insights: SessionInsight[]): string[] {
       const details = compactEvidence([
         item.actions.length ? `actions ${item.actions.slice(0, 3).join('; ')}` : null,
         item.files.length ? `artifacts ${item.files.slice(0, 4).map((file) => `\`${file}\``).join(', ')}` : null,
-        item.communications.length ? `comms ${item.communications.slice(0, 4).map((target) => `[[${target}]]`).join(', ')}` : null,
+        item.communications.length ? `comms ${item.communications.slice(0, 4).map(formatJournalEntityReference).join(', ')}` : null,
         item.domains.length ? `domains ${item.domains.slice(0, 3).join(', ')}` : null,
       ]);
       return `- ${item.target}: ${humaniseDuration(item.activeMs)} across ${item.sessions} session${item.sessions === 1 ? '' : 's'}` +
@@ -2122,11 +2136,16 @@ function sessionTarget(session: ActivitySession, frames: Frame[]): string {
       return appTarget(topApp.value);
     }
   }
-  return `[[${session.primary_entity_path}]]`;
+  return formatJournalEntityReference(session.primary_entity_path);
 }
 
 function appTarget(app: string): string {
-  return `[[apps/${slugifyForPath(app)}]]`;
+  return app;
+}
+
+function formatJournalEntityReference(entityPath: string): string {
+  if (entityPath.startsWith('apps/')) return titleFromPath(entityPath);
+  return `[[${entityPath}]]`;
 }
 
 function slugifyForPath(value: string): string {
@@ -2147,7 +2166,7 @@ function renderWorkArc(insights: SessionInsight[]): string[] {
       insight.files.length ? `files ${insight.files.map((file) => `\`${file}\``).join(', ')}` : null,
       insight.domains.length ? `domains ${insight.domains.join(', ')}` : null,
       insight.communicationTargets.length
-        ? `communication ${insight.communicationTargets.map((target) => `[[${target}]]`).join(', ')}`
+        ? `communication ${insight.communicationTargets.map(formatJournalEntityReference).join(', ')}`
         : null,
     ]);
     return `- **${window}** You ${describeInsightAction(insight)}.` +
@@ -2192,7 +2211,7 @@ function renderFollowUpCandidates(insights: SessionInsight[]): string[] {
     if (next.communicationTargets.length === 0) continue;
     const prevAction = prev.action ?? `focused on ${prev.primaryTarget}`;
     if (!isWorkAction(prevAction)) continue;
-    const targets = next.communicationTargets.slice(0, 4).map((target) => `[[${target}]]`).join(', ');
+    const targets = next.communicationTargets.slice(0, 4).map(formatJournalEntityReference).join(', ');
     const files = next.files.length ? `; artifacts nearby: ${next.files.map((file) => `\`${file}\``).join(', ')}` : '';
     out.push(`- ${next.session.started_at.slice(11, 16)}: communication with ${targets} followed ${prevAction}${files}.`);
     if (out.length >= 5) break;
@@ -2210,7 +2229,7 @@ function inferTransition(
   const gap = gapMs >= 2 * 60_000 ? ` after ${humaniseDuration(gapMs)} idle` : '';
 
   if (next.communicationTargets.length > 0 && isWorkAction(prevAction)) {
-    const targets = next.communicationTargets.map((target) => `[[${target}]]`).join(', ');
+    const targets = next.communicationTargets.map(formatJournalEntityReference).join(', ');
     return `${next.session.started_at.slice(11, 16)}${gap}: after ${formatActionTarget(prev.action, prev.primaryTarget)}, shifted into communication with ${targets}; likely follow-up or coordination around the previous work.`;
   }
 
@@ -2253,7 +2272,8 @@ function describeSessionContext(frames: Frame[]): string | null {
   const apps = topValues(frames, (f) => f.app, 3).map((x) => x.value);
   if (apps.length) parts.push(`mostly ${apps.join(', ')}`);
 
-  const entities = topValues(frames, (f) => f.entity_path, 3).map((x) => `[[${x.value}]]`);
+  const entities = topValues(frames, (f) => f.entity_path, 3)
+    .map((x) => formatJournalEntityReference(x.value));
   if (entities.length) parts.push(`centered on ${entities.join(', ')}`);
 
   const titles = representativeTitles(frames, 3);

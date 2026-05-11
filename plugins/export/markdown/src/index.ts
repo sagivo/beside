@@ -55,7 +55,7 @@ class MarkdownExport implements IExport {
   constructor(
     outDir: string,
     logger: Logger,
-    narrativeTimeoutMs = 30_000,
+    narrativeTimeoutMs: number = DEFAULT_NARRATIVE_TIMEOUT_MS,
     narrativeTextEnabled = false,
   ) {
     this.outDir = outDir;
@@ -220,12 +220,40 @@ class MarkdownExport implements IExport {
     await this.copyTree(_state.rootPath, this.outDir);
     await this.refreshRootIndex(strategy);
 
-    // Re-render every day's journal we have data for.
+    // Re-render every day's journal we have data for. The narrative
+    // step inside `maybeRenderJournal` is an LLM call (gemma4:e4b in
+    // the default config), and Ollama serves up to OLLAMA_NUM_PARALLEL
+    // (default 4) concurrent requests on the same model. Running the
+    // days serially used 1 of those slots and idled 3 — so a 9-day
+    // back-fill took ~3 min where it could be ~45 s.
+    //
+    // We bound concurrency to JOURNAL_NARRATIVE_CONCURRENCY (matches
+    // the indexer's default render concurrency) so we never overwhelm
+    // the model and never starve the user-facing chat path. Errors
+    // inside `maybeRenderJournal` are already swallowed there, so a
+    // single bad day can't unwind the whole `fullSync`.
     if (this.services) {
       const days = await this.services.storage.listDays();
-      for (const d of days) {
-        await this.maybeRenderJournal(d, { enrich: true });
-      }
+      const concurrency = JOURNAL_NARRATIVE_CONCURRENCY;
+      let cursor = 0;
+      const workers = Array.from(
+        { length: Math.min(concurrency, days.length) },
+        async () => {
+          while (true) {
+            const i = cursor++;
+            if (i >= days.length) return;
+            try {
+              await this.maybeRenderJournal(days[i] as string, { enrich: true });
+            } catch (err) {
+              this.logger.warn('journal render failed during fullSync', {
+                day: days[i],
+                err: String(err),
+              });
+            }
+          }
+        },
+      );
+      await Promise.all(workers);
     }
 
     this.lastSync = new Date().toISOString();
@@ -421,6 +449,29 @@ class MarkdownExport implements IExport {
     return { prompt: lines.join('\n'), images };
   }
 }
+
+/**
+ * Bounded concurrency for the per-day journal-narrative LLM calls in
+ * `fullSync`. These are *vision* calls (gemma4:e4b with 3-5 attached
+ * screenshots), which dominate Ollama's KV cache and slow per-request
+ * throughput dramatically when several share the model's parallel slots.
+ *
+ * Empirically, going wider than 2 made each call ~4x slower wall-clock
+ * and every call tripped the per-narrative timeout — net loss. 2 is
+ * the sweet spot: ~2x speedup over sequential without starving any
+ * single call of its KV-cache budget. Note: the indexer's text-only
+ * entity-page renders use the full 4 lanes elsewhere; this constant
+ * is narrative-specific.
+ */
+const JOURNAL_NARRATIVE_CONCURRENCY = 2;
+/**
+ * Default timeout for a single journal-narrative call. The previous
+ * 30 s was tuned for the sequential path where each call took 18-30 s
+ * end-to-end. Once we run two in parallel, throughput-per-call halves
+ * and 30 s starts hitting the wire on legitimately-completing calls.
+ * 120 s is generous: the slowest calls we see top out around 60 s.
+ */
+const DEFAULT_NARRATIVE_TIMEOUT_MS = 120_000;
 
 const JOURNAL_NARRATIVE_SYSTEM_PROMPT = `You write personal activity reports from captured desktop sessions.
 

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { createHash } from 'node:crypto';
 import type {
   EntityKind,
@@ -32,6 +33,30 @@ const STRATEGY_NAME = 'karpathy';
  * VRAM/parallel slots.
  */
 const DEFAULT_RENDER_CONCURRENCY = 4;
+
+/**
+ * Pick an effective render concurrency based on current system load.
+ * Apple Silicon's UMA design means our renders share GPU bandwidth
+ * with whatever else the user is running (browser/Slack/IDE), so a
+ * fixed 4-wide fan-out can saturate the system on a busy machine.
+ *
+ *   loadavg-per-core < 0.5  → use the configured maximum
+ *   loadavg-per-core 0.5–0.85 → halve it (rounded up, min 1)
+ *   loadavg-per-core ≥ 0.85 → drop to 1 (single-flight)
+ *
+ * `os.loadavg()` is a 1-minute moving average so this is naturally
+ * smoothed; we don't oscillate batch-to-batch on transient spikes.
+ * On platforms where loadavg returns 0 (Windows) we keep the max.
+ */
+function effectiveRenderConcurrency(maxLanes: number): number {
+  const cpuCount = Math.max(1, os.cpus().length);
+  const [oneMin] = os.loadavg();
+  if (!Number.isFinite(oneMin) || oneMin <= 0) return maxLanes;
+  const normalised = oneMin / cpuCount;
+  if (normalised < 0.5) return maxLanes;
+  if (normalised < 0.85) return Math.max(1, Math.ceil(maxLanes / 2));
+  return 1;
+}
 
 /**
  * Bounded concurrent-map without a runtime dep on p-limit. Preserves
@@ -317,19 +342,35 @@ export class KarpathyStrategy implements IIndexStrategy {
     // intentionally keep this serial (better-sqlite3 is synchronous;
     // running the queries concurrently doesn't help) and only fan out
     // the LLM-bound `renderEntityPage` calls below.
+    //
+    // Filter ordering matters: `shouldRenderEntityPage` is a pure
+    // entity-property check (kind, focused-time, frame-count) with NO
+    // DB I/O. Run it FIRST so we can short-circuit ~25-30% of the
+    // dirty set (the noise/below-threshold app entities) without
+    // paying for the 500-row `getEntityFrames` lookup or the page-read.
+    // For entities that don't have an existing page either, we don't
+    // even need `readPage` — they have nothing to delete.
     const prepared: PreparedTask[] = [];
     for (const entity of dirtyByPath.values()) {
       const pagePath = `${entity.path}.md`;
-      const frames = await this.storage.getEntityFrames(entity.path, 500);
+      if (!(await this.shouldRenderEntityPage(entity))) {
+        // Cheap path. Only read the page to know if we need to issue
+        // a delete; for noise app entities the page rarely exists.
+        const existing = await this.store.readPage(pagePath);
+        prepared.push({ kind: 'skip-noise', pagePath, existed: !!existing });
+        continue;
+      }
+      // 500 was the historical default but `buildEvidence` only
+      // surfaces MAX_KEYFRAMES (3) + MAX_WINDOWS (12) + MAX_TEXT_SNIPPETS (8)
+      // worth of frames into the prompt. 250 covers any plausible recent
+      // window with comfortable headroom and halves DB read time on
+      // hot entities — a measurable win when the dirty set is large.
+      const frames = await this.storage.getEntityFrames(entity.path, 250);
       if (frames.length === 0) {
         prepared.push({ kind: 'skip-empty', pagePath });
         continue;
       }
       const existing = await this.store.readPage(pagePath);
-      if (!(await this.shouldRenderEntityPage(entity))) {
-        prepared.push({ kind: 'skip-noise', pagePath, existed: !!existing });
-        continue;
-      }
       prepared.push({ kind: 'render', entity, frames, existing, pagePath });
     }
 
@@ -353,7 +394,17 @@ export class KarpathyStrategy implements IIndexStrategy {
     const renderTasks = prepared.filter(
       (t): t is Extract<PreparedTask, { kind: 'render' }> => t.kind === 'render',
     );
-    const concurrency = this.renderConcurrency;
+    // Adapt the lane count to current system load. Keeps the indexer
+    // a polite citizen on an already-busy machine — running a build,
+    // a Zoom call, or a heavy IDE session won't get crushed by a 4-way
+    // fan-out into ollama. When the box is idle we use the configured
+    // max for fastest reindex.
+    const concurrency = effectiveRenderConcurrency(this.renderConcurrency);
+    if (concurrency < this.renderConcurrency && renderTasks.length > 0) {
+      this.logger.debug(
+        `render concurrency throttled to ${concurrency} (system load high)`,
+      );
+    }
     const rendered = await pmap(renderTasks, concurrency, async (task) => {
       try {
         const result = await this.renderEntityPage(

@@ -3,10 +3,13 @@ import * as TooltipPrimitive from '@radix-ui/react-tooltip';
 import {
   AlertTriangle,
   Check,
+  CheckCircle2,
   Cpu,
   Download,
+  ExternalLink,
   FolderOpen,
   HelpCircle,
+  Keyboard,
   Loader2,
   Mic,
   Monitor,
@@ -63,10 +66,12 @@ import {
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
 import type {
+  AccessibilityPermission,
   LoadedConfig,
   MicPermission,
   ModelBootstrapProgress,
   RuntimeOverview,
+  ScreenPermission,
   WhisperProbe,
 } from '@/global';
 
@@ -349,6 +354,7 @@ export function Settings({
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="h-auto flex-wrap justify-start self-start">
           <TabsTrigger value="general">General</TabsTrigger>
+          <TabsTrigger value="permissions">Permissions</TabsTrigger>
           <TabsTrigger value="capture">Capture</TabsTrigger>
           <TabsTrigger value="privacy">Privacy</TabsTrigger>
           <TabsTrigger value="storage">Storage</TabsTrigger>
@@ -427,6 +433,10 @@ export function Settings({
               />
             </div>
           </SettingsSection>
+        </TabsContent>
+
+        <TabsContent value="permissions" className="flex flex-col gap-4">
+          <PermissionsSettingsPanel />
         </TabsContent>
 
         <TabsContent value="capture" className="flex flex-col gap-4">
@@ -2178,6 +2188,258 @@ function ThemePicker({
         </Label>
       ))}
     </RadioGroup>
+  );
+}
+
+/**
+ * Settings → Permissions panel. Lets users repair / re-grant the
+ * macOS permissions CofounderOS uses any time after onboarding.
+ * Mirrors the onboarding `PermissionsStep` but lives at a stable
+ * surface so users always have a place to fix permissions if a macOS
+ * upgrade or a config change wipes them.
+ */
+function PermissionsSettingsPanel() {
+  const [screen, setScreen] = React.useState<ScreenPermission | null>(null);
+  const [accessibility, setAccessibility] = React.useState<AccessibilityPermission | null>(null);
+  const [mic, setMic] = React.useState<MicPermission | null>(null);
+  const [requesting, setRequesting] = React.useState<
+    'screen' | 'accessibility' | 'microphone' | null
+  >(null);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const [s, a, m] = await Promise.all([
+        window.cofounderos.probeScreenPermission(),
+        window.cofounderos.probeAccessibilityPermission(),
+        window.cofounderos.probeMicPermission(),
+      ]);
+      setScreen(s);
+      setAccessibility(a);
+      setMic(m);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2500);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  React.useEffect(() => {
+    const handler = () => void refresh();
+    window.addEventListener('focus', handler);
+    return () => window.removeEventListener('focus', handler);
+  }, [refresh]);
+
+  async function request(kind: 'screen' | 'accessibility' | 'microphone') {
+    setRequesting(kind);
+    try {
+      if (kind === 'screen') await window.cofounderos.requestScreenPermission();
+      if (kind === 'accessibility') await window.cofounderos.requestAccessibilityPermission();
+      if (kind === 'microphone') await window.cofounderos.requestMicPermission();
+    } finally {
+      setRequesting(null);
+      void refresh();
+    }
+  }
+
+  const screenStatus = screen?.status ?? 'unsupported';
+  const screenSupported = screenStatus !== 'unsupported';
+  const screenGranted = screenStatus === 'granted';
+  const screenNeedsRelaunch = screen?.needsRelaunch === true;
+
+  const accessibilityStatus = accessibility?.status ?? 'unsupported';
+  const accessibilitySupported = accessibilityStatus !== 'unsupported';
+  const accessibilityGranted = accessibilityStatus === 'granted';
+
+  const micStatus = mic?.status ?? 'unsupported';
+  const micSupported = micStatus !== 'unsupported';
+  const micGranted = micStatus === 'granted';
+
+  if (!screenSupported && !accessibilitySupported && !micSupported) {
+    return (
+      <SettingsSection
+        title="System permissions"
+        description="Per-app permissions don't apply on this OS — CofounderOS uses standard system APIs."
+      >
+        <p className="text-sm text-muted-foreground">
+          Nothing to manage here on your platform.
+        </p>
+      </SettingsSection>
+    );
+  }
+
+  return (
+    <>
+      {screenNeedsRelaunch && (
+        <Alert variant="warning">
+          <RefreshCw />
+          <AlertTitle>Restart required to apply Screen Recording</AlertTitle>
+          <AlertDescription>
+            macOS only honours the new Screen Recording grant after the next launch.
+            <div className="mt-3">
+              <Button size="sm" onClick={() => void window.cofounderos.relaunchApp()}>
+                <RefreshCw />
+                Restart CofounderOS
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+      <SettingsSection
+        title="System permissions"
+        description="CofounderOS asks for these only to power local capture. Toggle them in System Settings any time."
+      >
+        <div className="flex flex-col gap-3">
+          {screenSupported && (
+            <SettingsPermissionRow
+              icon={<Monitor className="size-5" />}
+              title="Screen Recording"
+              requirement="required"
+              granted={screenGranted}
+              needsRelaunch={screenNeedsRelaunch}
+              statusText={
+                screenGranted
+                  ? screenNeedsRelaunch
+                    ? 'Granted — restart to apply.'
+                    : 'Granted. Capture can take screenshots.'
+                  : screenStatus === 'denied'
+                    ? 'Denied. Capture cannot take screenshots.'
+                    : screenStatus === 'restricted'
+                      ? 'Restricted by a profile. CofounderOS cannot capture.'
+                      : 'Not granted yet.'
+              }
+              busy={requesting === 'screen'}
+              onRequest={() => void request('screen')}
+              onOpenSettings={() =>
+                void window.cofounderos.openPermissionSettings('screen')
+              }
+            />
+          )}
+          {accessibilitySupported && (
+            <SettingsPermissionRow
+              icon={<Keyboard className="size-5" />}
+              title="Accessibility"
+              requirement="recommended"
+              granted={accessibilityGranted}
+              statusText={
+                accessibilityGranted
+                  ? 'Granted. Window focus and on-screen text are available.'
+                  : 'Not granted. Capture falls back to OCR-only text and reduced window metadata.'
+              }
+              busy={requesting === 'accessibility'}
+              onRequest={() => void request('accessibility')}
+              onOpenSettings={() =>
+                void window.cofounderos.openPermissionSettings('accessibility')
+              }
+            />
+          )}
+          {micSupported && (
+            <SettingsPermissionRow
+              icon={<Mic className="size-5" />}
+              title="Microphone"
+              requirement="optional"
+              granted={micGranted}
+              statusText={
+                micGranted
+                  ? 'Granted. Live audio capture can record while another app uses the mic.'
+                  : micStatus === 'denied'
+                    ? 'Denied. Live audio capture is disabled.'
+                    : micStatus === 'restricted'
+                      ? 'Restricted by a profile. Live audio capture is disabled.'
+                      : 'Not requested yet. CofounderOS will prompt when audio capture starts.'
+              }
+              busy={requesting === 'microphone'}
+              onRequest={() => void request('microphone')}
+              onOpenSettings={() =>
+                void window.cofounderos.openPermissionSettings('microphone')
+              }
+            />
+          )}
+        </div>
+      </SettingsSection>
+    </>
+  );
+}
+
+function SettingsPermissionRow({
+  icon,
+  title,
+  requirement,
+  granted,
+  needsRelaunch,
+  statusText,
+  busy,
+  onRequest,
+  onOpenSettings,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  requirement: 'required' | 'recommended' | 'optional';
+  granted: boolean;
+  needsRelaunch?: boolean;
+  statusText: string;
+  busy: boolean;
+  onRequest: () => void;
+  onOpenSettings: () => void;
+}) {
+  const requirementBadge =
+    requirement === 'required' ? (
+      <Badge>Required</Badge>
+    ) : requirement === 'recommended' ? (
+      <Badge variant="muted">Recommended</Badge>
+    ) : (
+      <Badge variant="outline">Optional</Badge>
+    );
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-start gap-4 rounded-lg border bg-card p-4',
+        granted ? 'border-success/30 bg-success/5' : undefined,
+      )}
+    >
+      <div
+        className={cn(
+          'size-10 shrink-0 grid place-items-center rounded-md',
+          granted ? 'bg-success/15 text-success' : 'bg-primary/10 text-primary',
+        )}
+      >
+        {granted ? <Check className="size-4" /> : icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h4 className="text-sm font-medium">{title}</h4>
+          {requirementBadge}
+          {granted && (
+            <Badge variant="outline" className="border-success/40 text-success">
+              <CheckCircle2 />
+              Granted
+            </Badge>
+          )}
+          {needsRelaunch && (
+            <Badge variant="outline" className="border-warning/40 text-warning">
+              <RefreshCw />
+              Restart needed
+            </Badge>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{statusText}</p>
+      </div>
+      <div className="flex items-center gap-2">
+        {!granted && (
+          <Button size="sm" onClick={onRequest} disabled={busy}>
+            {busy ? <Loader2 className="animate-spin" /> : null}
+            Grant access
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={onOpenSettings}>
+          <ExternalLink />
+          System Settings
+        </Button>
+      </div>
+    </div>
   );
 }
 

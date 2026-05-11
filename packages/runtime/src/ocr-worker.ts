@@ -153,6 +153,23 @@ export class OcrWorker {
   private terminating = false;
   private startupLogged = false;
   private axSkipCount = 0;
+  /**
+   * Wall-clock of the last actual Tesseract `recognize()` call. We use
+   * this to free the worker after a period of OCR-free ticks — on a
+   * desk where the user is mostly in apps with rich Accessibility text
+   * (Slack/Cursor/browser), Tesseract gets called rarely yet the worker
+   * sits in memory holding ~50-100 MB plus its trained data file.
+   */
+  private lastTesseractUseAt: number | null = null;
+  /**
+   * Idle window before a loaded Tesseract worker is freed. 10 min is
+   * comfortably longer than the scheduler's tick cadence (30 s) so we
+   * don't thrash on slightly bursty workloads, but short enough that
+   * the desktop's footprint shrinks when the user moves to a screen
+   * cocktail of OCR-skippable apps for a while. Reload on next real
+   * use takes ~1 s + lazy import.
+   */
+  private readonly tesseractIdleEvictMs = 10 * 60_000;
 
   constructor(
     private readonly storage: IStorage,
@@ -181,6 +198,9 @@ export class OcrWorker {
     if (!this.enabled || this.terminating) {
       return { processed: 0, failed: 0, remaining: 0 };
     }
+    // Free the Tesseract worker after a sustained idle period. Cheap —
+    // a property check + maybe a `terminate()` once every ~10 min.
+    await this.maybeEvictIdleTesseractWorker();
     const tasks = await this.storage.listFramesNeedingOcr(this.batchSize);
     if (tasks.length === 0) {
       return { processed: 0, failed: 0, remaining: 0 };
@@ -309,6 +329,7 @@ export class OcrWorker {
           continue;
         }
         const result = await worker.recognize(input);
+        this.lastTesseractUseAt = Date.now();
         const raw = (result.data.text ?? '').trim();
         const cleaned = redactPii(raw, this.sensitiveKeywords);
         const merged = mergeVisualText(cleaned, existingText);
@@ -371,6 +392,33 @@ export class OcrWorker {
       }
     }
     this.workerPromise = null;
+  }
+
+  /**
+   * Free the Tesseract worker if it hasn't been used to actually
+   * recognize a frame in `tesseractIdleEvictMs` ms. AX-text-skip
+   * and phash-skip paths don't bump `lastTesseractUseAt`, so a long
+   * stretch in OCR-friendly apps lets the worker get evicted.
+   *
+   * Cheap — when the worker is unloaded, this is just a property
+   * check; when it's loaded but in-use, the timestamp was just bumped.
+   */
+  private async maybeEvictIdleTesseractWorker(): Promise<void> {
+    if (!this.workerPromise) return;
+    if (this.lastTesseractUseAt == null) return;
+    if (Date.now() - this.lastTesseractUseAt < this.tesseractIdleEvictMs) return;
+    const promise = this.workerPromise;
+    this.workerPromise = null;
+    this.lastTesseractUseAt = null;
+    try {
+      const w = await promise;
+      if (w) await w.terminate();
+      this.logger.info(
+        `OCR worker evicted (idle for >${Math.round(this.tesseractIdleEvictMs / 60_000)}m)`,
+      );
+    } catch (err) {
+      this.logger.debug('idle OCR worker eviction failed', { err: String(err) });
+    }
   }
 
   private async getWorker(): Promise<TesseractWorker | null> {

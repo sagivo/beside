@@ -45,6 +45,14 @@ declare global {
       probeFfprobe: () => Promise<{ available: boolean; path?: string }>;
       probeMicPermission: () => Promise<MicPermission>;
       requestMicPermission: () => Promise<MicPermission>;
+      probeScreenPermission: () => Promise<ScreenPermission>;
+      requestScreenPermission: () => Promise<ScreenPermissionRequestResult>;
+      probeAccessibilityPermission: () => Promise<AccessibilityPermission>;
+      requestAccessibilityPermission: () => Promise<AccessibilityPermissionRequestResult>;
+      openPermissionSettings: (
+        kind: 'screen' | 'accessibility' | 'microphone' | 'automation',
+      ) => Promise<{ opened: boolean }>;
+      relaunchApp: () => Promise<{ relaunching: true }>;
       onDesktopLogs?: (callback: (logs: string) => void) => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
       onWhisperInstallProgress?: (
@@ -240,6 +248,34 @@ export type WhisperInstallProgress =
  */
 export type MicPermission = {
   status: 'granted' | 'denied' | 'not-determined' | 'restricted' | 'unsupported';
+};
+
+/**
+ * Screen Recording permission probe. macOS only — Windows / Linux
+ * report `unsupported`. `needsRelaunch` is true when the OS shows the
+ * permission as granted but the running process has not yet picked it
+ * up (TCC enforces that the grant only takes effect after the next
+ * launch). The renderer surfaces a one-click relaunch in that case.
+ */
+export type ScreenPermission = {
+  status: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unsupported';
+  needsRelaunch: boolean;
+};
+
+export type ScreenPermissionRequestResult = ScreenPermission & {
+  openedSettings: boolean;
+};
+
+/**
+ * Accessibility permission gates window-focus metadata + AX text
+ * extraction in the Node capture plugin. macOS only.
+ */
+export type AccessibilityPermission = {
+  status: 'granted' | 'denied' | 'unsupported';
+};
+
+export type AccessibilityPermissionRequestResult = AccessibilityPermission & {
+  openedSettings: boolean;
 };
 
 export interface DoctorCheck {

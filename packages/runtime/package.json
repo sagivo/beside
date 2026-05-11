@@ -9,7 +9,7 @@
     "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/smoke-meetings.mjs"
+    "test": "node scripts/smoke-meetings.mjs && pnpm run build && node scripts/smoke-journal-story.mjs"
   },
   "dependencies": {
     "@cofounderos/core": "workspace:*",

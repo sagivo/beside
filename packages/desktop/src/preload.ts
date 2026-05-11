@@ -36,6 +36,15 @@ const api = {
   probeFfprobe: () => ipcRenderer.invoke('cofounderos:probe-ffprobe'),
   probeMicPermission: () => ipcRenderer.invoke('cofounderos:probe-mic-permission'),
   requestMicPermission: () => ipcRenderer.invoke('cofounderos:request-mic-permission'),
+  probeScreenPermission: () => ipcRenderer.invoke('cofounderos:probe-screen-permission'),
+  requestScreenPermission: () => ipcRenderer.invoke('cofounderos:request-screen-permission'),
+  probeAccessibilityPermission: () =>
+    ipcRenderer.invoke('cofounderos:probe-accessibility-permission'),
+  requestAccessibilityPermission: () =>
+    ipcRenderer.invoke('cofounderos:request-accessibility-permission'),
+  openPermissionSettings: (kind: 'screen' | 'accessibility' | 'microphone' | 'automation') =>
+    ipcRenderer.invoke('cofounderos:open-permission-settings', kind),
+  relaunchApp: () => ipcRenderer.invoke('cofounderos:relaunch-app'),
   onDesktopLogs: (callback: (logs: string) => void) => {
     ipcRenderer.on('cofounderos:desktop-logs', (_event, logs: string) => callback(logs));
   },

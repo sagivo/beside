@@ -7,7 +7,12 @@ import { Toaster, toast } from '@/components/ui/sonner';
 import { chatStore } from '@/lib/chat-store';
 import { SidebarStateProvider } from '@/lib/sidebar-state';
 import { ThemeProvider } from '@/lib/theme';
-import { ONBOARDING_KEY, type Screen } from '@/types';
+import {
+  ONBOARDING_KEY,
+  ONBOARDING_MODEL_KEY,
+  ONBOARDING_STEP_KEY,
+  type Screen,
+} from '@/types';
 
 const Connect = React.lazy(() =>
   import('@/screens/Connect').then((mod) => ({ default: mod.Connect })),
@@ -330,6 +335,8 @@ function AppInner() {
           onComplete={() => {
             try {
               localStorage.setItem(ONBOARDING_KEY, '1');
+              localStorage.removeItem(ONBOARDING_STEP_KEY);
+              localStorage.removeItem(ONBOARDING_MODEL_KEY);
             } catch {
               /* ignore */
             }
@@ -396,6 +403,8 @@ function AppInner() {
       onRestartOnboarding={() => {
         try {
           localStorage.removeItem(ONBOARDING_KEY);
+          localStorage.removeItem(ONBOARDING_STEP_KEY);
+          localStorage.removeItem(ONBOARDING_MODEL_KEY);
         } catch {
           /* ignore */
         }

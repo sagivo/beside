@@ -4,16 +4,21 @@ import {
   ArrowRight,
   Brain,
   Check,
+  CheckCircle2,
   Cpu,
   Eye,
+  ExternalLink,
+  Keyboard,
   Layers,
   Loader2,
   Lock,
   Mic,
+  Monitor,
   RefreshCw,
   Rocket,
   Search,
   Shield,
+  ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react';
@@ -22,7 +27,6 @@ import { Badge } from '@/components/ui/badge';
 import { BrandMark } from '@/components/BrandMark';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
@@ -35,10 +39,13 @@ import {
 import { formatBytes } from '@/lib/format';
 import { MODEL_CHOICES } from '@/lib/model-catalog';
 import { cn } from '@/lib/utils';
+import { ONBOARDING_MODEL_KEY, ONBOARDING_STEP_KEY } from '@/types';
 import type {
+  AccessibilityPermission,
   MicPermission,
   ModelBootstrapProgress,
   RuntimeOverview,
+  ScreenPermission,
   WhisperInstaller,
   WhisperProbe,
 } from '@/global';
@@ -47,6 +54,7 @@ type OnboardingStep =
   | 'welcome'
   | 'how-it-works'
   | 'privacy'
+  | 'permissions'
   | 'choose-model'
   | 'install-model'
   | 'audio'
@@ -56,6 +64,7 @@ const STEPS: OnboardingStep[] = [
   'welcome',
   'how-it-works',
   'privacy',
+  'permissions',
   'choose-model',
   'install-model',
   'audio',
@@ -66,14 +75,18 @@ const STEP_LABELS: Record<OnboardingStep, string> = {
   welcome: 'Welcome',
   'how-it-works': 'How it works',
   privacy: 'Privacy',
+  permissions: 'Permissions',
   'choose-model': 'Local AI',
   'install-model': 'Install',
   audio: 'Audio',
   done: 'Done',
 };
 
-// Model catalog is shared with Settings → AI; edit it in
-// `lib/model-catalog.ts`.
+// Steps the user must finish before we let them into the app. Skipping
+// the audio step is fine, but capture without screen recording or
+// summaries without a local model are non-functional, so we hard-gate
+// the "Open CofounderOS" / "Skip setup" buttons on these.
+type RequiredGate = 'screen' | 'model';
 
 export function Onboarding({
   bootstrapEvents,
@@ -84,10 +97,54 @@ export function Onboarding({
   onClearBootstrapEvents: () => void;
   onComplete: () => void;
 }) {
-  const [step, setStep] = React.useState<OnboardingStep>('welcome');
-  const [chosenModel, setChosenModel] = React.useState<string>(MODEL_CHOICES[0]!.id);
+  const [step, setStep] = React.useState<OnboardingStep>(() => {
+    // Persist the current step across relaunches so the post-Screen-
+    // Recording-grant restart drops the user back into context instead
+    // of forcing them through Welcome → How it works again.
+    try {
+      const saved = localStorage.getItem(ONBOARDING_STEP_KEY);
+      if (saved && (STEPS as string[]).includes(saved)) return saved as OnboardingStep;
+    } catch {
+      /* ignore */
+    }
+    return 'welcome';
+  });
+  const [chosenModel, setChosenModel] = React.useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(ONBOARDING_MODEL_KEY);
+      if (saved && MODEL_CHOICES.some((m) => m.id === saved)) return saved;
+    } catch {
+      /* ignore */
+    }
+    return MODEL_CHOICES[0]!.id;
+  });
   const [overview, setOverview] = React.useState<RuntimeOverview | null>(null);
+  const [screen, setScreen] = React.useState<ScreenPermission | null>(null);
+  const [accessibility, setAccessibility] = React.useState<AccessibilityPermission | null>(null);
 
+  // Persist whichever step we're on so a relaunch can resume it.
+  React.useEffect(() => {
+    try {
+      if (step === 'done') {
+        localStorage.removeItem(ONBOARDING_STEP_KEY);
+      } else {
+        localStorage.setItem(ONBOARDING_STEP_KEY, step);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [step]);
+
+  React.useEffect(() => {
+    try {
+      localStorage.setItem(ONBOARDING_MODEL_KEY, chosenModel);
+    } catch {
+      /* ignore */
+    }
+  }, [chosenModel]);
+
+  // Initial overview probe + pause capture so onboarding doesn't burn CPU on
+  // a half-configured runtime while the user is still granting permissions.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -111,10 +168,6 @@ export function Onboarding({
     };
   }, []);
 
-  // Subscribe to live overview push (heartbeat plus after every mutation).
-  // Falls back to a sparse manual poll only if the push channel
-  // isn't available — important because onboarding decides when to advance
-  // based on capture state changing.
   React.useEffect(() => {
     if (window.cofounderos?.onOverview) {
       window.cofounderos.onOverview((next) => setOverview(next));
@@ -131,9 +184,37 @@ export function Onboarding({
     return () => window.clearInterval(timer);
   }, []);
 
+  // Always know the current permission state so we can decide whether
+  // to gate the "Continue" buttons / show the relaunch banner — even
+  // when the user is on a step that doesn't render the cards.
+  const refreshPermissions = React.useCallback(async () => {
+    try {
+      const [s, a] = await Promise.all([
+        window.cofounderos.probeScreenPermission(),
+        window.cofounderos.probeAccessibilityPermission(),
+      ]);
+      setScreen(s);
+      setAccessibility(a);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refreshPermissions();
+  }, [refreshPermissions]);
+
   const stepIndex = STEPS.indexOf(step);
   const progressPct = Math.round(((stepIndex + 1) / STEPS.length) * 100);
   const modelReady = overview?.model.ready ?? false;
+  const screenOk = screen ? screen.status === 'granted' || screen.status === 'unsupported' : false;
+  const screenNeedsRelaunch = screen?.needsRelaunch === true;
+
+  const gateMet: Record<RequiredGate, boolean> = {
+    screen: screenOk && !screenNeedsRelaunch,
+    model: modelReady,
+  };
+  const allGatesMet = gateMet.screen && gateMet.model;
 
   const scrollRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
@@ -150,6 +231,9 @@ export function Onboarding({
   function goToInstall() {
     go('install-model');
   }
+  function goToPermissions() {
+    go('permissions');
+  }
   function goBack() {
     const idx = STEPS.indexOf(step);
     if (idx > 0) go(STEPS[idx - 1]!);
@@ -159,8 +243,6 @@ export function Onboarding({
     let final: RuntimeOverview | null | undefined = null;
     try {
       final = await window.cofounderos?.getOverview();
-      // Onboarding no longer makes the user click "Start capturing" — ensure
-      // the runtime is up and capture is live before we hand off the app.
       if (!final?.capture.running) {
         try {
           await window.cofounderos.startRuntime();
@@ -177,12 +259,19 @@ export function Onboarding({
     } catch {
       /* ignore */
     }
-    if (!(final?.model.ready ?? modelReady)) {
-      go('install-model');
-      return;
-    }
+    // Defensive: if the user somehow lands on Done without all gates,
+    // route them back to the most upstream step that still needs work
+    // rather than handing off a broken app.
+    if (!gateMet.screen) return goToPermissions();
+    if (!(final?.model.ready ?? modelReady)) return goToInstall();
     onComplete();
   }
+
+  const skipDisabledReason = !gateMet.screen
+    ? 'Grant Screen Recording first — CofounderOS captures the screen.'
+    : !gateMet.model
+      ? 'Install the local AI first — CofounderOS needs it to organise memory.'
+      : '';
 
   return (
     <div className="flex h-screen flex-col bg-background bg-[radial-gradient(circle_at_top,_rgba(96,165,250,0.16),_transparent_32rem)]">
@@ -203,18 +292,20 @@ export function Onboarding({
             variant="ghost"
             size="sm"
             onClick={onComplete}
-            disabled={!modelReady}
-            title={
-              modelReady
-                ? 'Skip the rest of setup'
-                : 'Install the local AI model first — CofounderOS needs it to run.'
-            }
+            disabled={!allGatesMet}
+            title={allGatesMet ? 'Skip the rest of setup' : skipDisabledReason}
             className="app-no-drag"
           >
             Skip setup
           </Button>
         )}
       </header>
+
+      {screenNeedsRelaunch && step !== 'done' && (
+        <RelaunchBanner
+          onRelaunch={() => void window.cofounderos.relaunchApp()}
+        />
+      )}
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div
@@ -224,8 +315,21 @@ export function Onboarding({
           )}
         >
           {step === 'welcome' && <WelcomeStep onContinue={goNext} />}
-          {step === 'how-it-works' && <HowItWorksStep onContinue={goNext} onBack={goBack} />}
-          {step === 'privacy' && <PrivacyStep onContinue={goNext} onBack={goBack} />}
+          {step === 'how-it-works' && (
+            <HowItWorksStep onContinue={goNext} onBack={goBack} />
+          )}
+          {step === 'privacy' && (
+            <PrivacyStep onContinue={goNext} onBack={goBack} />
+          )}
+          {step === 'permissions' && (
+            <PermissionsStep
+              screen={screen}
+              accessibility={accessibility}
+              onRefresh={refreshPermissions}
+              onContinue={goNext}
+              onBack={goBack}
+            />
+          )}
           {step === 'choose-model' && (
             <ChooseModelStep
               chosenModel={chosenModel}
@@ -247,9 +351,10 @@ export function Onboarding({
           {step === 'audio' && <AudioStep onContinue={goNext} onBack={goBack} />}
           {step === 'done' && (
             <DoneStep
-              modelReady={modelReady}
+              gateMet={gateMet}
               onFinish={finish}
               onInstallModel={goToInstall}
+              onGoToPermissions={goToPermissions}
             />
           )}
         </div>
@@ -265,6 +370,7 @@ function StepCard({
   children,
   back,
   next,
+  footerHint,
 }: {
   eyebrow?: string;
   title: string;
@@ -276,7 +382,9 @@ function StepCard({
     onClick: () => void;
     disabled?: boolean;
     variant?: 'default' | 'outline';
+    title?: string;
   };
+  footerHint?: React.ReactNode;
 }) {
   return (
     <Card className="overflow-hidden py-0">
@@ -317,17 +425,21 @@ function StepCard({
                 <span />
               )}
             </div>
-            {next ? (
-              <Button
-                size="lg"
-                variant={next.variant ?? 'default'}
-                onClick={next.onClick}
-                disabled={next.disabled}
-              >
-                {next.label}
-                <ArrowRight />
-              </Button>
-            ) : null}
+            <div className="flex items-center gap-3">
+              {footerHint}
+              {next ? (
+                <Button
+                  size="lg"
+                  variant={next.variant ?? 'default'}
+                  onClick={next.onClick}
+                  disabled={next.disabled}
+                  title={next.title}
+                >
+                  {next.label}
+                  <ArrowRight />
+                </Button>
+              ) : null}
+            </div>
           </div>
         )}
       </CardContent>
@@ -452,7 +564,7 @@ function WelcomeStep({ onContinue }: { onContinue: () => void }) {
               <ArrowRight />
             </Button>
             <p className="text-xs text-muted-foreground">
-              Takes about 2 minutes. Runs entirely on your computer.
+              Takes about 5 minutes including the local AI download. Runs entirely on your computer.
             </p>
           </div>
         </div>
@@ -565,6 +677,376 @@ function PrivacyStep({
   );
 }
 
+// -- Permissions step --------------------------------------------------------
+
+type PermissionPhase = 'idle' | 'requesting' | 'waiting' | 'granted' | 'needs-relaunch';
+
+function PermissionsStep({
+  screen,
+  accessibility,
+  onRefresh,
+  onContinue,
+  onBack,
+}: {
+  screen: ScreenPermission | null;
+  accessibility: AccessibilityPermission | null;
+  onRefresh: () => Promise<void>;
+  onContinue: () => void;
+  onBack: () => void;
+}) {
+  const [requesting, setRequesting] = React.useState<'screen' | 'accessibility' | null>(null);
+
+  // While the user is in System Settings flipping toggles, poll the
+  // permission state every second so the UI flips to "Granted" the
+  // moment the toggle turns on. Cheap (a single IPC call) and well
+  // within the cost budget for this short-lived screen.
+  React.useEffect(() => {
+    const timer = window.setInterval(() => {
+      void onRefresh();
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [onRefresh]);
+
+  // Re-probe the second the desktop window regains focus — covers the
+  // common path of the user switching back from System Settings.
+  React.useEffect(() => {
+    const handler = () => void onRefresh();
+    window.addEventListener('focus', handler);
+    return () => window.removeEventListener('focus', handler);
+  }, [onRefresh]);
+
+  async function requestScreen() {
+    setRequesting('screen');
+    try {
+      await window.cofounderos.requestScreenPermission();
+    } finally {
+      setRequesting(null);
+      void onRefresh();
+    }
+  }
+
+  async function requestAccessibility() {
+    setRequesting('accessibility');
+    try {
+      await window.cofounderos.requestAccessibilityPermission();
+    } finally {
+      setRequesting(null);
+      void onRefresh();
+    }
+  }
+
+  async function openScreenSettings() {
+    await window.cofounderos.openPermissionSettings('screen');
+    void onRefresh();
+  }
+  async function openAccessibilitySettings() {
+    await window.cofounderos.openPermissionSettings('accessibility');
+    void onRefresh();
+  }
+
+  const screenPhase: PermissionPhase = (() => {
+    if (!screen) return 'idle';
+    if (screen.needsRelaunch) return 'needs-relaunch';
+    if (screen.status === 'granted' || screen.status === 'unsupported') return 'granted';
+    if (requesting === 'screen') return 'requesting';
+    return screen.status === 'not-determined' ? 'idle' : 'waiting';
+  })();
+
+  const accessibilityPhase: PermissionPhase = (() => {
+    if (!accessibility) return 'idle';
+    if (accessibility.status === 'granted' || accessibility.status === 'unsupported') {
+      return 'granted';
+    }
+    if (requesting === 'accessibility') return 'requesting';
+    return 'waiting';
+  })();
+
+  const screenSupported = screen ? screen.status !== 'unsupported' : true;
+  const accessibilitySupported = accessibility ? accessibility.status !== 'unsupported' : true;
+  const screenOk = screenPhase === 'granted';
+
+  return (
+    <StepCard
+      eyebrow="One-time setup"
+      title="Give CofounderOS what it needs"
+      lede="Screen Recording lets CofounderOS take the small screenshots that become your searchable memory. Accessibility makes it know which app and window you're using. Everything stays on this device."
+      back={{ onClick: onBack }}
+      next={{
+        label: screenOk ? 'Continue' : 'Continue',
+        onClick: onContinue,
+        disabled: !screenOk,
+        title: screenOk
+          ? undefined
+          : 'Grant Screen Recording first — without it, CofounderOS cannot capture anything.',
+      }}
+      footerHint={
+        !screenOk ? (
+          <span className="text-xs text-muted-foreground">
+            Screen Recording is required.
+          </span>
+        ) : null
+      }
+    >
+      {screenSupported ? (
+        <PermissionCard
+          icon={<Monitor className="size-5" />}
+          title="Screen Recording"
+          requirement="required"
+          phase={screenPhase}
+          description="Required so CofounderOS can take the small screenshots that build your private memory."
+          stateMessages={{
+            idle: 'Click Grant access to show the macOS prompt and toggle CofounderOS on.',
+            requesting: 'Opening System Settings…',
+            waiting:
+              'Waiting for permission. Toggle CofounderOS on in System Settings, then come back.',
+            'needs-relaunch':
+              'Permission granted. Restart CofounderOS so it can start capturing.',
+            granted: 'Granted. CofounderOS can record screenshots when you start capture.',
+          }}
+          onPrimary={() => void requestScreen()}
+          onSecondary={() => void openScreenSettings()}
+          primaryLabel={
+            screenPhase === 'idle'
+              ? 'Grant access'
+              : screenPhase === 'waiting'
+                ? 'Re-check'
+                : screenPhase === 'requesting'
+                  ? 'Opening…'
+                  : screenPhase === 'needs-relaunch'
+                    ? 'Restart CofounderOS'
+                    : 'Granted'
+          }
+          primaryAction={
+            screenPhase === 'needs-relaunch'
+              ? 'relaunch'
+              : screenPhase === 'granted'
+                ? 'none'
+                : 'request'
+          }
+          onRelaunch={() => void window.cofounderos.relaunchApp()}
+          showSecondary={screenPhase === 'waiting' || screenPhase === 'idle'}
+          secondaryLabel="Open System Settings"
+          settingsHint="System Settings → Privacy & Security → Screen Recording"
+        />
+      ) : null}
+
+      {accessibilitySupported ? (
+        <PermissionCard
+          icon={<Keyboard className="size-5" />}
+          title="Accessibility"
+          requirement="recommended"
+          phase={accessibilityPhase}
+          description="Lets CofounderOS know the active window and read on-screen text without OCR. Strongly recommended for higher-quality memory."
+          stateMessages={{
+            idle: 'Click Grant access to allow window-focus and accessibility text.',
+            requesting: 'Opening System Settings…',
+            waiting:
+              'Waiting for permission. Toggle CofounderOS on in System Settings, then come back.',
+            'needs-relaunch':
+              'Permission granted. (Accessibility takes effect immediately.)',
+            granted: 'Granted. Window focus and on-screen text are available.',
+          }}
+          onPrimary={() => void requestAccessibility()}
+          onSecondary={() => void openAccessibilitySettings()}
+          primaryLabel={
+            accessibilityPhase === 'idle'
+              ? 'Grant access'
+              : accessibilityPhase === 'waiting'
+                ? 'Re-check'
+                : accessibilityPhase === 'requesting'
+                  ? 'Opening…'
+                  : 'Granted'
+          }
+          primaryAction={accessibilityPhase === 'granted' ? 'none' : 'request'}
+          onRelaunch={() => void window.cofounderos.relaunchApp()}
+          showSecondary={accessibilityPhase === 'waiting' || accessibilityPhase === 'idle'}
+          secondaryLabel="Open System Settings"
+          settingsHint="System Settings → Privacy & Security → Accessibility"
+        />
+      ) : null}
+
+      {!screenSupported && !accessibilitySupported && (
+        <Alert>
+          <ShieldCheck />
+          <AlertTitle>No extra permissions needed on this OS</AlertTitle>
+          <AlertDescription>
+            Your platform doesn't gate desktop capture behind a per-app permission. CofounderOS
+            will use the standard OS APIs to capture frames once you finish setup.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {screenPhase === 'waiting' && (
+        <Alert>
+          <Monitor />
+          <AlertTitle>Tip: switch to System Settings</AlertTitle>
+          <AlertDescription>
+            macOS sometimes hides the prompt behind another window. Open
+            <em> System Settings → Privacy &amp; Security → Screen Recording</em> and toggle
+            CofounderOS on. This screen updates automatically the moment you do.
+          </AlertDescription>
+        </Alert>
+      )}
+    </StepCard>
+  );
+}
+
+function PermissionCard({
+  icon,
+  title,
+  requirement,
+  description,
+  phase,
+  stateMessages,
+  onPrimary,
+  onSecondary,
+  onRelaunch,
+  primaryLabel,
+  primaryAction,
+  secondaryLabel,
+  showSecondary,
+  settingsHint,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  requirement: 'required' | 'recommended';
+  description: string;
+  phase: PermissionPhase;
+  stateMessages: Record<PermissionPhase, string>;
+  onPrimary: () => void;
+  onSecondary: () => void;
+  onRelaunch: () => void;
+  primaryLabel: string;
+  primaryAction: 'request' | 'relaunch' | 'none';
+  secondaryLabel: string;
+  showSecondary: boolean;
+  settingsHint: string;
+}) {
+  const granted = phase === 'granted';
+  const needsRelaunch = phase === 'needs-relaunch';
+  return (
+    <div
+      className={cn(
+        'rounded-xl border bg-card p-5 shadow-sm transition-colors',
+        granted
+          ? 'border-success/40 bg-success/5'
+          : needsRelaunch
+            ? 'border-warning/40 bg-warning/5'
+            : requirement === 'required'
+              ? 'border-primary/30'
+              : 'border-border',
+      )}
+    >
+      <div className="flex flex-wrap items-start gap-4">
+        <div
+          className={cn(
+            'size-12 shrink-0 grid place-items-center rounded-lg',
+            granted
+              ? 'bg-success/15 text-success'
+              : needsRelaunch
+                ? 'bg-warning/15 text-warning'
+                : 'bg-primary/10 text-primary',
+          )}
+        >
+          {granted ? <Check className="size-5" /> : icon}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-medium text-base">{title}</h3>
+            <Badge variant={requirement === 'required' ? 'default' : 'muted'}>
+              {requirement === 'required' ? 'Required' : 'Recommended'}
+            </Badge>
+            {granted && (
+              <Badge variant="outline" className="border-success/40 text-success">
+                <CheckCircle2 />
+                Granted
+              </Badge>
+            )}
+            {needsRelaunch && (
+              <Badge variant="outline" className="border-warning/40 text-warning">
+                <RefreshCw />
+                Restart needed
+              </Badge>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground mt-1.5 leading-relaxed">{description}</p>
+          <p
+            className={cn(
+              'text-xs mt-3 flex items-start gap-1.5 leading-relaxed',
+              granted
+                ? 'text-success'
+                : needsRelaunch
+                  ? 'text-warning'
+                  : 'text-muted-foreground',
+            )}
+          >
+            {phase === 'requesting' || phase === 'waiting' ? (
+              <Loader2 className="mt-0.5 size-3 shrink-0 animate-spin" />
+            ) : null}
+            <span>{stateMessages[phase]}</span>
+          </p>
+          {!granted && !needsRelaunch && (
+            <p className="text-[11px] text-muted-foreground mt-2 flex items-center gap-1.5">
+              <ExternalLink className="size-3" />
+              {settingsHint}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 sm:items-end">
+          {primaryAction === 'relaunch' ? (
+            <Button onClick={onRelaunch}>
+              <RefreshCw />
+              {primaryLabel}
+            </Button>
+          ) : primaryAction === 'request' ? (
+            <Button
+              variant={requirement === 'required' ? 'default' : 'outline'}
+              onClick={onPrimary}
+              disabled={phase === 'requesting'}
+            >
+              {phase === 'requesting' ? <Loader2 className="animate-spin" /> : null}
+              {primaryLabel}
+            </Button>
+          ) : (
+            <Button variant="ghost" disabled>
+              <Check />
+              {primaryLabel}
+            </Button>
+          )}
+          {showSecondary && primaryAction !== 'relaunch' && (
+            <Button variant="ghost" size="sm" onClick={onSecondary}>
+              {secondaryLabel}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RelaunchBanner({ onRelaunch }: { onRelaunch: () => void }) {
+  return (
+    <div className="border-b border-warning/40 bg-warning/10 px-6 py-3">
+      <div className="mx-auto flex max-w-4xl items-center gap-4">
+        <RefreshCw className="size-4 shrink-0 text-warning" />
+        <div className="flex-1 text-sm">
+          <span className="font-medium text-warning">Screen Recording is now granted.</span>{' '}
+          <span className="text-muted-foreground">
+            macOS only honours the new grant after the next launch — restart CofounderOS to start
+            capturing.
+          </span>
+        </div>
+        <Button size="sm" onClick={onRelaunch}>
+          <RefreshCw />
+          Restart CofounderOS
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// -- Choose model + Install model -------------------------------------------
+
 function ChooseModelStep({
   chosenModel,
   onChoose,
@@ -580,7 +1062,7 @@ function ChooseModelStep({
     <StepCard
       eyebrow="Choose your local AI"
       title="Pick the private model that runs on this device"
-      lede="CofounderOS uses Ollama, an open-source tool, so search and summaries can be processed locally. The smaller the model, the faster it runs and the less disk it uses."
+      lede="CofounderOS uses Ollama to run the model fully on your hardware. Smaller models are faster and use less disk; the recommended default fits most laptops."
       back={{ onClick: onBack }}
       next={{ label: 'Continue', onClick: onContinue }}
     >
@@ -612,8 +1094,8 @@ function ChooseModelStep({
         ))}
       </RadioGroup>
       <p className="text-xs text-muted-foreground">
-        You can switch models later in Settings. If a download fails, CofounderOS falls back to a
-        simple local indexer so you can keep working.
+        You can switch models later in Settings → AI. The download happens once and is reused
+        every time CofounderOS starts.
       </p>
     </StepCard>
   );
@@ -648,7 +1130,7 @@ function InstallModelStep({
   }, []);
 
   React.useEffect(() => {
-    if (modelReady && phase === 'running') setPhase('done');
+    if (modelReady && phase !== 'done') setPhase('done');
   }, [modelReady, phase]);
 
   React.useEffect(() => {
@@ -721,8 +1203,8 @@ function InstallModelStep({
     phase === 'done'
       ? 'Everything is installed and running locally. Time to capture your first private moment.'
       : phase === 'error'
-        ? "We couldn't finish the install. You can retry, or continue with the simple local indexer for now."
-        : 'This is a one-time download for private processing on this device. Your memory stays local and encrypted while the model installs.';
+        ? "We couldn't finish the install. Fix the issue below and try again — CofounderOS needs the local model to organise your memory."
+        : 'This is a one-time download for private processing on this device. Your memory stays local and encrypted while the model installs. You can keep using your computer in the background.';
 
   return (
     <Card className="overflow-hidden py-0">
@@ -753,7 +1235,14 @@ function InstallModelStep({
             <Alert variant="destructive">
               <X />
               <AlertTitle>Install failed</AlertTitle>
-              <AlertDescription>{errorMessage}</AlertDescription>
+              <AlertDescription>
+                {errorMessage}
+                <span className="mt-2 block text-xs opacity-90">
+                  Common causes: no network, a previous Ollama install needs Homebrew/winget
+                  privileges, or the model server is busy. Click <em>Try again</em> below — the
+                  installer is idempotent and will resume where it left off.
+                </span>
+              </AlertDescription>
             </Alert>
           )}
 
@@ -780,18 +1269,22 @@ function InstallModelStep({
             </Button>
             <div className="flex items-center gap-2">
               {phase === 'error' && (
-                <Button variant="outline" onClick={() => void runInstall()}>
+                <Button onClick={() => void runInstall()}>
+                  <RefreshCw />
                   Try again
                 </Button>
               )}
-              {phase === 'error' && (
-                <Button variant="ghost" onClick={onContinue}>
-                  Skip and continue
-                  <ArrowRight />
-                </Button>
-              )}
               {phase !== 'error' && (
-                <Button size="lg" onClick={onContinue} disabled={phase !== 'done'}>
+                <Button
+                  size="lg"
+                  onClick={onContinue}
+                  disabled={phase !== 'done'}
+                  title={
+                    phase !== 'done'
+                      ? 'Wait for the local model to finish installing.'
+                      : undefined
+                  }
+                >
                   {phase === 'done' ? 'Continue' : 'Working…'}
                   {phase === 'done' && <ArrowRight />}
                 </Button>
@@ -902,7 +1395,6 @@ function AudioStep({
       .catch(() => setInstaller(null));
   }, [refreshProbes]);
 
-  // Subscribe to live install progress streamed from the main process.
   React.useEffect(() => {
     if (!window.cofounderos.onWhisperInstallProgress) return;
     window.cofounderos.onWhisperInstallProgress((event) => {
@@ -939,8 +1431,6 @@ function AudioStep({
       await window.cofounderos.saveConfigPatch({
         capture: {
           capture_audio: turnOn,
-          // Ensure live recording flips with the master toggle while
-          // staying gated on another app using microphone input.
           audio: {
             live_recording: {
               enabled: turnOn,
@@ -951,8 +1441,6 @@ function AudioStep({
         },
       });
       setEnabled(turnOn);
-      // Once turned on, kick the installer automatically if Whisper isn't
-      // already there — saves the user from having to click again.
       if (
         turnOn &&
         whisper &&
@@ -1079,6 +1567,15 @@ function AudioStep({
                       ? "Restricted by a profile or parental control. We can't record."
                       : 'Will prompt the first time recording starts.'
               }
+              action={
+                mic.status === 'denied' || mic.status === 'restricted'
+                  ? {
+                      label: 'Open System Settings',
+                      onClick: () =>
+                        void window.cofounderos.openPermissionSettings('microphone'),
+                    }
+                  : undefined
+              }
             />
           )}
         </div>
@@ -1194,10 +1691,12 @@ function StatusRow({
   label,
   status,
   detail,
+  action,
 }: {
   label: string;
   status: 'ok' | 'missing' | 'pending' | 'installing';
   detail?: string;
+  action?: { label: string; onClick: () => void };
 }) {
   return (
     <div className="flex items-start gap-3 rounded-md border bg-card p-3">
@@ -1218,18 +1717,25 @@ function StatusRow({
           <div className="text-xs text-muted-foreground mt-0.5 break-words">{detail}</div>
         )}
       </div>
+      {action && (
+        <Button variant="outline" size="sm" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      )}
     </div>
   );
 }
 
 function DoneStep({
-  modelReady,
+  gateMet,
   onFinish,
   onInstallModel,
+  onGoToPermissions,
 }: {
-  modelReady: boolean;
+  gateMet: { screen: boolean; model: boolean };
   onFinish: () => void;
   onInstallModel: () => void;
+  onGoToPermissions: () => void;
 }) {
   const items = [
     {
@@ -1248,6 +1754,7 @@ function DoneStep({
       body: 'Exclude apps, change retention, switch models, or delete the encrypted memory.',
     },
   ];
+  const allReady = gateMet.screen && gateMet.model;
   return (
     <Card className="overflow-hidden py-0">
       <CardContent className="p-0">
@@ -1255,10 +1762,13 @@ function DoneStep({
           <div className="mx-auto size-16 rounded-2xl bg-primary/10 text-primary grid place-items-center">
             <Rocket className="size-9" />
           </div>
-          <h1 className="mt-5 text-3xl font-semibold tracking-tight">You're all set</h1>
+          <h1 className="mt-5 text-3xl font-semibold tracking-tight">
+            {allReady ? "You're all set" : 'Almost there'}
+          </h1>
           <p className="mx-auto mt-3 max-w-xl text-base text-muted-foreground leading-relaxed">
-            CofounderOS is now ready to remember quietly in the background, with a local encrypted
-            memory only you can see and control.
+            {allReady
+              ? 'CofounderOS is now ready to remember quietly in the background, with a local encrypted memory only you can see and control.'
+              : 'A couple of required pieces still need attention before CofounderOS can run.'}
           </p>
           <PrivacyPillRow className="mt-5 justify-center" />
         </div>
@@ -1273,20 +1783,34 @@ function DoneStep({
             You can pause capture from the menu bar and change privacy settings anytime. Your local
             memory remains encrypted and under your control.
           </PrivacyNote>
-          {!modelReady && (
+          {!gateMet.screen && (
             <Alert variant="warning">
-              <Shield />
+              <Monitor />
+              <AlertTitle>Screen Recording is required</AlertTitle>
+              <AlertDescription>
+                Without it, CofounderOS has nothing to remember. Grant access to continue.
+              </AlertDescription>
+            </Alert>
+          )}
+          {!gateMet.model && (
+            <Alert variant="warning">
+              <Cpu />
               <AlertTitle>Local AI not installed yet</AlertTitle>
               <AlertDescription>
-                CofounderOS needs the local model to organize and answer questions about your
+                CofounderOS needs the local model to organise and answer questions about your
                 memory. Finish installing it before opening the app.
               </AlertDescription>
             </Alert>
           )}
           <div className="flex justify-center border-t border-border pt-4">
-            {modelReady ? (
+            {allReady ? (
               <Button size="xl" onClick={onFinish}>
                 Open CofounderOS
+                <ArrowRight />
+              </Button>
+            ) : !gateMet.screen ? (
+              <Button size="xl" onClick={onGoToPermissions}>
+                Grant Screen Recording
                 <ArrowRight />
               </Button>
             ) : (

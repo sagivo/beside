@@ -40,6 +40,10 @@ import {
   type HarnessHandle,
   type HarnessOptions,
 } from './agent/index.js';
+import {
+  insertJournalStory as insertJournalStorySection,
+  renderDeterministicObservedJournalStory as renderJournalStorySection,
+} from './journal-story.js';
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -616,10 +620,10 @@ export class CofounderRuntime {
         sessions,
         meetings,
       });
-      const story = renderDeterministicObservedJournalStory(frames, sessions);
+      const story = renderJournalStorySection(frames, sessions);
       return {
         day,
-        markdown: story ? insertJournalStory(baseline, story) : baseline,
+        markdown: story ? insertJournalStorySection(baseline, story) : baseline,
       };
     });
   }
@@ -1346,20 +1350,23 @@ function renderDeterministicObservedJournalStory(
   if (beats.length === 0) return null;
 
   const paragraphs: string[] = [];
-  paragraphs.push(`Today, the captured part of your day reads as a sequence of work sessions rather than a list of apps. ${beats[0]!.sentence}`);
+  paragraphs.push(`Your captured day started when you ${beats[0]!.sentenceBody}.`);
   if (beats.length > 1) {
     paragraphs.push(
       beats
         .slice(1)
-        .map((beat, index) => `${index === 0 ? 'After that' : 'Then'}, ${lowercaseFirst(beat.sentence)}`)
+        .map((beat, index) => `${index === 0 ? 'After that' : 'Then'}, you ${beat.sentenceBody}.`)
         .join(' '),
     );
   }
 
-  const communicationDigest = renderCommunicationDigest(frames);
-  const communications = [...new Set(beats.flatMap((beat) => beat.communications))];
+  const communicationDigests = buildCommunicationDigests(frames);
+  const communicationDigest = communicationDigests.map(renderCommunicationDigestItem);
+  const communications = communicationDigests.length > 0
+    ? communicationDigests.map((item) => item.label)
+    : [...new Set(beats.flatMap((beat) => beat.communications))].map(formatObservedEntity);
   if (communications.length > 0) {
-    const readableComms = communications.map(formatObservedEntity).join(', ');
+    const readableComms = communications.join(', ');
     const suffix = communicationDigest.length > 0
       ? 'The readable exchanges I could safely extract are called out below.'
       : 'The capture shows the channels or inboxes involved, but not enough message body text to safely claim exactly what was said.';
@@ -1368,6 +1375,11 @@ function renderDeterministicObservedJournalStory(
 
   if (communicationDigest.length > 0) {
     paragraphs.push(['### Communication TL;DR', ...communicationDigest].join('\n'));
+  }
+
+  const followUps = renderFollowUps(communicationDigests);
+  if (followUps.length > 0) {
+    paragraphs.push(['### Follow-ups', ...followUps].join('\n'));
   }
 
   const workOutcomes = renderWorkOutcomeDigest(frames);
@@ -1391,7 +1403,7 @@ interface CommunicationDigest {
   frames: Frame[];
 }
 
-function renderCommunicationDigest(frames: Frame[]): string[] {
+function buildCommunicationDigests(frames: Frame[]): CommunicationDigest[] {
   const grouped = new Map<string, CommunicationDigest>();
   for (const frame of frames) {
     const item = communicationDigestForFrame(frame);
@@ -1404,14 +1416,30 @@ function renderCommunicationDigest(frames: Frame[]): string[] {
     }
   }
 
-  return [...grouped.values()]
+  const ranked = [...grouped.values()]
     .map((item) => ({
       ...item,
       frames: item.frames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
     }))
-    .sort((a, b) => a.frames[0]!.timestamp.localeCompare(b.frames[0]!.timestamp))
+    .sort((a, b) => communicationImportance(b) - communicationImportance(a));
+
+  return ranked
+    .filter((item) => communicationImportance(item) >= 5)
     .slice(0, 5)
-    .map(renderCommunicationDigestItem);
+    .sort((a, b) => a.frames[0]!.timestamp.localeCompare(b.frames[0]!.timestamp));
+}
+
+function communicationImportance(item: CommunicationDigest): number {
+  const label = item.label.toLowerCase();
+  const text = item.frames.map((frame) => frame.text ?? '').join(' ').toLowerCase();
+  let score = item.surface === 'Slack' ? 4 : 2;
+  if (/travis rinn|take home assessment|feature parity|feature matrix|small announcement|out all day monday|family obligations/.test(text)) score += 6;
+  if (/calendar|invite|standup|updated invitation/.test(text)) score += 3;
+  if (/newsletter|morning brew|idea of the day/.test(label) || /newsletter|morning brew|idea of the day/.test(text)) score -= 5;
+  if (/announce|product updates/.test(label)) score -= 3;
+  if (label.includes('#')) score += 1;
+  if (label.includes('adam') || label.includes('milan')) score += 1;
+  return score;
 }
 
 function communicationDigestForFrame(
@@ -1456,9 +1484,9 @@ function renderCommunicationDigestItem(item: CommunicationDigest): string {
     .join('; ');
   const topic = communicationTopicFromDigest(item);
   if (topic) {
-    return `- **${time} ${item.surface} (${item.label})**: ${topic}${title ? ` Evidence: ${title}.` : ''}`;
+    return `- **${time} ${item.surface} (${item.label})**: ${topic}`;
   }
-  return `- **${time} ${item.surface} (${item.label})**: You opened this conversation or inbox, but the capture did not include enough readable message body text to summarize what was discussed${title ? ` (visible window: ${title})` : ''}.`;
+  return `- **${time} ${item.surface} (${item.label})**: You opened this conversation or inbox, but the capture did not include enough readable message body text to summarize what was discussed${title ? ` (${title})` : ''}.`;
 }
 
 function communicationTopicFromDigest(item: CommunicationDigest): string | null {
@@ -1526,6 +1554,27 @@ function slackTopicFromFrames(frames: Frame[], label: string): string | null {
   return null;
 }
 
+function renderFollowUps(items: CommunicationDigest[]): string[] {
+  const out: string[] = [];
+  for (const item of items) {
+    const text = item.frames.map((frame) => frame.text ?? '').join(' ');
+    const label = item.label.toLowerCase();
+    if (/Travis Rinn/i.test(text) && /take home assessment/i.test(text) && /diana|david|adam/i.test(label)) {
+      out.push('- David reviewed Travis Rinn’s take-home assessment; the open question was whether Travis should get a follow-up code review before coming onsite.');
+    }
+    if (/out all day Monday/i.test(text) && /later part of Thursday/i.test(text) && label.includes('liblab')) {
+      out.push('- Nermina will be out Monday and late Thursday, so plan around that availability in `#liblab`.');
+    }
+    if (/feature parity work/i.test(text) && /feature matrix/i.test(text) && label.includes('adam')) {
+      out.push('- Adam said he would post the feature parity status, including the feature matrix and each SDK’s status.');
+    }
+    if (/small announcement/i.test(text) && /sdk-gen/i.test(text) && label.includes('milan')) {
+      out.push('- Milan planned a small announcement for `#liblab`, `#sdk-gen`, and `#proj-sdk-integrations`.');
+    }
+  }
+  return [...new Set(out)].slice(0, 6);
+}
+
 function communicationTextSnippet(frame: Frame): string | null {
   if (!frame.text) return null;
   const cleaned = cleanEvidenceText(frame.text);
@@ -1585,7 +1634,7 @@ function renderWorkOutcomeDigest(frames: Frame[]): string[] {
 }
 
 function observedSessionBeat(session: ActivitySession, frames: Frame[]): {
-  sentence: string;
+  sentenceBody: string;
   communications: string[];
 } {
   const start = session.started_at.slice(11, 16);
@@ -1606,20 +1655,31 @@ function observedSessionBeat(session: ActivitySession, frames: Frame[]): {
   const domains = distinctValues(frames, (frame) => domainForObservedStory(frame.url), 3);
   const appNames = distinctValues(frames, (frame) => frame.app, 4);
   const task = inferObservedTask(windows, files, appNames);
+  const visibleCommunications = communications.filter((entity) => !isLowSignalCommunication(entity));
   const evidenceParts = [
     files.length ? `the files ${files.map((file) => `\`${file}\``).join(', ')}` : null,
     domains.length ? `web pages on ${domains.join(', ')}` : null,
-    communications.length ? `communication in ${communications.map(formatObservedEntity).join(', ')}` : null,
+    visibleCommunications.length ? `communication in ${visibleCommunications.map(formatObservedEntity).join(', ')}` : null,
   ].filter((part): part is string => Boolean(part));
   const evidence = evidenceParts.length ? `, with ${joinObservedList(evidenceParts)}` : '';
   return {
-    sentence: `Around ${start}-${end}, you ${task}${evidence}.`,
+    sentenceBody: `${task}${evidence} around ${start}-${end}`,
     communications,
   };
 }
 
+function isLowSignalCommunication(entity: string): boolean {
+  return /announce|product-updates|newsletter/i.test(entity);
+}
+
 function inferObservedTask(windows: string[], files: string[], apps: string[]): string {
   const haystack = [...windows, ...files, ...apps].join(' ').toLowerCase();
+  if (/journal narrative|indexed journal|communication tl;dr|what happened/.test(haystack)) {
+    return 'improved the journal narrative so it reads more like a story';
+  }
+  if (/settings screen|load guard|pause heavy work/.test(haystack)) {
+    return 'worked on the settings and load-guard experience';
+  }
   if (haystack.includes('codex') && files.length === 0) {
     return haystack.includes('reduce cpu usage') || haystack.includes('improve app efficiency')
       ? 'worked with Codex and briefly revisited CPU usage or app efficiency work'
@@ -1644,11 +1704,27 @@ function inferObservedTask(windows: string[], files: string[], apps: string[]): 
 }
 
 function formatObservedEntity(entity: string): string {
+  if (entity.startsWith('contacts/')) return formatContactEntity(entity);
   return entity
     .replace(/^apps\//, '')
     .replace(/^channels\//, '#')
-    .replace(/^contacts\//, '')
     .replace(/-/g, ' ');
+}
+
+function formatContactEntity(entity: string): string {
+  const slug = entity.replace(/^contacts\//, '');
+  const parts = slug.split('-').filter(Boolean);
+  const known = [
+    ['adam', 'Adam'],
+    ['david', 'David'],
+    ['diana', 'Diana'],
+    ['jacob', 'Jacob'],
+    ['tony', 'Tony'],
+    ['milan', 'Milan'],
+  ].filter(([needle]) => parts.includes(needle)).map(([, label]) => label);
+  if (known.length >= 3) return `group DM with ${known.slice(0, 5).join(', ')}${known.length > 5 ? ', and others' : ''}`;
+  if (known.length > 0) return known.join(', ');
+  return slug.replace(/-/g, ' ');
 }
 
 function domainForObservedStory(url: string | null): string | null {

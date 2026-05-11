@@ -777,6 +777,17 @@ async function runFullReindexLocked(
     opts.to ? `to=${opts.to}` : null,
   ].filter(Boolean).join(', ');
   const t0 = Date.now();
+  // Self-measurement: capture process resource usage at start so we
+  // can report deltas at end. Helps the user see "this reindex cost
+  // 14m wall, 5m CPU, peak 480MB RSS, +X MB on disk". `cpuUsage()`
+  // returns microseconds; `memoryUsage().rss` is in bytes.
+  const cpu0 = process.cpuUsage();
+  let peakRssBytes = process.memoryUsage().rss;
+  const rssSampler = setInterval(() => {
+    const r = process.memoryUsage().rss;
+    if (r > peakRssBytes) peakRssBytes = r;
+  }, 2000);
+  rssSampler.unref?.();
   log.info(
     `full re-index starting (strategy=${strategy.name}${range ? `, ${range}` : ''})`,
   );
@@ -951,16 +962,41 @@ async function runFullReindexLocked(
 
     // Final WAL truncate + best-effort VACUUM. The page walk
     // accumulates writes again (markIndexed + applyUpdate); without
-    // these the WAL ends the run at 30+ MB and the DB file holds
-    // pages freed by the embeddings/sessions/meetings clears earlier.
-    // VACUUM rewrites the file once — typically reclaims 30–40% on
-    // a freshly-reindexed DB. Best-effort: if VACUUM fails (e.g. the
-    // disk is tight), the run is still successful.
+    // a TRUNCATE the WAL ends the run at 30+ MB and the DB file
+    // holds pages freed by the embeddings/sessions/meetings clears
+    // earlier. VACUUM rewrites the file once — typically reclaims
+    // 30–40% on a freshly-reindexed DB.
+    //
+    // Note the order: TRUNCATE → VACUUM → TRUNCATE. VACUUM itself
+    // rewrites the entire DB into the WAL before atomically swapping
+    // it back, so the WAL temporarily balloons during the run. A
+    // post-VACUUM checkpoint shrinks it back to ~0 bytes on disk.
+    // Skipping that second TRUNCATE leaves the WAL bigger than the
+    // DB itself when the run ends — exactly the failure we hit
+    // pre-fix in run #4 (122 MB WAL alongside a 121 MB DB).
+    //
+    // Best-effort: if VACUUM fails (e.g. the disk is tight), the
+    // run is still successful.
     await checkpointWalIfSupported(storage, 'TRUNCATE', log);
     await vacuumDbIfSupported(storage, log);
+    await checkpointWalIfSupported(storage, 'TRUNCATE', log);
 
     const totalSec = Math.round((Date.now() - t0) / 1000);
-    log.info(`full re-index complete — ${totalProcessed} events processed in ${totalSec}s`);
+    // Self-measurement summary. CPU% is "how saturated was 1 core for
+    // the runtime's lifetime"; on a single-threaded Node process this
+    // peaks at 100%. Above that means we did real parallel work via
+    // libuv workers (sharp, sqlite, fs). RSS shows the peak memory
+    // the indexer process needed.
+    clearInterval(rssSampler);
+    const cpuTotal = process.cpuUsage(cpu0);
+    const cpuMs = (cpuTotal.user + cpuTotal.system) / 1000;
+    const wallMs = Date.now() - t0;
+    const cpuPct = wallMs > 0 ? Math.round((cpuMs / wallMs) * 100) : 0;
+    const rssMb = Math.round(peakRssBytes / 1024 / 1024);
+    log.info(
+      `full re-index complete — ${totalProcessed} events processed in ${totalSec}s ` +
+        `(cpu=${Math.round(cpuMs / 1000)}s ~${cpuPct}% of one core, peak_rss=${rssMb} MB)`,
+    );
   } finally {
     // Restore keep_alive so live chat/recall don't pin the model in VRAM
     // for 30 minutes after the reindex finishes.

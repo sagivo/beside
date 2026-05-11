@@ -277,10 +277,11 @@ function buildFrame(
     textSource = 'accessibility';
   }
 
+  const frameDay = dayKey(new Date(anchor.timestamp));
   return {
     id: `frm_${anchor.id.slice(4)}`,
     timestamp: anchor.timestamp,
-    day: dayKey(new Date(anchor.timestamp)),
+    day: frameDay,
     monitor: anchor.screen_index ?? 0,
     app: anchor.app ?? '',
     app_bundle_id: anchor.app_bundle_id ?? '',
@@ -288,7 +289,7 @@ function buildFrame(
     url,
     text,
     text_source: textSource,
-    asset_path: anchor.asset_path,
+    asset_path: normaliseFrameAssetPath(anchor.asset_path, frameDay),
     perceptual_hash: typeof meta.perceptual_hash === 'string'
       ? (meta.perceptual_hash as string)
       : null,
@@ -301,6 +302,11 @@ function buildFrame(
     meeting_id: null,
     source_event_ids: sourceEventIds,
   };
+}
+
+function normaliseFrameAssetPath(assetPath: string | null, frameDay: string): string | null {
+  if (!assetPath) return null;
+  return assetPath.replace(/(^|\/)NaN-NaN-NaN(?=\/screenshots\/)/, `$1${frameDay}`);
 }
 
 function buildTextOnlyFrame(group: RawEvent[]): Frame {
