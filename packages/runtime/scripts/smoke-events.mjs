@@ -186,6 +186,7 @@ async function main() {
     // the calendar, not filter by proximity to "now". One calendar
     // screenshot can legitimately show past, current, and future items.
     const captureDay = localDayKey();
+    const staleVisibleDay = captureDay === '2026-05-12' ? '2026-05-13' : '2026-05-12';
     await storage.upsertFrame({
       id: `frame_calendar_${randomUUID().slice(0, 8)}`,
       timestamp: `${captureDay}T09:00:00.000Z`,
@@ -232,14 +233,14 @@ async function main() {
     });
     await storage.upsertDayEvent({
       id: `event_stale_visible_calendar_${randomUUID().slice(0, 8)}`,
-      day: '2026-05-12',
-      starts_at: '2026-05-12T08:00:00.000Z',
-      ends_at: '2026-05-12T08:30:00.000Z',
+      day: staleVisibleDay,
+      starts_at: `${staleVisibleDay}T08:00:00.000Z`,
+      ends_at: `${staleVisibleDay}T08:30:00.000Z`,
       kind: 'calendar',
       source: 'calendar_screen',
       title: 'Stale Visible Calendar Item',
       source_app: 'Calendar',
-      context_md: 'This row should be removed because May 12 is visible in the rescanned calendar.',
+      context_md: 'This row should be preserved because there is no fresh same-day candidate.',
       attendees: [],
       links: [],
       meeting_id: null,
@@ -247,8 +248,8 @@ async function main() {
       content_hash: 'stale-visible-calendar-row',
       status: 'ready',
       failure_reason: null,
-      created_at: '2026-05-12T08:00:00.000Z',
-      updated_at: '2026-05-12T08:00:00.000Z',
+      created_at: `${staleVisibleDay}T08:00:00.000Z`,
+      updated_at: `${staleVisibleDay}T08:00:00.000Z`,
     });
 
     const availableModel = {
@@ -292,7 +293,7 @@ async function main() {
     assert(r3.llmExtracted >= 3, `calendar extraction accepted past/today/future dates (got ${r3.llmExtracted})`);
     const pastEvents = await storage.listDayEvents({ day: '1999-12-31', kind: 'calendar' });
     const todayEvents = await storage.listDayEvents({ day: captureDay, kind: 'calendar' });
-    const visibleDayEvents = await storage.listDayEvents({ day: '2026-05-12', kind: 'calendar' });
+    const visibleDayEvents = await storage.listDayEvents({ day: staleVisibleDay, kind: 'calendar' });
     const futureEvents = await storage.listDayEvents({ day: '2050-01-02', kind: 'calendar' });
     assert(
       pastEvents.some((e) => e.title === 'Past Strategy Review'),

@@ -432,11 +432,13 @@ export function Meetings({
   events,
   meetings,
   loading,
+  focusRequest,
   onRefresh,
 }: {
   events: DayEvent[];
   meetings: Meeting[];
   loading: boolean;
+  focusRequest?: { id: number; target: { eventId: string; day: string } | null } | null;
   onRefresh: () => void | Promise<void>;
 }) {
   // Manual "scan now" — triggers the EventExtractor immediately so the
@@ -543,6 +545,8 @@ export function Meetings({
     // events, else today (we'll just show an empty state).
     return today;
   });
+  const pendingFocusEventIdRef = React.useRef<string | null>(null);
+  const handledFocusRequestRef = React.useRef(0);
 
   // Once the props arrive, if today is empty but a recent day has data,
   // auto-jump there so the user sees something on first paint. Only
@@ -550,6 +554,7 @@ export function Meetings({
   const autoJumpedRef = React.useRef(false);
   React.useEffect(() => {
     if (autoJumpedRef.current) return;
+    if (pendingFocusEventIdRef.current) return;
     if (daysFromProps.length === 0) return;
     autoJumpedRef.current = true;
     const todayHasEvents = events.some((ev) => ev.day === today);
@@ -570,6 +575,28 @@ export function Meetings({
 
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   React.useEffect(() => {
+    if (!focusRequest || focusRequest.id === handledFocusRequestRef.current) return;
+    handledFocusRequestRef.current = focusRequest.id;
+    if (!focusRequest.target) {
+      pendingFocusEventIdRef.current = null;
+      return;
+    }
+    autoJumpedRef.current = true;
+    pendingFocusEventIdRef.current = focusRequest.target.eventId;
+    setSelectedDay(focusRequest.target.day);
+  }, [focusRequest]);
+
+  React.useEffect(() => {
+    const pendingFocusEventId = pendingFocusEventIdRef.current;
+    if (pendingFocusEventId) {
+      if (visibleEvents.some((event) => event.id === pendingFocusEventId)) {
+        pendingFocusEventIdRef.current = null;
+        setSelectedId(pendingFocusEventId);
+        return;
+      }
+      setSelectedId(null);
+      return;
+    }
     // Clear selection when day changes; auto-pick the first event so the
     // detail pane isn't empty when the day has data.
     if (visibleEvents.length === 0) {

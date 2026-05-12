@@ -92,7 +92,7 @@ export function Dashboard({
   onBootstrap: () => Promise<void>;
   onOpenMarkdownExport: (category?: string) => Promise<void>;
   onGoTimeline: () => void;
-  onGoMeetings: () => void;
+  onGoMeetings: (target?: FounderAgendaTarget | null) => void;
 }) {
   const [bootstrapping, setBootstrapping] = React.useState(false);
 
@@ -381,7 +381,7 @@ function FounderDashboard({
   loading: boolean;
   events: DayEvent[];
   meetings: Meeting[];
-  onGoMeetings: () => void;
+  onGoMeetings: (target?: FounderAgendaTarget | null) => void;
 }) {
   const cards = React.useMemo(
     () => buildFounderCards(journal, events, meetings),
@@ -423,18 +423,30 @@ function FounderDashboard({
             Replies, promises, changes, and follow-ups from today.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={onGoMeetings}>
+        <Button variant="outline" size="sm" onClick={() => onGoMeetings(null)}>
           Agenda <ArrowRight className="size-3.5" />
         </Button>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {cards.map((card) => (
-          <FounderBriefCard key={card.title} card={card} />
+          <FounderBriefCard
+            key={card.title}
+            card={card}
+            onOpenItem={(item) =>
+              onGoMeetings(
+                item.eventId && item.day ? { eventId: item.eventId, day: item.day } : null,
+              )
+            }
+          />
         ))}
       </div>
     </section>
   );
 }
+
+type FounderAgendaTarget = { eventId: string; day: string };
+
+type FounderCardItem = { title: string; meta?: string; eventId?: string; day?: string };
 
 type FounderCard = {
   title: string;
@@ -442,10 +454,16 @@ type FounderCard = {
   icon: React.ComponentType<{ className?: string }>;
   accent: string;
   empty: string;
-  items: Array<{ title: string; meta?: string }>;
+  items: FounderCardItem[];
 };
 
-function FounderBriefCard({ card }: { card: FounderCard }) {
+function FounderBriefCard({
+  card,
+  onOpenItem,
+}: {
+  card: FounderCard;
+  onOpenItem: (item: FounderCardItem) => void;
+}) {
   const Icon = card.icon;
   return (
     <Card>
@@ -471,14 +489,19 @@ function FounderBriefCard({ card }: { card: FounderCard }) {
         ) : (
           <div className="flex flex-col gap-2">
             {card.items.slice(0, 3).map((item, i) => (
-              <div key={`${item.title}-${i}`} className="min-w-0">
+              <button
+                key={`${item.title}-${i}`}
+                type="button"
+                onClick={() => onOpenItem(item)}
+                className="-mx-1 min-w-0 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
                 <div className="line-clamp-2 text-sm leading-snug">{item.title}</div>
                 {item.meta ? (
                   <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                     {item.meta}
                   </div>
                 ) : null}
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -518,18 +541,24 @@ function buildFounderCards(
     .map((event) => ({
       title: event.title,
       meta: eventMeta(event),
+      eventId: event.id,
+      day: event.day,
     }));
   const taskEvents = chronological
     .filter((event) => event.kind === 'task')
     .map((event) => ({
       title: event.title,
       meta: eventMeta(event),
+      eventId: event.id,
+      day: event.day,
     }));
   const futureEvents = chronological
     .filter((event) => Date.parse(event.starts_at) >= now)
     .map((event) => ({
       title: event.title,
       meta: eventMeta(event),
+      eventId: event.id,
+      day: event.day,
     }));
   const recentChanges = chronological
     .filter((event) => event.kind !== 'meeting')
@@ -538,6 +567,8 @@ function buildFounderCards(
     .map((event) => ({
       title: event.title,
       meta: eventMeta(event),
+      eventId: event.id,
+      day: event.day,
     }));
   const topApps =
     journal && journal.frames.length > 0

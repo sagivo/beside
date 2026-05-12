@@ -368,6 +368,45 @@ function assetUrl(assetPath: string): string {
   return `${ASSET_PROTOCOL}://local/${encodeURIComponent(assetPath)}`;
 }
 
+function isPathInside(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function isStatusWindowNavigation(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === `${ASSET_PROTOCOL}:`) return true;
+    if (rendererDevUrl) {
+      const dev = new URL(rendererDevUrl);
+      return parsed.origin === dev.origin;
+    }
+    if (parsed.protocol === 'file:') {
+      const rendererRoot = path.resolve(here, 'renderer');
+      return isPathInside(path.resolve(fileURLToPath(parsed)), rendererRoot);
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+async function openExternalHttpUrl(url: string): Promise<string> {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('Only http(s) URLs can be opened.');
+  }
+  const target = parsed.toString();
+  await shell.openExternal(target);
+  return target;
+}
+
+function openExternalHttpUrlFromNavigation(url: string): void {
+  void openExternalHttpUrl(url).catch((err) => {
+    appendLog(`Blocked external navigation ${url}: ${String(err)}`);
+  });
+}
+
 app.on('window-all-closed', () => {
   // Keep the tray process alive after the status window closes.
 });
@@ -652,6 +691,15 @@ async function showStatusWindow(_opts: { focus?: 'doctor' } = {}): Promise<void>
     });
     statusWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
       appendLog(`[renderer] preload failed ${preloadPath}: ${error.message}`);
+    });
+    statusWindow.webContents.setWindowOpenHandler(({ url }) => {
+      openExternalHttpUrlFromNavigation(url);
+      return { action: 'deny' };
+    });
+    statusWindow.webContents.on('will-navigate', (event, url) => {
+      if (isStatusWindowNavigation(url)) return;
+      event.preventDefault();
+      openExternalHttpUrlFromNavigation(url);
     });
   }
   await renderStatusWindow();
@@ -1497,12 +1545,7 @@ function registerRuntimeIpc(): void {
     return { copied: true };
   });
   ipcMain.handle('cofounderos:open-external-url', async (_event, url: string) => {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error('Only http(s) URLs can be opened.');
-    }
-    await shell.openExternal(parsed.toString());
-    return { opened: parsed.toString() };
+    return { opened: await openExternalHttpUrl(url) };
   });
   ipcMain.handle('cofounderos:delete-frame', async (_event, frameId: string) => {
     return await (await getRuntimeForRequest()).call('deleteFrame', frameId);

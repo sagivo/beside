@@ -248,6 +248,12 @@ export function Privacy({
               value={urlDraft}
               onChange={setUrlDraft}
               placeholder="example.com"
+              hint={
+                <>
+                  One rule per line. Use domains like <code>example.com</code>, subdomains like{' '}
+                  <code>*.example.com</code>, or paths like <code>example.com/private/*</code>.
+                </>
+              }
               suggestions={recentDomains}
               onAddSuggestion={(value) => {
                 const next = uniqueStrings([...ignoredUrls, value]);
@@ -459,6 +465,7 @@ function ListEditor({
   value,
   onChange,
   placeholder,
+  hint,
   suggestions,
   onAddSuggestion,
 }: {
@@ -466,6 +473,7 @@ function ListEditor({
   value: string;
   onChange: (value: string) => void;
   placeholder: string;
+  hint?: React.ReactNode;
   suggestions: Array<{ value: string; count: number }>;
   onAddSuggestion: (value: string) => void;
 }) {
@@ -482,6 +490,11 @@ function ListEditor({
         placeholder={placeholder}
         className="min-h-36"
       />
+      {hint ? (
+        <p className="text-xs leading-relaxed text-muted-foreground [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11px]">
+          {hint}
+        </p>
+      ) : null}
       {suggestions.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {suggestions.slice(0, 8).map((item) => (

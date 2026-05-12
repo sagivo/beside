@@ -1639,7 +1639,7 @@ class NodeCapture implements ICapture {
     if (appHit) return true;
     if (win.url) {
       const urlHit = this.config.excluded_url_patterns.some((pat) =>
-        wildcardMatch(win.url ?? '', pat),
+        urlMatchesExcludedPattern(win.url ?? '', pat),
       );
       if (urlHit) return true;
     }
@@ -1670,6 +1670,56 @@ function wildcardMatch(haystack: string, pattern: string): boolean {
   // Convert simple "*.banking.com" style to regex.
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
   return new RegExp(`^${escaped}$`, 'i').test(haystack);
+}
+
+function urlMatchesExcludedPattern(rawUrl: string, rawPattern: string): boolean {
+  const pattern = rawPattern.trim();
+  if (!pattern) return false;
+  if (wildcardMatch(rawUrl, pattern)) return true;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  const normalizedHost = stripWww(parsed.hostname);
+  const pathAndQuery = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  const candidates = [
+    parsed.href,
+    parsed.hostname,
+    stripWww(parsed.hostname),
+    parsed.host,
+    stripWww(parsed.host),
+    `${normalizedHost}${pathAndQuery}`,
+    `${parsed.host}${pathAndQuery}`,
+  ];
+  if (candidates.some((candidate) => wildcardMatch(candidate, pattern))) {
+    return true;
+  }
+
+  if (!isBareHostPattern(pattern)) return false;
+  const patternHost = hostFromPattern(pattern);
+  return !!patternHost && (normalizedHost === patternHost || normalizedHost.endsWith(`.${patternHost}`));
+}
+
+function isBareHostPattern(pattern: string): boolean {
+  const value = pattern.trim().replace(/^https?:\/\//i, '');
+  return value.length > 0 && !/[/?#*:]/.test(value);
+}
+
+function hostFromPattern(pattern: string): string | null {
+  try {
+    const value = pattern.includes('://') ? pattern : `https://${pattern}`;
+    return stripWww(new URL(value).hostname);
+  } catch {
+    return null;
+  }
+}
+
+function stripWww(value: string): string {
+  return value.toLowerCase().replace(/^www\./, '');
 }
 
 const factory: PluginFactory<ICapture> = (ctx) => {

@@ -143,6 +143,7 @@ function ConnectScreen({
 }) {
   const [test, setTest] = React.useState<TestState>({ status: 'idle' });
   const [enabling, setEnabling] = React.useState(false);
+  const healthUrl = `${url}/health`;
 
   React.useEffect(() => {
     if (test.status !== 'ok') return;
@@ -154,7 +155,7 @@ function ConnectScreen({
     setTest({ status: 'pending' });
     const started = performance.now();
     try {
-      const response = await fetch(`${url}/health`, {
+      const response = await fetch(healthUrl, {
         signal: AbortSignal.timeout(2500),
       });
       const elapsed = Math.round(performance.now() - started);
@@ -214,7 +215,7 @@ function ConnectScreen({
           <div className="flex items-center gap-2">
             {!mcpEnabled && <Badge variant="warning">Disabled</Badge>}
             <StatusPill tone={mcpRunning ? 'success' : 'muted'} pulse={mcpRunning}>
-              {mcpRunning ? 'Running' : 'Ready'}
+              {mcpRunning ? 'Running' : 'Not running'}
             </StatusPill>
           </div>
         </div>
@@ -244,12 +245,12 @@ function ConnectScreen({
             <Button
               variant="ghost"
               size="lg"
-              onClick={() => void window.cofounderos.openExternalUrl(url)}
+              onClick={() => void window.cofounderos.openExternalUrl(healthUrl)}
             >
               <Plug />
               Open health URL
             </Button>
-            <TestResult test={test} url={url} />
+            <TestResult test={test} url={healthUrl} />
           </div>
 
           <div className="grid gap-3 md:grid-cols-3">
@@ -302,7 +303,7 @@ function ConnectScreen({
             </code>
           </div>
           <StatusPill tone={markdownRunning ? 'success' : 'muted'} pulse={markdownRunning}>
-            {markdownRunning ? 'Running' : 'Ready'}
+            {markdownRunning ? 'Running' : 'Not running'}
           </StatusPill>
           <Button
             variant="outline"

@@ -610,8 +610,8 @@ export function Settings({
                   value={draft.excludedUrlPatterns}
                   onChange={(v) => set('excludedUrlPatterns', v)}
                   typeLabel="string list"
-                  hint="One URL pattern per line. Use this for private sites or noisy dashboards."
-                  placeholder="One pattern per line"
+                  hint="One rule per line. Use domains like example.com, subdomains like *.example.com, or paths like example.com/private/*."
+                  placeholder="example.com"
                 />
               </div>
             </div>

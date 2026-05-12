@@ -64,6 +64,11 @@ const AGENDA_REFRESH_JOBS = new Set([
   'event-extractor',
 ]);
 
+type MeetingFocusRequest = {
+  id: number;
+  target: { eventId: string; day: string } | null;
+};
+
 export function App() {
   return (
     <ThemeProvider>
@@ -90,11 +95,14 @@ function AppInner() {
   const [meetings, setMeetings] = React.useState<Meeting[]>([]);
   const [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]);
   const [meetingsLoading, setMeetingsLoading] = React.useState(false);
+  const [meetingFocusRequest, setMeetingFocusRequest] =
+    React.useState<MeetingFocusRequest | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(
     null,
   );
   const searchRequestId = React.useRef(0);
+  const meetingFocusRequestId = React.useRef(0);
   const agendaRefreshKeyRef = React.useRef('');
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => {
     try {
@@ -227,6 +235,12 @@ function AppInner() {
     searchRequestId.current += 1;
     setSearchRequest({ id: searchRequestId.current, query: q });
     setScreen('search');
+  }
+
+  function openMeetings(target: MeetingFocusRequest['target'] = null) {
+    meetingFocusRequestId.current += 1;
+    setMeetingFocusRequest({ id: meetingFocusRequestId.current, target });
+    setScreen('meetings');
   }
 
   // Navigating into the AI Chat tab from another screen should drop the
@@ -410,7 +424,7 @@ function AppInner() {
       onBootstrap={actions.onBootstrap}
       onOpenMarkdownExport={actions.onOpenMarkdownExport}
       onGoTimeline={() => setScreen('timeline')}
-      onGoMeetings={() => setScreen('meetings')}
+      onGoMeetings={openMeetings}
     />
   ) : screen === 'timeline' ? (
     <Timeline
@@ -425,6 +439,7 @@ function AppInner() {
       events={dayEvents}
       meetings={meetings}
       loading={meetingsLoading}
+      focusRequest={meetingFocusRequest}
       onRefresh={() => loadScreen('meetings')}
     />
   ) : screen === 'privacy' ? (

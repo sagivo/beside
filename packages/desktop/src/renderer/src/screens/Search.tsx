@@ -37,6 +37,7 @@ const RECENT_LIMIT = 6;
 const EXPLANATION_LIMIT = 8;
 const EXPLANATION_CONCURRENCY = 1;
 const KNOWN_APPS_SAMPLE_LIMIT = 500;
+const KNOWN_APPS_DAY_SAMPLE = 7;
 
 const SUGGESTIONS: string[] = [
   'design doc',
@@ -89,6 +90,7 @@ export function Search({
   const [recent, setRecent] = React.useState<string[]>(() => readRecent());
   const handledSearchRequestRef = React.useRef<number | null>(null);
   const searchRunRef = React.useRef(0);
+  const lastSearchFilterKeyRef = React.useRef('');
 
   useListKeyboardNav();
 
@@ -96,12 +98,20 @@ export function Search({
     let cancelled = false;
     (async () => {
       try {
-        const today = days[days.length - 1];
-        if (!today) return;
-        const frames = await window.cofounderos.searchFrames({
-          day: today,
-          limit: KNOWN_APPS_SAMPLE_LIMIT,
-        });
+        const sampleDays = days.slice(-KNOWN_APPS_DAY_SAMPLE).reverse();
+        if (sampleDays.length === 0) return;
+        const perDayLimit = Math.max(
+          80,
+          Math.ceil(KNOWN_APPS_SAMPLE_LIMIT / sampleDays.length),
+        );
+        const framesByDay = await Promise.all(
+          sampleDays.map((day) =>
+            window.cofounderos
+              .searchFrames({ day, limit: perDayLimit })
+              .catch(() => [] as Frame[]),
+          ),
+        );
+        const frames = framesByDay.flat().slice(0, KNOWN_APPS_SAMPLE_LIMIT);
         if (cancelled) return;
         setKnownApps(
           Array.from(new Set(frames.map((f) => f.app).filter(Boolean) as string[])).sort(),
@@ -124,10 +134,16 @@ export function Search({
     };
   }, [days]);
 
-  const runSearch = React.useCallback(async (text?: string) => {
+  const currentFilterKey = React.useMemo(
+    () => JSON.stringify([dayFilter, appFilter, domainFilter, textSourceFilter]),
+    [appFilter, dayFilter, domainFilter, textSourceFilter],
+  );
+
+  const runSearch = React.useCallback(async (text?: string, syncQuery = text !== undefined) => {
     const q = (text ?? query).trim();
     if (!q) {
       searchRunRef.current += 1;
+      lastSearchFilterKeyRef.current = '';
       setResults(null);
       setActiveSearchQuery('');
       setExplanations({});
@@ -136,11 +152,12 @@ export function Search({
     }
     const runId = searchRunRef.current + 1;
     searchRunRef.current = runId;
-    if (text !== undefined) setQuery(text);
+    if (text !== undefined && syncQuery) setQuery(text);
     setLoading(true);
     setExplanations({});
     setActiveSearchQuery(q);
     setSearched(true);
+    lastSearchFilterKeyRef.current = currentFilterKey;
     try {
       const found = await window.cofounderos.searchFrames({
         text: q,
@@ -202,13 +219,19 @@ export function Search({
     } finally {
       if (searchRunRef.current === runId) setLoading(false);
     }
-  }, [appFilter, dayFilter, domainFilter, query, textSourceFilter]);
+  }, [appFilter, currentFilterKey, dayFilter, domainFilter, query, textSourceFilter]);
 
   React.useEffect(() => {
     if (!searchRequest || handledSearchRequestRef.current === searchRequest.id) return;
     handledSearchRequestRef.current = searchRequest.id;
     void runSearch(searchRequest.query);
   }, [runSearch, searchRequest]);
+
+  React.useEffect(() => {
+    if (!searched || !activeSearchQuery) return;
+    if (lastSearchFilterKeyRef.current === currentFilterKey) return;
+    void runSearch(activeSearchQuery, false);
+  }, [activeSearchQuery, currentFilterKey, runSearch, searched]);
 
   function clearRecent() {
     setRecent([]);
@@ -259,6 +282,7 @@ export function Search({
                 variant="ghost"
                 onClick={() => {
                   searchRunRef.current += 1;
+                  lastSearchFilterKeyRef.current = '';
                   setQuery('');
                   setResults(null);
                   setActiveSearchQuery('');
@@ -514,6 +538,17 @@ function ResultCard({
   const context = explanation ?? buildFrameSearchContext(searchQuery, frame);
   const domain = domainFromUrl(frame.url);
   const source = textSourceLabel(frame.text_source);
+  const openMemory = React.useCallback(() => {
+    detail.open(frame, {
+      onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
+      searchContext: searchQuery
+        ? {
+            query: searchQuery,
+            explanation,
+          }
+        : undefined,
+    });
+  }, [detail, explanation, frame, onDeleted, searchQuery]);
   React.useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -540,34 +575,7 @@ function ResultCard({
 
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={() =>
-        detail.open(frame, {
-          onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
-          searchContext: searchQuery
-            ? {
-                query: searchQuery,
-                explanation,
-              }
-            : undefined,
-        })
-      }
-      onKeyDown={(event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        detail.open(frame, {
-          onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
-          searchContext: searchQuery
-            ? {
-                query: searchQuery,
-                explanation,
-              }
-            : undefined,
-        });
-      }}
-      {...listItemProps}
-      className="group rounded-xl border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+      className="group rounded-xl border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm"
     >
       <div className="aspect-video w-full bg-muted/40 grid place-items-center overflow-hidden">
         {thumbUrl ? (
@@ -624,27 +632,27 @@ function ResultCard({
             </span>
           )}
         </div>
-        {isHttpUrl(frame.url) && (
-          <div className="mt-2">
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={openMemory}
+            {...listItemProps}
+            className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            <SearchIcon className="size-3" />
+            Open memory
+          </button>
+          {isHttpUrl(frame.url) && (
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                void window.cofounderos.openExternalUrl(frame.url!);
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== 'Enter' && event.key !== ' ') return;
-                event.preventDefault();
-                event.stopPropagation();
-                void window.cofounderos.openExternalUrl(frame.url!);
-              }}
-              className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+              onClick={() => void window.cofounderos.openExternalUrl(frame.url!)}
+              className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
               <ExternalLink className="size-3" />
               Open source
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

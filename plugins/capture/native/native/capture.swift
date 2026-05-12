@@ -21,6 +21,8 @@ struct HelperConfig: Decodable {
   var screenshot_quality: Int?
   var screenshot_max_dim: Int?
   var content_change_min_interval_ms: Int?
+  var excluded_apps: [String]?
+  var excluded_url_patterns: [String]?
   var multi_screen: Bool?
   var screens: [Int]?
   var capture_mode: String?
@@ -370,7 +372,31 @@ func runMacCapture(config: HelperConfig) {
     var currentWindow: ActiveWindow? = nil
     if let current = queryActiveWindow(displays: displays) {
       currentWindow = current
-      if lastWindow?.focusKey != current.focusKey {
+      if isExcluded(window: current, config: config) {
+        pendingFocusCapture = nil
+        if let previous = lastWindow, !isExcluded(window: previous, config: config) {
+          emitEvent(
+            type: "window_blur",
+            sessionId: sessionId,
+            app: previous.app,
+            bundleId: previous.bundleId,
+            title: previous.title,
+            url: previous.url,
+            content: nil,
+            durationMs: Int(Date().timeIntervalSince(lastEnteredAt) * 1000),
+            idleBeforeMs: nil,
+            screenIndex: previous.screenIndex,
+            metadata: [
+              "pid": Int(previous.pid),
+              "source": "native-macos",
+              "privacy_transition": "excluded"
+            ]
+          )
+        }
+        lastWindow = current
+        lastEnteredAt = Date()
+        lastUrl = current.url
+      } else if (lastWindow.map { isExcluded(window: $0, config: config) } ?? false) || lastWindow?.focusKey != current.focusKey {
         if let previous = lastWindow {
           emitEvent(
             type: "window_blur",
@@ -673,6 +699,81 @@ func hasMeetingUiText(_ text: String) -> Bool {
 
 func regexMatch(_ pattern: String, _ text: String) -> Bool {
   text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+}
+
+func isExcluded(window: ActiveWindow, config: HelperConfig) -> Bool {
+  let app = window.app.lowercased()
+  let bundleId = window.bundleId.lowercased()
+  for raw in config.excluded_apps ?? [] {
+    let needle = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if needle.isEmpty { continue }
+    if app.contains(needle) || bundleId.contains(needle) { return true }
+  }
+  guard let url = window.url else { return false }
+  return (config.excluded_url_patterns ?? []).contains { pattern in
+    urlMatchesExcludedPattern(url, pattern: pattern)
+  }
+}
+
+func urlMatchesExcludedPattern(_ rawUrl: String, pattern rawPattern: String) -> Bool {
+  let pattern = rawPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+  if pattern.isEmpty { return false }
+  if wildcardMatch(rawUrl, pattern: pattern) { return true }
+  guard let parsed = URL(string: rawUrl) else { return false }
+
+  var candidates = [parsed.absoluteString]
+  if let host = parsed.host {
+    let normalizedHost = stripWww(host)
+    let hostWithPort = parsed.port.map { "\(host):\($0)" } ?? host
+    let normalizedHostWithPort = stripWww(hostWithPort)
+    let queryPart = parsed.query.map { "?\($0)" } ?? ""
+    let fragmentPart = parsed.fragment.map { "#\($0)" } ?? ""
+    let pathAndQuery = "\(parsed.path)\(queryPart)\(fragmentPart)"
+    candidates.append(host)
+    candidates.append(normalizedHost)
+    candidates.append(hostWithPort)
+    candidates.append(normalizedHostWithPort)
+    candidates.append("\(normalizedHost)\(pathAndQuery)")
+    candidates.append("\(normalizedHostWithPort)\(pathAndQuery)")
+  }
+
+  if candidates.contains(where: { wildcardMatch($0, pattern: pattern) }) {
+    return true
+  }
+
+  guard isBareHostPattern(pattern),
+        let patternHost = hostFromPattern(pattern),
+        let urlHost = parsed.host.map(stripWww) else {
+    return false
+  }
+  return urlHost == patternHost || urlHost.hasSuffix(".\(patternHost)")
+}
+
+func wildcardMatch(_ haystack: String, pattern: String) -> Bool {
+  let escaped = NSRegularExpression
+    .escapedPattern(for: pattern)
+    .replacingOccurrences(of: "\\*", with: ".*")
+  return haystack.range(
+    of: "^\(escaped)$",
+    options: [.regularExpression, .caseInsensitive]
+  ) != nil
+}
+
+func isBareHostPattern(_ pattern: String) -> Bool {
+  let value = pattern
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+    .replacingOccurrences(of: #"^https?://"#, with: "", options: .regularExpression)
+  return !value.isEmpty && value.range(of: #"[/?#*:]"#, options: .regularExpression) == nil
+}
+
+func hostFromPattern(_ pattern: String) -> String? {
+  let raw = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+  let value = raw.contains("://") ? raw : "https://\(raw)"
+  return URL(string: value).flatMap { $0.host }.map(stripWww)
+}
+
+func stripWww(_ value: String) -> String {
+  value.lowercased().replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression)
 }
 
 func captureScreenshots(
