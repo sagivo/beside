@@ -191,7 +191,6 @@ const storage = {
   async getSession() { return null; },
   async getSessionFrames() { return []; },
   async deleteFrame() { return { assetPath: null }; },
-  async deleteFramesByDay() { return { frames: 0, assetPaths: [] }; },
   async deleteAllMemory() { return { frames: 0, events: 0, assetBytes: 0 }; },
 };
 

@@ -27,7 +27,6 @@ export const CHANGELOG: ChangelogEntry[] = [
     items: [
       'Connect AI has a "Test connection" button that pings the local MCP endpoint and reports latency or the actual error.',
       'Help has a new About card with the running version, your platform, and links to the source code.',
-      'Timeline gained a "Delete day" action so you can prune one bad afternoon without nuking everything.',
       'Onboarding is now lazy-loaded so the dashboard paints faster after first run.',
     ],
   },
@@ -50,8 +49,8 @@ export const CHANGELOG: ChangelogEntry[] = [
     items: [
       'New look powered by shadcn — cleaner cards, better spacing, proper dark mode toggle in Settings.',
       'Dashboard shows a live "just captured" strip and a per-app activity breakdown.',
-      'Timeline and Search results now open a detail dialog with the full screenshot and metadata.',
-      'Command palette (⌘K) plus keyboard shortcuts: ⌘1–7 jump screens, ⌘. toggles capture, j/k walks Timeline & Search results.',
+      'Search results now open a detail dialog with the full screenshot and metadata.',
+      'Command palette (⌘K) plus keyboard shortcuts: ⌘1–8 jump screens, ⌘. toggles capture, j/k walks Search results.',
       'Collapsible sidebar, toast notifications, and skeleton loaders.',
       'Settings has a new "Save & restart" button so config changes apply immediately.',
       'Window remembers its size and position across launches.',

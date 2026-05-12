@@ -1741,7 +1741,7 @@ function DoneStep({
   const items = [
     {
       icon: <Search />,
-      title: 'Search your private timeline',
+      title: 'Search your private memory',
       body: 'Revisit captured moments by day, session, app, or remembered detail.',
     },
     {

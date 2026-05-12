@@ -13,7 +13,6 @@ declare global {
       saveConfigPatch: (patch: unknown) => Promise<LoadedConfig>;
       listJournalDays: () => Promise<string[]>;
       getJournalDay: (day: string) => Promise<JournalDay>;
-      getIndexedJournalDay: (day: string) => Promise<IndexedJournalDay>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       getFrameIndexDetails: (frameId: string) => Promise<FrameIndexDetails | null>;
@@ -34,7 +33,6 @@ declare global {
       copyText: (text: string) => Promise<{ copied: true }>;
       openExternalUrl: (url: string) => Promise<{ opened: string }>;
       deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
-      deleteFramesByDay: (day: string) => Promise<{ frames: number; assetPaths: string[] }>;
       deleteFrames: (query: {
         app?: string;
         urlDomain?: string;
@@ -498,11 +496,6 @@ export interface JournalDay {
   day: string;
   frames: Frame[];
   sessions: ActivitySession[];
-}
-
-export interface IndexedJournalDay {
-  day: string;
-  markdown: string;
 }
 
 export interface Frame {

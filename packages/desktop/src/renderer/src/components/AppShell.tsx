@@ -61,14 +61,13 @@ export function AppShell({
 
     const SCREEN_KEYS: Record<string, Screen> = {
       '1': 'dashboard',
-      '2': 'timeline',
-      '3': 'meetings',
-      '4': 'privacy',
-      '5': 'search',
-      '6': 'chat',
-      '7': 'connect',
-      '8': 'settings',
-      '9': 'help',
+      '2': 'meetings',
+      '3': 'privacy',
+      '4': 'search',
+      '5': 'chat',
+      '6': 'connect',
+      '7': 'settings',
+      '8': 'help',
     };
 
     function onKey(e: KeyboardEvent) {
@@ -85,7 +84,7 @@ export function AppShell({
       // so the user can still type "1" inside Search / Settings inputs.
       if (isInsideEditableField(e.target)) return;
 
-      // Cmd+1..6: jump screens
+      // Cmd+1..8: jump screens
       if (mod && SCREEN_KEYS[e.key]) {
         e.preventDefault();
         stateRef.current.onChange(SCREEN_KEYS[e.key]!);

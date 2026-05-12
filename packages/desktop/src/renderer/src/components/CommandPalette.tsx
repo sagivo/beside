@@ -1,6 +1,5 @@
 import * as React from 'react';
 import {
-  Calendar,
   CircleStop,
   FolderOpen,
   HelpCircle,
@@ -87,9 +86,6 @@ export function CommandPalette({
         <CommandGroup heading="Jump to">
           <CommandItem onSelect={() => run(() => onJump('dashboard'))}>
             <LayoutDashboard /> Dashboard
-          </CommandItem>
-          <CommandItem onSelect={() => run(() => onJump('timeline'))}>
-            <Calendar /> Timeline
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('meetings'))}>
             <Video /> Agenda

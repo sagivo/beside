@@ -27,9 +27,6 @@ const Search = React.lazy(() =>
 const Settings = React.lazy(() =>
   import('@/screens/Settings').then((mod) => ({ default: mod.Settings })),
 );
-const Timeline = React.lazy(() =>
-  import('@/screens/Timeline').then((mod) => ({ default: mod.Timeline })),
-);
 const Chat = React.lazy(() => import('@/screens/Chat').then((mod) => ({ default: mod.Chat })));
 const Meetings = React.lazy(() =>
   import('@/screens/Meetings').then((mod) => ({ default: mod.Meetings })),
@@ -48,7 +45,6 @@ const Onboarding = React.lazy(() =>
 import type {
   DayEvent,
   DoctorCheck,
-  JournalDay,
   LoadedConfig,
   Meeting,
   ModelBootstrapProgress,
@@ -87,8 +83,6 @@ function AppInner() {
   const [overview, setOverview] = React.useState<RuntimeOverview | null>(null);
   const [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null);
   const [days, setDays] = React.useState<string[]>([]);
-  const [selectedDay, setSelectedDay] = React.useState<string | null>(null);
-  const [journal, setJournal] = React.useState<JournalDay | null>(null);
   const [config, setConfig] = React.useState<LoadedConfig | null>(null);
   const [logs, setLogs] = React.useState('');
   const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
@@ -160,17 +154,6 @@ function AppInner() {
         setOverview(await window.cofounderos.getOverview());
         setDoctor(await window.cofounderos.runDoctor());
       }
-      if (next === 'timeline') {
-        const nextDays = await window.cofounderos.listJournalDays();
-        setDays(nextDays);
-        // If the previously-selected day no longer exists (e.g. deleted),
-        // fall back to the most recent day so the panel doesn't render
-        // empty pointing at a missing key.
-        const stillThere = selectedDay && nextDays.includes(selectedDay) ? selectedDay : null;
-        const day = stillThere ?? nextDays[nextDays.length - 1] ?? null;
-        setSelectedDay(day);
-        setJournal(day ? await window.cofounderos.getJournalDay(day) : null);
-      }
       if (next === 'search') {
         const nextDays = await window.cofounderos.listJournalDays();
         setDays(nextDays);
@@ -209,12 +192,6 @@ function AppInner() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }
-
-  async function chooseDay(day: string) {
-    setSelectedDay(day);
-    setJournal(null);
-    setJournal(await window.cofounderos.getJournalDay(day));
   }
 
   async function copyMcpSnippet() {
@@ -423,16 +400,7 @@ function AppInner() {
       onTriggerFullReindex={actions.onTriggerFullReindex}
       onBootstrap={actions.onBootstrap}
       onOpenMarkdownExport={actions.onOpenMarkdownExport}
-      onGoTimeline={() => setScreen('timeline')}
       onGoMeetings={openMeetings}
-    />
-  ) : screen === 'timeline' ? (
-    <Timeline
-      days={days}
-      selectedDay={selectedDay}
-      journal={journal}
-      onChooseDay={chooseDay}
-      onRefresh={() => loadScreen('timeline')}
     />
   ) : screen === 'meetings' ? (
     <Meetings

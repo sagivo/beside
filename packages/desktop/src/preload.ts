@@ -8,7 +8,6 @@ const api = {
   saveConfigPatch: (patch: unknown) => ipcRenderer.invoke('cofounderos:save-config-patch', patch),
   listJournalDays: () => ipcRenderer.invoke('cofounderos:list-journal-days'),
   getJournalDay: (day: string) => ipcRenderer.invoke('cofounderos:get-journal-day', day),
-  getIndexedJournalDay: (day: string) => ipcRenderer.invoke('cofounderos:get-indexed-journal-day', day),
   searchFrames: (query: unknown) => ipcRenderer.invoke('cofounderos:search-frames', query),
   explainSearchResults: (query: unknown) => ipcRenderer.invoke('cofounderos:explain-search-results', query),
   getFrameIndexDetails: (frameId: string) => ipcRenderer.invoke('cofounderos:get-frame-index-details', frameId),
@@ -29,7 +28,6 @@ const api = {
   copyText: (text: string) => ipcRenderer.invoke('cofounderos:copy-text', text),
   openExternalUrl: (url: string) => ipcRenderer.invoke('cofounderos:open-external-url', url),
   deleteFrame: (frameId: string) => ipcRenderer.invoke('cofounderos:delete-frame', frameId),
-  deleteFramesByDay: (day: string) => ipcRenderer.invoke('cofounderos:delete-frames-by-day', day),
   deleteFrames: (query: { app?: string; urlDomain?: string }) =>
     ipcRenderer.invoke('cofounderos:delete-frames', query),
   deleteAllMemory: () => ipcRenderer.invoke('cofounderos:delete-all-memory'),

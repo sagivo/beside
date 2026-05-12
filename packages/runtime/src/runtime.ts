@@ -34,7 +34,6 @@ import {
   type OrchestratorHandles,
   type OrchestratorOptions,
 } from './orchestrator.js';
-import { renderJournalMarkdown } from '@cofounderos/interfaces';
 import {
   runChatTurn,
   type ChatStreamHandler,
@@ -42,10 +41,6 @@ import {
   type HarnessHandle,
   type HarnessOptions,
 } from './agent/index.js';
-import {
-  insertJournalStory as insertJournalStorySection,
-  renderDeterministicObservedJournalStory as renderJournalStorySection,
-} from './journal-story.js';
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -157,11 +152,6 @@ export interface RuntimeJournalDay {
   day: string;
   frames: Frame[];
   sessions: ActivitySession[];
-}
-
-export interface RuntimeIndexedJournalDay {
-  day: string;
-  markdown: string;
 }
 
 export interface SearchResultExplanation {
@@ -624,43 +614,6 @@ export class CofounderRuntime {
     });
   }
 
-  async getIndexedJournalDay(day: string): Promise<RuntimeIndexedJournalDay> {
-    return await this.withHandles(async (handles) => {
-      const frames = (await handles.storage.getJournal(day))
-        .slice()
-        .sort((a, b) => Date.parse(a.timestamp ?? '') - Date.parse(b.timestamp ?? ''));
-      let sessions: ActivitySession[] = [];
-      try {
-        sessions = await handles.storage.listSessions({
-          day,
-          order: 'chronological',
-          limit: 500,
-        });
-      } catch {
-        sessions = [];
-      }
-      let meetings: Meeting[] = [];
-      try {
-        meetings = await handles.storage.listMeetings({
-          day,
-          order: 'chronological',
-          limit: 100,
-        });
-      } catch {
-        meetings = [];
-      }
-      const baseline = renderJournalMarkdown(day, frames, {
-        sessions,
-        meetings,
-      });
-      const story = renderJournalStorySection(frames, sessions);
-      return {
-        day,
-        markdown: story ? insertJournalStorySection(baseline, story) : baseline,
-      };
-    });
-  }
-
   async searchFrames(query: FrameQuery): Promise<Frame[]> {
     return await this.withHandles((handles) => handles.storage.searchFrames(query));
   }
@@ -786,10 +739,6 @@ export class CofounderRuntime {
 
   async deleteFrame(frameId: string): Promise<{ assetPath: string | null }> {
     return await this.withHandles((handles) => handles.storage.deleteFrame(frameId));
-  }
-
-  async deleteFramesByDay(day: string): Promise<{ frames: number; assetPaths: string[] }> {
-    return await this.withHandles((handles) => handles.storage.deleteFramesByDay(day));
   }
 
   async deleteFrames(query: { app?: string; urlDomain?: string }): Promise<{

@@ -1,5 +1,4 @@
 import {
-  Calendar,
   ChevronsLeft,
   ChevronsRight,
   HelpCircle,
@@ -34,17 +33,16 @@ interface NavItem {
  */
 const NAV_PRIMARY: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: LayoutDashboard, shortcut: '1' },
-  { id: 'timeline', label: 'Timeline', icon: Calendar, shortcut: '2' },
-  { id: 'meetings', label: 'Agenda', icon: Video, shortcut: '3' },
-  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '4' },
-  { id: 'search', label: 'Search', icon: Search, shortcut: '5' },
-  { id: 'chat', label: 'Ask AI', icon: MessageSquare, shortcut: '6' },
+  { id: 'meetings', label: 'Agenda', icon: Video, shortcut: '2' },
+  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '3' },
+  { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
+  { id: 'chat', label: 'Ask AI', icon: MessageSquare, shortcut: '5' },
 ];
 
 const NAV_SECONDARY: NavItem[] = [
-  { id: 'connect', label: 'Connect', icon: Plug, shortcut: '7' },
-  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '8' },
-  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '9' },
+  { id: 'connect', label: 'Connect', icon: Plug, shortcut: '6' },
+  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '7' },
+  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '8' },
 ];
 
 export function Sidebar({

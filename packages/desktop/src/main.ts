@@ -1465,9 +1465,6 @@ function registerRuntimeIpc(): void {
   ipcMain.handle('cofounderos:get-journal-day', async (_event, day: string) => {
     return await (await getRuntimeForRequest()).call('getJournalDay', day);
   });
-  ipcMain.handle('cofounderos:get-indexed-journal-day', async (_event, day: string) => {
-    return await (await getRuntimeForRequest()).call('getIndexedJournalDay', day);
-  });
   ipcMain.handle('cofounderos:list-meetings', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('listMeetings', query);
   });
@@ -1549,9 +1546,6 @@ function registerRuntimeIpc(): void {
   });
   ipcMain.handle('cofounderos:delete-frame', async (_event, frameId: string) => {
     return await (await getRuntimeForRequest()).call('deleteFrame', frameId);
-  });
-  ipcMain.handle('cofounderos:delete-frames-by-day', async (_event, day: string) => {
-    return await (await getRuntimeForRequest()).call('deleteFramesByDay', day);
   });
   ipcMain.handle('cofounderos:delete-frames', async (_event, query: unknown) => {
     return await (await getRuntimeForRequest()).call('deleteFrames', query);

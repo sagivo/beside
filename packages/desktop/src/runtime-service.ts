@@ -246,8 +246,6 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.listJournalDays();
     case 'getJournalDay':
       return await runtime.getJournalDay(String(req.params));
-    case 'getIndexedJournalDay':
-      return await runtime.getIndexedJournalDay(String(req.params));
     case 'listMeetings':
       return await runtime.listMeetings(
         req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
@@ -272,11 +270,6 @@ async function handle(req: Request): Promise<unknown> {
       const result = await runtime.deleteFrame(String(req.params));
       // Re-emit overview so KPIs / live strip update without waiting for
       // the next heartbeat after a destructive action.
-      void pushOverview('full');
-      return result;
-    }
-    case 'deleteFramesByDay': {
-      const result = await runtime.deleteFramesByDay(String(req.params));
       void pushOverview('full');
       return result;
     }

@@ -75,7 +75,6 @@ export function Dashboard({
   onTriggerFullReindex,
   onBootstrap,
   onOpenMarkdownExport,
-  onGoTimeline,
   onGoMeetings,
 }: {
   overview: RuntimeOverview | null;
@@ -91,12 +90,11 @@ export function Dashboard({
   onTriggerFullReindex: (fromDate: string) => Promise<void>;
   onBootstrap: () => Promise<void>;
   onOpenMarkdownExport: (category?: string) => Promise<void>;
-  onGoTimeline: () => void;
   onGoMeetings: (target?: FounderAgendaTarget | null) => void;
 }) {
   const [bootstrapping, setBootstrapping] = React.useState(false);
 
-  // Single fetch of today's journal — used by both the timeline viz and the
+  // Single fetch of today's journal — used by both the activity bars and the
   // bento tiles, so we don't double-poll the runtime.
   const { journal, loading } = useTodayJournal(overview);
   const founderBrief = useFounderBrief(overview);
@@ -201,10 +199,7 @@ export function Dashboard({
       {/* Recent moments — full-bleed film strip. The most "alive" thing on the
           screen, designed to read like Photos.app rather than another card. */}
       {captureLive && recentFrames.length > 0 && (
-        <FilmStrip
-          frames={recentFrames.slice(0, FILM_STRIP_FRAMES)}
-          onJump={onGoTimeline}
-        />
+        <FilmStrip frames={recentFrames.slice(0, FILM_STRIP_FRAMES)} />
       )}
 
       {/* Bento tile grid — replaces the old "Activity card with 4 stats inside".
@@ -255,8 +250,8 @@ function prettyToday(): string {
 
 /* ──────────────────────────────────────────────────────────────────────────
    Today's-journal fetch
-   Lifted out of ActivityCard so the bento grid + timeline viz share one
-   data fetch instead of polling separately.
+   Shared by the bento grid + activity bars so the dashboard only pays for
+   one journal fetch.
    ────────────────────────────────────────────────────────────────────── */
 function useTodayJournal(overview: RuntimeOverview | null) {
   const eventsToday = overview?.capture.eventsToday ?? 0;
@@ -759,7 +754,7 @@ function Hero({
               </span>
               <span className="text-base text-muted-foreground">moments today</span>
             </div>
-            <ActivityTimeline
+            <ActivityBars
               frames={journal?.frames ?? []}
               loading={loading}
               accent={tone === 'live'}
@@ -867,12 +862,12 @@ function HeroSkeleton() {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   ActivityTimeline
+   ActivityBars
    24-hour bar visualization showing capture density per hour. Replaces a
    bullet stat with a real visualization — a non-technical user sees
    at-a-glance "I was busy this morning, quiet over lunch, picked up again".
    ────────────────────────────────────────────────────────────────────── */
-function ActivityTimeline({
+function ActivityBars({
   frames,
   loading,
   accent,
@@ -967,21 +962,14 @@ function formatActiveMinutes(minutes: number): string {
 
 /* ──────────────────────────────────────────────────────────────────────────
    FilmStrip
-   Horizontal-scroll strip of large recent thumbnails. Replaces the old
-   small-grid LiveCaptureStrip with something that reads like a creative
-   tool, not an admin panel.
+   Horizontal-scroll strip of large recent thumbnails. Designed to read like
+   a creative tool, not an admin panel.
    ────────────────────────────────────────────────────────────────────── */
 
-function FilmStrip({
-  frames,
-  onJump,
-}: {
-  frames: Frame[];
-  onJump: () => void;
-}) {
+function FilmStrip({ frames }: { frames: Frame[] }) {
   return (
     <section>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center gap-2 mb-3">
         <div className="flex items-center gap-2">
           <span className="relative grid place-items-center size-5 rounded-full bg-success/15 text-success">
             <Radio className="size-3" />
@@ -990,13 +978,6 @@ function FilmStrip({
           <h3 className="text-sm font-semibold">Just captured</h3>
           <span className="text-xs text-muted-foreground">— click any moment</span>
         </div>
-        <button
-          type="button"
-          onClick={onJump}
-          className="text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
-        >
-          See timeline →
-        </button>
       </div>
 
       <div className="-mx-1 flex gap-3 overflow-x-auto pb-2 px-1 scrollbar-none scroll-smooth">

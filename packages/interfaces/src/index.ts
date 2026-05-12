@@ -1222,14 +1222,6 @@ export interface IStorage {
   deleteFrame(frameId: string): Promise<{ assetPath: string | null }>;
 
   /**
-   * Permanently delete every frame, raw event, and session for a given
-   * day (YYYY-MM-DD) along with all their assets on disk. Returns the
-   * count of deleted frames and the list of asset paths removed for
-   * UI feedback.
-   */
-  deleteFramesByDay(day: string): Promise<{ frames: number; assetPaths: string[] }>;
-
-  /**
    * Permanently delete every frame matching a privacy scope, along with
    * raw events, derived search/memory rows, meetings, and assets tied to
    * those frames. At least one filter must be present.
