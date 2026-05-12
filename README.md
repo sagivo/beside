@@ -480,7 +480,7 @@ capture:
     batch_size: 5
     whisper_command: whisper
     live_recording:
-      enabled: true       # native capture plugin only; records mic/input chunks while another process uses audio input
+      enabled: true       # native capture plugin only; joins after another process opens audio input
       activation: other_process_input
       system_audio_backend: core_audio_tap
       chunk_seconds: 300
@@ -496,8 +496,10 @@ OpenAI Whisper's CLI. Files that fail transcription are moved to
 
 When using `capture.plugin: native` on macOS, live recording is enabled
 by default and starts only while another process is actively using audio
-input. The transcript worker will pick up finished `.m4a` / `.wav`
-chunks on its next tick.
+input. CofounderOS does not start audio capture from meeting UI or URL
+detection alone; it only joins an already-active audio session. The
+transcript worker will pick up finished `.m4a` / `.wav` chunks on its
+next tick.
 
 ### Meetings (Zoom / Google Meet / Microsoft Teams / Webex)
 

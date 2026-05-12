@@ -259,17 +259,21 @@ class OllamaAdapter implements IModelAdapter {
       images: images.map((b) => b.toString('base64')),
     });
 
-    const res = await this.client.chat({
-      model: this.visionModel,
-      messages,
-      stream: false,
-      format: options.responseFormat === 'json' ? 'json' : undefined,
-      keep_alive: this.keepAlive,
-      options: {
-        temperature: options.temperature ?? 0.2,
-        num_predict: options.maxTokens ?? 1024,
-      },
-    });
+    const res = await raceWithTimeout(
+      this.client.chat({
+        model: this.visionModel,
+        messages,
+        stream: false,
+        format: options.responseFormat === 'json' ? 'json' : undefined,
+        keep_alive: this.keepAlive,
+        options: {
+          temperature: options.temperature ?? 0.2,
+          num_predict: options.maxTokens ?? 1024,
+        },
+      }),
+      COMPLETE_TIMEOUT_MS,
+      'ollama vision /api/chat',
+    );
     this.scheduleIdleUnload();
     return res.message.content;
   }

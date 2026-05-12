@@ -80,7 +80,6 @@ type CaptureMode = 'active' | 'all';
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type ScreenshotFormat = 'webp' | 'jpeg';
 type SystemAudioBackend = 'core_audio_tap' | 'screencapturekit' | 'off';
-type LiveRecordingActivation = 'other_process_input' | 'always';
 type LiveRecordingFormat = 'm4a';
 type McpTransport = 'http' | 'stdio';
 
@@ -197,7 +196,6 @@ interface SettingsDraft {
   minAudioBytesPerSec: number;
   minAudioRateCheckMs: number;
   liveRecordingEnabled: boolean;
-  liveRecordingActivation: LiveRecordingActivation;
   liveRecordingFormat: LiveRecordingFormat;
   liveRecordingSampleRate: number;
   liveRecordingChannels: number;
@@ -1013,7 +1011,6 @@ export function Settings({
             maxAudioBytes={draft.maxAudioBytes}
             minAudioBytesPerSec={draft.minAudioBytesPerSec}
             minAudioRateCheckMs={draft.minAudioRateCheckMs}
-            liveRecordingActivation={draft.liveRecordingActivation}
             liveRecordingFormat={draft.liveRecordingFormat}
             liveRecordingSampleRate={draft.liveRecordingSampleRate}
             liveRecordingChannels={draft.liveRecordingChannels}
@@ -1435,7 +1432,6 @@ function AudioSettings({
   maxAudioBytes,
   minAudioBytesPerSec,
   minAudioRateCheckMs,
-  liveRecordingActivation,
   liveRecordingFormat,
   liveRecordingSampleRate,
   liveRecordingChannels,
@@ -1459,7 +1455,6 @@ function AudioSettings({
   maxAudioBytes: number;
   minAudioBytesPerSec: number;
   minAudioRateCheckMs: number;
-  liveRecordingActivation: LiveRecordingActivation;
   liveRecordingFormat: LiveRecordingFormat;
   liveRecordingSampleRate: number;
   liveRecordingChannels: number;
@@ -1544,7 +1539,7 @@ function AudioSettings({
               <Separator className="my-4" />
               <ToggleRow
                 title="Live microphone recording"
-                description="Record short chunks from the microphone while capture is running."
+                description="Record short chunks only after another app is already using audio input."
                 typeLabel="boolean"
                 checked={liveRecordingEnabled}
                 onChange={setLiveRecordingEnabled}
@@ -1593,7 +1588,7 @@ function AudioSettings({
                 <div>
                   <h4 className="font-medium">Remote participant audio</h4>
                   <p className="text-sm text-muted-foreground mt-0.5">
-                    Choose how CofounderOS records the people you hear during meetings.
+                    Choose how CofounderOS joins remote audio after another app opens input.
                   </p>
                 </div>
                 <RadioGroup
@@ -1614,8 +1609,8 @@ function AudioSettings({
                     <div className="min-w-0">
                       <div className="font-medium">Core Audio tap</div>
                       <div className="text-xs text-muted-foreground mt-0.5">
-                        Recommended on macOS 14.2+. Captures system output without the
-                        macOS screen-sharing indicator.
+                        Recommended on macOS 14.2+. Joins system output without the
+                        macOS screen-sharing indicator once another app is using input.
                       </div>
                     </div>
                   </Label>
@@ -1649,8 +1644,8 @@ function AudioSettings({
                     <div className="min-w-0">
                       <div className="font-medium">ScreenCaptureKit fallback</div>
                       <div className="text-xs text-muted-foreground mt-0.5">
-                        Captures remote audio on older macOS versions, but macOS shows
-                        "Currently Sharing" while it is active.
+                        Joins remote audio on older macOS versions, but macOS shows
+                        "Currently Sharing" while active.
                       </div>
                     </div>
                   </Label>
@@ -1667,17 +1662,6 @@ function AudioSettings({
                   unit="sec"
                   typeLabel="integer"
                   hint="Shorter chunks = faster feedback during calls, more Whisper invocations."
-                />
-                <SelectField
-                  label="Recording activation"
-                  value={liveRecordingActivation}
-                  onChange={(v) => set('liveRecordingActivation', v as LiveRecordingActivation)}
-                  typeLabel="enum"
-                  hint="Always is more reliable for calls; input-only is quieter when nothing is using the mic."
-                  options={[
-                    { value: 'other_process_input', label: 'When another process uses input' },
-                    { value: 'always', label: 'Always while capture is running' },
-                  ]}
                 />
                 <SelectField
                   label="Recording format"
@@ -3526,7 +3510,6 @@ function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     minAudioBytesPerSec: audio?.min_audio_bytes_per_sec ?? 4096,
     minAudioRateCheckMs: audio?.min_audio_rate_check_ms ?? 5000,
     liveRecordingEnabled: liveRecording?.enabled ?? false,
-    liveRecordingActivation: liveRecording?.activation ?? 'other_process_input',
     liveRecordingFormat: liveRecording?.format ?? 'm4a',
     liveRecordingSampleRate: liveRecording?.sample_rate ?? 16_000,
     liveRecordingChannels: liveRecording?.channels ?? 1,
@@ -3601,7 +3584,7 @@ function configPatchFromDraft(draft: SettingsDraft) {
         min_audio_rate_check_ms: clampInt(draft.minAudioRateCheckMs, 0),
         live_recording: {
           enabled: draft.liveRecordingEnabled,
-          activation: draft.liveRecordingActivation,
+          activation: 'other_process_input',
           system_audio_backend: draft.systemAudioBackend,
           poll_interval_sec: clampInt(draft.liveRecordingPollIntervalSec, 1),
           chunk_seconds: clampInt(draft.chunkSeconds, 1),

@@ -43,7 +43,8 @@
               "activation": {
                 "type": "string",
                 "enum": ["other_process_input", "always"],
-                "default": "other_process_input"
+                "default": "other_process_input",
+                "description": "Use other_process_input. Legacy always values are accepted for old configs but treated as input-only by the native helper."
               },
               "poll_interval_sec": { "type": "integer", "default": 3 }
             }

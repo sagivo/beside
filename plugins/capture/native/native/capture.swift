@@ -241,7 +241,6 @@ func runMacCapture(config: HelperConfig) {
   let focusSettleDelay = max(0, Double(config.focus_settle_delay_ms ?? 900) / 1000.0)
   let idleThreshold = Double(config.idle_threshold_sec ?? 60)
   let contentChangeInterval = max(0, Double(config.content_change_min_interval_ms ?? 60_000) / 1000.0)
-  let meetingEvidenceGrace = max(600.0, contentChangeInterval * 2)
   let displays = enumerateDisplays()
   let selectedDisplays = selectDisplays(displays: displays, config: config)
   let audioChunker = AudioChunker(config: config)
@@ -286,7 +285,6 @@ func runMacCapture(config: HelperConfig) {
   var lastUrl: String? = nil
   var lastSoftCaptureAt = Date.distantPast
   var pendingFocusCapture: PendingFocusCapture? = nil
-  var lastMeetingEvidenceAt: Date? = nil
   // Throttle the periodic status emit. Previously fired every poll
   // (every 3 s when active = 20/min), waking the Node-side stdout
   // reader and recomputing memory via mach_task_basic_info each time.
@@ -316,13 +314,12 @@ func runMacCapture(config: HelperConfig) {
         audioChunker.stop()
         sysAudio?.stop()
         pendingFocusCapture = nil
-        lastMeetingEvidenceAt = nil
       }
       if command.contains("\"kind\":\"resume\"") { paused = false }
     }
 
     if paused {
-      audioChunker.tick(paused: true, meetingVisible: false)
+      audioChunker.tick(paused: true)
       // sysAudio is already stopped on pause; nothing to tick
       Thread.sleep(forTimeInterval: idlePollInterval)
       return .next
@@ -360,24 +357,19 @@ func runMacCapture(config: HelperConfig) {
         metadata: ["source": "native-macos"]
       )
       if let lastWindow {
-        if captureScreenshots(
+        _ = captureScreenshots(
           trigger: "idle_end",
           window: lastWindow,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        ) {
-          lastMeetingEvidenceAt = Date()
-        }
+        )
       }
     }
 
     var currentWindow: ActiveWindow? = nil
     if let current = queryActiveWindow(displays: displays) {
       currentWindow = current
-      if liveMeetingEvidence(window: current, text: nil) {
-        lastMeetingEvidenceAt = Date()
-      }
       if lastWindow?.focusKey != current.focusKey {
         if let previous = lastWindow {
           emitEvent(
@@ -435,42 +427,36 @@ func runMacCapture(config: HelperConfig) {
             "source": "native-macos"
           ]
         )
-        if captureScreenshots(
+        _ = captureScreenshots(
           trigger: "url_change",
           window: current,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        ) {
-          lastMeetingEvidenceAt = Date()
-        }
+        )
         lastSoftCaptureAt = Date()
         pendingFocusCapture = nil
         lastUrl = current.url
       } else if !idle && pendingFocusCapture == nil && contentChangeInterval > 0 && Date().timeIntervalSince(lastSoftCaptureAt) >= contentChangeInterval {
-        if captureScreenshots(
+        _ = captureScreenshots(
           trigger: "content_change",
           window: current,
           sessionId: sessionId,
           displays: selectedDisplays,
           config: config
-        ) {
-          lastMeetingEvidenceAt = Date()
-        }
+        )
         lastSoftCaptureAt = Date()
       }
     }
 
     if !idle, let pending = pendingFocusCapture, Date() >= pending.dueAt {
-      if captureScreenshots(
+      _ = captureScreenshots(
         trigger: "window_focus",
         window: currentWindow ?? pending.window,
         sessionId: sessionId,
         displays: selectedDisplays,
         config: config
-      ) {
-        lastMeetingEvidenceAt = Date()
-      }
+      )
       lastSoftCaptureAt = Date()
       pendingFocusCapture = nil
     }
@@ -484,9 +470,8 @@ func runMacCapture(config: HelperConfig) {
       }
       lastStatusEmitAt = nowTs
     }
-    let meetingVisible = lastMeetingEvidenceAt.map { Date().timeIntervalSince($0) <= meetingEvidenceGrace } ?? false
-    audioChunker.tick(paused: false, meetingVisible: meetingVisible)
-    sysAudio?.tick(meetingVisible)
+    audioChunker.tick(paused: false)
+    sysAudio?.tick()
     Thread.sleep(forTimeInterval: idle ? idlePollInterval : pollInterval)
     return .next
     }
@@ -651,9 +636,6 @@ func liveMeetingEvidence(window: ActiveWindow, text: String?) -> Bool {
   }
 
   guard let text, !text.isEmpty else { return false }
-  if hasMeetingTitleLine(text) {
-    return true
-  }
   if hasActualMeetingUrl(text) && hasMeetingUiText(text) {
     return true
   }
@@ -1326,7 +1308,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
-  func tick(paused: Bool, meetingVisible: Bool) {
+  func tick(paused: Bool) {
     guard enabled, prepared else { return }
     if paused {
       stop()
@@ -1337,7 +1319,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
       return
     }
     nextInputCheckAt = Date().addingTimeInterval(pollInterval)
-    let shouldRecord = shouldRecordNow(meetingVisible: meetingVisible)
+    let shouldRecord = shouldRecordNow()
     if !shouldRecord {
       stop()
       return
@@ -1363,12 +1345,10 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     }
   }
 
-  private func shouldRecordNow(meetingVisible: Bool) -> Bool {
+  private func shouldRecordNow() -> Bool {
     switch activation {
-    case "always":
-      return true
-    case "other_process_input":
-      return meetingVisible || inputDetector.isOtherProcessUsingInput()
+    case "always", "other_process_input":
+      return inputDetector.isOtherProcessUsingInput()
     default:
       emit([
         "kind": "error",
@@ -1640,7 +1620,7 @@ final class OtherProcessAudioInputDetector {
 /// Wraps the availability-gated SystemAudioChunker behind plain closures so
 /// runMacCapture can call tick/stop without sprinkling @available guards everywhere.
 struct SystemAudioHandle {
-  let tick: (Bool) -> Void
+  let tick: () -> Void
   let stop: () -> Void
 }
 
@@ -1667,7 +1647,7 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     let chunker = CoreAudioSystemAudioChunker(config: config)
     chunker.startIfEnabled()
     return SystemAudioHandle(
-      tick: { meetingVisible in chunker.tick(meetingVisible: meetingVisible) },
+      tick: { chunker.tick() },
       stop: { chunker.stop() }
     )
   case "screencapturekit":
@@ -1679,7 +1659,7 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     let chunker = SystemAudioChunker(config: config)
     chunker.startIfEnabled()
     return SystemAudioHandle(
-      tick: { meetingVisible in chunker.tick(meetingVisible: meetingVisible) },
+      tick: { chunker.tick() },
       stop: { chunker.stop() }
     )
   default:
@@ -1742,21 +1722,21 @@ final class CoreAudioSystemAudioChunker {
       emit(["kind": "log", "level": "info",
             "message": "native Core Audio system output capture armed",
             "data": ["chunk_seconds": chunkSeconds, "backend": "core_audio_tap", "activation": activation]])
-      tick(meetingVisible: false)
+      tick()
     } catch {
       emit(["kind": "error", "code": "core_audio_tap_prepare_failed",
             "message": String(describing: error), "fatal": false])
     }
   }
 
-  func tick(meetingVisible: Bool) {
+  func tick() {
     guard enabled, prepared else { return }
     guard Date() >= nextInputCheckAt else {
       rotateIfNeeded()
       return
     }
     nextInputCheckAt = Date().addingTimeInterval(pollInterval)
-    guard shouldRecordNow(meetingVisible: meetingVisible) else {
+    guard shouldRecordNow() else {
       stop()
       return
     }
@@ -1793,12 +1773,10 @@ final class CoreAudioSystemAudioChunker {
     }
   }
 
-  private func shouldRecordNow(meetingVisible: Bool) -> Bool {
+  private func shouldRecordNow() -> Bool {
     switch activation {
-    case "always":
-      return true
-    case "other_process_input":
-      return meetingVisible || inputDetector.isOtherProcessUsingInput()
+    case "always", "other_process_input":
+      return inputDetector.isOtherProcessUsingInput()
     default:
       emit(["kind": "error", "code": "audio_activation_unsupported",
             "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",
@@ -2014,9 +1992,12 @@ final class CoreAudioSystemAudioChunker {
 @available(macOS 13.0, *)
 final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
   private let enabled: Bool
+  private let activation: String
   private let inboxPath: String
   private let partialPath: String
   private let chunkSeconds: TimeInterval
+  private let pollInterval: TimeInterval
+  private let inputDetector = OtherProcessAudioInputDetector()
 
   private var stream: SCStream?
   // Serial queue owns all chunk state — SCStream audio callbacks are also
@@ -2025,7 +2006,9 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
 
   private var chunkIndex = 0
   private var capturing = false
+  private var prepared = false
   private var sessionStarted = false
+  private var nextInputCheckAt = Date.distantPast
   private var currentWriter: AVAssetWriter?
   private var currentInput: AVAssetWriterInput?
   private var currentStartedAt: Date?
@@ -2035,11 +2018,13 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
   init(config: HelperConfig) {
     let live = config.audio?.live_recording
     self.enabled = (config.capture_audio == true) && (live?.enabled == true)
+    self.activation = live?.activation ?? "other_process_input"
     self.inboxPath = NSString(
       string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
     ).expandingTildeInPath
     self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-sys")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
+    self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
   }
 
   func startIfEnabled() {
@@ -2047,13 +2032,47 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
     try? FileManager.default.createDirectory(atPath: inboxPath,  withIntermediateDirectories: true)
     try? FileManager.default.createDirectory(atPath: partialPath, withIntermediateDirectories: true)
     reapStalePartials()
-    startStream()
+    prepared = true
+    emit(["kind": "log", "level": "info",
+          "message": "native system audio capture armed",
+          "data": ["chunk_seconds": chunkSeconds, "backend": "screencapturekit", "activation": activation]])
+    tick()
   }
 
-  func tick(meetingVisible: Bool) {
+  func tick() {
+    guard enabled, prepared else { return }
+    guard Date() >= nextInputCheckAt else {
+      rotateIfNeeded()
+      return
+    }
+    nextInputCheckAt = Date().addingTimeInterval(pollInterval)
+    guard shouldRecordNow() else {
+      stop()
+      return
+    }
+    if stream == nil {
+      startStream()
+      return
+    }
+    rotateIfNeeded()
+  }
+
+  private func rotateIfNeeded() {
     q.async { [weak self] in
       guard let self, self.capturing, let started = self.currentStartedAt else { return }
       if Date().timeIntervalSince(started) >= self.chunkSeconds { self.rotate() }
+    }
+  }
+
+  private func shouldRecordNow() -> Bool {
+    switch activation {
+    case "always", "other_process_input":
+      return inputDetector.isOtherProcessUsingInput()
+    default:
+      emit(["kind": "error", "code": "audio_activation_unsupported",
+            "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",
+            "fatal": false])
+      return false
     }
   }
 

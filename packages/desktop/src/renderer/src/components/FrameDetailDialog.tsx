@@ -32,6 +32,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from '@/components/ui/sonner';
 import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { formatLocalTime, localDayKey, prettyDay } from '@/lib/format';
+import { buildFrameSearchContext } from '@/lib/search-context';
 import type { Frame, FrameIndexDetails } from '@/global';
 
 type DeleteHandler = (frame: Frame) => void | Promise<void>;
@@ -141,7 +142,6 @@ function FrameDetailBody({
   const [detailExplanation, setDetailExplanation] = React.useState<string | null>(
     searchContext?.explanation ?? null,
   );
-  const [explanationLoading, setExplanationLoading] = React.useState(false);
   const [indexDetails, setIndexDetails] = React.useState<FrameIndexDetails | null>(null);
   const [indexDetailsLoading, setIndexDetailsLoading] = React.useState(false);
 
@@ -177,12 +177,10 @@ function FrameDetailBody({
     const query = searchContext?.query.trim();
     setDetailExplanation(searchContext?.explanation ?? null);
     if (!query || searchContext?.explanation || !frame.id) {
-      setExplanationLoading(false);
       return () => {
         cancelled = true;
       };
     }
-    setExplanationLoading(true);
     void (async () => {
       try {
         const explained = await window.cofounderos.explainSearchResults({
@@ -192,8 +190,6 @@ function FrameDetailBody({
         if (!cancelled) setDetailExplanation(explained[0]?.explanation ?? null);
       } catch {
         if (!cancelled) setDetailExplanation(null);
-      } finally {
-        if (!cancelled) setExplanationLoading(false);
       }
     })();
     return () => {
@@ -239,6 +235,9 @@ function FrameDetailBody({
   const metadataEntries = Object.entries(indexDetails?.metadata ?? {}).filter(
     ([key]) => !AI_CAPTION_KEYS.has(key),
   );
+  const searchContextText = searchContext
+    ? detailExplanation ?? buildFrameSearchContext(searchContext.query, frame)
+    : null;
 
   return (
     <div className="grid h-[80vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[1.4fr_1fr]">
@@ -305,7 +304,7 @@ function FrameDetailBody({
                   <span>Search context</span>
                 </div>
                 <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
-                  {detailExplanation || (explanationLoading ? 'Reading context from this result…' : 'No AI context available for this result yet.')}
+                  {searchContextText || 'No searchable context is available for this result yet.'}
                 </div>
               </div>
             ) : null}
@@ -481,4 +480,3 @@ function formatMetadataValue(value: unknown): string {
     return String(value);
   }
 }
-

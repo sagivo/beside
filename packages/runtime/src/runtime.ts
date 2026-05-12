@@ -203,6 +203,7 @@ const OVERVIEW_SLOW_LOG_MS = 500;
  * are stored in insertion order so we evict the oldest first.
  */
 const EXPLAIN_SEARCH_CACHE_MAX = 256;
+const SEARCH_EXPLANATION_TIMEOUT_MS = 20_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
@@ -685,7 +686,11 @@ export class CofounderRuntime {
         // Refresh recency: re-insert so this entry is the youngest.
         this.explainSearchCache.delete(key);
         this.explainSearchCache.set(key, hit);
-        if (hit) cached.push({ frameId: frame.id, explanation: hit });
+        const fallback = buildFallbackSearchResultExplanation(text, frame);
+        const explanation = hit || fallback;
+        if (explanation) {
+          cached.push({ frameId: frame.id, explanation });
+        }
       } else {
         misses.push(frame);
       }
@@ -694,7 +699,9 @@ export class CofounderRuntime {
     if (misses.length === 0) return cached;
 
     return await this.withHandles(async (handles) => {
-      if (!(await handles.model.isAvailable().catch(() => false))) return cached;
+      if (!(await handles.model.isAvailable().catch(() => false))) {
+        return [...cached, ...buildFallbackSearchResultExplanations(text, misses)];
+      }
 
       const modelInfo = handles.model.getModelInfo();
       const fresh: SearchResultExplanation[] = [];
@@ -705,27 +712,33 @@ export class CofounderRuntime {
             ? await readFrameAssetForModel(handles, frame.asset_path)
             : null;
           const prompt = buildSearchResultExplanationPrompt(text, frame, image != null);
-          const raw = image
-            ? await handles.model.completeWithVision(prompt, [image], {
-                maxTokens: 120,
-                temperature: 0.2,
-              })
-            : await handles.model.complete(prompt, {
-                maxTokens: 120,
-                temperature: 0.2,
-              });
+          const raw = await raceSearchExplanation(
+            image
+              ? handles.model.completeWithVision(prompt, [image], {
+                  maxTokens: 120,
+                  temperature: 0.2,
+                })
+              : handles.model.complete(prompt, {
+                  maxTokens: 120,
+                  temperature: 0.2,
+                }),
+          );
           const explanation = cleanSearchExplanation(raw);
           // Cache empty strings too so we don't keep hammering the
           // model on frames that consistently produce nothing useful.
           this.rememberExplainCache(key, explanation);
-          if (explanation) {
-            fresh.push({ frameId: frame.id, explanation });
+          const fallback = buildFallbackSearchResultExplanation(text, frame);
+          const displayExplanation = explanation || fallback;
+          if (displayExplanation) {
+            fresh.push({ frameId: frame.id, explanation: displayExplanation });
           }
         } catch (err) {
           handles.logger.debug('search result explanation failed', {
             frameId: frame.id,
             err: String(err),
           });
+          const fallback = buildFallbackSearchResultExplanation(text, frame);
+          if (fallback) fresh.push({ frameId: frame.id, explanation: fallback });
         }
       }
       return [...cached, ...fresh];
@@ -2290,11 +2303,106 @@ function explainCacheKey(frameId: string, normalisedQuery: string): string {
   return `${frameId}::${normalisedQuery}`;
 }
 
+async function raceSearchExplanation(promise: Promise<string>): Promise<string> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `search result explanation timed out after ${Math.round(SEARCH_EXPLANATION_TIMEOUT_MS / 1000)}s`,
+        ),
+      );
+    }, SEARCH_EXPLANATION_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function cleanSearchExplanation(raw: string): string {
   return raw
     .replace(/^["'\s]+|["'\s]+$/g, '')
     .replace(/\s+/g, ' ')
     .slice(0, 260);
+}
+
+function buildFallbackSearchResultExplanations(
+  query: string,
+  frames: Frame[],
+): SearchResultExplanation[] {
+  return frames.flatMap((frame) => {
+    const explanation = buildFallbackSearchResultExplanation(query, frame);
+    return explanation ? [{ frameId: frame.id, explanation }] : [];
+  });
+}
+
+function buildFallbackSearchResultExplanation(query: string, frame: Frame): string | null {
+  const terms = searchTerms(query);
+  const text = normaliseSearchContextText(frame.text);
+  const title = normaliseSearchContextText(frame.window_title);
+  const url = normaliseSearchContextText(frame.url);
+
+  const textSnippet = searchContextSnippet(text, terms);
+  if (textSnippet) return `Captured text: ${textSnippet}`;
+
+  const titleSnippet = searchContextSnippet(title, terms);
+  if (titleSnippet) return `Window title: ${titleSnippet}`;
+
+  const urlSnippet = searchContextSnippet(url, terms);
+  if (urlSnippet) return `URL: ${urlSnippet}`;
+
+  if (text) return `Captured text: ${truncateSearchContext(text)}`;
+  if (title) return `Window title: ${truncateSearchContext(title)}`;
+  if (url) return `URL: ${truncateSearchContext(url)}`;
+  if (frame.app) return `Captured in ${frame.app}.`;
+
+  return null;
+}
+
+function searchTerms(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function normaliseSearchContextText(value: string | null | undefined): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function searchContextSnippet(text: string, terms: string[]): string | null {
+  if (!text || terms.length === 0) return null;
+
+  const lower = text.toLowerCase();
+  let bestIndex = -1;
+  let bestTerm = '';
+  for (const term of terms) {
+    const index = lower.indexOf(term);
+    if (index === -1) continue;
+    if (bestIndex === -1 || index < bestIndex) {
+      bestIndex = index;
+      bestTerm = term;
+    }
+  }
+  if (bestIndex === -1) return null;
+
+  const radius = 90;
+  const start = Math.max(0, bestIndex - radius);
+  const end = Math.min(text.length, bestIndex + bestTerm.length + radius);
+  const prefix = start > 0 ? '...' : '';
+  const suffix = end < text.length ? '...' : '';
+  return `${prefix}${text.slice(start, end).trim()}${suffix}`;
+}
+
+function truncateSearchContext(text: string): string {
+  const max = 220;
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 3).trimEnd()}...`;
 }
 
 function deepMerge(target: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {

@@ -49,15 +49,12 @@ interface NativeCaptureConfig {
       channels?: number;
       system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
       /**
-       * When to start the microphone recorder:
+       * When to join an already-active microphone session:
        *   'other_process_input' — record when another process is actively
-       *     using the microphone, or when the native helper sees a live meeting
-       *     UI/URL in the captured screen evidence. The visual meeting fallback
-       *     covers Bluetooth headsets, muted mics, and virtual audio devices that
-       *     CoreAudio does not report via `kAudioProcessPropertyIsRunningInput`.
-       *   'always' — record whenever capture is running (recommended for calls).
-       *     Pairs well with `delete_audio_after_transcribe: true` so only the
-       *     redacted transcript is retained.
+       *     using the microphone. CofounderOS does not initiate recording based
+       *     on meeting UI or URLs.
+       *   'always' — legacy value accepted for older configs; treated as
+       *     input-only so the app never opens audio by itself.
        */
       activation?: 'other_process_input' | 'always';
       poll_interval_sec?: number;

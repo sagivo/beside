@@ -77,11 +77,10 @@ const CaptureSchema = z.object({
     // noisy. Default 5000 (5 s).
     min_audio_rate_check_ms: z.number().int().nonnegative().default(5000),
     // Live mic/input recording. ON by default for native meeting
-    // capture. `activation: other_process_input` starts recording
-    // while another process is actively using audio input, or while
-    // the native helper sees a real meeting UI/URL in the captured
-    // screen evidence. Users who want fully manual capture can turn
-    // this off in config.yaml or Settings.
+    // capture, but it only joins after another process is already
+    // using audio input. Meeting UI/URL detection never opens audio by
+    // itself. `always` is retained for old configs and treated as
+    // input-only by the native helper.
     live_recording: z.object({
       enabled: z.boolean().default(true),
       chunk_seconds: z.number().int().positive().default(300),
@@ -539,11 +538,10 @@ capture:
     min_audio_bytes_per_sec: 4096 # silence floor; chunks below this byte rate skip whisper and are deleted (0 = disable)
     min_audio_rate_check_ms: 5000 # skip the silence floor check for clips shorter than this (ms)
     live_recording:
-      enabled: true               # native plugin only; records mic/input chunks into the inbox while calls are detected
-      # activation controls when microphone recording starts:
-      #   other_process_input — record while another process uses audio input OR a real meeting UI/URL is visible
-      #     (covers Bluetooth/AirPods, muted mics, and virtual devices that CoreAudio may not report)
-      #   always              — record whenever capture is running (recommended for calls)
+      enabled: true               # native plugin only; records mic/input chunks after another app opens audio input
+      # activation controls when microphone recording may join:
+      #   other_process_input — record only while another process uses audio input
+      #   always              — legacy value; treated as input-only so CofounderOS does not initiate capture
       activation: other_process_input
       # Remote participant audio:
       #   core_audio_tap  — macOS 14.2+ audio-only system output capture; no screen-sharing indicator

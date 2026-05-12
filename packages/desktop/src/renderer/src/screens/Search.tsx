@@ -15,6 +15,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { formatLocalDateTime } from '@/lib/format';
 import { listItemProps, useListKeyboardNav } from '@/lib/list-keys';
+import { buildFrameSearchContext } from '@/lib/search-context';
 import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
 import type { Frame } from '@/global';
@@ -67,7 +68,6 @@ export function Search({
   const [results, setResults] = React.useState<Frame[] | null>(null);
   const [activeSearchQuery, setActiveSearchQuery] = React.useState('');
   const [explanations, setExplanations] = React.useState<Record<string, string>>({});
-  const [explaining, setExplaining] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [searched, setSearched] = React.useState(false);
   const [knownApps, setKnownApps] = React.useState<string[]>([]);
@@ -107,7 +107,6 @@ export function Search({
       setResults(null);
       setActiveSearchQuery('');
       setExplanations({});
-      setExplaining(false);
       setSearched(false);
       return;
     }
@@ -115,7 +114,6 @@ export function Search({
     searchRunRef.current = runId;
     if (text !== undefined) setQuery(text);
     setLoading(true);
-    setExplaining(false);
     setExplanations({});
     setActiveSearchQuery(q);
     setSearched(true);
@@ -130,7 +128,6 @@ export function Search({
       setResults(found);
       const framesToExplain = found.slice(0, EXPLANATION_LIMIT);
       if (framesToExplain.length > 0) {
-        setExplaining(true);
         void (async () => {
           let nextIndex = 0;
           const explainNext = async (): Promise<void> => {
@@ -163,8 +160,6 @@ export function Search({
             );
           } catch {
             if (searchRunRef.current === runId) setExplanations({});
-          } finally {
-            if (searchRunRef.current === runId) setExplaining(false);
           }
         })();
       }
@@ -264,7 +259,6 @@ export function Search({
                 setResults(null);
                 setActiveSearchQuery('');
                 setExplanations({});
-                setExplaining(false);
                 setSearched(false);
               }}
             >
@@ -288,7 +282,6 @@ export function Search({
                     frame={frame}
                     searchQuery={activeSearchQuery}
                     explanation={frame.id ? explanations[frame.id] : undefined}
-                    explaining={explaining && i < EXPLANATION_LIMIT}
                     onDeleted={(deleted) =>
                       setResults((prev) => (prev ? prev.filter((f) => f.id !== deleted.id) : prev))
                     }
@@ -405,17 +398,16 @@ function ResultCard({
   frame,
   searchQuery,
   explanation,
-  explaining,
   onDeleted,
 }: {
   frame: Frame;
   searchQuery: string;
   explanation?: string;
-  explaining?: boolean;
   onDeleted?: (frame: Frame) => void;
 }) {
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const detail = useFrameDetail();
+  const context = explanation ?? buildFrameSearchContext(searchQuery, frame);
   React.useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -483,11 +475,11 @@ function ResultCard({
             frame.url ||
             (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}
         </div>
-        {(explanation || explaining) && (
+        {context && (
           <div className="mt-1 flex items-start gap-1.5 rounded-lg bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground">
             <Sparkles className="mt-0.5 size-3 shrink-0" />
             <span className="line-clamp-3">
-              {explanation || 'Reading context from this result…'}
+              {context}
             </span>
           </div>
         )}
