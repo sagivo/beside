@@ -78,6 +78,7 @@ declare global {
         kind?: DayEventKind;
         limit?: number;
       }) => Promise<DayEvent[]>;
+      getActionCenter: (query?: { day?: string }) => Promise<RuntimeActionCenter>;
       triggerEventExtractor: () => Promise<{
         meetingsLifted: number;
         llmExtracted: number;
@@ -605,4 +606,54 @@ export interface DayEvent {
   failure_reason: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export type RuntimeActionCenterSource = 'llm' | 'fallback';
+export type RuntimeActionCenterUrgency = 'high' | 'medium' | 'low';
+export type RuntimeFollowupCategory = 'reply' | 'send' | 'decide' | 'schedule' | 'task';
+
+export interface RuntimeActionCenterFollowup {
+  category: RuntimeFollowupCategory;
+  title: string;
+  body: string;
+  urgency: RuntimeActionCenterUrgency;
+  evidenceIds: string[];
+}
+
+export interface RuntimeActionCenterProject {
+  path: string;
+  title: string;
+  kind: string;
+  summary: string;
+  status: string;
+  nextActions: string[];
+  evidenceIds: string[];
+}
+
+export interface RuntimeMeetingWorkBridge {
+  meetingId: string;
+  title: string;
+  startedAt: string;
+  summary: string;
+  workAfter: string[];
+  followups: string[];
+  evidenceIds: string[];
+}
+
+export interface RuntimeActionCenter {
+  day: string;
+  generatedAt: string;
+  source: RuntimeActionCenterSource;
+  modelName: string;
+  modelReady: boolean;
+  followups: RuntimeActionCenterFollowup[];
+  projects: RuntimeActionCenterProject[];
+  meetingBridges: RuntimeMeetingWorkBridge[];
+  evidence: Array<{
+    id: string;
+    label: string;
+    kind: 'event' | 'meeting' | 'frame' | 'entity';
+    at?: string;
+  }>;
+  signature: string;
 }

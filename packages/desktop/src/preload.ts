@@ -79,6 +79,8 @@ const api = {
     kind?: string;
     limit?: number;
   }) => ipcRenderer.invoke('cofounderos:list-day-events', query),
+  getActionCenter: (query?: { day?: string }) =>
+    ipcRenderer.invoke('cofounderos:get-action-center', query),
   triggerEventExtractor: () => ipcRenderer.invoke('cofounderos:trigger-event-extractor'),
 };
 

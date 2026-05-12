@@ -64,6 +64,7 @@ const api = {
   },
   listMeetings: (query) => ipcRenderer.invoke('cofounderos:list-meetings', query),
   listDayEvents: (query) => ipcRenderer.invoke('cofounderos:list-day-events', query),
+  getActionCenter: (query) => ipcRenderer.invoke('cofounderos:get-action-center', query),
   triggerEventExtractor: () => ipcRenderer.invoke('cofounderos:trigger-event-extractor'),
 };
 

@@ -432,19 +432,19 @@ const SOURCE_MATCHERS: SourceMatcher[] = [
       }
       const url = (f.url ?? '').toLowerCase();
       if (/^https?:\/\/mail\.google\.com/.test(url)) return true;
-      if (/^https?:\/\/outlook\.(live|office)\.com\/mail/.test(url)) return true;
+      if (/^https?:\/\/outlook\.(live|office|office365)\.com\/(?:mail|owa)/.test(url)) return true;
       if (/^https?:\/\/(?:.+\.)?superhuman\.com/.test(url)) return true;
       return false;
     },
   },
   {
     source: 'slack_screen',
-    label: 'slack',
+    label: 'chat',
     match: (f) => {
       const app = (f.app ?? '').toLowerCase();
-      if (app === 'slack' || app === 'discord') return true;
+      if (app === 'slack' || app === 'discord' || app === 'microsoft teams' || app === 'teams') return true;
       const url = (f.url ?? '').toLowerCase();
-      return /^https?:\/\/app\.slack\.com|^https?:\/\/.+\.slack\.com|^https?:\/\/discord\.com\/channels/.test(
+      return /^https?:\/\/app\.slack\.com|^https?:\/\/.+\.slack\.com|^https?:\/\/teams\.microsoft\.com|^https?:\/\/discord\.com\/channels/.test(
         url,
       );
     },

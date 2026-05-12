@@ -25,6 +25,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -52,6 +53,11 @@ import type {
   JournalDay,
   Meeting,
   ModelBootstrapProgress,
+  RuntimeActionCenter,
+  RuntimeActionCenterFollowup,
+  RuntimeActionCenterProject,
+  RuntimeActionCenterUrgency,
+  RuntimeMeetingWorkBridge,
   RuntimeOverview,
 } from '@/global';
 
@@ -59,6 +65,8 @@ const FULL_JOURNAL_FRAME_LIMIT = 600;
 const ACTIVITY_SAMPLE_LIMIT = 500;
 const TIMELINE_UPCOMING_LIMIT = 3;
 const TIMELINE_RECENT_LIMIT = 6;
+const actionItemButtonClass =
+  'group w-full rounded-md border border-border/70 bg-background/55 p-3 text-left shadow-xs transition-colors hover:border-primary/35 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40';
 
 export function Dashboard({
   overview,
@@ -99,6 +107,7 @@ export function Dashboard({
   // bento tiles, so we don't double-poll the runtime.
   const { journal, loading } = useTodayJournal(overview);
   const founderBrief = useFounderBrief(overview);
+  const actionCenter = useActionCenter(overview);
 
   if (!overview) {
     return (
@@ -121,7 +130,7 @@ export function Dashboard({
       <PageHeader
         title="Today"
         eyebrow={prettyToday()}
-        description="Search, briefs, timeline, and capture status for the day."
+        description="Search, timeline, and capture status for the day."
         actions={
           <Button variant="ghost" size="sm" onClick={onRefresh}>
             <RefreshCcw />
@@ -137,6 +146,8 @@ export function Dashboard({
         running={running}
         journal={journal}
         loading={loading || founderBrief.loading}
+        actionCenter={actionCenter.center}
+        actionLoading={actionCenter.loading}
         events={founderBrief.events}
         meetings={founderBrief.meetings}
         onStart={onStart}
@@ -383,6 +394,54 @@ function useFounderBrief(overview: RuntimeOverview | null): {
   return { events, meetings, loading };
 }
 
+function useActionCenter(overview: RuntimeOverview | null): {
+  center: RuntimeActionCenter | null;
+  loading: boolean;
+} {
+  const today = localDayKey();
+  const hasOverview = overview !== null;
+  const eventsToday = overview?.capture.eventsToday ?? 0;
+  const eventBucket = Math.floor(eventsToday / 5);
+  const refreshKey = React.useMemo(() => {
+    if (!overview) return '';
+    return (overview.backgroundJobs ?? [])
+      .filter((job) =>
+        ['event-extractor', 'meeting-builder', 'meeting-summarizer'].includes(job.name),
+      )
+      .map((job) => `${job.name}:${job.lastCompletedAt ?? ''}:${job.runCount}`)
+      .join('|');
+  }, [overview]);
+  const [center, setCenter] = React.useState<RuntimeActionCenter | null>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!hasOverview) {
+      setCenter(null);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      try {
+        const next = await window.cofounderos.getActionCenter({ day: today });
+        if (!cancelled) setCenter(next);
+      } catch {
+        if (!cancelled) setCenter(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [eventBucket, hasOverview, refreshKey, today]);
+
+  return { center, loading };
+}
+
 type FounderAgendaTarget = { eventId: string; day: string };
 
 type FounderCardItem = { title: string; meta?: string; eventId?: string; day?: string };
@@ -543,6 +602,8 @@ type TodayHomeProps = {
   running: boolean;
   journal: JournalDay | null;
   loading: boolean;
+  actionCenter: RuntimeActionCenter | null;
+  actionLoading: boolean;
   events: DayEvent[];
   meetings: Meeting[];
   onStart: () => Promise<void>;
@@ -560,6 +621,8 @@ function TodayHome({
   running,
   journal,
   loading,
+  actionCenter,
+  actionLoading,
   events,
   meetings,
   onStart,
@@ -586,6 +649,12 @@ function TodayHome({
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
       <div className="flex min-w-0 flex-col gap-4">
         <QuickSearchPanel onSearch={onSearch} />
+
+        <ActionCenterPanel
+          center={actionCenter}
+          loading={actionLoading}
+          onSearch={onSearch}
+        />
 
         <TimelyBriefsPanel
           briefs={briefs}
@@ -672,6 +741,315 @@ function QuickSearchPanel({ onSearch }: { onSearch: (query: string) => void }) {
       </div>
     </section>
   );
+}
+
+function ActionCenterPanel({
+  center,
+  loading,
+  onSearch,
+}: {
+  center: RuntimeActionCenter | null;
+  loading: boolean;
+  onSearch: (query: string) => void;
+}) {
+  if (loading && !center) {
+    return (
+      <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="mt-2 h-3 w-56" />
+          </div>
+          <Loader2 className="size-4 animate-spin text-primary" />
+        </div>
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Skeleton className="h-28 rounded-md" />
+          <Skeleton className="h-28 rounded-md" />
+          <Skeleton className="h-28 rounded-md" />
+        </div>
+      </section>
+    );
+  }
+
+  if (!center) return null;
+  const total = center.followups.length + center.projects.length + center.meetingBridges.length;
+  if (total === 0) return null;
+
+  return (
+    <section className="rounded-lg border bg-card p-5 shadow-card">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-semibold leading-6">Action center</h3>
+            <span className={cn(
+              'rounded-md border px-2 py-0.5 text-xs font-medium uppercase',
+              center.source === 'llm'
+                ? 'border-primary/25 bg-primary/10 text-primary'
+                : 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+            )}>
+              {center.source === 'llm' ? 'Local LLM' : 'Fallback'}
+            </span>
+          </div>
+          <p className="mt-1 text-sm leading-5 text-muted-foreground">
+            Follow-ups, project memory, and meeting-to-work links.
+          </p>
+        </div>
+        {loading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Wand2 className="size-5 text-primary" />}
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
+        <ActionColumn
+          title="Follow-up radar"
+          icon={Inbox}
+          accent="text-emerald-500 dark:text-emerald-300"
+          empty="No follow-ups surfaced."
+        >
+          {center.followups.slice(0, 5).map((item, index) => (
+            <FollowupRow
+              key={`${item.title}-${index}`}
+              item={item}
+              onOpen={() => onSearch(item.title)}
+            />
+          ))}
+        </ActionColumn>
+
+        <ActionColumn
+          title="Active projects"
+          icon={FolderOpen}
+          accent="text-blue-500 dark:text-blue-300"
+          empty="No active projects surfaced."
+        >
+          {center.projects.slice(0, 4).map((project) => (
+            <ProjectRow
+              key={project.path}
+              project={project}
+              onOpen={() => onSearch(project.title)}
+            />
+          ))}
+        </ActionColumn>
+
+        <ActionColumn
+          title="Meeting to work"
+          icon={MessageSquare}
+          accent="text-amber-500 dark:text-amber-300"
+          empty="No meeting-to-work links yet."
+        >
+          {center.meetingBridges.slice(0, 4).map((bridge) => (
+            <BridgeRow
+              key={bridge.meetingId}
+              bridge={bridge}
+              onOpen={() => onSearch(bridge.title)}
+            />
+          ))}
+        </ActionColumn>
+      </div>
+    </section>
+  );
+}
+
+function ActionColumn({
+  title,
+  icon: Icon,
+  accent,
+  empty,
+  children,
+}: {
+  title: string;
+  icon: React.ComponentType<{ className?: string }>;
+  accent: string;
+  empty: string;
+  children: React.ReactNode;
+}) {
+  const count = React.Children.count(children);
+  return (
+    <div className="min-w-0 border-t pt-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className={cn('grid size-8 shrink-0 place-items-center rounded-md bg-muted', accent)}>
+          <Icon className="size-4" />
+        </span>
+        <div className="min-w-0 text-base font-semibold leading-6">{title}</div>
+        <Badge variant={count > 0 ? 'outline' : 'muted'} className="ml-auto min-w-8 shrink-0">
+          {count}
+        </Badge>
+      </div>
+      {count > 0 ? (
+        <div className="flex flex-col gap-3">{children}</div>
+      ) : (
+        <p className="rounded-md border border-dashed border-border/70 bg-background/35 p-3 text-sm leading-5 text-muted-foreground">
+          {empty}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FollowupRow({
+  item,
+  onOpen,
+}: {
+  item: RuntimeActionCenterFollowup;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={actionItemButtonClass}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span className="line-clamp-3 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
+          {cleanActionText(item.title) || followupCategoryLabel(item.category)}
+        </span>
+        <span className={cn(
+          'mt-0.5 shrink-0 rounded-md border px-2 py-0.5 text-xs font-medium',
+          urgencyClass(item.urgency),
+        )}>
+          {followupCategoryLabel(item.category)}
+        </span>
+      </div>
+      {cleanActionText(item.body) ? (
+        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
+          {cleanActionText(item.body)}
+        </p>
+      ) : null}
+      <EvidenceHint className="mt-3" />
+    </button>
+  );
+}
+
+function ProjectRow({
+  project,
+  onOpen,
+}: {
+  project: RuntimeActionCenterProject;
+  onOpen: () => void;
+}) {
+  const title = projectTitle(project);
+  const summary = cleanActionText(project.summary);
+  const nextAction = project.nextActions.map(cleanActionText).find(Boolean);
+  const status = cleanActionText(project.status);
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={actionItemButtonClass}
+    >
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <span className="line-clamp-2 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
+          {title}
+        </span>
+        {project.kind ? (
+          <span className="mt-0.5 shrink-0 rounded-md border border-border/70 bg-muted/45 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+            {kindLabel(project.kind)}
+          </span>
+        ) : null}
+      </div>
+      {summary ? (
+        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
+          {summary}
+        </p>
+      ) : null}
+      {nextAction ? (
+        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
+          <span className="font-medium text-foreground">Next: </span>
+          <span className="break-words">{nextAction}</span>
+        </p>
+      ) : null}
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+        {status ? (
+          <span className="text-xs leading-4 text-muted-foreground">
+            {status}
+          </span>
+        ) : null}
+        <EvidenceHint />
+      </div>
+    </button>
+  );
+}
+
+function BridgeRow({
+  bridge,
+  onOpen,
+}: {
+  bridge: RuntimeMeetingWorkBridge;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={actionItemButtonClass}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span className="line-clamp-2 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
+          {cleanActionText(bridge.title) || 'Meeting follow-up'}
+        </span>
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {formatLocalTime(bridge.startedAt)}
+        </span>
+      </div>
+      {cleanActionText(bridge.summary) ? (
+        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
+          {cleanActionText(bridge.summary)}
+        </p>
+      ) : null}
+      {bridge.followups.length > 0 ? (
+        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
+          <span className="font-medium text-foreground">Follow-up: </span>
+          <span className="break-words">{cleanActionText(bridge.followups[0])}</span>
+        </p>
+      ) : bridge.workAfter.length > 0 ? (
+        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
+          <span className="font-medium text-foreground">After: </span>
+          <span className="break-words">{cleanActionText(bridge.workAfter[0])}</span>
+        </p>
+      ) : null}
+      <EvidenceHint className="mt-3" />
+    </button>
+  );
+}
+
+function EvidenceHint({ className }: { className?: string }) {
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1 text-xs font-medium text-primary/90 group-hover:text-primary',
+      className,
+    )}>
+      Search evidence
+      <ArrowRight className="size-3" />
+    </span>
+  );
+}
+
+function cleanActionText(value?: string | null): string {
+  return stripMarkdown(value).replace(/\s+/g, ' ').trim();
+}
+
+function urgencyClass(urgency: RuntimeActionCenterFollowup['urgency']): string {
+  switch (urgency) {
+    case 'high':
+      return 'border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-300';
+    case 'medium':
+      return 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300';
+    case 'low':
+      return 'border-muted bg-muted/60 text-muted-foreground';
+  }
+}
+
+function followupCategoryLabel(category: RuntimeActionCenterFollowup['category']): string {
+  return category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+function projectTitle(project: RuntimeActionCenterProject): string {
+  const title = cleanActionText(project.title);
+  if (title) return title;
+
+  const summaryApp = cleanActionText(project.summary).match(/^([^:]{2,48}):/);
+  if (summaryApp?.[1]) return summaryApp[1];
+
+  const pathName = project.path.split(/[\\/]/).filter(Boolean).at(-1);
+  return pathName || kindLabel(project.kind) || 'Active project';
 }
 
 type TimelyBriefItem = {

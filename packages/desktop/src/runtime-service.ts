@@ -254,6 +254,10 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.listDayEvents(
         req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
       );
+    case 'getActionCenter':
+      return await runtime.getActionCenter(
+        req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},
+      );
     case 'triggerEventExtractor':
       return await runtime.triggerEventExtractor();
     case 'searchFrames':

@@ -41,6 +41,11 @@ import {
   type HarnessHandle,
   type HarnessOptions,
 } from './agent/index.js';
+import {
+  buildRuntimeActionCenter,
+  type RuntimeActionCenter,
+  type RuntimeActionCenterQuery,
+} from './action-center.js';
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
 export interface RuntimeOptions extends OrchestratorOptions {
@@ -194,6 +199,7 @@ const OVERVIEW_SLOW_LOG_MS = 500;
  */
 const EXPLAIN_SEARCH_CACHE_MAX = 256;
 const SEARCH_EXPLANATION_TIMEOUT_MS = 20_000;
+const ACTION_CENTER_CACHE_TTL_MS = 60_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
@@ -213,6 +219,10 @@ export class CofounderRuntime {
    * pop `keys().next()` on overflow (to evict oldest).
    */
   private readonly explainSearchCache = new Map<string, string>();
+  private readonly actionCenterCache = new Map<string, {
+    value: RuntimeActionCenter;
+    expiresAt: number;
+  }>();
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -590,6 +600,18 @@ export class CofounderRuntime {
         return [];
       }
     });
+  }
+
+  async getActionCenter(query: RuntimeActionCenterQuery = {}): Promise<RuntimeActionCenter> {
+    const cacheKey = query.day ?? 'today';
+    const cached = this.actionCenterCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const value = await this.withHandles((handles) => buildRuntimeActionCenter(handles, query));
+    this.actionCenterCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + ACTION_CENTER_CACHE_TTL_MS,
+    });
+    return value;
   }
 
   async listJournalDays(): Promise<string[]> {
