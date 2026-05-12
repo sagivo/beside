@@ -431,14 +431,14 @@ function auditAnswer({ scenario, answer, prompts }) {
     if (/\b\d+\s+frames?\b/i.test(answer)) {
       findings.push({ severity: 'fail', rule: 'stats-frames', detail: 'frame count leaked' });
     }
-    if (/\b\d+\s+sessions?\b/i.test(answer) && scenario.intent !== 'daily_briefing') {
-      // daily briefing says "across N sessions" sometimes — flag separately
+    if (/\b\d+\s+sessions?\b/i.test(answer) && scenario.intent !== 'day_overview') {
+      // day overview says "across N sessions" sometimes — flag separately
       findings.push({ severity: 'warn', rule: 'stats-sessions', detail: 'session count' });
     }
   }
   // 4. Output template adherence: per-intent expected leading marker.
   const heads = {
-    daily_briefing: /\*\*today'?s calendar:?\*\*/i,
+    day_overview: /\*\*today'?s calendar:?\*\*/i,
     calendar_check: /\*\*\d{1,2}:\d{2}\s*(am|pm)?\*\*/i,
     open_loops: /^[-*]\s+/m,
     time_audit: /you spent\s+\*\*/i,
@@ -492,10 +492,10 @@ function auditAnswer({ scenario, answer, prompts }) {
 
 const SCENARIOS = [
   {
-    name: 'daily_briefing — clean',
+    name: 'day_overview — clean',
     message: "What's on my plate today?",
-    intent: 'daily_briefing',
-    routerJson: { route: 'tools', intent: 'daily_briefing', reason: 'plate' },
+    intent: 'day_overview',
+    routerJson: { route: 'tools', intent: 'day_overview', reason: 'plate' },
     expectsTools: true,
     composeAnswer: [
       "**Today's calendar:**",
@@ -512,10 +512,10 @@ const SCENARIOS = [
     hallucinationCanary: ['paris', 'whatsapp'],
   },
   {
-    name: 'daily_briefing — bad model output (closer + frame stat)',
+    name: 'day_overview — bad model output (closer + frame stat)',
     message: "What's on my plate today?",
-    intent: 'daily_briefing',
-    routerJson: { route: 'tools', intent: 'daily_briefing', reason: 'plate' },
+    intent: 'day_overview',
+    routerJson: { route: 'tools', intent: 'day_overview', reason: 'plate' },
     expectsTools: true,
     composeAnswer: [
       'Sure! Based on your data, you have 458 frames captured.',

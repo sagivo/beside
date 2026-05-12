@@ -80,7 +80,7 @@ export function buildDirectAnswerPrompt(input: {
  * Compose the user-side prompt for the tools-mode answer step.
  *
  * Critical: the prompt is INTENT-AWARE. Different intents need
- * different output shapes (a daily briefing leads with calendar +
+ * different output shapes (a day overview leads with calendar +
  * pending items; a recall query leads with the matched moment; a
  * project-status query leads with the entity rollup). Without per-
  * intent guidance, small local models default to summarizing whatever
@@ -158,8 +158,8 @@ function formatContextForIntent(
   }
 
   switch (intent) {
-    case 'daily_briefing':
-      parts.push(...buildDailyBriefingContext(anchor, results));
+    case 'day_overview':
+      parts.push(...buildDayOverviewContext(anchor, results));
       break;
     case 'calendar_check':
       parts.push(...buildCalendarContext(results));
@@ -205,9 +205,9 @@ function formatContextForIntent(
   return parts.join('\n\n');
 }
 
-function buildDailyBriefingContext(anchor: DateAnchor, results: CollectedToolResults): string[] {
-  const d = results.daily_briefing;
-  if (!d) return ['No daily briefing data was retrieved.'];
+function buildDayOverviewContext(anchor: DateAnchor, results: CollectedToolResults): string[] {
+  const d = results.day_overview;
+  if (!d) return ['No day overview data was retrieved.'];
   const out: string[] = [];
 
   // Lead with calendar candidates — these are what "what's on my plate"
@@ -246,10 +246,10 @@ function buildDailyBriefingContext(anchor: DateAnchor, results: CollectedToolRes
 }
 
 function buildCalendarContext(results: CollectedToolResults): string[] {
-  const c = results.calendar_check ?? results.daily_briefing;
+  const c = results.calendar_check ?? results.day_overview;
   if (!c) return ['No calendar data was retrieved.'];
   const candidates =
-    'candidates' in c ? c.candidates : (c as NonNullable<typeof results.daily_briefing>).calendar_candidates;
+    'candidates' in c ? c.candidates : (c as NonNullable<typeof results.day_overview>).calendar_candidates;
   if (candidates.length === 0) {
     return ['No calendar-related frames were captured for the requested day. The user may not have opened their calendar app.'];
   }
@@ -273,12 +273,12 @@ function formatCalendarFrameForExtraction(frame: CompactFrame): string {
 }
 
 function buildOpenLoopsContext(results: CollectedToolResults): string[] {
-  const c = results.open_loops ?? results.daily_briefing;
+  const c = results.open_loops ?? results.day_overview;
   if (!c) return ['No open-loop data was retrieved.'];
   const candidates =
     'candidates' in c
       ? c.candidates
-      : (c as NonNullable<typeof results.daily_briefing>).open_loop_candidates;
+      : (c as NonNullable<typeof results.day_overview>).open_loop_candidates;
   if (candidates.length === 0) {
     return ['No open-loop signals were found in the captures for the requested day.'];
   }
@@ -428,7 +428,7 @@ function buildPeopleSearchContext(results: CollectedToolResults): string[] {
 }
 
 function buildTimeAuditContext(anchor: DateAnchor, results: CollectedToolResults): string[] {
-  const d = results.daily_briefing;
+  const d = results.day_overview;
   if (!d) return ['No time-audit data was retrieved.'];
   const out: string[] = [
     `Totals for ${anchor.day}: ${formatMinutes(d.totals.active_min)} active across ${d.totals.sessions} focus sessions.`,
@@ -453,8 +453,8 @@ function buildTimeAuditContext(anchor: DateAnchor, results: CollectedToolResults
 
 function buildGeneralContext(results: CollectedToolResults): string[] {
   const out: string[] = [];
-  if (results.daily_briefing) {
-    out.push(...buildDailyBriefingContext({ day: results.daily_briefing.day } as DateAnchor, results));
+  if (results.day_overview) {
+    out.push(...buildDayOverviewContext({ day: results.day_overview.day } as DateAnchor, results));
   }
   if (results.searches.length > 0) {
     out.push(...buildRecallContext(results));
@@ -499,7 +499,7 @@ function formatOutputTemplate(
   results: CollectedToolResults,
 ): string {
   switch (intent) {
-    case 'daily_briefing':
+    case 'day_overview':
       return [
         'OUTPUT FORMAT — follow exactly:',
         '1. Start with **Today\'s calendar:** followed by a bullet list of meetings/events you can identify from the calendar frames. Use clock time + title. If you can\'t identify any concrete meeting from the OCR, write "Nothing on the calendar I can pin down — check your calendar app to confirm."',

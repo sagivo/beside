@@ -11,7 +11,7 @@ import { routeRequest } from './router.js';
 import {
   getActivitySessionTool,
   getCalendarCandidates,
-  getDailyBriefing,
+  getDayActivitySummary,
   getEntitySummaryTool,
   getFrameContextTool,
   getOpenLoopCandidates,
@@ -324,7 +324,7 @@ interface ExecutionPlan {
 }
 
 type PlanStep =
-  | { kind: 'daily_briefing' }
+  | { kind: 'day_activity_summary' }
   | { kind: 'calendar_check' }
   | { kind: 'open_loops' }
   | { kind: 'search_frames'; query: string; limit?: number; anchorDay?: boolean }
@@ -353,12 +353,12 @@ function planForIntent(intent: ChatIntent, message: string): ExecutionPlan {
   const focused = extractFocusedQuery(message);
 
   switch (intent) {
-    case 'daily_briefing':
+    case 'day_overview':
       return {
         intent,
-        summary: 'Pull the daily briefing; verify any garbled open loops.',
+        summary: 'Pull the day overview; verify any garbled open loops.',
         steps: [
-          { kind: 'daily_briefing' },
+          { kind: 'day_activity_summary' },
           { kind: 'frame_context_for_top', max: 2, before: 3, after: 1, garbledOnly: true },
         ],
       };
@@ -435,14 +435,14 @@ function planForIntent(intent: ChatIntent, message: string): ExecutionPlan {
     case 'time_audit':
       // If the user named a specific entity ("how much time on Cursor"),
       // also drill in via entity_lookup → entity_timeline at hour
-      // granularity. Otherwise the daily briefing alone covers the
+      // granularity. Otherwise the day overview alone covers the
       // top-apps / top-entities question.
       if (focused) {
         return {
           intent,
           summary: `Daily totals plus an hourly timeline for "${focused}".`,
           steps: [
-            { kind: 'daily_briefing' },
+            { kind: 'day_activity_summary' },
             { kind: 'entity_lookup', query: focused },
             { kind: 'entity_timeline_for_top', granularity: 'hour', limit: 24 },
           ],
@@ -450,8 +450,8 @@ function planForIntent(intent: ChatIntent, message: string): ExecutionPlan {
       }
       return {
         intent,
-        summary: 'Pull the daily briefing for time totals (top apps + entities).',
-        steps: [{ kind: 'daily_briefing' }],
+        summary: 'Pull the day overview for time totals (top apps + entities).',
+        steps: [{ kind: 'day_activity_summary' }],
       };
     case 'topic_deep_dive':
       return {
@@ -472,13 +472,13 @@ function planForIntent(intent: ChatIntent, message: string): ExecutionPlan {
         intent,
         summary: focused
           ? `Generic plan: search frames for "${focused}".`
-          : 'Generic plan: pull today\'s briefing as background context.',
+          : 'Generic plan: pull today\'s activity as background context.',
         steps: focused
           ? [
               { kind: 'search_index_pages', query: focused, limit: 4 },
               { kind: 'search_frames', query: focused, limit: 10, anchorDay: false },
             ]
-          : [{ kind: 'daily_briefing' }],
+          : [{ kind: 'day_activity_summary' }],
       };
   }
 }
@@ -507,13 +507,13 @@ async function executePlan(args: ExecArgs): Promise<void> {
 async function runStep(step: PlanStep, args: ExecArgs): Promise<void> {
   const { tools, anchor, results, ctx } = args;
   switch (step.kind) {
-    case 'daily_briefing': {
-      const callId = ctx.emitToolCall('get_daily_summary', { day: anchor.day });
-      const out = await getDailyBriefing(tools, anchor);
-      results.daily_briefing = out;
+    case 'day_activity_summary': {
+      const callId = ctx.emitToolCall('get_day_activity_summary', { day: anchor.day });
+      const out = await getDayActivitySummary(tools, anchor);
+      results.day_overview = out;
       ctx.emitToolResult(
         callId,
-        'get_daily_summary',
+        'get_day_activity_summary',
         `${out.totals.sessions} sessions, ${out.calendar_candidates.length} calendar hints, ${out.open_loop_candidates.length} open-loop hints`,
       );
       return;
@@ -777,9 +777,9 @@ function collectTopFrameIds(
   // - Calendar: occasionally truncated titles.
   // - Search hits: only as a tiebreaker.
   for (const f of results.open_loops?.candidates ?? []) push(f);
-  for (const f of results.daily_briefing?.open_loop_candidates ?? []) push(f);
+  for (const f of results.day_overview?.open_loop_candidates ?? []) push(f);
   for (const f of results.calendar_check?.candidates ?? []) push(f);
-  for (const f of results.daily_briefing?.calendar_candidates ?? []) push(f);
+  for (const f of results.day_overview?.calendar_candidates ?? []) push(f);
   for (const search of results.searches) {
     for (const m of search.matches) push(m);
   }
@@ -1137,8 +1137,8 @@ function safeModelInfo(model: IModelAdapter): ReturnType<IModelAdapter['getModel
  * either.
  */
 function hasCapturedEvidence(results: CollectedToolResults): boolean {
-  if (results.daily_briefing) {
-    const d = results.daily_briefing;
+  if (results.day_overview) {
+    const d = results.day_overview;
     if (
       d.totals.frames > 0 ||
       d.totals.sessions > 0 ||
@@ -1187,8 +1187,8 @@ function composeNoEvidenceAnswer(intent: ChatIntent, anchor: DateAnchor): string
       return `I don't see any calendar frames captured for ${day}.\n\n_Open your calendar app so a frame gets captured, then ask again._`;
     case 'open_loops':
       return `Nothing pending I can confirm from your captures${anchor.label === 'today' ? ' for today' : ` for ${day}`}.`;
-    case 'daily_briefing':
-      return `I don't have any captured activity for ${day} yet.\n\n_Once some frames are captured I can give you a real briefing._`;
+    case 'day_overview':
+      return `I don't have any captured activity for ${day} yet.\n\n_Once some frames are captured I can give you a real overview._`;
     case 'project_status':
     case 'topic_deep_dive':
       return `I don't see anything about that in your captures.\n\n_Try rephrasing with a more specific keyword, or ask about a different time window._`;
@@ -1211,8 +1211,8 @@ function composeOfflineFallback(
   lines.push(
     `_The local model isn't available, so here's a deterministic readout of what I gathered for ${anchor.label} (${anchor.day})._`,
   );
-  if (results.daily_briefing) {
-    const d = results.daily_briefing;
+  if (results.day_overview) {
+    const d = results.day_overview;
     lines.push(
       `**Totals:** ${d.totals.active_min} active min across ${d.totals.sessions} sessions.`,
     );

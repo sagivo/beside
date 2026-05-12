@@ -777,6 +777,20 @@ export class EventExtractor {
       if (!parsed) return 0;
     }
 
+    if (extractionBucket.source === 'calendar_screen') {
+      const structured = structuredCalendarCandidates(extractionBucket);
+      if (structured.length > 0) {
+        parsed = {
+          events: mergeStructuredCalendarCandidates(
+            parsed.events,
+            structured,
+            captureDay,
+          ),
+        };
+        canReplaceCalendarView = true;
+      }
+    }
+
     if (extractionBucket.source === 'calendar_screen' && parsed.events.length === 0) {
       const fallback = deterministicCalendarCandidates(captureDay, extractionBucket);
       if (fallback.length > 0) {
@@ -1385,33 +1399,14 @@ function deterministicCalendarCandidates(
   captureDay: string,
   bucket: SourceBucket,
 ): ExtractionCandidate[] {
+  const structured = structuredCalendarCandidates(bucket);
+  if (structured.length > 0) return structured;
+
   const out: ExtractionCandidate[] = [];
   const seen = new Set<string>();
   const frames = bucket.frames
     .slice()
     .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-
-  for (const frame of frames) {
-    if (out.length >= 25) break;
-    const text = (frame.text ?? '').trim();
-    if (!text) continue;
-    // App-name calendar matches can occasionally carry stale AX/OCR text
-    // from another foreground app. Require the text itself to look like
-    // a calendar grid before applying this fallback.
-    if (!looksLikeCalendarText(text)) continue;
-
-    for (const candidate of structuredCalendarCandidatesFromText(text, frame)) {
-      const startsAt = parseEventTimestamp(candidate.starts_at);
-      if (!startsAt) continue;
-      const eventDay = localDayKey(new Date(startsAt));
-      const key = `${eventDay}|${localHourBucket(startsAt)}|${normaliseTitleForKey(candidate.title ?? '')}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(candidate);
-      if (out.length >= 25) break;
-    }
-  }
-  if (out.length > 0) return out;
 
   for (const frame of frames) {
     if (out.length >= 25) break;
@@ -1479,6 +1474,148 @@ function deterministicCalendarCandidates(
   }
 
   return out;
+}
+
+function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate[] {
+  const out: ExtractionCandidate[] = [];
+  const seen = new Set<string>();
+  const frames = bucket.frames
+    .slice()
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
+
+  for (const frame of frames) {
+    if (out.length >= 25) break;
+    const text = (frame.text ?? '').trim();
+    if (!text || !looksLikeCalendarText(text)) continue;
+
+    for (const candidate of structuredCalendarCandidatesFromText(text, frame)) {
+      const startsAt = parseEventTimestamp(candidate.starts_at);
+      if (!startsAt) continue;
+      const eventDay = localDayKey(new Date(startsAt));
+      const key = `${eventDay}|${localHourBucket(startsAt)}|${normaliseTitleForKey(candidate.title ?? '')}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(candidate);
+      if (out.length >= 25) break;
+    }
+  }
+
+  return out;
+}
+
+function mergeStructuredCalendarCandidates(
+  candidates: ExtractionCandidate[],
+  structured: ExtractionCandidate[],
+  captureDay: string,
+): ExtractionCandidate[] {
+  if (structured.length === 0) return candidates;
+
+  const out: ExtractionCandidate[] = [];
+  const usedStructured = new Set<number>();
+
+  for (const candidate of candidates) {
+    const matchIndex = structured.findIndex(
+      (structuredCandidate, index) =>
+        !usedStructured.has(index) &&
+        calendarCandidatesLikelySame(candidate, structuredCandidate, captureDay),
+    );
+
+    if (matchIndex >= 0) {
+      const structuredCandidate = structured[matchIndex]!;
+      usedStructured.add(matchIndex);
+      out.push({
+        ...candidate,
+        kind: 'calendar',
+        starts_at: structuredCandidate.starts_at,
+        ends_at: structuredCandidate.ends_at,
+        title: (candidate.title ?? '').trim() || structuredCandidate.title,
+        context: (candidate.context ?? '').trim() || structuredCandidate.context,
+      });
+    } else {
+      out.push(candidate);
+    }
+  }
+
+  for (let i = 0; i < structured.length; i++) {
+    if (!usedStructured.has(i)) out.push(structured[i]!);
+  }
+
+  return dedupeExtractionCandidates(out, captureDay);
+}
+
+function dedupeExtractionCandidates(
+  candidates: ExtractionCandidate[],
+  captureDay: string,
+): ExtractionCandidate[] {
+  const out: ExtractionCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    const titleKey = normaliseTitleForKey(candidate.title ?? '');
+    if (!titleKey) continue;
+    const startsAt =
+      parseEventTimestamp(candidate.starts_at) ??
+      coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+    const day = startsAt ? localDayKey(new Date(startsAt)) : captureDay;
+    const hour = startsAt ? localHourBucket(startsAt) : '00';
+    const key = `${day}|${hour}|${titleKey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(candidate);
+  }
+
+  return out;
+}
+
+function calendarCandidatesLikelySame(
+  a: ExtractionCandidate,
+  b: ExtractionCandidate,
+  captureDay: string,
+): boolean {
+  if (!calendarCandidateDatesOverlap(a, b, captureDay)) return false;
+  return calendarTitlesLikelySame(a.title ?? '', b.title ?? '');
+}
+
+function calendarCandidateDatesOverlap(
+  a: ExtractionCandidate,
+  b: ExtractionCandidate,
+  captureDay: string,
+): boolean {
+  const aKeys = calendarCandidateDateKeys(a, captureDay);
+  const bKeys = calendarCandidateDateKeys(b, captureDay);
+  if (aKeys.size === 0 || bKeys.size === 0) return true;
+  for (const key of aKeys) {
+    if (bKeys.has(key)) return true;
+  }
+  return false;
+}
+
+function calendarCandidateDateKeys(
+  candidate: ExtractionCandidate,
+  captureDay: string,
+): Set<string> {
+  const startsAt =
+    parseEventTimestamp(candidate.starts_at) ??
+    coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+  if (!startsAt) return new Set();
+  const d = new Date(startsAt);
+  if (Number.isNaN(d.getTime())) return new Set();
+  return new Set([`local:${localDayKey(d)}`, `iso:${startsAt.slice(0, 10)}`]);
+}
+
+function calendarTitlesLikelySame(a: string, b: string): boolean {
+  const aNorm = normaliseTitleForKey(a);
+  const bNorm = normaliseTitleForKey(b);
+  if (!aNorm || !bNorm) return false;
+  if (aNorm === bNorm) return true;
+  if (aNorm.length >= 8 && bNorm.includes(aNorm)) return true;
+  if (bNorm.length >= 8 && aNorm.includes(bNorm)) return true;
+
+  const aTokens = aNorm.split(/\s+/).filter((token) => token.length >= 3);
+  const bTokens = new Set(bNorm.split(/\s+/).filter((token) => token.length >= 3));
+  if (aTokens.length < 2 || bTokens.size < 2) return false;
+  const hits = aTokens.filter((token) => bTokens.has(token)).length;
+  return hits >= Math.max(2, Math.ceil(Math.min(aTokens.length, bTokens.size) * 0.7));
 }
 
 function visibleCalendarDays(

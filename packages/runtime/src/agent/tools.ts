@@ -12,7 +12,7 @@ import type {
   CalendarCheckResult,
   CompactFrame,
   CompactSession,
-  DailyBriefingResult,
+  DayActivitySummaryResult,
   DateAnchor,
   EntityListResult,
   EntitySummaryResult,
@@ -43,7 +43,7 @@ import {
  *   2. Trims / normalises the result so it fits a small LLM context.
  *   3. Applies the noise filters from §3.4 of the harness rules.
  *
- * Functions that aggregate (e.g. `getDailyBriefing`) intentionally
+ * Functions that aggregate (e.g. `getDayActivitySummary`) intentionally
  * stay lightweight — they do not reproduce the MCP plugin's full
  * digest. We pass the trimmed results to the model and let it do the
  * narrative assembly. The model is the brain; these tools are eyes.
@@ -139,15 +139,15 @@ export interface ToolDeps {
 }
 
 /**
- * Daily briefing: one call covers most "what's on my plate today" /
+ * Day overview: one call covers most "what's on my plate today" /
  * "what did I work on" questions. Aggregates sessions for the day and
  * pulls a couple of small frame samples for calendar / chat / review
  * surfaces so the model has concrete examples to ground its answer.
  */
-export async function getDailyBriefing(
+export async function getDayActivitySummary(
   deps: ToolDeps,
   anchor: DateAnchor,
-): Promise<DailyBriefingResult> {
+): Promise<DayActivitySummaryResult> {
   const { storage } = deps;
 
   const rawSessions = await storage.listSessions({
@@ -503,7 +503,7 @@ function scoreCalendarFrame(frame: Frame): number {
   // Require a strong calendar signal — a plain timestamp inside an
   // unrelated frame (a Slack message at "9:01 AM", a chat with an ETA,
   // even a code comment with `12:30`) would otherwise leak into the
-  // calendar bucket and confuse the daily-briefing answer.
+  // calendar bucket and confuse the day-overview answer.
   if (!appHit && !urlHit && !titleHit) return 0;
   let score = 0;
   if (appHit) score += 4;
@@ -522,7 +522,7 @@ function scoreOpenLoopFrame(frame: Frame): number {
   // Just being on a chat app or GitHub is not enough — most of those
   // captures are casual conversation the user has already replied to,
   // and surfacing them as open loops produces hallucination-shaped
-  // bullets in the daily briefing ("Tanya is waiting on you" when the
+  // bullets in the day overview ("Tanya is waiting on you" when the
   // user's reply is right there in the OCR).
   //
   // We look for explicit unanswered/action language. `\breply\b` alone

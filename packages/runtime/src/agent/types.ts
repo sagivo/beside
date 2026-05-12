@@ -33,7 +33,7 @@ export interface ChatTurnInput {
  * calls.
  */
 export type ChatIntent =
-  | 'daily_briefing'
+  | 'day_overview'
   | 'calendar_check'
   | 'open_loops'
   | 'recall_preference'
@@ -88,7 +88,7 @@ export interface CompactFrame {
   garbled?: boolean;
 }
 
-export interface DailyBriefingResult {
+export interface DayActivitySummaryResult {
   day: string;
   totals: { active_min: number; sessions: number; frames: number };
   top_apps: Array<{ app: string; minutes: number; frames: number }>;
@@ -199,7 +199,7 @@ export type ChatStreamHandler = (event: ChatStreamEvent) => void;
 // callId, fed into the final-answer prompt builder. Not emitted on the
 // wire — the renderer never sees this.
 export interface CollectedToolResults {
-  daily_briefing?: DailyBriefingResult;
+  day_overview?: DayActivitySummaryResult;
   calendar_check?: CalendarCheckResult;
   open_loops?: OpenLoopsResult;
   searches: SearchResultBlock[];

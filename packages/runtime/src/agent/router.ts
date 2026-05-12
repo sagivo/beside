@@ -15,7 +15,7 @@ import type { ChatIntent, ChatTurnHistoryItem } from './types.js';
  *               previous turn, off-topic chat, etc.
  *
  * Why this gate exists:
- *   The harness tools (`get_daily_summary`, `search_frames`, …) are
+ *   The harness tools (`get_day_activity_summary`, `search_frames`, …) are
  *   only useful for personal-productivity questions about the user's
  *   captured device activity. Forcing every turn through them produces
  *   weird answers ("I couldn't find anything about Paris in your
@@ -26,7 +26,7 @@ export type RouteDecision =
   | { kind: 'direct'; reason: string };
 
 const INTENT_VALUES: ChatIntent[] = [
-  'daily_briefing',
+  'day_overview',
   'calendar_check',
   'open_loops',
   'recall_preference',
@@ -119,7 +119,7 @@ async function llmRouteGate(
     'Disambiguation rule when uncertain: if the message names a specific topic / company / person / project but does NOT ask for a definition or explanation of it, prefer route="tools". The user is almost always asking about their own activity on that thing, because that\'s what this assistant is for.',
     '',
     'When route="tools", also pick exactly one of these intents (verbatim). Use the cues:',
-    '  - daily_briefing: "what\'s on my plate", "what do i have today", briefing-style prompts.',
+    '  - day_overview: "what\'s on my plate", "what do i have today", day overview prompts.',
     '  - calendar_check: meetings, schedule, agenda, "am I free", "when is X".',
     '  - open_loops: "open loops", "pending", "follow ups", "to-dos", "what\'s waiting on me".',
     '  - recall_preference: "favorite", "best pick", "what did I like", "top pick", shortlist questions.',
@@ -135,7 +135,7 @@ async function llmRouteGate(
     '',
     'Reply with a JSON object. Examples:',
     '  {"route":"direct","reason":"greeting or general definitional question"}',
-    '  {"route":"tools","intent":"daily_briefing","reason":"asks about today"}',
+    '  {"route":"tools","intent":"day_overview","reason":"asks about today"}',
     '  {"route":"tools","intent":"recall_event","reason":"wants to find a past frame"}',
     '  {"route":"tools","intent":"recall_preference","reason":"asks about a favorite or top pick"}',
     '  {"route":"tools","intent":"project_status","reason":"\\"how is <project> going\\""}',

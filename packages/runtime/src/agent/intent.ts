@@ -2,7 +2,7 @@ import type { IModelAdapter } from '@cofounderos/interfaces';
 import type { ChatIntent } from './types.js';
 
 const INTENT_VALUES: ChatIntent[] = [
-  'daily_briefing',
+  'day_overview',
   'calendar_check',
   'open_loops',
   'recall_preference',
@@ -18,11 +18,10 @@ const INTENT_SET = new Set<string>(INTENT_VALUES);
 
 const SIGNAL_PATTERNS: Array<{ intent: ChatIntent; patterns: RegExp[] }> = [
   {
-    intent: 'daily_briefing',
+    intent: 'day_overview',
     patterns: [
       /\bon my plate\b/i,
       /\bdaily summary\b/i,
-      /\bbrief(ing)?\b/i,
       /\bwhat do i have (today|going on|to do)\b/i,
       /\bwhat'?s? (my )?(day|today|tomorrow|yesterday) (look like|going|like)\b/i,
       /\bwhat (did|have) i (work|been working)\b/i,

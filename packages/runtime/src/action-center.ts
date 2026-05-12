@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { DayEvent, EntityRecord, Frame, Meeting } from '@cofounderos/interfaces';
 import { resolveDateAnchor } from './agent/date.js';
-import { compactFrame, getDailyBriefing } from './agent/tools.js';
-import type { CompactFrame, DailyBriefingResult, DateAnchor } from './agent/types.js';
+import { compactFrame, getDayActivitySummary } from './agent/tools.js';
+import type { CompactFrame, DayActivitySummaryResult, DateAnchor } from './agent/types.js';
 import type { OrchestratorHandles } from './orchestrator.js';
 
 export type RuntimeActionCenterSource = 'llm' | 'fallback';
@@ -133,7 +133,7 @@ export async function buildRuntimeActionCenter(
   const modelReady = await handles.model.isAvailable().catch(() => false);
 
   const [daily, events, meetings, entities] = await Promise.all([
-    getDailyBriefing({ storage: handles.storage, strategy: handles.strategy }, anchor),
+    getDayActivitySummary({ storage: handles.storage, strategy: handles.strategy }, anchor),
     handles.storage
       .listDayEvents({ day: anchor.day, order: 'chronological', limit: 180 })
       .catch(() => [] as DayEvent[]),
@@ -558,7 +558,7 @@ function mergeScreenFollowupDuplicates(items: ScreenFollowupSignal[]): ScreenFol
 }
 
 function buildFollowupSignals(
-  daily: DailyBriefingResult,
+  daily: DayActivitySummaryResult,
   events: DayEvent[],
   meetings: Meeting[],
 ): FollowupSignal[] {

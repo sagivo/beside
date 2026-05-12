@@ -223,7 +223,7 @@ function makeRecorder({ route, intent }) {
 const logger = { debug() {}, info() {}, warn() {}, error() {}, child() { return logger; } };
 
 const cases = [
-  { name: 'daily_briefing', message: "what's on my plate today?", route: 'tools', intent: 'daily_briefing' },
+  { name: 'day_overview', message: "what's on my plate today?", route: 'tools', intent: 'day_overview' },
   { name: 'calendar_check', message: 'do i have meetings today?', route: 'tools', intent: 'calendar_check' },
   { name: 'open_loops', message: 'any open loops?', route: 'tools', intent: 'open_loops' },
   { name: 'recall_event', message: 'when did i plan paris?', route: 'tools', intent: 'recall_event' },

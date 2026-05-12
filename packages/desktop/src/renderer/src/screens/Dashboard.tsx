@@ -1,9 +1,9 @@
 import * as React from 'react';
 import {
   AlertCircle,
-  ArrowRight,
   Calendar,
   ChevronDown,
+  ChevronRight,
   CheckSquare,
   CircleStop,
   Clock,
@@ -25,7 +25,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -65,8 +64,6 @@ const FULL_JOURNAL_FRAME_LIMIT = 600;
 const ACTIVITY_SAMPLE_LIMIT = 500;
 const TIMELINE_UPCOMING_LIMIT = 3;
 const TIMELINE_RECENT_LIMIT = 6;
-const actionItemButtonClass =
-  'group w-full rounded-md border border-border/70 bg-background/55 p-3 text-left shadow-xs transition-colors hover:border-primary/35 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40';
 
 export function Dashboard({
   overview,
@@ -636,8 +633,8 @@ function TodayHome({
     () => buildFounderCards(journal, events, meetings),
     [journal, events, meetings],
   );
-  const briefs = React.useMemo(
-    () => buildTimelyBriefs(meetings, founderCards),
+  const insights = React.useMemo(
+    () => buildInsights(meetings, founderCards),
     [meetings, founderCards],
   );
   const timeline = React.useMemo(
@@ -656,8 +653,8 @@ function TodayHome({
           onSearch={onSearch}
         />
 
-        <TimelyBriefsPanel
-          briefs={briefs}
+        <InsightsPanel
+          items={insights}
           onOpenItem={(item) =>
             item.eventId && item.day ? onGoMeetings({ eventId: item.eventId, day: item.day }) : null
           }
@@ -754,132 +751,213 @@ function ActionCenterPanel({
 }) {
   if (loading && !center) {
     return (
-      <section className="rounded-lg border bg-card/70 p-4 shadow-card">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="mt-2 h-3 w-56" />
+      <section className="rounded-lg border bg-card p-4 shadow-card">
+        <div className="flex items-center gap-3">
+          <span className="grid size-9 shrink-0 place-items-center rounded-md bg-primary-soft text-primary">
+            <Loader2 className="size-4 animate-spin" />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-sm font-semibold leading-5">Action center</h3>
+              <span className="rounded-md border border-primary/25 bg-primary/10 px-2 py-0.5 text-xs font-medium uppercase text-primary">
+                Loading
+              </span>
+            </div>
+            <p className="mt-1 text-sm leading-5 text-muted-foreground">
+              Looking for follow-ups, active projects, and meeting-to-work links.
+            </p>
           </div>
-          <Loader2 className="size-4 animate-spin text-primary" />
-        </div>
-        <div className="grid gap-4 lg:grid-cols-3">
-          <Skeleton className="h-28 rounded-md" />
-          <Skeleton className="h-28 rounded-md" />
-          <Skeleton className="h-28 rounded-md" />
         </div>
       </section>
     );
   }
 
   if (!center) return null;
-  const total = center.followups.length + center.projects.length + center.meetingBridges.length;
+
+  const followups = [...center.followups].sort(
+    (a, b) => urgencyWeight(b.urgency) - urgencyWeight(a.urgency),
+  );
+  const projects = [...center.projects].sort(
+    (a, b) => projectActiveWeight(b) - projectActiveWeight(a),
+  );
+  const bridges = center.meetingBridges;
+
+  const total = followups.length + projects.length + bridges.length;
   if (total === 0) return null;
+
+  const columns: React.ReactNode[] = [];
+
+  if (followups.length > 0) {
+    columns.push(
+      <ActionColumn
+        key="followups"
+        title="Follow-ups"
+        icon={Inbox}
+        accent="text-emerald-500 dark:text-emerald-300"
+        count={followups.length}
+      >
+        {followups.slice(0, 5).map((item, index) => (
+          <FollowupRow
+            key={`${item.title}-${index}`}
+            item={item}
+            onOpen={() => onSearch(item.title)}
+          />
+        ))}
+      </ActionColumn>,
+    );
+  }
+
+  if (projects.length > 0) {
+    columns.push(
+      <ActionColumn
+        key="projects"
+        title="Projects"
+        icon={FolderOpen}
+        accent="text-blue-500 dark:text-blue-300"
+        count={projects.length}
+      >
+        {projects.slice(0, 4).map((project) => (
+          <ProjectRow
+            key={project.path}
+            project={project}
+            onOpen={() => onSearch(project.title)}
+          />
+        ))}
+      </ActionColumn>,
+    );
+  }
+
+  if (bridges.length > 0) {
+    columns.push(
+      <ActionColumn
+        key="bridges"
+        title="Meeting → work"
+        icon={MessageSquare}
+        accent="text-amber-500 dark:text-amber-300"
+        count={bridges.length}
+      >
+        {bridges.slice(0, 4).map((bridge) => (
+          <BridgeRow
+            key={bridge.meetingId}
+            bridge={bridge}
+            onOpen={() => onSearch(bridge.title)}
+          />
+        ))}
+      </ActionColumn>,
+    );
+  }
+
+  const gridClass =
+    columns.length === 1
+      ? 'grid gap-5'
+      : columns.length === 2
+        ? 'grid gap-5 lg:grid-cols-2'
+        : 'grid gap-5 lg:grid-cols-2 2xl:grid-cols-3';
 
   return (
     <section className="rounded-lg border bg-card p-5 shadow-card">
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-base font-semibold leading-6">Action center</h3>
-            <span className={cn(
-              'rounded-md border px-2 py-0.5 text-xs font-medium uppercase',
-              center.source === 'llm'
-                ? 'border-primary/25 bg-primary/10 text-primary'
-                : 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300',
-            )}>
-              {center.source === 'llm' ? 'Local LLM' : 'Fallback'}
-            </span>
-          </div>
-          <p className="mt-1 text-sm leading-5 text-muted-foreground">
-            Follow-ups, project memory, and meeting-to-work links.
-          </p>
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Wand2 className="size-4 shrink-0 text-primary" />
+          <h3 className="text-base font-semibold leading-6">Action center</h3>
         </div>
-        {loading ? <Loader2 className="size-5 animate-spin text-primary" /> : <Wand2 className="size-5 text-primary" />}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          {loading ? <Loader2 className="size-3.5 animate-spin text-primary" /> : null}
+          <span
+            className={cn(
+              'rounded-md px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide',
+              center.source === 'llm'
+                ? 'bg-primary/10 text-primary'
+                : 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
+            )}
+            title={center.source === 'llm' ? 'Generated by local LLM' : 'Heuristic fallback'}
+          >
+            {center.source === 'llm' ? 'LLM' : 'Fallback'}
+          </span>
+        </div>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-2 2xl:grid-cols-3">
-        <ActionColumn
-          title="Follow-up radar"
-          icon={Inbox}
-          accent="text-emerald-500 dark:text-emerald-300"
-          empty="No follow-ups surfaced."
-        >
-          {center.followups.slice(0, 5).map((item, index) => (
-            <FollowupRow
-              key={`${item.title}-${index}`}
-              item={item}
-              onOpen={() => onSearch(item.title)}
-            />
-          ))}
-        </ActionColumn>
-
-        <ActionColumn
-          title="Active projects"
-          icon={FolderOpen}
-          accent="text-blue-500 dark:text-blue-300"
-          empty="No active projects surfaced."
-        >
-          {center.projects.slice(0, 4).map((project) => (
-            <ProjectRow
-              key={project.path}
-              project={project}
-              onOpen={() => onSearch(project.title)}
-            />
-          ))}
-        </ActionColumn>
-
-        <ActionColumn
-          title="Meeting to work"
-          icon={MessageSquare}
-          accent="text-amber-500 dark:text-amber-300"
-          empty="No meeting-to-work links yet."
-        >
-          {center.meetingBridges.slice(0, 4).map((bridge) => (
-            <BridgeRow
-              key={bridge.meetingId}
-              bridge={bridge}
-              onOpen={() => onSearch(bridge.title)}
-            />
-          ))}
-        </ActionColumn>
-      </div>
+      <div className={gridClass}>{columns}</div>
     </section>
   );
+}
+
+function urgencyWeight(urgency: RuntimeActionCenterUrgency): number {
+  switch (urgency) {
+    case 'high':
+      return 3;
+    case 'medium':
+      return 2;
+    case 'low':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function projectActiveWeight(project: RuntimeActionCenterProject): number {
+  const status = (project.status ?? '').toLowerCase();
+  if (status.includes('active')) return 2;
+  if (status.includes('dormant') || status.includes('stale')) return 0;
+  return 1;
 }
 
 function ActionColumn({
   title,
   icon: Icon,
   accent,
-  empty,
+  count,
   children,
 }: {
   title: string;
   icon: React.ComponentType<{ className?: string }>;
   accent: string;
-  empty: string;
+  count: number;
   children: React.ReactNode;
 }) {
-  const count = React.Children.count(children);
   return (
-    <div className="min-w-0 border-t pt-4">
-      <div className="mb-3 flex items-center gap-2">
-        <span className={cn('grid size-8 shrink-0 place-items-center rounded-md bg-muted', accent)}>
-          <Icon className="size-4" />
-        </span>
-        <div className="min-w-0 text-base font-semibold leading-6">{title}</div>
-        <Badge variant={count > 0 ? 'outline' : 'muted'} className="ml-auto min-w-8 shrink-0">
+    <div className="min-w-0">
+      <div className="mb-2.5 flex items-center gap-2">
+        <Icon className={cn('size-3.5 shrink-0', accent)} />
+        <div className="min-w-0 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+          {title}
+        </div>
+        <span className="ml-auto rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular text-muted-foreground">
           {count}
-        </Badge>
+        </span>
       </div>
-      {count > 0 ? (
-        <div className="flex flex-col gap-3">{children}</div>
-      ) : (
-        <p className="rounded-md border border-dashed border-border/70 bg-background/35 p-3 text-sm leading-5 text-muted-foreground">
-          {empty}
-        </p>
-      )}
+      <div className="flex flex-col gap-2">{children}</div>
     </div>
+  );
+}
+
+function ActionRowChrome({
+  children,
+  onOpen,
+  active,
+  ariaLabel,
+}: {
+  children: React.ReactNode;
+  onOpen: () => void;
+  active?: boolean;
+  ariaLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={ariaLabel}
+      className={cn(
+        'group relative w-full rounded-md border px-3 py-2.5 text-left transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+        active
+          ? 'border-primary/40 bg-primary/5 hover:bg-primary/10'
+          : 'border-border/70 bg-background/55 hover:border-border hover:bg-accent/30',
+      )}
+    >
+      {children}
+      <ChevronRight className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/0 transition-all group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+    </button>
   );
 }
 
@@ -890,30 +968,29 @@ function FollowupRow({
   item: RuntimeActionCenterFollowup;
   onOpen: () => void;
 }) {
+  const title = cleanActionText(item.title) || followupCategoryLabel(item.category);
+  const body = cleanActionText(item.body);
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={actionItemButtonClass}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <span className="line-clamp-3 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
-          {cleanActionText(item.title) || followupCategoryLabel(item.category)}
-        </span>
-        <span className={cn(
-          'mt-0.5 shrink-0 rounded-md border px-2 py-0.5 text-xs font-medium',
-          urgencyClass(item.urgency),
-        )}>
-          {followupCategoryLabel(item.category)}
-        </span>
+    <ActionRowChrome onOpen={onOpen} ariaLabel={`Search evidence for ${title}`}>
+      <div className="flex items-start gap-2 pr-5">
+        <UrgencyDot urgency={item.urgency} className="mt-1.5" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="line-clamp-2 min-w-0 flex-1 break-words text-sm font-medium leading-5 text-foreground">
+              {title}
+            </span>
+            <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              {followupCategoryLabel(item.category)}
+            </span>
+          </div>
+          {body ? (
+            <p className="mt-1 line-clamp-2 break-words text-xs leading-snug text-muted-foreground">
+              {body}
+            </p>
+          ) : null}
+        </div>
       </div>
-      {cleanActionText(item.body) ? (
-        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
-          {cleanActionText(item.body)}
-        </p>
-      ) : null}
-      <EvidenceHint className="mt-3" />
-    </button>
+    </ActionRowChrome>
   );
 }
 
@@ -928,43 +1005,40 @@ function ProjectRow({
   const summary = cleanActionText(project.summary);
   const nextAction = project.nextActions.map(cleanActionText).find(Boolean);
   const status = cleanActionText(project.status);
+  const isActive = /active/i.test(status);
+  const isDormant = /dormant|stale/i.test(status);
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={actionItemButtonClass}
-    >
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <span className="line-clamp-2 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
-          {title}
-        </span>
-        {project.kind ? (
-          <span className="mt-0.5 shrink-0 rounded-md border border-border/70 bg-muted/45 px-2 py-0.5 text-xs font-medium text-muted-foreground">
-            {kindLabel(project.kind)}
+    <ActionRowChrome onOpen={onOpen} active={isActive} ariaLabel={`Search evidence for ${title}`}>
+      <div className="pr-5">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="line-clamp-1 min-w-0 flex-1 break-words text-sm font-medium leading-5 text-foreground">
+            {title}
           </span>
+          {isActive ? (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              Active
+            </span>
+          ) : isDormant ? (
+            <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+              Dormant
+            </span>
+          ) : null}
+        </div>
+        {summary ? (
+          <p className="mt-0.5 line-clamp-1 break-words text-xs leading-snug text-muted-foreground">
+            {summary}
+          </p>
+        ) : null}
+        {nextAction ? (
+          <p className="mt-1 line-clamp-1 break-words text-xs leading-snug text-foreground/75">
+            <span className="text-muted-foreground">→ </span>
+            {nextAction}
+          </p>
         ) : null}
       </div>
-      {summary ? (
-        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
-          {summary}
-        </p>
-      ) : null}
-      {nextAction ? (
-        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
-          <span className="font-medium text-foreground">Next: </span>
-          <span className="break-words">{nextAction}</span>
-        </p>
-      ) : null}
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-        {status ? (
-          <span className="text-xs leading-4 text-muted-foreground">
-            {status}
-          </span>
-        ) : null}
-        <EvidenceHint />
-      </div>
-    </button>
+    </ActionRowChrome>
   );
 }
 
@@ -975,66 +1049,66 @@ function BridgeRow({
   bridge: RuntimeMeetingWorkBridge;
   onOpen: () => void;
 }) {
+  const title = cleanActionText(bridge.title) || 'Meeting follow-up';
+  const summary = cleanActionText(bridge.summary);
+  const followup = bridge.followups.map(cleanActionText).find(Boolean);
+  const workAfter = bridge.workAfter.map(cleanActionText).find(Boolean);
+  const tail = followup
+    ? { label: 'Follow-up', value: followup }
+    : workAfter
+      ? { label: 'After', value: workAfter }
+      : null;
+
   return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={actionItemButtonClass}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <span className="line-clamp-2 min-w-0 break-words text-[15px] font-semibold leading-5 text-foreground">
-          {cleanActionText(bridge.title) || 'Meeting follow-up'}
-        </span>
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {formatLocalTime(bridge.startedAt)}
-        </span>
+    <ActionRowChrome onOpen={onOpen} ariaLabel={`Search evidence for ${title}`}>
+      <div className="pr-5">
+        <div className="flex items-baseline gap-2">
+          <span className="line-clamp-1 min-w-0 flex-1 break-words text-sm font-medium leading-5 text-foreground">
+            {title}
+          </span>
+          <span className="shrink-0 text-[11px] tabular text-muted-foreground">
+            {formatLocalTime(bridge.startedAt)}
+          </span>
+        </div>
+        {summary ? (
+          <p className="mt-0.5 line-clamp-1 break-words text-xs leading-snug text-muted-foreground">
+            {summary}
+          </p>
+        ) : null}
+        {tail ? (
+          <p className="mt-1 line-clamp-1 break-words text-xs leading-snug text-foreground/75">
+            <span className="text-muted-foreground">{tail.label}: </span>
+            {tail.value}
+          </p>
+        ) : null}
       </div>
-      {cleanActionText(bridge.summary) ? (
-        <p className="mt-2 line-clamp-3 break-words text-sm leading-5 text-foreground/75">
-          {cleanActionText(bridge.summary)}
-        </p>
-      ) : null}
-      {bridge.followups.length > 0 ? (
-        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
-          <span className="font-medium text-foreground">Follow-up: </span>
-          <span className="break-words">{cleanActionText(bridge.followups[0])}</span>
-        </p>
-      ) : bridge.workAfter.length > 0 ? (
-        <p className="mt-3 rounded-md bg-muted/45 px-2.5 py-2 text-sm leading-5 text-foreground/75">
-          <span className="font-medium text-foreground">After: </span>
-          <span className="break-words">{cleanActionText(bridge.workAfter[0])}</span>
-        </p>
-      ) : null}
-      <EvidenceHint className="mt-3" />
-    </button>
+    </ActionRowChrome>
   );
 }
 
-function EvidenceHint({ className }: { className?: string }) {
+function UrgencyDot({
+  urgency,
+  className,
+}: {
+  urgency: RuntimeActionCenterUrgency;
+  className?: string;
+}) {
   return (
-    <span className={cn(
-      'inline-flex items-center gap-1 text-xs font-medium text-primary/90 group-hover:text-primary',
-      className,
-    )}>
-      Search evidence
-      <ArrowRight className="size-3" />
-    </span>
+    <span
+      title={`${urgency} urgency`}
+      className={cn(
+        'size-2 shrink-0 rounded-full',
+        urgency === 'high' && 'bg-red-500',
+        urgency === 'medium' && 'bg-amber-500',
+        urgency === 'low' && 'bg-muted-foreground/40',
+        className,
+      )}
+    />
   );
 }
 
 function cleanActionText(value?: string | null): string {
   return stripMarkdown(value).replace(/\s+/g, ' ').trim();
-}
-
-function urgencyClass(urgency: RuntimeActionCenterFollowup['urgency']): string {
-  switch (urgency) {
-    case 'high':
-      return 'border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-300';
-    case 'medium':
-      return 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300';
-    case 'low':
-      return 'border-muted bg-muted/60 text-muted-foreground';
-  }
 }
 
 function followupCategoryLabel(category: RuntimeActionCenterFollowup['category']): string {
@@ -1052,7 +1126,7 @@ function projectTitle(project: RuntimeActionCenterProject): string {
   return pathName || kindLabel(project.kind) || 'Active project';
 }
 
-type TimelyBriefItem = {
+type InsightItem = {
   id: string;
   title: string;
   body: string;
@@ -1063,14 +1137,14 @@ type TimelyBriefItem = {
   day?: string;
 };
 
-function TimelyBriefsPanel({
-  briefs,
+function InsightsPanel({
+  items,
   onOpenItem,
 }: {
-  briefs: TimelyBriefItem[];
-  onOpenItem: (item: TimelyBriefItem) => void;
+  items: InsightItem[];
+  onOpenItem: (item: InsightItem) => void;
 }) {
-  if (briefs.length === 0) return null;
+  if (items.length === 0) return null;
 
   return (
     <section className="rounded-lg border bg-card/70 p-4 shadow-card">
@@ -1083,14 +1157,14 @@ function TimelyBriefsPanel({
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
-        {briefs.map((brief) => {
-          const Icon = brief.icon;
-          const clickable = Boolean(brief.eventId && brief.day);
+        {items.map((item) => {
+          const Icon = item.icon;
+          const clickable = Boolean(item.eventId && item.day);
           return (
             <button
-              key={brief.id}
+              key={item.id}
               type="button"
-              onClick={() => clickable && onOpenItem(brief)}
+              onClick={() => clickable && onOpenItem(item)}
               className={cn(
                 'min-w-0 rounded-lg border bg-background/55 p-3 text-left transition-colors',
                 clickable
@@ -1102,18 +1176,18 @@ function TimelyBriefsPanel({
                 <span
                   className={cn(
                     'grid size-8 shrink-0 place-items-center rounded-md bg-muted',
-                    brief.accent,
+                    item.accent,
                   )}
                 >
                   <Icon className="size-4" />
                 </span>
                 <div className="min-w-0">
-                  <div className="line-clamp-1 text-sm font-medium">{brief.title}</div>
+                  <div className="line-clamp-1 text-sm font-medium">{item.title}</div>
                   <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">
-                    {brief.body}
+                    {item.body}
                   </p>
                   <div className="mt-2 truncate text-[11px] text-muted-foreground">
-                    {brief.meta}
+                    {item.meta}
                   </div>
                 </div>
               </div>
@@ -1372,22 +1446,22 @@ function ActivityTimeline({
   );
 }
 
-function buildTimelyBriefs(
+function buildInsights(
   meetings: Meeting[],
   cards: FounderCard[],
-): TimelyBriefItem[] {
+): InsightItem[] {
   const byTitle = new Map(cards.map((card) => [card.title, card]));
   const replies = byTitle.get('Replies');
   const promises = byTitle.get('Promises');
   const followUp = byTitle.get('Follow up');
   const readyMeetings = meetings.filter((meeting) => meeting.summary_status === 'ready');
-  const briefs: TimelyBriefItem[] = [];
+  const insights: InsightItem[] = [];
 
   if (readyMeetings.length > 0) {
     const latest = readyMeetings
       .slice()
       .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0]!;
-    briefs.push({
+    insights.push({
       id: `meeting-${latest.id}`,
       title: 'Meeting summary ready',
       body: latest.summary_json?.tldr || latest.title || platformLabel(latest.platform),
@@ -1398,7 +1472,7 @@ function buildTimelyBriefs(
   }
 
   if (promises && promises.items.length > 0) {
-    briefs.push({
+    insights.push({
       id: 'promises',
       title: `${promises.items.length} promise${promises.items.length === 1 ? '' : 's'} to track`,
       body: promises.items[0]?.title ?? 'Meeting action items and task captures are ready.',
@@ -1411,7 +1485,7 @@ function buildTimelyBriefs(
   }
 
   if (followUp && followUp.items.length > 0) {
-    briefs.push({
+    insights.push({
       id: 'follow-up',
       title: `${followUp.items.length} follow-up${followUp.items.length === 1 ? '' : 's'} surfaced`,
       body: followUp.items[0]?.title ?? 'Open questions and next calendar items are ready.',
@@ -1424,7 +1498,7 @@ function buildTimelyBriefs(
   }
 
   if (replies && replies.items.length > 0) {
-    briefs.push({
+    insights.push({
       id: 'replies',
       title: `${replies.items.length} reply signal${replies.items.length === 1 ? '' : 's'}`,
       body: replies.items[0]?.title ?? 'Inbox and chat activity surfaced from capture.',
@@ -1436,11 +1510,11 @@ function buildTimelyBriefs(
     });
   }
 
-  if (briefs.length === 0) {
+  if (insights.length === 0) {
     return [];
   }
 
-  return briefs.slice(0, 4);
+  return insights.slice(0, 4);
 }
 
 function buildTimelineItems(journal: JournalDay | null, events: DayEvent[]): TimelineItem[] {

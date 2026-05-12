@@ -108,7 +108,7 @@ declare global {
 }
 
 export type ChatIntent =
-  | 'daily_briefing'
+  | 'day_overview'
   | 'calendar_check'
   | 'open_loops'
   | 'recall_preference'

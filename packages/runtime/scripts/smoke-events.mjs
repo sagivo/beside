@@ -75,6 +75,14 @@ function localDayKey(date = new Date()) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function englishDate(day) {
+  return new Date(`${day}T12:00:00`).toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
 async function main() {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-events-smoke-'));
   try {
@@ -364,6 +372,106 @@ async function main() {
       futureEvents.some((e) => e.title === 'Future Planning'),
       'calendar extraction stores future-dated events',
     );
+
+    const structuredTmp = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'cofounderos-events-structured-calendar-'),
+    );
+    try {
+      const structuredStorage = await storageMod.default({
+        dataDir: structuredTmp,
+        logger,
+        config: { path: structuredTmp },
+      });
+      const structuredDay = localDayKey();
+      const structuredDate = englishDate(structuredDay);
+      await structuredStorage.upsertFrame({
+        id: `frame_structured_calendar_${randomUUID().slice(0, 8)}`,
+        timestamp: `${structuredDay}T09:00:00.000Z`,
+        day: structuredDay,
+        monitor: 0,
+        app: 'Calendar',
+        app_bundle_id: 'com.apple.iCal',
+        window_title: 'Calendar',
+        url: null,
+        text:
+          `Calendar May 2026 Mon Tue Wed Thu Fri 8 AM 9 AM 10 AM 11 AM Noon 1 PM 2 PM 3 PM 4 PM\n` +
+          `Tuesday\n` +
+          `Open Enrollment Office Hour at Cupertino-1-Palaven (4) [Zoom Room]. Starts on ${structuredDate} at 3:00 PM and ends at 3:30 PM.\n` +
+          `Sagiv / Balaji - 1:1 at Cupertino Meeting Room - Vimire, Cupertino-1-Vimire (4) [Zoom Room]. Starts on ${structuredDate} at 3:30 PM and ends at 4:00 PM.\n`,
+        text_source: 'ocr_accessibility',
+        asset_path: null,
+        perceptual_hash: `structured_cal_${randomUUID().slice(0, 8)}`,
+        trigger: 'screenshot',
+        session_id: 'sess_structured_calendar_smoke',
+        duration_ms: null,
+        entity_path: null,
+        entity_kind: null,
+        activity_session_id: null,
+        meeting_id: null,
+        source_event_ids: [],
+      });
+
+      const wrongCalendarModel = {
+        ...stubModel,
+        isAvailable: async () => true,
+        complete: async () =>
+          JSON.stringify({
+            events: [
+              {
+                title: 'Open Enrollment Office Hour',
+                kind: 'calendar',
+                starts_at: `${structuredDay}T11:30:00`,
+                ends_at: `${structuredDay}T12:45:00`,
+                attendees: [],
+                context: 'An office hour for open enrollment.',
+              },
+              {
+                title: 'Sagiv / Balaji - 1:1',
+                kind: 'calendar',
+                starts_at: `${structuredDay}T13:30:00`,
+                ends_at: `${structuredDay}T16:00:00`,
+                attendees: [],
+                context: 'A one-on-one meeting between Sagiv and Balaji.',
+              },
+            ],
+          }),
+      };
+      const structuredExtractor = new EventExtractor(
+        structuredStorage,
+        wrongCalendarModel,
+        logger,
+        {
+          llmEnabled: true,
+          minTextChars: 20,
+          lookbackDays: 1,
+        },
+      );
+      await structuredExtractor.tick({ lookbackDays: 1 });
+      const structuredEvents = await structuredStorage.listDayEvents({
+        day: structuredDay,
+        kind: 'calendar',
+        order: 'chronological',
+      });
+      const openEnrollment = structuredEvents.find((e) =>
+        e.title.includes('Open Enrollment Office Hour'),
+      );
+      const balaji = structuredEvents.find((e) => e.title.includes('Sagiv / Balaji'));
+      assert(
+        openEnrollment &&
+          new Date(openEnrollment.starts_at).getHours() === 15 &&
+          new Date(openEnrollment.starts_at).getMinutes() === 0,
+        'structured calendar accessibility time overrides wrong LLM time for Open Enrollment',
+      );
+      assert(
+        balaji &&
+          new Date(balaji.starts_at).getHours() === 15 &&
+          new Date(balaji.starts_at).getMinutes() === 30 &&
+          new Date(balaji.ends_at ?? '').getHours() === 16,
+        'structured calendar accessibility time overrides wrong LLM time for Sagiv / Balaji',
+      );
+    } finally {
+      await fs.rm(structuredTmp, { recursive: true, force: true });
+    }
 
     const falseCalendarTmp = await fs.mkdtemp(
       path.join(os.tmpdir(), 'cofounderos-events-false-calendar-'),
