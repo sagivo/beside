@@ -4,6 +4,11 @@
   "private": true,
   "description": "Desktop interface for Beside local memory capture and journals.",
   "author": "Beside",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sagivo/beside.git",
+    "directory": "packages/desktop"
+  },
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -37,6 +42,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "electron-updater": "^6.8.3",
     "lucide-react": "^1.14.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
@@ -63,6 +69,15 @@
     "directories": {
       "output": "release"
     },
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "sagivo",
+        "repo": "beside",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "dist/**/*",
       "package.json"
@@ -75,20 +90,27 @@
     ],
     "mac": {
       "target": [
-        "dir"
+        "dmg",
+        "zip"
       ],
       "icon": "build/icon.icns",
       "category": "public.app-category.productivity"
     },
     "win": {
       "target": [
-        "dir"
+        "nsis"
       ],
       "icon": "build/icon.png"
     },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
     "linux": {
       "target": [
-        "dir"
+        "AppImage",
+        "deb"
       ],
       "icon": "build/icon.png",
       "category": "Utility"

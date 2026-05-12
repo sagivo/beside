@@ -29,7 +29,7 @@ export function CommandDialog({
 }: {
   title?: string;
   description?: string;
-  children: React.ReactNode;
+  children: React.ComponentPropsWithoutRef<typeof CommandPrimitive>['children'];
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }) {

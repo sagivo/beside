@@ -1,0 +1,88 @@
+name: desktop-release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS x64
+            os: macos-13
+            builder_args: --mac --x64
+            csc_link_secret: MACOS_CSC_LINK
+            csc_password_secret: MACOS_CSC_KEY_PASSWORD
+          - name: Windows x64
+            os: windows-latest
+            builder_args: --win --x64
+            csc_link_secret: WINDOWS_CSC_LINK
+            csc_password_secret: WINDOWS_CSC_KEY_PASSWORD
+          - name: Linux x64
+            os: ubuntu-latest
+            builder_args: --linux --x64
+            csc_link_secret: LINUX_CSC_LINK
+            csc_password_secret: LINUX_CSC_KEY_PASSWORD
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CSC_LINK: ${{ secrets[matrix.csc_link_secret] }}
+      CSC_KEY_PASSWORD: ${{ secrets[matrix.csc_password_secret] }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxss-dev libx11-dev libxext-dev libxtst-dev
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Warn when production signing is missing
+        if: (runner.os == 'macOS' || runner.os == 'Windows') && env.CSC_LINK == ''
+        run: echo "::warning::No code-signing certificate configured for this OS. Add the documented secrets before shipping production builds."
+
+      - name: Build and publish desktop app
+        run: pnpm --filter @beside/desktop run dist -- ${{ matrix.builder_args }} --publish always
+
+      - name: Upload release artifacts for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: packages/desktop/release/**
+          if-no-files-found: ignore

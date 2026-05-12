@@ -258,7 +258,7 @@ function AboutCard() {
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" asChild>
             <a
-              href="https://github.com/beside/beside"
+              href="https://github.com/sagivo/beside"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -269,7 +269,7 @@ function AboutCard() {
           </Button>
           <Button variant="outline" size="sm" asChild>
             <a
-              href="https://github.com/beside/beside/blob/main/README.md"
+              href="https://github.com/sagivo/beside/blob/main/README.md"
               target="_blank"
               rel="noopener noreferrer"
             >

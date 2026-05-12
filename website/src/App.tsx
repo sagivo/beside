@@ -1,6 +1,6 @@
 import "./styles.css";
 
-const DOWNLOAD_URL = "https://github.com/beside-ai/beside/releases/latest/download/Beside-mac.dmg";
+const DOWNLOAD_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-mac.dmg";
 
 export default function App() {
   return (
@@ -17,7 +17,10 @@ export default function App() {
             <a href="#pipeline">Live pipeline</a>
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
-            <a href="https://github.com/beside-ai/beside">GitHub</a>
+            <a href="https://github.com/sagivo/beside" className="nav-gh">
+              <GitHubIcon />
+              <span>Open source</span>
+            </a>
             <a href="#download" className="nav-cta">Download</a>
           </nav>
         </div>
@@ -29,8 +32,8 @@ export default function App() {
           <div className="container hero-grid">
             <div>
               <span className="eyebrow">
-                <span className="dot" aria-hidden />
-                Ambient AI · captures, indexes, surfaces, remembers
+                <SparkleMark />
+                Open source · Runs entirely on your Mac
               </span>
 
               <h1>
@@ -44,7 +47,8 @@ export default function App() {
                 <strong>indexes</strong> it into a self-organising knowledge base,
                 quietly <strong>surfaces</strong> what matters, and{" "}
                 <strong>remembers</strong> it as long-term context for every AI
-                agent you use — securely on-device.
+                agent you use — <strong>100% on your machine</strong>, every line
+                of code <strong>open source</strong>.
               </p>
 
               <div className="btn-row">
@@ -55,61 +59,119 @@ export default function App() {
                     <small>macOS 12+ · Apple silicon &amp; Intel</small>
                   </span>
                 </a>
-                <a className="btn btn-ghost" href="#pipeline">
-                  See it in motion
+                <a
+                  className="btn btn-ghost"
+                  href="https://github.com/sagivo/beside"
+                >
+                  <GitHubIcon />
+                  <span>
+                    View source
+                    <small>MIT · star on GitHub</small>
+                  </span>
                 </a>
               </div>
 
-              <div className="trust" aria-label="Highlights">
-                <span><Tick /> 100% local-first</span>
-                <span><Tick /> Free during beta</span>
-                <span><Tick /> Works with MCP</span>
+              <div className="proof-bar" aria-label="What you get with Beside">
+                <div className="proof-cell">
+                  <span className="pc-ic" aria-hidden><LocalIcon /></span>
+                  <div className="pc-body">
+                    <span className="pc-label">Local-only</span>
+                    <span className="pc-value">0 bytes leave your Mac</span>
+                  </div>
+                </div>
+                <div className="proof-cell">
+                  <span className="pc-ic" aria-hidden><GitHubIcon /></span>
+                  <div className="pc-body">
+                    <span className="pc-label">MIT licensed</span>
+                    <span className="pc-value">
+                      <a href="https://github.com/sagivo/beside">github.com/sagivo/beside</a>
+                    </span>
+                  </div>
+                </div>
+                <div className="proof-cell">
+                  <span className="pc-ic" aria-hidden><ModelIcon /></span>
+                  <div className="pc-body">
+                    <span className="pc-label">Any model</span>
+                    <span className="pc-value">Ollama · OpenAI · Anthropic</span>
+                  </div>
+                </div>
+                <div className="proof-cell">
+                  <span className="pc-ic" aria-hidden><MCPIcon /></span>
+                  <div className="pc-body">
+                    <span className="pc-label">MCP-ready</span>
+                    <span className="pc-value">Claude · Cursor · ChatGPT</span>
+                  </div>
+                </div>
+                <span className="proof-corner" aria-hidden />
+              </div>
+
+              <div className="hero-meta" aria-hidden>
+                <span className="hm-dot" />
+                Free during beta · no account · no telemetry
               </div>
             </div>
 
             <div className="hero-viz" aria-hidden>
               <div className="grid-bg" />
-              <MemoryConstellation />
+              <AmbientAINetwork />
 
-              {/* capture chips drifting toward the memory core */}
-              <div className="cap-chip-layer">
-                <div className="cap-chip tl">
-                  <span className="ic cap">▢</span>
-                  <span>Screenshot · Figma</span>
-                </div>
-                <div className="cap-chip tr">
-                  <span className="ic url">↗</span>
-                  <span>URL · Stripe docs</span>
-                </div>
-                <div className="cap-chip bl">
-                  <span className="ic idx">▲</span>
-                  <span>Slack · #beside-core</span>
-                </div>
-                <div className="cap-chip br">
-                  <span className="ic rec">✦</span>
-                  <span>Code · pricing.ts</span>
-                </div>
+              <div className="hero-status" aria-hidden>
+                <span className="live-dot" />
+                <span className="live-label">Live</span>
+                <span className="status-sep" />
+                <span className="caption-stack">
+                  <span>Indexing · Mail</span>
+                  <span>Indexing · Slack</span>
+                  <span>Indexing · Calendar</span>
+                  <span>Indexing · Figma</span>
+                  <span>Indexing · Notion</span>
+                  <span>Indexing · Linear</span>
+                </span>
               </div>
+            </div>
+          </div>
+        </section>
 
-              {/* outbound agent chips pulling context */}
-              <div className="agent-chip-layer">
-                <div className="agent-chip a1">
-                  <span className="a-dot" />
-                  <span>Claude</span>
-                </div>
-                <div className="agent-chip a2">
-                  <span className="a-dot" />
-                  <span>Cursor</span>
-                </div>
-                <div className="agent-chip a3">
-                  <span className="a-dot" />
-                  <span>ChatGPT</span>
-                </div>
-              </div>
-
-              <div className="hero-caption">
+        {/* ─────── Self-writing wiki ─────── */}
+        <section id="wiki" className="wiki">
+          <div className="container wiki-grid">
+            <div className="wiki-copy">
+              <span className="eyebrow">
                 <span className="dot" />
-                Indexing — 14 new memories
+                A self-writing wiki
+              </span>
+              <h2>Your day, inked into a wiki you can actually read.</h2>
+              <p>
+                Beside watches, then quietly writes your day into a Markdown
+                wiki on your disk — topics, tags, and decisions, all under{" "}
+                <code>~/beside/wiki</code>. No filing. No formatting. No
+                forgetting.
+              </p>
+              <ul className="wiki-bullets" aria-label="What lives in the wiki">
+                <li>
+                  <span className="bs" />
+                  Pages re-organise themselves as your work evolves
+                </li>
+                <li>
+                  <span className="bs" />
+                  Plain Markdown — grep it, edit it, version it
+                </li>
+                <li>
+                  <span className="bs" />
+                  Tags emerge from your actual signals, not a fixed schema
+                </li>
+              </ul>
+            </div>
+
+            <div className="wiki-stage" aria-hidden>
+              <span className="wiki-stage-grid" />
+              <span className="wiki-stage-tape" />
+              <JournalPage />
+              <div className="wiki-tags">
+                <span className="wt wt-1">#acme</span>
+                <span className="wt wt-2">#onboarding</span>
+                <span className="wt wt-3">#pricing</span>
+                <span className="wt wt-4">#ship</span>
               </div>
             </div>
           </div>
@@ -136,6 +198,45 @@ export default function App() {
           </div>
         </section>
 
+        {/* ─────── Ask any AI ─────── */}
+        <section id="ask" className="block ask">
+          <div className="container">
+            <div className="ask-grid">
+              <div className="ask-copy">
+                <span className="eyebrow"><span className="dot" />Ask any AI</span>
+                <h2>Your memory, instantly available to every AI you use.</h2>
+                <p>
+                  Beside speaks <strong>MCP</strong>. Plug it into{" "}
+                  <strong>Claude</strong>, <strong>Cursor</strong>,{" "}
+                  <strong>ChatGPT</strong> — or any MCP-compatible agent —
+                  and ask the questions you'd normally have to dig through
+                  six apps to answer.
+                </p>
+                <p>
+                  The agent runs the query, Beside pulls the matching context
+                  from your <strong>local</strong> knowledge base, and the
+                  answer comes back grounded in what you actually did this
+                  week. Your raw data never leaves your machine.
+                </p>
+                <ul className="ask-prompts" aria-label="Example prompts">
+                  <li><span className="q-dot" />“What are my open items?”</li>
+                  <li><span className="q-dot" />“Summarise this week with Acme.”</li>
+                  <li><span className="q-dot" />“What did we decide on pricing?”</li>
+                  <li><span className="q-dot" />“Draft a follow-up from yesterday's call.”</li>
+                </ul>
+                <div className="ask-agents-row" aria-label="Compatible agents">
+                  <span className="agent-pill"><ClaudeMark /> Claude</span>
+                  <span className="agent-pill"><CursorMark /> Cursor</span>
+                  <span className="agent-pill"><ChatGPTMark /> ChatGPT</span>
+                  <span className="agent-pill agent-pill-more">+ any MCP agent</span>
+                </div>
+              </div>
+
+              <AskDemo />
+            </div>
+          </div>
+        </section>
+
         {/* ─────── Features ─────── */}
         <section id="features" className="block">
           <div className="container">
@@ -151,33 +252,35 @@ export default function App() {
             <div className="features">
               <Feature
                 badge="01"
+                title="100% local-first"
+                body="Captures, embeddings, and indexes live on your disk as JSONL + SQLite. Bring your own model — Ollama, llama.cpp, OpenAI, Anthropic — or run fully offline."
+                accent="local"
+              />
+              <Feature
+                badge="02"
+                title="Open source · MIT"
+                body="Every capture path, every prompt, every byte we touch is auditable on GitHub. Fork it, extend it, self-host it. No black boxes."
+                accent="oss"
+              />
+              <Feature
+                badge="03"
                 title="Silent capture"
                 body="Screenshots, active window, URLs, idle state — captured locally with negligible overhead. Nothing leaves your machine unless you say so."
               />
               <Feature
-                badge="02"
+                badge="04"
                 title="Self-organising knowledge"
                 body="A local model turns captures into structured notes, topics, and timelines. The wiki re-organises itself as your work evolves."
               />
               <Feature
-                badge="03"
+                badge="05"
                 title="Proactive surfacing"
                 body="Beside watches for the moments that matter — patterns, follow-ups, half-finished threads — and quietly pins them where you'll see them."
               />
               <Feature
-                badge="04"
-                title="Memory for agents"
-                body="Ship rich context to Claude, ChatGPT, Cursor and any MCP-compatible agent — so they remember yesterday, last week, last quarter."
-              />
-              <Feature
-                badge="05"
-                title="Local-first by design"
-                body="Raw data lives as JSONL + SQLite on your disk. Bring your own model — Ollama, OpenAI, Anthropic — or run fully offline."
-              />
-              <Feature
                 badge="06"
-                title="OCR &amp; semantic search"
-                body="Every screenshot is OCR'd and embedded so you can search across everything you've ever seen — in plain English."
+                title="Memory for any agent"
+                body="Ship rich context to Claude, ChatGPT, Cursor and any MCP-compatible agent — so they remember yesterday, last week, last quarter."
               />
             </div>
           </div>
@@ -241,7 +344,7 @@ export default function App() {
                     <small>Free during beta · macOS 12+</small>
                   </span>
                 </a>
-                <a className="btn btn-ghost" href="https://github.com/beside-ai/beside">
+                <a className="btn btn-ghost" href="https://github.com/sagivo/beside">
                   <GitHubIcon />
                   <span>
                     Star on GitHub
@@ -261,7 +364,7 @@ export default function App() {
         <div className="container footer-inner">
           <div>© {new Date().getFullYear()} Beside · Local-first AI memory.</div>
           <div style={{ display: "flex", gap: 22 }}>
-            <a href="https://github.com/beside-ai/beside">GitHub</a>
+            <a href="https://github.com/sagivo/beside">GitHub</a>
             <a href="/privacy">Privacy</a>
             <a href="mailto:hello@beside.ai">Contact</a>
           </div>
@@ -284,76 +387,265 @@ function AmbientBackdrop() {
   );
 }
 
-function MemoryConstellation() {
-  const nodes = [
-    { id: "n1", cx: 92,  cy: 110, r: 7 },
-    { id: "n2", cx: 312, cy: 92,  r: 6 },
-    { id: "n3", cx: 80,  cy: 290, r: 8 },
-    { id: "n4", cx: 320, cy: 310, r: 7 },
-    { id: "n5", cx: 200, cy: 60,  r: 5 },
-    { id: "n6", cx: 340, cy: 200, r: 5 },
-    { id: "n7", cx: 60,  cy: 200, r: 5 },
-    { id: "n8", cx: 200, cy: 340, r: 5 },
+/* ── Ambient AI hub: a quiet AI core connected to every app, indexing in real-time ── */
+function AmbientAINetwork() {
+  type App = {
+    id: string;
+    name: string;
+    angle: number;            // degrees, 0=right, 90=down (SVG)
+    color: string;            // brand-evocative ink
+    tint: string;             // soft tint for icon background
+    sample: string;           // what's being indexed
+  };
+
+  const apps: App[] = [
+    { id: "calendar", name: "Calendar", angle: -90,  color: "#1f5fd0", tint: "rgba(31, 95, 208, 0.10)",  sample: "Standup · 9:00" },
+    { id: "mail",     name: "Mail",     angle: -45,  color: "#c43c52", tint: "rgba(196, 60, 82, 0.10)",  sample: "Acme · contract" },
+    { id: "linear",   name: "Linear",   angle: 0,    color: "#5e5cf7", tint: "rgba(94, 92, 247, 0.10)",  sample: "BES-218 · OCR loop" },
+    { id: "github",   name: "GitHub",   angle: 45,   color: "#15182a", tint: "rgba(21, 24, 42, 0.08)",   sample: "PR #142 · merged" },
+    { id: "figma",    name: "Figma",    angle: 90,   color: "#d7593e", tint: "rgba(215, 89, 62, 0.10)",  sample: "Hero · rev 7" },
+    { id: "notion",   name: "Notion",   angle: 135,  color: "#3a3a48", tint: "rgba(58, 58, 72, 0.08)",   sample: "Spec · Onboarding" },
+    { id: "slack",    name: "Slack",    angle: 180,  color: "#5d3aa6", tint: "rgba(93, 58, 166, 0.10)",  sample: "#beside-core" },
+    { id: "drive",    name: "Drive",    angle: -135, color: "#2d8a4a", tint: "rgba(45, 138, 74, 0.10)",  sample: "Pricing · v3.pdf" },
   ];
+
   const center = { x: 200, y: 200 };
+  const R_SVG = 158;     // SVG node radius from center
+  const INNER = 44;      // inset before reaching the core
+  const R_HTML = 41.5;   // % radius for HTML chips
+  const R_TIP = 28;      // % radius for floating "indexed" tooltips (closer to core)
 
   return (
-    <svg viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stopColor="#6b6cf0" stopOpacity="0.55" />
-          <stop offset="60%" stopColor="#d2c8ec" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="#d2c8ec" stopOpacity="0" />
-        </radialGradient>
-        <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#6b6cf0" stopOpacity="0.0" />
-          <stop offset="50%" stopColor="#6b6cf0" stopOpacity="0.55" />
-          <stop offset="100%" stopColor="#6b6cf0" stopOpacity="0.0" />
-        </linearGradient>
-        <radialGradient id="nodeFill" cx="35%" cy="35%" r="65%">
-          <stop offset="0%" stopColor="#ffffff" />
-          <stop offset="70%" stopColor="#c9c7ee" />
-          <stop offset="100%" stopColor="#7c7df0" />
-        </radialGradient>
-        <filter id="soft" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="1.2" />
-        </filter>
-      </defs>
+    <>
+      <svg viewBox="0 0 400 400" className="ai-net" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <radialGradient id="coreOrb" cx="38%" cy="34%" r="70%">
+            <stop offset="0%"  stopColor="#ffffff" />
+            <stop offset="38%" stopColor="#dadcfa" />
+            <stop offset="80%" stopColor="#7c7df0" />
+            <stop offset="100%" stopColor="#4a4be0" />
+          </radialGradient>
+          <radialGradient id="coreHalo" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"  stopColor="#6b6cf0" stopOpacity="0.42" />
+            <stop offset="55%" stopColor="#6b6cf0" stopOpacity="0.08" />
+            <stop offset="100%" stopColor="#6b6cf0" stopOpacity="0" />
+          </radialGradient>
+          <linearGradient id="edgeFlow" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%"   stopColor="#6b6cf0" stopOpacity="0.0" />
+            <stop offset="55%"  stopColor="#6b6cf0" stopOpacity="0.55" />
+            <stop offset="100%" stopColor="#6b6cf0" stopOpacity="0.05" />
+          </linearGradient>
+          <filter id="aiSoft" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2" />
+          </filter>
+        </defs>
 
-      <g className="viz-orbit" opacity="0.5">
-        <circle cx="200" cy="200" r="140" fill="none" stroke="#15182a" strokeOpacity="0.06" strokeDasharray="2 6" />
-        <circle cx="200" cy="200" r="170" fill="none" stroke="#15182a" strokeOpacity="0.04" strokeDasharray="1 8" />
-      </g>
+        {/* outer halo behind the core */}
+        <circle cx={center.x} cy={center.y} r="180" fill="url(#coreHalo)" />
 
-      <circle cx="200" cy="200" r="120" fill="url(#coreGlow)" />
-
-      {nodes.map((n, i) => (
-        <path
-          key={`e-${n.id}`}
-          d={`M${center.x} ${center.y} Q ${(center.x + n.cx) / 2 + (i % 2 ? 16 : -16)} ${(center.y + n.cy) / 2 + (i % 2 ? -12 : 12)} ${n.cx} ${n.cy}`}
-          stroke="url(#edge)"
-          strokeWidth="1.2"
-          fill="none"
-          className={`viz-flow ${i % 4 === 0 ? "" : i % 4 === 1 ? "b" : i % 4 === 2 ? "c" : "d"}`}
-        />
-      ))}
-
-      {nodes.map((n, i) => (
-        <g key={n.id} className={i % 3 === 0 ? "viz-pulse" : i % 3 === 1 ? "viz-pulse-2" : "viz-pulse-3"}>
-          <circle cx={n.cx} cy={n.cy} r={n.r + 6} fill="#6b6cf0" opacity="0.08" filter="url(#soft)" />
-          <circle cx={n.cx} cy={n.cy} r={n.r} fill="url(#nodeFill)" />
-          <circle cx={n.cx} cy={n.cy} r={n.r} fill="none" stroke="#ffffff" strokeOpacity="0.6" strokeWidth="0.5" />
+        {/* faint orbital guides */}
+        <g className="viz-orbit" opacity="0.55">
+          <circle cx={center.x} cy={center.y} r="170" fill="none" stroke="#15182a" strokeOpacity="0.05" strokeDasharray="2 7" />
+          <circle cx={center.x} cy={center.y} r="120" fill="none" stroke="#15182a" strokeOpacity="0.04" strokeDasharray="1 6" />
         </g>
-      ))}
 
-      <g className="viz-pulse">
-        <circle cx={center.x} cy={center.y} r="22" fill="#6b6cf0" opacity="0.16" filter="url(#soft)" />
-        <circle cx={center.x} cy={center.y} r="13" fill="url(#nodeFill)" />
-        <circle cx={center.x} cy={center.y} r="13" fill="none" stroke="#ffffff" strokeOpacity="0.85" strokeWidth="0.8" />
-        <circle cx={center.x - 3} cy={center.y - 3} r="3" fill="#ffffff" opacity="0.85" />
-      </g>
-    </svg>
+        {/* connection lines & packets, one per app */}
+        {apps.map((a, i) => {
+          const rad = (a.angle * Math.PI) / 180;
+          const x  = +(center.x + Math.cos(rad) * R_SVG).toFixed(2);
+          const y  = +(center.y + Math.sin(rad) * R_SVG).toFixed(2);
+          const ix = +(center.x + Math.cos(rad) * INNER).toFixed(2);
+          const iy = +(center.y + Math.sin(rad) * INNER).toFixed(2);
+          const path = `M ${x} ${y} L ${ix} ${iy}`;
+          return (
+            <g key={`edge-${a.id}`} className="ai-edge">
+              {/* base dashed rail */}
+              <line
+                x1={x} y1={y} x2={ix} y2={iy}
+                stroke="rgba(107,108,240,0.22)"
+                strokeWidth="0.7"
+                strokeDasharray="3 5"
+              />
+              {/* glowing flow overlay */}
+              <line
+                x1={x} y1={y} x2={ix} y2={iy}
+                stroke="url(#edgeFlow)"
+                strokeWidth="1.2"
+                className={`ai-flow ai-flow-${i % 4}`}
+              />
+              {/* primary data packet riding the line into the core */}
+              <circle r="2.6" fill="#6b6cf0" opacity="0" className="ai-packet">
+                <set attributeName="opacity" to="0.95" begin={`${(i * 0.35).toFixed(2)}s`} />
+                <animateMotion
+                  dur="2.8s"
+                  repeatCount="indefinite"
+                  begin={`${(i * 0.35).toFixed(2)}s`}
+                  path={path}
+                  keyPoints="0;1"
+                  keyTimes="0;1"
+                  calcMode="linear"
+                />
+              </circle>
+              {/* secondary trailing packet */}
+              <circle r="1.6" fill="#a4a5f7" opacity="0" className="ai-packet-2">
+                <set attributeName="opacity" to="0.9" begin={`${(i * 0.35 + 1.4).toFixed(2)}s`} />
+                <animateMotion
+                  dur="2.8s"
+                  repeatCount="indefinite"
+                  begin={`${(i * 0.35 + 1.4).toFixed(2)}s`}
+                  path={path}
+                  keyPoints="0;1"
+                  keyTimes="0;1"
+                  calcMode="linear"
+                />
+              </circle>
+            </g>
+          );
+        })}
+
+        {/* concentric pulse rings emanating from the core */}
+        <g>
+          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple" />
+          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay2" />
+          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay3" />
+        </g>
+
+        {/* central AI core */}
+        <g>
+          <circle cx={center.x} cy={center.y} r="56" fill="#ffffff" opacity="0.35" filter="url(#aiSoft)" />
+          <circle cx={center.x} cy={center.y} r="38" fill="url(#coreOrb)" className="ai-core" />
+          <circle cx={center.x} cy={center.y} r="38" fill="none" stroke="#ffffff" strokeOpacity="0.7" strokeWidth="0.8" />
+          {/* tiny highlight */}
+          <circle cx={center.x - 9} cy={center.y - 10} r="4.2" fill="#ffffff" opacity="0.9" />
+          {/* neural micro-arcs inside core for subtle "thinking" texture */}
+          <g opacity="0.42">
+            <path d="M 184 200 Q 200 188 216 200" stroke="#ffffff" strokeWidth="0.7" fill="none" strokeLinecap="round" />
+            <path d="M 184 204 Q 200 220 216 204" stroke="#ffffff" strokeWidth="0.7" fill="none" strokeLinecap="round" />
+            <path d="M 196 188 L 196 212"      stroke="#ffffff" strokeWidth="0.5" fill="none" strokeLinecap="round" />
+            <path d="M 204 188 L 204 212"      stroke="#ffffff" strokeWidth="0.5" fill="none" strokeLinecap="round" />
+          </g>
+        </g>
+      </svg>
+
+      {/* HTML overlay: app chips around the ring + floating "indexed" tooltips */}
+      <div className="ai-ring">
+        {apps.map((a, i) => {
+          const rad = (a.angle * Math.PI) / 180;
+          const x = 50 + Math.cos(rad) * R_HTML;
+          const y = 50 + Math.sin(rad) * R_HTML;
+          const tx = 50 + Math.cos(rad) * R_TIP;
+          const ty = 50 + Math.sin(rad) * R_TIP;
+          return (
+            <span key={a.id}>
+              <span
+                className={`ai-node n-${a.id}`}
+                style={{ left: `${x}%`, top: `${y}%`, ["--c" as any]: a.color, ["--t" as any]: a.tint }}
+                aria-hidden
+              >
+                <span className="ic"><AppIcon id={a.id} /></span>
+                <span className="lbl">{a.name}</span>
+                <span className="live" />
+              </span>
+              <span
+                className={`ai-tip t-${a.id}`}
+                style={{
+                  left: `${tx}%`,
+                  top: `${ty}%`,
+                  animationDelay: `${(i * 1.6).toFixed(2)}s`,
+                  ["--c" as any]: a.color,
+                }}
+                aria-hidden
+              >
+                {a.sample}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+    </>
   );
+}
+
+/* tiny, line-style app glyphs — distinctive but trademark-safe */
+function AppIcon({ id }: { id: string }) {
+  switch (id) {
+    case "calendar":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3.5" y="5" width="17" height="15.5" rx="2.5" />
+          <line x1="3.5" y1="10" x2="20.5" y2="10" />
+          <line x1="8" y1="3" x2="8" y2="7" />
+          <line x1="16" y1="3" x2="16" y2="7" />
+          <circle cx="9" cy="14" r="0.9" fill="currentColor" stroke="none" />
+          <circle cx="13" cy="14" r="0.9" fill="currentColor" stroke="none" />
+          <circle cx="17" cy="14" r="0.9" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "mail":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3" y="5.5" width="18" height="13.5" rx="2.5" />
+          <path d="M3.5 7.5 L12 13.5 L20.5 7.5" />
+        </svg>
+      );
+    case "linear":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <line x1="3" y1="8" x2="16" y2="21" />
+          <line x1="3" y1="12" x2="12" y2="21" />
+          <line x1="3" y1="16" x2="8" y2="21" />
+          <line x1="3" y1="4" x2="20" y2="21" />
+        </svg>
+      );
+    case "github":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <circle cx="6" cy="5.5" r="2.2" />
+          <circle cx="6" cy="18.5" r="2.2" />
+          <circle cx="18" cy="5.5" r="2.2" />
+          <line x1="6" y1="7.7" x2="6" y2="16.3" />
+          <path d="M18 7.7 C 18 12, 12 12, 12 16.3" />
+        </svg>
+      );
+    case "figma":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M9 3h3v6H9a3 3 0 010-6z" opacity="0.85" />
+          <path d="M12 3h3a3 3 0 110 6h-3V3z" opacity="0.65" />
+          <path d="M9 9h3v6H9a3 3 0 010-6z" opacity="0.75" />
+          <circle cx="14.5" cy="12" r="3" />
+          <path d="M9 15h3v3a3 3 0 11-3-3z" opacity="0.55" />
+        </svg>
+      );
+    case "notion":
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="4" y="4" width="16" height="16" rx="2.5" />
+          <line x1="8.5" y1="8" x2="8.5" y2="16" />
+          <line x1="8.5" y1="8" x2="15.5" y2="16" />
+          <line x1="15.5" y1="8" x2="15.5" y2="16" />
+        </svg>
+      );
+    case "slack":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <rect x="3" y="10" width="8" height="3" rx="1.5" />
+          <rect x="13" y="11" width="8" height="3" rx="1.5" />
+          <rect x="10" y="3" width="3" height="8" rx="1.5" />
+          <rect x="11" y="13" width="3" height="8" rx="1.5" />
+        </svg>
+      );
+    case "drive":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+          <path d="M8 4h8l5 9h-9z" opacity="0.85" />
+          <path d="M3 16l5-9 4.5 8L9 22z" opacity="0.7" />
+          <path d="M9 22l4-7h9l-4 7z" opacity="0.9" />
+        </svg>
+      );
+    default:
+      return null;
+  }
 }
 
 function MemoryLog() {
@@ -378,6 +670,52 @@ function MemoryLog() {
           <span className="what">{r.what}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ── Journal page · ruled paper with handwriting being inked in.
+   Lives in the bottom-right corner of the hero viz. Three lines per
+   "page", three pages cycling on an 18s loop in sync with the
+   ambient indexing animation. The whole thing is pure CSS — width +
+   caret animation per .ink-stack variant gives the typewriter feel,
+   subtle paper rotation gives it physicality. ────────────────────── */
+function JournalPage() {
+  return (
+    <div className="journal" aria-hidden>
+      <div className="journal-corner" />
+      <div className="journal-page">
+        <div className="journal-head">
+          <span className="journal-led" />
+          <span>~/beside/wiki · today</span>
+        </div>
+        <div className="journal-body">
+          <div className="journal-line jl1">
+            <span className="bullet">•</span>
+            <span className="ink-stack">
+              <span>Acme · contract redlines</span>
+              <span>Standup · OCR loop ships</span>
+              <span>Spec · onboarding v7</span>
+            </span>
+          </div>
+          <div className="journal-line jl2">
+            <span className="bullet">•</span>
+            <span className="ink-stack">
+              <span>→ Q2 plan, pricing</span>
+              <span>→ BES-218 closed</span>
+              <span>→ onboarding wiki</span>
+            </span>
+          </div>
+          <div className="journal-line jl3">
+            <span className="bullet">•</span>
+            <span className="ink-stack">
+              <span>tags: #acme · #q2</span>
+              <span>tags: #linear · #ship</span>
+              <span>tags: #users · #flow</span>
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -500,9 +838,174 @@ function RecallCard() {
   );
 }
 
-function Feature({ badge, title, body }: { badge: string; title: string; body: string }) {
+/* ── Ask any AI · animated demo ─────────────────────────────────
+   Two cards side-by-side with an MCP beam between them — a literal
+   picture of how Beside connects to any agent:
+
+      [ Agent window ]  ⇆ MCP ⇆  [ Beside · local memory ]
+
+   Per 10s slot:
+     · 0.4–2.8s  user types a prompt in the agent
+     · 3.0–3.6s  query pulse fires left → right
+     · 3.4–6.0s  Beside orb glows, status flips to "matching",
+                 source chips light up around the orb
+     · 6.0–6.6s  context pulse fires right → left
+     · 6.6–9.6s  answer streams back in the agent
+
+   3 prompts × 10s = 30s super-loop. Pure CSS, no state.            */
+/* Each "scene" is a complete (prompt → MCP call → grounded answer)
+   unit. We render all three in the same grid cell and crossfade them
+   as a whole, so individual chunks never sit half-on-top of each
+   other (the old design typed the user prompts in stacked variants
+   with overlapping width animations, which is what produced the
+   "What aire mssy hoepriictket eonjs?" garble). */
+type AskBulletTag = "linear" | "slack" | "mail" | "figma";
+type AskBullet = { tag: AskBulletTag; bold: string; rest: string };
+type AskScene = {
+  agent: { name: "Claude" | "Cursor" | "ChatGPT"; mark: JSX.Element };
+  prompt: string;
+  title: string;
+  bullets: AskBullet[];
+  sources: AskBulletTag[];
+};
+
+const ASK_SCENES: AskScene[] = [
+  {
+    agent: { name: "Claude", mark: <ClaudeMark /> },
+    prompt: "What are my open items?",
+    title: "3 open items worth your attention:",
+    bullets: [
+      { tag: "linear", bold: "BES-218",      rest: " — OCR loop, waiting on you (3d)." },
+      { tag: "slack",  bold: "#beside-core", rest: " — pricing thread, 2 unread replies." },
+      { tag: "mail",   bold: "Acme",         rest: " — contract draft, due tomorrow." },
+    ],
+    sources: ["linear", "slack", "mail"],
+  },
+  {
+    agent: { name: "Cursor", mark: <CursorMark /> },
+    prompt: "Summarise this week with Acme.",
+    title: "This week with Acme:",
+    bullets: [
+      { tag: "mail",   bold: "Tue", rest: " — kickoff call, 4 action items captured." },
+      { tag: "slack",  bold: "Wed", rest: " — pricing pushback, re-scoped tier 2." },
+      { tag: "figma",  bold: "Fri", rest: " — contract v3 in your inbox, awaiting redlines." },
+    ],
+    sources: ["mail", "slack", "figma"],
+  },
+  {
+    agent: { name: "ChatGPT", mark: <ChatGPTMark /> },
+    prompt: "What did we decide on pricing?",
+    title: "Pricing decision (Wed, #beside-core):",
+    bullets: [
+      { tag: "slack",  bold: "Two tiers",    rest: " — Solo and Team." },
+      { tag: "slack",  bold: "Free tier",    rest: " for the duration of the beta." },
+      { tag: "linear", bold: "Final number", rest: " TBD by Friday standup." },
+    ],
+    sources: ["slack", "linear"],
+  },
+];
+
+const ALL_SOURCES: AskBulletTag[] = ["slack", "linear", "mail", "figma"];
+
+function AskDemo() {
   return (
-    <div className="feature">
+    <div className="ask-demo" aria-hidden>
+      <div className="ask-glow" />
+
+      <div className="ask-card">
+        {/* chrome row · cycling agent name + permanent MCP · beside badge */}
+        <div className="ask-chrome">
+          <span className="ask-traffic"><i /><i /><i /></span>
+          <span className="ask-agent-pill">
+            <span className="ask-agent-cycle">
+              {ASK_SCENES.map((s, i) => (
+                <span className={`ag-slot ag-slot-${i + 1}`} key={s.agent.name}>
+                  {s.agent.mark}
+                  <b>{s.agent.name}</b>
+                </span>
+              ))}
+            </span>
+          </span>
+          <span className="ask-mcp">
+            <span className="ask-mcp-dot" />
+            MCP · beside
+          </span>
+        </div>
+
+        {/* the conversation — three full scenes share one grid area,
+            one is fully visible at a time, swapped via simple opacity */}
+        <div className="ask-conv">
+          {ASK_SCENES.map((s, i) => (
+            <div className={`scene scene-${i + 1}`} key={s.agent.name}>
+              <div className="ask-msg ask-msg-user">
+                <span className="ask-avatar ask-avatar-user">YOU</span>
+                <div className="ask-bubble ask-bubble-user">{s.prompt}</div>
+              </div>
+
+              <div className="ask-tool">
+                <span className="ask-tool-spinner" />
+                <span>
+                  Calling <code>beside.recall</code> via MCP — pulling local
+                  context…
+                </span>
+              </div>
+
+              <div className="ask-msg ask-msg-ai">
+                <span className="ask-avatar ask-avatar-ai">
+                  <span className="ask-orb" />
+                </span>
+                <div className="ask-bubble ask-bubble-ai">
+                  <div className="ans-title">{s.title}</div>
+                  {s.bullets.map((b, j) => (
+                    <div className="ans-bullet" key={j}>
+                      <span className={`ans-tag t-${b.tag}`}>●</span>
+                      <strong>{b.bold}</strong>
+                      {b.rest}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* sources strip · which apps in your local memory got matched */}
+        <div className="ask-sources-row">
+          <span className="src-label">Sources · ~/beside/memory</span>
+          <div className="src-list">
+            {ALL_SOURCES.map((s, i) => (
+              <span className={`src-chip src-${s} src-pos-${i + 1}`} key={s}>
+                <span className="src-ic"><AppIcon id={s} /></span>
+                <span className="src-name">{s[0].toUpperCase() + s.slice(1)}</span>
+                <span className="src-dot" />
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* footer · the calming reminder */}
+        <div className="ask-footer">
+          <span className="lock"><LocalIcon /></span>
+          <span>Query ran on-device · raw data never leaves your machine</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Feature({
+  badge,
+  title,
+  body,
+  accent,
+}: {
+  badge: string;
+  title: string;
+  body: string;
+  accent?: "local" | "oss";
+}) {
+  return (
+    <div className={`feature${accent ? ` feature--${accent}` : ""}`}>
       <div className="ico">{badge}</div>
       <h3>{title}</h3>
       <p>{body}</p>
@@ -544,12 +1047,159 @@ function GitHubIcon() {
   );
 }
 
-function Tick() {
+/* Laptop with a lock — "runs entirely on your Mac, data never leaves" */
+function LocalIcon() {
   return (
-    <span className="tick" aria-hidden>
-      <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
-        <path d="M2 6.5l2.5 2.5L10 3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden>
+      {/* laptop body */}
+      <rect
+        x="4"
+        y="5"
+        width="16"
+        height="11"
+        rx="1.8"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      {/* base */}
+      <path
+        d="M2.5 18.5h19"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      {/* lock body */}
+      <rect
+        x="9.6"
+        y="10.2"
+        width="4.8"
+        height="3.6"
+        rx="0.7"
+        fill="currentColor"
+      />
+      {/* lock shackle */}
+      <path
+        d="M10.6 10.2v-1.2a1.4 1.4 0 012.8 0v1.2"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill="none"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/* Tiny brand-ish marks for the agent pills. Trademark-safe glyphs that
+   evoke each brand without copying their logo. */
+function ClaudeMark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M7 4.5 L12 19.5 M17 4.5 L12 19.5 M9 13 H15"
+        stroke="#d97757"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+function CursorMark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M5 3 L19 12 L12 13 L9 20 Z"
+        fill="#15182a"
+        stroke="#15182a"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+function ChatGPTMark() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden>
+      <circle cx="12" cy="12" r="8.5" stroke="#10a37f" strokeWidth="1.8" fill="none" />
+      <path
+        d="M8 12c0-2.2 1.8-4 4-4M16 12c0 2.2-1.8 4-4 4"
+        stroke="#10a37f"
+        strokeWidth="1.8"
+        fill="none"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/* Inline-SVG sparkle for the hero eyebrow — solid fill, explicit dims,
+   no gradient/filter chain (those occasionally render blank on Safari/Firefox). */
+function SparkleMark() {
+  return (
+    <span className="ai-mark" aria-hidden>
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        xmlns="http://www.w3.org/2000/svg"
+        aria-hidden
+      >
+        {/* primary 4-point sparkle, solid violet */}
+        <path
+          d="M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z"
+          fill="#6b6cf0"
+        />
+        {/* secondary sparkle, lighter violet */}
+        <path
+          d="M19 14 L19.8 16.7 L22.5 17.5 L19.8 18.3 L19 21 L18.2 18.3 L15.5 17.5 L18.2 16.7 Z"
+          fill="#a4a5f7"
+        />
+        {/* tiny accent sparkle */}
+        <path
+          d="M5 3.5 L5.5 5 L7 5.5 L5.5 6 L5 7.5 L4.5 6 L3 5.5 L4.5 5 Z"
+          fill="#a4a5f7"
+        />
       </svg>
     </span>
+  );
+}
+
+/* "Bring your own model" — an octahedral solid suggesting model layers / weights. */
+function ModelIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 3 L20 8 V16 L12 21 L4 16 V8 Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4 8 L12 13 L20 8 M12 13 V21"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+        opacity="0.55"
+      />
+      <circle cx="12" cy="13" r="1.3" fill="currentColor" />
+    </svg>
+  );
+}
+
+/* MCP — three peripherals plugged into one hub, the literal shape of the protocol. */
+function MCPIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="3.1" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="4.5" cy="6"  r="1.7" fill="currentColor" />
+      <circle cx="4.5" cy="18" r="1.7" fill="currentColor" />
+      <circle cx="19.5" cy="12" r="1.7" fill="currentColor" />
+      <path
+        d="M6 7 L9.4 10.4 M6 17 L9.4 13.6 M14.9 12 L18 12"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }

@@ -5,6 +5,7 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import readline from 'node:readline';
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, Tray, nativeImage, protocol, shell, dialog, systemPreferences } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import { defaultDataDir, expandPath, loadConfig } from '@beside/core';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,11 @@ function saveWindowState(win: BrowserWindow): void {
 let tray: Tray | null = null, statusWindow: BrowserWindow | null = null, managedRuntime: RuntimeServiceClient | null = null, statusItemHelper: ChildProcess | null = null;
 let lastLogs: string[] = [], lastOverview: any = null;
 const useMacAccessoryMode = process.platform === 'darwin' && process.env.BESIDE_DESKTOP_SHOW_DOCK !== '1';
+let updateCheckInFlight = false;
+let manualUpdateCheckRequested = false;
+let updateDownloadPromptOpen = false;
+let updateInstallPromptOpen = false;
+let updateCheckTimer: NodeJS.Timeout | null = null;
 
 type MenuBarCaptureState = 'capturing' | 'paused' | 'stopped';
 type MenuBarIndicator = { state: MenuBarCaptureState; label: string; };
@@ -89,6 +95,7 @@ if (process.platform === 'darwin') try { app.setAboutPanelOptions({ applicationN
 let initialScreenStatus: string | null = null;
 
 app.whenReady().then(async () => {
+  configureAutoUpdates();
   if (process.platform === 'darwin') {
     try { initialScreenStatus = systemPreferences.getMediaAccessStatus('screen') === 'unknown' ? 'unsupported' : systemPreferences.getMediaAccessStatus('screen'); }
     catch { initialScreenStatus = 'unsupported'; }
@@ -98,6 +105,7 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin' && startNativeStatusItem()) {} else createElectronTrayFallback();
   await startDaemonIfNeeded();
   if (process.env.BESIDE_DESKTOP_SHOW_ON_START !== '0') await showStatusWindow();
+  scheduleAutoUpdateChecks();
 });
 
 function registerAssetProtocol() {
@@ -136,7 +144,7 @@ async function openExternalHttpUrl(url: string) {
 }
 
 app.on('window-all-closed', () => {});
-app.on('before-quit', () => { statusItemHelper?.kill('SIGTERM'); managedRuntime?.close(); });
+app.on('before-quit', () => { if (updateCheckTimer) clearInterval(updateCheckTimer); statusItemHelper?.kill('SIGTERM'); managedRuntime?.close(); });
 
 function createElectronTrayFallback() {
   try {
@@ -181,10 +189,106 @@ async function refreshTray() {
     { label: 'Open Beside', accelerator: 'CommandOrControl+O', click: () => showStatusWindow() },
     live ? { label: 'Pause Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('pauseCapture').catch(e => appendLog(`Pause failed: ${e}`)); await refreshTray(); } } : paused ? { label: 'Resume Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('resumeCapture').catch(e => appendLog(`Resume failed: ${e}`)); await refreshTray(); } } : { label: 'Start Capture', click: () => startRuntime(), enabled: !live && !paused && !(h.ok && !managedRuntime) },
     { type: 'separator' }, { label: 'Run Doctor', click: () => showStatusWindow({ focus: 'doctor' }) },
+    { label: 'Check for Updates...', click: () => checkForUpdates(true) },
     { label: 'Reveal Files', submenu: [{ label: 'Markdown Export', click: () => shell.openPath(markdownExportDir) }, { label: 'Data Folder', click: () => shell.openPath(dataDir) }, { label: 'Config File', click: () => shell.openPath(configPath) }] },
     { type: 'separator' }, ...(managedRuntime ? [{ label: 'Stop Managed Runtime', click: () => stopManagedRuntime() }] : []),
     { label: 'Quit', accelerator: 'CommandOrControl+Q', click: () => app.quit() }
   ]));
+}
+
+function configureAutoUpdates() {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => appendLog('Checking for app updates.'));
+  autoUpdater.on('update-available', (info) => { updateCheckInFlight = false; manualUpdateCheckRequested = false; void promptToDownloadUpdate(info); });
+  autoUpdater.on('update-not-available', (info) => {
+    const wasManual = manualUpdateCheckRequested;
+    manualUpdateCheckRequested = false;
+    updateCheckInFlight = false;
+    appendLog(`No app update available; current version is ${app.getVersion()}${info?.version ? `, latest is ${info.version}` : ''}.`);
+    if (wasManual) void dialog.showMessageBox({ type: 'info', message: 'Beside is up to date.', detail: `You are running ${app.getVersion()}.` });
+  });
+  autoUpdater.on('download-progress', (progress) => appendLog(`Downloading app update ${Math.round(progress.percent)}%.`));
+  autoUpdater.on('update-downloaded', (info) => { updateCheckInFlight = false; manualUpdateCheckRequested = false; void promptToInstallUpdate(info); });
+  autoUpdater.on('error', (err) => {
+    const wasManual = manualUpdateCheckRequested;
+    manualUpdateCheckRequested = false;
+    updateCheckInFlight = false;
+    appendLog(`App update failed: ${err?.message ?? String(err)}`);
+    if (wasManual) void dialog.showMessageBox({ type: 'error', message: 'Could not check for updates.', detail: err?.message ?? String(err) });
+  });
+}
+
+function scheduleAutoUpdateChecks() {
+  if (process.env.BESIDE_DISABLE_AUTO_UPDATES === '1') return;
+  void checkForUpdates(false);
+  updateCheckTimer = setInterval(() => void checkForUpdates(false), 6 * 60 * 60 * 1000);
+}
+
+async function checkForUpdates(manual: boolean) {
+  if (!app.isPackaged) {
+    if (manual) await dialog.showMessageBox({ type: 'info', message: 'Updates are available in packaged builds.', detail: 'Build and install Beside before checking for production updates.' });
+    return;
+  }
+  if (process.env.BESIDE_DISABLE_AUTO_UPDATES === '1') {
+    if (manual) await dialog.showMessageBox({ type: 'info', message: 'Automatic updates are disabled.', detail: 'BESIDE_DISABLE_AUTO_UPDATES=1 is set for this process.' });
+    return;
+  }
+  if (updateCheckInFlight) {
+    if (manual) await dialog.showMessageBox({ type: 'info', message: 'Already checking for updates.' });
+    return;
+  }
+
+  updateCheckInFlight = true;
+  manualUpdateCheckRequested = manual;
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    if (manual && !result?.updateInfo) await dialog.showMessageBox({ type: 'info', message: 'No update information was returned.' });
+  } catch (err) {
+    manualUpdateCheckRequested = false;
+    updateCheckInFlight = false;
+    appendLog(`App update check failed: ${String(err)}`);
+    if (manual) await dialog.showMessageBox({ type: 'error', message: 'Could not check for updates.', detail: String(err) });
+  }
+}
+
+async function promptToDownloadUpdate(info: any) {
+  appendLog(`App update ${info?.version ?? 'is'} available.`);
+  if (updateDownloadPromptOpen) return;
+  updateDownloadPromptOpen = true;
+  try {
+    const res = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['Download Update', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      message: `Beside ${info?.version ?? 'update'} is available.`,
+      detail: `You are running ${app.getVersion()}. Download the update now?`,
+    });
+    if (res.response === 0) await autoUpdater.downloadUpdate();
+  } finally {
+    updateDownloadPromptOpen = false;
+  }
+}
+
+async function promptToInstallUpdate(info: any) {
+  appendLog(`App update ${info?.version ?? ''} downloaded.`);
+  if (updateInstallPromptOpen) return;
+  updateInstallPromptOpen = true;
+  try {
+    const res = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['Restart and Update', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      message: `Beside ${info?.version ?? 'update'} is ready to install.`,
+      detail: 'Restart Beside to finish installing the update.',
+    });
+    if (res.response === 0) autoUpdater.quitAndInstall(false, true);
+  } finally {
+    updateInstallPromptOpen = false;
+  }
 }
 
 async function showStatusWindow(opts: { focus?: 'doctor' } = {}) {
