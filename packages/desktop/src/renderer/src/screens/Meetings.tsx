@@ -691,19 +691,11 @@ export function Meetings({
 }
 
 // ---------------------------------------------------------------------------
-// Day picker — two-piece control:
+// Day picker:
 //
-//  1. Nav pill: [<  Today  >]
-//     The centre label is always "Today" and acts as a shortcut button
-//     that jumps the selection back to today. The chevrons step ±1 day
-//     from the currently-selected day regardless of label.
-//
-//  2. Calendar button: shows just the icon when we ARE on today, and
-//     expands to "[icon] Wed, May 13" when the user has navigated to a
-//     different day. Clicking it opens the native date picker (via
-//     `showPicker()`) so the user can jump to any date directly. The
-//     button doubles as the "you are here" indicator — it's the only
-//     surface that ever names the non-today day.
+//  The middle button names the selected day and opens the native date
+//  picker. The chevrons step ±1 day from that selected day. When the
+//  selection moves away from today, a separate Today shortcut appears.
 //
 // `color-scheme` is set on :root / .dark in style.css so the
 // OS-rendered date popover follows the active light/dark theme.
@@ -748,7 +740,7 @@ function DayPicker({
 
   return (
     <div className="flex items-center gap-2">
-      <div className="inline-flex items-center gap-1 rounded-full border border-border bg-card p-1 shadow-sm">
+      <div className="relative inline-flex items-center gap-1 rounded-full border border-border bg-card p-1 shadow-sm">
         <Button
           variant="ghost"
           size="icon"
@@ -761,22 +753,21 @@ function DayPicker({
 
         <button
           type="button"
-          onClick={onToday}
-          disabled={isToday}
-          title={
-            isToday
-              ? `${prettyDay(selectedDay)} (${selectedDay})`
-              : `Jump to today (currently viewing ${prettyDay(selectedDay)})`
-          }
+          onClick={openPicker}
+          aria-label={`Viewing ${prettyDay(selectedDay)}. Pick another date`}
+          title={`${prettyDay(selectedDay)} (${selectedDay}) — click to pick another date`}
           className={cn(
-            'inline-flex items-center justify-center rounded-full px-4 h-8 text-sm font-medium',
-            'min-w-20 transition-colors',
-            isToday
-              ? 'text-foreground cursor-default'
-              : 'text-foreground hover:bg-accent hover:text-accent-foreground',
+            'inline-flex h-8 min-w-28 items-center justify-center gap-2 rounded-full px-3',
+            'text-sm font-medium text-foreground tabular-nums transition-colors',
+            'hover:bg-accent hover:text-accent-foreground',
           )}
         >
-          Today
+          {loading ? (
+            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+          ) : (
+            <CalendarDays className="size-3.5 text-foreground/80" />
+          )}
+          <span>{prettyDay(selectedDay)}</span>
         </button>
 
         <Button
@@ -788,39 +779,6 @@ function DayPicker({
         >
           <ChevronRight className="size-4" />
         </Button>
-      </div>
-
-      {/* Calendar button. Collapses to just an icon on today, expands to
-          show the active selected day (Wed, May 13) when navigated away.
-          Either way, clicking opens the native date picker. */}
-      <div className="relative">
-        <button
-          type="button"
-          onClick={openPicker}
-          aria-label={isToday ? 'Pick a date' : `Viewing ${prettyDay(selectedDay)} — pick another date`}
-          title={isToday ? 'Pick a date' : `${prettyDay(selectedDay)} (${selectedDay}) — click to pick another date`}
-          className={cn(
-            'inline-flex items-center gap-2 h-9 rounded-full border border-border bg-card shadow-sm',
-            'transition-colors hover:bg-accent hover:text-accent-foreground',
-            // Square when collapsed (today), pill when showing the date.
-            isToday ? 'size-9 justify-center' : 'px-3.5 tabular-nums',
-          )}
-        >
-          {loading ? (
-            <Loader2 className="size-4 animate-spin text-muted-foreground" />
-          ) : (
-            <CalendarDays className="size-4 text-foreground/80" />
-          )}
-          {!isToday && (
-            <span className="text-sm font-medium text-foreground">
-              {prettyDay(selectedDay)}
-            </span>
-          )}
-        </button>
-        {/* Native date input lives under the icon button so click-fallback
-            (when showPicker isn't available) still hits a real input.
-            color-scheme on :root drives whether the OS-rendered picker
-            popover is light or dark. */}
         <input
           ref={dateInputRef}
           type="date"
@@ -834,6 +792,17 @@ function DayPicker({
           className="absolute inset-0 opacity-0 pointer-events-none"
         />
       </div>
+
+      {!isToday && (
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onToday}
+          className="h-9 rounded-full px-3"
+        >
+          Today
+        </Button>
+      )}
 
       {eventCount > 0 && (
         <span className="ml-1 text-xs text-muted-foreground">
