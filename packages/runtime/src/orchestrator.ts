@@ -462,6 +462,7 @@ export async function buildOrchestrator(
     strategy,
     model,
     embeddingModelName: getEmbeddingModelName(config),
+    embeddingSearchWeight: config.index.embeddings.search_weight,
     dataDir,
     triggerReindex: async (_full) => {
       await scheduler.runNow(INCREMENTAL_JOB);
@@ -569,6 +570,7 @@ export async function buildOrchestrator(
     enabled: embeddingsCfg.enabled,
     batchSize: embeddingsCfg.batch_size,
     modelName: getEmbeddingModelName(config),
+    strategy,
   });
   const vacuumCfg = config.storage.local.vacuum;
   // Resolve the effective window in ms. `*_minutes` (when set) wins
@@ -1792,6 +1794,7 @@ export function useOfflineModel(handles: OrchestratorHandles): void {
     strategy: handles.strategy,
     model: offline,
     embeddingModelName: getEmbeddingModelName(handles.config),
+    embeddingSearchWeight: handles.config.index.embeddings.search_weight,
     dataDir: handles.loaded.dataDir,
     triggerReindex: async (_full) => {
       await handles.scheduler.runNow(INCREMENTAL_JOB);

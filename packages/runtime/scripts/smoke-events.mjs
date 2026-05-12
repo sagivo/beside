@@ -307,13 +307,90 @@ async function main() {
       'calendar extraction replaces stale events from the rescanned calendar day',
     );
     assert(
-      !visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
-      'calendar extraction clears stale events from visible days with no fresh candidate',
+      visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
+      'calendar extraction preserves visible-day rows when there is no fresh same-day candidate',
     );
     assert(
       futureEvents.some((e) => e.title === 'Future Planning'),
       'calendar extraction stores future-dated events',
     );
+
+    const falseCalendarTmp = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'cofounderos-events-false-calendar-'),
+    );
+    try {
+      const falseStorage = await storageMod.default({
+        dataDir: falseCalendarTmp,
+        logger,
+        config: { path: falseCalendarTmp },
+      });
+      const falseDay = localDayKey();
+      await falseStorage.upsertDayEvent({
+        id: `event_keep_calendar_${randomUUID().slice(0, 8)}`,
+        day: falseDay,
+        starts_at: `${falseDay}T09:00:00.000Z`,
+        ends_at: `${falseDay}T09:30:00.000Z`,
+        kind: 'calendar',
+        source: 'calendar_screen',
+        title: 'Keep Existing Calendar Item',
+        source_app: 'Calendar',
+        context_md: 'This row should survive a false native-calendar metadata frame.',
+        attendees: [],
+        links: [],
+        meeting_id: null,
+        evidence_frame_ids: [],
+        content_hash: 'keep-existing-calendar-row',
+        status: 'ready',
+        failure_reason: null,
+        created_at: `${falseDay}T08:00:00.000Z`,
+        updated_at: `${falseDay}T08:00:00.000Z`,
+      });
+      await falseStorage.upsertFrame({
+        id: `frame_false_calendar_${randomUUID().slice(0, 8)}`,
+        timestamp: `${falseDay}T10:00:00.000Z`,
+        day: falseDay,
+        monitor: 0,
+        app: 'Calendar',
+        app_bundle_id: 'com.apple.iCal',
+        window_title: 'Calendar',
+        url: null,
+        text:
+          'Firefox File Edit View History Bookmarks Profiles Tools Window Help ' +
+          'Saved Recents Austin Cedar Groupon Codex Agenda Calendar mention only. ' +
+          'This is not a calendar grid and has no weekday row or time gutter.',
+        text_source: 'ocr',
+        asset_path: null,
+        perceptual_hash: `false_cal_${randomUUID().slice(0, 8)}`,
+        trigger: 'screenshot',
+        session_id: 'sess_false_calendar_smoke',
+        duration_ms: null,
+        entity_path: null,
+        entity_kind: null,
+        activity_session_id: null,
+        meeting_id: null,
+        source_event_ids: [],
+      });
+
+      const emptyCalendarModel = {
+        ...stubModel,
+        isAvailable: async () => true,
+        complete: async () => '{"events":[]}',
+        completeWithVision: async () => '{"events":[]}',
+      };
+      const falseExtractor = new EventExtractor(falseStorage, emptyCalendarModel, logger, {
+        llmEnabled: true,
+        minTextChars: 20,
+        lookbackDays: 1,
+      });
+      await falseExtractor.tick({ lookbackDays: 1 });
+      const keptEvents = await falseStorage.listDayEvents({ day: falseDay, kind: 'calendar' });
+      assert(
+        keptEvents.some((e) => e.title === 'Keep Existing Calendar Item'),
+        'false/empty calendar pass preserves existing calendar rows',
+      );
+    } finally {
+      await fs.rm(falseCalendarTmp, { recursive: true, force: true });
+    }
 
     if (failures === 0) {
       console.log('All event extractor checks passed.');

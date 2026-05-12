@@ -188,6 +188,15 @@ const CALENDAR_BUNDLE_PREFIXES = [
   'co.amie',
 ];
 
+function isNativeCalendarAppFrame(frame: Frame): boolean {
+  const app = (frame.app ?? '').toLowerCase();
+  const bundle = (frame.app_bundle_id ?? '').toLowerCase();
+  return (
+    CALENDAR_APP_NAMES.has(app) ||
+    CALENDAR_BUNDLE_PREFIXES.some((p) => bundle.startsWith(p))
+  );
+}
+
 /**
  * Hostname (or hostname suffix) → is-calendar-host. We match by
  * `host === entry` first, then `host.endsWith('.' + entry)` so any
@@ -387,9 +396,10 @@ const SOURCE_MATCHERS: SourceMatcher[] = [
     label: 'calendar',
     match: (f) => {
       // (a) Native app.
-      if (CALENDAR_APP_NAMES.has((f.app ?? '').toLowerCase())) return true;
-      const bundle = (f.app_bundle_id ?? '').toLowerCase();
-      if (CALENDAR_BUNDLE_PREFIXES.some((p) => bundle.startsWith(p))) return true;
+      // macOS can report Calendar as the active app while the captured OCR
+      // belongs to the visible window underneath. Treat native calendar app
+      // metadata as a hint, but require the text itself to look calendar-like.
+      if (isNativeCalendarAppFrame(f)) return looksLikeCalendarText(f.text ?? null);
 
       // (b) Known calendar webapp / sub-route.
       if (isCalendarUrl(f.url)) return true;
@@ -398,7 +408,7 @@ const SOURCE_MATCHERS: SourceMatcher[] = [
       //     Only fires for frames that have a chance of being a web page
       //     (URL present), to avoid sweeping in any random text editor
       //     that happens to mention "May 2026" plus a couple of weekdays.
-      if (f.url && looksLikeCalendarText(f.text ?? null)) return true;
+      if (/^https?:\/\//i.test(f.url ?? '') && looksLikeCalendarText(f.text ?? null)) return true;
 
       return false;
     },
@@ -794,7 +804,10 @@ export class EventExtractor {
     }
 
     if (bucket.source === 'calendar_screen' && canReplaceCalendarView) {
-      await this.replaceVisibleCalendarDays(captureDay, bucket, parsed.events);
+      await this.replaceCalendarDaysWithCandidates(
+        captureDay,
+        parsed.events.slice(0, this.maxEventsPerResponse),
+      );
     }
 
     const evidenceIds = bucket.frames.map((f) => f.id);
@@ -881,14 +894,28 @@ export class EventExtractor {
     return count;
   }
 
-  private async replaceVisibleCalendarDays(
+  private async replaceCalendarDaysWithCandidates(
     captureDay: string,
-    bucket: SourceBucket,
     candidates: ExtractionCandidate[],
   ): Promise<void> {
-    const days = visibleCalendarDays(captureDay, bucket, candidates);
-    for (const day of days) {
+    const candidateCounts = candidateCalendarDayCounts(captureDay, candidates);
+    if (candidateCounts.size === 0) return;
+
+    for (const [day, candidateCount] of candidateCounts) {
       try {
+        const existing = await this.storage
+          .listDayEvents({ day, kind: 'calendar', order: 'chronological', limit: 5000 })
+          .catch(() => [] as DayEvent[]);
+        const existingCalendarRows = existing.filter(
+          (event) => event.source === 'calendar_screen',
+        );
+        if (existingCalendarRows.length > candidateCount) {
+          this.logger.debug(
+            `skipping destructive calendar replace for ${day}: ` +
+              `${candidateCount} fresh candidate(s), ${existingCalendarRows.length} existing row(s)`,
+          );
+          continue;
+        }
         await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen');
       } catch (err) {
         this.logger.debug(`failed to replace calendar events for ${day}`, {
@@ -1458,6 +1485,25 @@ function visibleCalendarDays(
   }
 
   return days;
+}
+
+function candidateCalendarDayCounts(
+  captureDay: string,
+  candidates: ExtractionCandidate[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const candidate of candidates) {
+    const title = (candidate?.title ?? '').trim();
+    if (!title) continue;
+    const startsAt =
+      parseEventTimestamp(candidate.starts_at) ??
+      coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+    if (!startsAt) continue;
+    const day = localDayKey(new Date(startsAt));
+    if (!isValidEventDay(day)) continue;
+    counts.set(day, (counts.get(day) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function calendarVisibleDaysFromText(text: string): Set<string> {

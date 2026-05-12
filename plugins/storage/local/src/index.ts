@@ -16,6 +16,12 @@ import type {
   FrameTextSource,
   FrameAsset,
   FrameAssetTier,
+  MemoryChunk,
+  MemoryChunkEmbeddingTask,
+  MemoryChunkKind,
+  MemoryChunkQuery,
+  MemoryChunkSemanticMatch,
+  MemoryIndexStats,
   EntityRef,
   EntityRecord,
   EntityKind,
@@ -90,6 +96,49 @@ interface DayEventRow {
   failure_reason: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface MemoryChunkRow {
+  id: string;
+  kind: string;
+  source_id: string;
+  title: string;
+  body: string;
+  entity_path: string | null;
+  entity_kind: string | null;
+  day: string | null;
+  timestamp: string | null;
+  source_refs_json: string;
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function memoryChunkFromRow(row: MemoryChunkRow): MemoryChunk {
+  let sourceRefs: string[] = [];
+  try {
+    const parsed = JSON.parse(row.source_refs_json);
+    if (Array.isArray(parsed)) {
+      sourceRefs = parsed.filter((v): v is string => typeof v === 'string');
+    }
+  } catch {
+    sourceRefs = [];
+  }
+  return {
+    id: row.id,
+    kind: row.kind as MemoryChunkKind,
+    sourceId: row.source_id,
+    title: row.title,
+    body: row.body,
+    entityPath: row.entity_path,
+    entityKind: (row.entity_kind as MemoryChunk['entityKind']) ?? null,
+    day: row.day,
+    timestamp: row.timestamp,
+    sourceRefs,
+    contentHash: row.content_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function dayEventFromRow(row: DayEventRow): DayEvent {
@@ -744,6 +793,16 @@ class LocalStorage implements IStorage {
         DELETE FROM sessions;
         DELETE FROM meeting_turns;
         DELETE FROM meetings;
+        DELETE FROM memory_chunk_text WHERE chunk_id IN (
+          SELECT id FROM memory_chunks
+          WHERE kind IN ('index_page', 'entity_summary', 'meeting_summary', 'day_event')
+        );
+        DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+          SELECT id FROM memory_chunks
+          WHERE kind IN ('index_page', 'entity_summary', 'meeting_summary', 'day_event')
+        );
+        DELETE FROM memory_chunks
+          WHERE kind IN ('index_page', 'entity_summary', 'meeting_summary', 'day_event');
         UPDATE frames SET activity_session_id = NULL, meeting_id = NULL;
       `);
 
@@ -1049,6 +1108,431 @@ class LocalStorage implements IStorage {
     } else {
       this.db.prepare('DELETE FROM frame_embeddings').run();
     }
+  }
+
+  async replaceMemoryChunks(
+    generatedKinds: MemoryChunkKind[],
+    chunks: MemoryChunk[],
+  ): Promise<void> {
+    const kinds = [...new Set(generatedKinds)];
+    if (kinds.length === 0) return;
+    const now = new Date().toISOString();
+    const upsert = this.memoryChunkUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_chunk_text WHERE chunk_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_chunk_text (chunk_id, title, body, entity_search, kind) VALUES (?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const chunk of chunks) {
+        const createdAt = chunk.createdAt || now;
+        const updatedAt = chunk.updatedAt || now;
+        upsert.run(
+          chunk.id,
+          chunk.kind,
+          chunk.sourceId,
+          chunk.title,
+          chunk.body,
+          chunk.entityPath,
+          chunk.entityKind,
+          chunk.day,
+          chunk.timestamp,
+          JSON.stringify(chunk.sourceRefs ?? []),
+          chunk.contentHash,
+          createdAt,
+          updatedAt,
+        );
+        ftsDelete.run(chunk.id);
+        ftsInsert.run(
+          chunk.id,
+          chunk.title,
+          chunk.body,
+          entityToFtsText(chunk.entityPath, chunk.entityKind),
+          chunk.kind,
+        );
+      }
+
+      const kindPlaceholders = kinds.map((_, i) => `@kind_${i}`).join(',');
+      const params: Record<string, unknown> = Object.fromEntries(
+        kinds.map((kind, i) => [`kind_${i}`, kind]),
+      );
+      const keepIds = new Set(chunks.map((chunk) => chunk.id));
+      const stale = this.db
+        .prepare(
+          `SELECT id FROM memory_chunks WHERE kind IN (${kindPlaceholders})`,
+        )
+        .all(params) as Array<{ id: string }>;
+      const staleIds = stale.map((row) => row.id).filter((id) => !keepIds.has(id));
+      for (let i = 0; i < staleIds.length; i += 500) {
+        const batch = staleIds.slice(i, i + 500);
+        if (batch.length === 0) continue;
+        const placeholders = batch.map((_, idx) => `@id_${idx}`).join(',');
+        const idParams = Object.fromEntries(batch.map((id, idx) => [`id_${idx}`, id]));
+        this.db.prepare(`DELETE FROM memory_chunk_text WHERE chunk_id IN (${placeholders})`).run(idParams);
+        this.db.prepare(`DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (${placeholders})`).run(idParams);
+        this.db.prepare(`DELETE FROM memory_chunks WHERE id IN (${placeholders})`).run(idParams);
+      }
+    });
+    tx();
+  }
+
+  async upsertMemoryChunks(chunks: MemoryChunk[]): Promise<void> {
+    if (chunks.length === 0) return;
+    const upsert = this.memoryChunkUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_chunk_text WHERE chunk_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_chunk_text (chunk_id, title, body, entity_search, kind) VALUES (?, ?, ?, ?, ?)',
+    );
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      for (const chunk of chunks) {
+        upsert.run(
+          chunk.id,
+          chunk.kind,
+          chunk.sourceId,
+          chunk.title,
+          chunk.body,
+          chunk.entityPath,
+          chunk.entityKind,
+          chunk.day,
+          chunk.timestamp,
+          JSON.stringify(chunk.sourceRefs ?? []),
+          chunk.contentHash,
+          chunk.createdAt || now,
+          chunk.updatedAt || now,
+        );
+        ftsDelete.run(chunk.id);
+        ftsInsert.run(
+          chunk.id,
+          chunk.title,
+          chunk.body,
+          entityToFtsText(chunk.entityPath, chunk.entityKind),
+          chunk.kind,
+        );
+      }
+    });
+    tx();
+  }
+
+  async searchMemoryChunks(query: MemoryChunkQuery): Promise<MemoryChunk[]> {
+    const params: Record<string, unknown> = {};
+    const where: string[] = ['1=1'];
+    const limit = Math.max(1, Math.floor(query.limit ?? 10));
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+
+    const addFilters = (prefix = 'memory_chunks'): void => {
+      if (query.kind) {
+        where.push(`${prefix}.kind = @kind`);
+        params.kind = query.kind;
+      }
+      if (query.entityPath) {
+        where.push(`${prefix}.entity_path = @entity_path`);
+        params.entity_path = query.entityPath;
+      }
+      if (query.day) {
+        where.push(`${prefix}.day = @day`);
+        params.day = query.day;
+      }
+      if (query.from) {
+        where.push(`COALESCE(${prefix}.timestamp, ${prefix}.updated_at) >= @from_ts`);
+        params.from_ts = query.from;
+      }
+      if (query.to) {
+        where.push(`COALESCE(${prefix}.timestamp, ${prefix}.updated_at) <= @to_ts`);
+        params.to_ts = query.to;
+      }
+    };
+
+    if (query.text && query.text.trim()) {
+      const ftsQuery = sanitiseFtsQuery(query.text);
+      params.text = ftsQuery;
+      where.push('memory_chunk_text MATCH @text');
+      addFilters('memory_chunks');
+      const rows = this.db
+        .prepare(
+          `SELECT memory_chunks.*
+           FROM memory_chunks
+           JOIN memory_chunk_text ON memory_chunk_text.chunk_id = memory_chunks.id
+           WHERE ${where.join(' AND ')}
+           ORDER BY bm25(memory_chunk_text, 4.0, 2.0, 1.0) ASC,
+                    COALESCE(memory_chunks.timestamp, memory_chunks.updated_at) DESC
+           LIMIT @limit OFFSET @offset`,
+        )
+        .all({ ...params, limit, offset }) as MemoryChunkRow[];
+      return rows.map(memoryChunkFromRow);
+    }
+
+    addFilters('memory_chunks');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_chunks
+         WHERE ${where.join(' AND ')}
+         ORDER BY COALESCE(timestamp, updated_at) DESC
+         LIMIT @limit OFFSET @offset`,
+      )
+      .all({ ...params, limit, offset }) as MemoryChunkRow[];
+    return rows.map(memoryChunkFromRow);
+  }
+
+  async listMemoryChunksNeedingEmbedding(
+    model: string,
+    limit: number,
+  ): Promise<MemoryChunkEmbeddingTask[]> {
+    const cap = Math.max(1, Math.floor(limit));
+    const missingRows = this.db
+      .prepare(
+        `SELECT memory_chunks.*, memory_chunk_embeddings.content_hash AS existing_hash
+         FROM memory_chunks
+         LEFT JOIN memory_chunk_embeddings
+           ON memory_chunk_embeddings.chunk_id = memory_chunks.id
+          AND memory_chunk_embeddings.model = @model
+         WHERE memory_chunk_embeddings.chunk_id IS NULL
+           AND COALESCE(memory_chunks.body, '') != ''
+         ORDER BY COALESCE(memory_chunks.timestamp, memory_chunks.updated_at) DESC
+         LIMIT @limit`,
+      )
+      .all({ model, limit: cap }) as Array<MemoryChunkRow & { existing_hash: string | null }>;
+
+    const out: MemoryChunkEmbeddingTask[] = [];
+    for (const row of missingRows) {
+      const chunk = memoryChunkFromRow(row);
+      const content = memoryChunkEmbeddingContent(chunk);
+      if (!content) continue;
+      out.push({ id: row.id, content_hash: sha256(content), content });
+      if (out.length >= cap) return out;
+    }
+
+    const staleRows = this.db
+      .prepare(
+        `SELECT memory_chunks.*, memory_chunk_embeddings.content_hash AS existing_hash
+         FROM memory_chunks
+         JOIN memory_chunk_embeddings
+           ON memory_chunk_embeddings.chunk_id = memory_chunks.id
+          AND memory_chunk_embeddings.model = @model
+         WHERE COALESCE(memory_chunks.body, '') != ''
+         ORDER BY memory_chunk_embeddings.created_at ASC
+         LIMIT @scanLimit`,
+      )
+      .all({
+        model,
+        scanLimit: Math.max(1, cap - out.length) * 10,
+      }) as Array<MemoryChunkRow & { existing_hash: string | null }>;
+    const queued = new Set(out.map((task) => task.id));
+    for (const row of staleRows) {
+      if (queued.has(row.id)) continue;
+      const chunk = memoryChunkFromRow(row);
+      const content = memoryChunkEmbeddingContent(chunk);
+      if (!content) continue;
+      const hash = sha256(content);
+      if (row.existing_hash === hash) continue;
+      out.push({ id: row.id, content_hash: hash, content });
+      queued.add(row.id);
+      if (out.length >= cap) break;
+    }
+    return out;
+  }
+
+  async upsertMemoryChunkEmbeddings(
+    embeddings: Array<{
+      chunkId: string;
+      model: string;
+      contentHash: string;
+      vector: number[];
+    }>,
+  ): Promise<void> {
+    if (embeddings.length === 0) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO memory_chunk_embeddings
+        (chunk_id, model, content_hash, vector, dims, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(chunk_id, model) DO UPDATE SET
+         content_hash = excluded.content_hash,
+         vector = excluded.vector,
+         dims = excluded.dims,
+         created_at = excluded.created_at`,
+    );
+    const now = new Date().toISOString();
+    const tx = this.db.transaction((items: typeof embeddings) => {
+      for (const item of items) {
+        const cleaned = normaliseVector(item.vector);
+        if (cleaned.length === 0) continue;
+        stmt.run(
+          item.chunkId,
+          item.model,
+          item.contentHash,
+          packFloat32(cleaned),
+          cleaned.length,
+          now,
+        );
+      }
+    });
+    tx(embeddings);
+  }
+
+  async findExistingMemoryChunkEmbeddings(
+    model: string,
+    contentHashes: string[],
+  ): Promise<Map<string, { vector: number[]; dims: number }>> {
+    const result = new Map<string, { vector: number[]; dims: number }>();
+    if (contentHashes.length === 0) return result;
+    const placeholders = contentHashes.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT content_hash, vector, dims
+         FROM memory_chunk_embeddings
+         WHERE model = ? AND content_hash IN (${placeholders})
+         GROUP BY content_hash`,
+      )
+      .all(model, ...contentHashes) as Array<{ content_hash: string; vector: Buffer; dims: number }>;
+    for (const row of rows) {
+      const vector = unpackFloat32(row.vector);
+      if (vector.length > 0) {
+        result.set(row.content_hash, { vector: Array.from(vector), dims: row.dims });
+      }
+    }
+    return result;
+  }
+
+  async searchMemoryChunkEmbeddings(
+    vector: number[],
+    query: Omit<MemoryChunkQuery, 'text'> & { model?: string } = {},
+  ): Promise<MemoryChunkSemanticMatch[]> {
+    const target = normaliseVector(vector);
+    if (target.length === 0) return [];
+    const where: string[] = ['1=1'];
+    const params: Record<string, unknown> = {};
+    if (query.model) {
+      where.push('memory_chunk_embeddings.model = @model');
+      params.model = query.model;
+    }
+    if (query.kind) {
+      where.push('memory_chunks.kind = @kind');
+      params.kind = query.kind;
+    }
+    if (query.entityPath) {
+      where.push('memory_chunks.entity_path = @entity_path');
+      params.entity_path = query.entityPath;
+    }
+    if (query.day) {
+      where.push('memory_chunks.day = @day');
+      params.day = query.day;
+    }
+    if (query.from) {
+      where.push('COALESCE(memory_chunks.timestamp, memory_chunks.updated_at) >= @from_ts');
+      params.from_ts = query.from;
+    }
+    if (query.to) {
+      where.push('COALESCE(memory_chunks.timestamp, memory_chunks.updated_at) <= @to_ts');
+      params.to_ts = query.to;
+    }
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const limit = Math.max(1, Math.floor(query.limit ?? 10));
+    const keep = offset + limit;
+    const spillLimit = Math.max(keep * 4, 100);
+    const keepLimit = Math.max(keep * 2, 50);
+    const candidates: Array<{ row: MemoryChunkRow; score: number }> = [];
+    const stmt = this.db.prepare(
+      `SELECT memory_chunks.*, memory_chunk_embeddings.vector AS vector_blob
+       FROM memory_chunk_embeddings
+       JOIN memory_chunks ON memory_chunks.id = memory_chunk_embeddings.chunk_id
+       WHERE ${where.join(' AND ')}`,
+    );
+    for (const row of stmt.iterate(params) as Iterable<MemoryChunkRow & { vector_blob: Buffer }>) {
+      const candidate = unpackFloat32(row.vector_blob);
+      if (candidate.length !== target.length) continue;
+      const score = dot(target, candidate);
+      if (!Number.isFinite(score)) continue;
+      candidates.push({ row, score });
+      if (candidates.length > spillLimit) {
+        candidates.sort(compareMemoryChunkCandidates);
+        candidates.length = keepLimit;
+      }
+    }
+    candidates.sort(compareMemoryChunkCandidates);
+    return candidates.slice(offset, offset + limit).map(({ row, score }) => ({
+      chunk: memoryChunkFromRow(row),
+      score,
+    }));
+  }
+
+  async getMemoryIndexStats(model?: string): Promise<MemoryIndexStats> {
+    const chunks = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM memory_chunks').get() as { n: number }
+    ).n;
+    const byKindRows = this.db
+      .prepare('SELECT kind, COUNT(*) AS n FROM memory_chunks GROUP BY kind')
+      .all() as Array<{ kind: MemoryChunkKind; n: number }>;
+    const chunkEmbeddings = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM memory_chunk_embeddings').get() as { n: number }
+    ).n;
+    const byModelRows = this.db
+      .prepare('SELECT model, COUNT(*) AS n FROM memory_chunk_embeddings GROUP BY model')
+      .all() as Array<{ model: string; n: number }>;
+    const missingChunkRows = this.db
+      .prepare(
+        `SELECT c.*, e.content_hash AS existing_hash
+         FROM memory_chunks c
+         LEFT JOIN memory_chunk_embeddings e
+           ON e.chunk_id = c.id ${model ? 'AND e.model = @model' : ''}
+         WHERE COALESCE(c.body, '') != ''
+           AND (e.chunk_id IS NULL OR e.content_hash != c.content_hash)`,
+      )
+      .all(model ? { model } : {}) as Array<MemoryChunkRow & { existing_hash: string | null }>;
+    const framesWithEmbeddings = (
+      this.db
+        .prepare(
+          `SELECT COUNT(DISTINCT frames.id) AS n
+           FROM frames
+           JOIN frame_embeddings ON frame_embeddings.frame_id = frames.id
+           ${model ? 'WHERE frame_embeddings.model = @model' : ''}`,
+        )
+        .get(model ? { model } : {}) as { n: number }
+    ).n;
+    const framesMissingEmbeddings = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n
+           FROM frames
+           LEFT JOIN frame_embeddings
+             ON frame_embeddings.frame_id = frames.id ${model ? 'AND frame_embeddings.model = @model' : ''}
+           WHERE (
+             COALESCE(frames.text, '') != ''
+             OR COALESCE(frames.window_title, '') != ''
+             OR COALESCE(frames.url, '') != ''
+           )
+             AND frame_embeddings.frame_id IS NULL`,
+        )
+        .get(model ? { model } : {}) as { n: number }
+    ).n;
+    return {
+      chunks,
+      chunksByKind: Object.fromEntries(byKindRows.map((row) => [row.kind, row.n])),
+      chunkEmbeddings,
+      chunkEmbeddingsByModel: Object.fromEntries(byModelRows.map((row) => [row.model, row.n])),
+      chunksMissingEmbedding: missingChunkRows.length,
+      framesWithEmbeddings,
+      framesMissingEmbeddings,
+    };
+  }
+
+  private memoryChunkUpsertStatement(): Database.Statement {
+    return this.db.prepare(
+      `INSERT INTO memory_chunks (
+         id, kind, source_id, title, body, entity_path, entity_kind, day,
+         timestamp, source_refs_json, content_hash, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         kind = excluded.kind,
+         source_id = excluded.source_id,
+         title = excluded.title,
+         body = excluded.body,
+         entity_path = excluded.entity_path,
+         entity_kind = excluded.entity_kind,
+         day = excluded.day,
+         timestamp = excluded.timestamp,
+         source_refs_json = excluded.source_refs_json,
+         content_hash = excluded.content_hash,
+         updated_at = excluded.updated_at`,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -2123,6 +2607,15 @@ class LocalStorage implements IStorage {
       this.db.exec(`UPDATE frames SET meeting_id = NULL`);
       this.db.exec(`DELETE FROM meeting_turns`);
       this.db.exec(`DELETE FROM meetings`);
+      this.db.exec(`
+        DELETE FROM memory_chunk_text WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE kind = 'meeting_summary'
+        );
+        DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE kind = 'meeting_summary'
+        );
+        DELETE FROM memory_chunks WHERE kind = 'meeting_summary';
+      `);
     });
     tx();
   }
@@ -2232,7 +2725,16 @@ class LocalStorage implements IStorage {
   }
 
   async clearAllDayEvents(): Promise<void> {
-    this.db.exec('DELETE FROM day_events');
+    this.db.exec(`
+      DELETE FROM day_events;
+      DELETE FROM memory_chunk_text WHERE chunk_id IN (
+        SELECT id FROM memory_chunks WHERE kind = 'day_event'
+      );
+      DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+        SELECT id FROM memory_chunks WHERE kind = 'day_event'
+      );
+      DELETE FROM memory_chunks WHERE kind = 'day_event';
+    `);
   }
 
   // -------------------------------------------------------------------------
@@ -2253,6 +2755,18 @@ class LocalStorage implements IStorage {
     const tx = this.db.transaction(() => {
       this.db.prepare('DELETE FROM frame_text WHERE frame_id = ?').run(frameId);
       this.db.prepare('DELETE FROM frame_embeddings WHERE frame_id = ?').run(frameId);
+      const frameRef = `%frame:${frameId}%`;
+      this.db.prepare(`
+        DELETE FROM memory_chunk_text WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE source_refs_json LIKE ?
+        )
+      `).run(frameRef);
+      this.db.prepare(`
+        DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE source_refs_json LIKE ?
+        )
+      `).run(frameRef);
+      this.db.prepare('DELETE FROM memory_chunks WHERE source_refs_json LIKE ?').run(frameRef);
       this.db.prepare('DELETE FROM frames WHERE id = ?').run(frameId);
     });
     tx();
@@ -2290,6 +2804,17 @@ class LocalStorage implements IStorage {
       this.db.prepare('DELETE FROM sessions WHERE day = ?').run(day);
       // Day events live on the same day axis — wipe them too.
       this.db.prepare('DELETE FROM day_events WHERE day = ?').run(day);
+      this.db.prepare(`
+        DELETE FROM memory_chunk_text WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE day = ?
+        )
+      `).run(day);
+      this.db.prepare(`
+        DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+          SELECT id FROM memory_chunks WHERE day = ?
+        )
+      `).run(day);
+      this.db.prepare('DELETE FROM memory_chunks WHERE day = ?').run(day);
       // Raw events: events.timestamp + events.day live together; depending on
       // schema age, `day` may not be a column on events. Filter by ISO prefix
       // on `timestamp` for portability.
@@ -2392,6 +2917,25 @@ class LocalStorage implements IStorage {
       this.db
         .prepare('DELETE FROM day_events WHERE starts_at < ?')
         .run(cutoff);
+      this.db
+        .prepare(`
+          DELETE FROM memory_chunk_text WHERE chunk_id IN (
+            SELECT id FROM memory_chunks
+            WHERE COALESCE(timestamp, updated_at) < ?
+          )
+        `)
+        .run(cutoff);
+      this.db
+        .prepare(`
+          DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+            SELECT id FROM memory_chunks
+            WHERE COALESCE(timestamp, updated_at) < ?
+          )
+        `)
+        .run(cutoff);
+      this.db
+        .prepare('DELETE FROM memory_chunks WHERE COALESCE(timestamp, updated_at) < ?')
+        .run(cutoff);
       // Entities aren't time-series rows but their last_seen tracks
       // the most recent frame that resolved to them. If that's before
       // the cutoff, the entity has no surviving frames. Drop it; if
@@ -2437,6 +2981,9 @@ class LocalStorage implements IStorage {
       'meetings',
       'meeting_turns',
       'day_events',
+      'memory_chunk_text',
+      'memory_chunk_embeddings',
+      'memory_chunks',
       'events',
       'index_state',
       'index_marks',
@@ -2788,6 +3335,57 @@ class LocalStorage implements IStorage {
         ON frame_embeddings(model);
       CREATE INDEX IF NOT EXISTS idx_frame_embeddings_model_hash
         ON frame_embeddings(model, content_hash);
+
+      -- memory_chunks: higher-level passages derived from wiki pages,
+      -- entity rollups, meeting summaries, day events, and user-curated
+      -- facts/procedures. Frames remain the evidence substrate; chunks are
+      -- the compact long-term memory layer used for retrieval.
+      CREATE TABLE IF NOT EXISTS memory_chunks (
+        id               TEXT PRIMARY KEY,
+        kind             TEXT NOT NULL,
+        source_id        TEXT NOT NULL,
+        title            TEXT NOT NULL,
+        body             TEXT NOT NULL,
+        entity_path      TEXT,
+        entity_kind      TEXT,
+        day              TEXT,
+        timestamp        TEXT,
+        source_refs_json TEXT NOT NULL,
+        content_hash     TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_chunks_kind
+        ON memory_chunks(kind);
+      CREATE INDEX IF NOT EXISTS idx_memory_chunks_entity
+        ON memory_chunks(entity_path);
+      CREATE INDEX IF NOT EXISTS idx_memory_chunks_day
+        ON memory_chunks(day);
+      CREATE INDEX IF NOT EXISTS idx_memory_chunks_timestamp
+        ON memory_chunks(timestamp DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunk_text USING fts5(
+        chunk_id UNINDEXED,
+        title,
+        body,
+        entity_search,
+        kind UNINDEXED,
+        tokenize='porter unicode61 remove_diacritics 2'
+      );
+
+      CREATE TABLE IF NOT EXISTS memory_chunk_embeddings (
+        chunk_id     TEXT NOT NULL,
+        model        TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        vector       BLOB NOT NULL,
+        dims         INTEGER NOT NULL,
+        created_at   TEXT NOT NULL,
+        PRIMARY KEY (chunk_id, model)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_chunk_embeddings_model
+        ON memory_chunk_embeddings(model);
+      CREATE INDEX IF NOT EXISTS idx_memory_chunk_embeddings_model_hash
+        ON memory_chunk_embeddings(model, content_hash);
 
       CREATE TABLE IF NOT EXISTS entities (
         path             TEXT PRIMARY KEY,
@@ -4108,6 +4706,18 @@ function frameEmbeddingContent(frame: Frame): string {
   return parts.join('\n').trim();
 }
 
+function memoryChunkEmbeddingContent(chunk: MemoryChunk): string {
+  const parts = [
+    `Kind: ${chunk.kind}`,
+    chunk.title ? `Title: ${chunk.title}` : null,
+    chunk.entityPath ? `Entity: ${chunk.entityPath}` : null,
+    chunk.day ? `Day: ${chunk.day}` : null,
+    chunk.timestamp ? `Timestamp: ${chunk.timestamp}` : null,
+    chunk.body ? `Body: ${truncateForEmbedding(chunk.body, MAX_EMBEDDING_TEXT_CHARS * 2)}` : null,
+  ].filter((p): p is string => Boolean(p));
+  return parts.join('\n').trim();
+}
+
 function truncateForEmbedding(text: string, maxChars: number): string {
   const cleaned = text.replace(/\s+/g, ' ').trim();
   if (cleaned.length <= maxChars) return cleaned;
@@ -4169,6 +4779,14 @@ function compareSemanticCandidates(
 ): number {
   if (b.score !== a.score) return b.score - a.score;
   return b.row.timestamp.localeCompare(a.row.timestamp);
+}
+
+function compareMemoryChunkCandidates(
+  a: { row: MemoryChunkRow; score: number },
+  b: { row: MemoryChunkRow; score: number },
+): number {
+  if (b.score !== a.score) return b.score - a.score;
+  return (b.row.timestamp ?? b.row.updated_at).localeCompare(a.row.timestamp ?? a.row.updated_at);
 }
 
 /**

@@ -74,6 +74,7 @@ class McpExport implements IExport {
       strategy: services.strategy,
       model: (services as ExportServices).model,
       embeddingModelName: (services as ExportServices).embeddingModelName,
+      embeddingSearchWeight: (services as ExportServices).embeddingSearchWeight,
       triggerReindex: (services as ExportServices).triggerReindex,
       summarizeMeeting: (services as ExportServices).summarizeMeeting,
     };

@@ -241,6 +241,67 @@ export interface FrameSemanticMatch {
   score: number;
 }
 
+// ---------------------------------------------------------------------------
+// Memory chunks — first-class long-term memory passages.
+// ---------------------------------------------------------------------------
+
+export type MemoryChunkKind =
+  | 'index_page'
+  | 'entity_summary'
+  | 'meeting_summary'
+  | 'day_event'
+  | 'fact'
+  | 'procedure';
+
+export interface MemoryChunk {
+  id: string;
+  kind: MemoryChunkKind;
+  sourceId: string;
+  title: string;
+  body: string;
+  entityPath: string | null;
+  entityKind: EntityKind | null;
+  day: string | null;
+  timestamp: string | null;
+  sourceRefs: string[];
+  contentHash: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryChunkQuery {
+  text?: string;
+  kind?: MemoryChunkKind;
+  entityPath?: string;
+  day?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface MemoryChunkEmbeddingTask {
+  id: string;
+  content_hash: string;
+  content: string;
+}
+
+export interface MemoryChunkSemanticMatch {
+  chunk: MemoryChunk;
+  /** Cosine similarity in [0, 1] after normalisation. Higher is better. */
+  score: number;
+}
+
+export interface MemoryIndexStats {
+  chunks: number;
+  chunksByKind: Partial<Record<MemoryChunkKind, number>>;
+  chunkEmbeddings: number;
+  chunkEmbeddingsByModel: Record<string, number>;
+  chunksMissingEmbedding: number;
+  framesWithEmbeddings: number;
+  framesMissingEmbeddings: number;
+}
+
 /** Lightweight projection used by the OCR worker. */
 export interface FrameOcrTask {
   id: string;
@@ -821,6 +882,57 @@ export interface IStorage {
   clearFrameEmbeddings(model?: string): Promise<void>;
 
   // -------------------------------------------------------------------------
+  // Memory chunks — summarised/indexed passages beyond raw frames.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Replace generated memory chunks for the supplied kinds. Manual
+   * `fact` / `procedure` chunks can be upserted separately and are not
+   * affected unless their kind is explicitly included.
+   */
+  replaceMemoryChunks(
+    generatedKinds: MemoryChunkKind[],
+    chunks: MemoryChunk[],
+  ): Promise<void>;
+
+  /** Insert or replace manual/curated memory chunks. */
+  upsertMemoryChunks(chunks: MemoryChunk[]): Promise<void>;
+
+  /** Keyword search over memory chunks. */
+  searchMemoryChunks(query: MemoryChunkQuery): Promise<MemoryChunk[]>;
+
+  /** Chunks whose searchable content lacks a current embedding. */
+  listMemoryChunksNeedingEmbedding(
+    model: string,
+    limit: number,
+  ): Promise<MemoryChunkEmbeddingTask[]>;
+
+  /** Insert or replace multiple memory chunk embeddings. */
+  upsertMemoryChunkEmbeddings(
+    embeddings: Array<{
+      chunkId: string;
+      model: string;
+      contentHash: string;
+      vector: number[];
+    }>,
+  ): Promise<void>;
+
+  /** Reuse existing memory chunk embeddings by content hash. */
+  findExistingMemoryChunkEmbeddings?(
+    model: string,
+    contentHashes: string[],
+  ): Promise<Map<string, { vector: number[]; dims: number }>>;
+
+  /** Semantic nearest-neighbour search over memory chunk embeddings. */
+  searchMemoryChunkEmbeddings(
+    vector: number[],
+    query?: Omit<MemoryChunkQuery, 'text'> & { model?: string },
+  ): Promise<MemoryChunkSemanticMatch[]>;
+
+  /** Aggregate index health for status/debugging surfaces. */
+  getMemoryIndexStats?(model?: string): Promise<MemoryIndexStats>;
+
+  // -------------------------------------------------------------------------
   // Entities (PR 6) — semantic rollup of frames
   //
   // Implementations may throw `not_implemented` if they don't materialise
@@ -1365,6 +1477,8 @@ export interface ExportServices {
   model: IModelAdapter;
   /** Storage key for embeddings produced by the active model adapter. */
   embeddingModelName?: string;
+  /** Weight semantic embedding matches get during hybrid retrieval. */
+  embeddingSearchWeight?: number;
   /** Absolute path to the data dir (raw assets root). */
   dataDir: string;
   /**

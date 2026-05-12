@@ -233,6 +233,126 @@ function dedupeEvents(events: DayEvent[]): DayEvent[] {
   return Array.from(seen.values());
 }
 
+const MEETING_CALENDAR_LINK_GRACE_MS = 10 * 60_000;
+
+function eventTimeRange(event: DayEvent): { start: number; end: number } | null {
+  const start = Date.parse(event.starts_at);
+  const parsedEnd = event.ends_at ? Date.parse(event.ends_at) : Number.NaN;
+  const end =
+    Number.isFinite(parsedEnd) && parsedEnd > start
+      ? parsedEnd
+      : start + Math.max(eventDuration(event) ?? 30 * 60_000, 5 * 60_000);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end };
+}
+
+function normaliseAgendaTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/\b(?:google\s+meet|zoom|teams|meeting|call)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function titlesLikelySame(a: string, b: string): boolean {
+  const left = normaliseAgendaTitle(a);
+  const right = normaliseAgendaTitle(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return left.length >= 6 && right.length >= 6 && (left.includes(right) || right.includes(left));
+}
+
+function meetingQualityScore(event: DayEvent, meeting: Meeting | null): number {
+  return (
+    (meeting?.summary_status === 'ready' ? 10_000 : 0) +
+    (meeting?.summary_json?.tldr ? 3_000 : 0) +
+    (meeting?.transcript_chars ?? 0) +
+    (meeting?.audio_chunk_count ?? 0) * 500 +
+    Math.min(eventDuration(event) ?? 0, 90 * 60_000) / 1000 +
+    (event.context_md?.length ?? 0)
+  );
+}
+
+function calendarMatchScore(calendar: DayEvent, captured: DayEvent): number {
+  if (!titlesLikelySame(calendar.title, captured.title)) return 0;
+  const calRange = eventTimeRange(calendar);
+  const capRange = eventTimeRange(captured);
+  if (!calRange || !capRange) return 0;
+
+  const overlap =
+    Math.min(calRange.end, capRange.end) - Math.max(calRange.start, capRange.start);
+  const startDistance = Math.abs(calRange.start - capRange.start);
+  const startsInside =
+    capRange.start >= calRange.start - MEETING_CALENDAR_LINK_GRACE_MS &&
+    capRange.start <= calRange.end + MEETING_CALENDAR_LINK_GRACE_MS;
+
+  if (overlap <= 0 && !startsInside && startDistance > MEETING_CALENDAR_LINK_GRACE_MS) {
+    return 0;
+  }
+
+  return Math.max(1, overlap / 60_000) + Math.max(0, 30 - startDistance / 60_000);
+}
+
+function reconcileCalendarMeetingItems(
+  events: DayEvent[],
+  meetingsById: Map<string, Meeting>,
+): DayEvent[] {
+  const deduped = dedupeEvents(events);
+  const calendarEvents = deduped.filter(
+    (event) => event.source === 'calendar_screen' && event.kind === 'calendar',
+  );
+  if (calendarEvents.length === 0) return deduped;
+
+  const hiddenMeetingEventIds = new Set<string>();
+  const linkedMeetingByCalendarId = new Map<string, { id: string; score: number }>();
+
+  for (const event of deduped) {
+    if (event.source !== 'meeting_capture' || event.kind !== 'meeting' || !event.meeting_id) {
+      continue;
+    }
+
+    let best: { calendar: DayEvent; score: number } | null = null;
+    for (const calendar of calendarEvents) {
+      const score = calendarMatchScore(calendar, event);
+      if (score > 0 && (!best || score > best.score)) {
+        best = { calendar, score };
+      }
+    }
+    if (!best) continue;
+
+    hiddenMeetingEventIds.add(event.id);
+    const meeting = meetingsById.get(event.meeting_id) ?? null;
+    const quality = meetingQualityScore(event, meeting);
+    const current = linkedMeetingByCalendarId.get(best.calendar.id);
+    if (!current || quality > current.score) {
+      linkedMeetingByCalendarId.set(best.calendar.id, {
+        id: event.meeting_id,
+        score: quality,
+      });
+    }
+  }
+
+  if (hiddenMeetingEventIds.size === 0) return deduped;
+
+  return deduped
+    .filter((event) => !hiddenMeetingEventIds.has(event.id))
+    .map((event) => {
+      const linked = linkedMeetingByCalendarId.get(event.id);
+      if (!linked) return event;
+      const meeting = meetingsById.get(linked.id) ?? null;
+      return {
+        ...event,
+        meeting_id: linked.id,
+        context_md:
+          meeting?.summary_json?.tldr ??
+          event.context_md,
+        attendees: Array.from(new Set([...event.attendees, ...(meeting?.attendees ?? [])])),
+        links: Array.from(new Set([...event.links, ...(meeting?.links ?? [])])),
+      };
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Screen.
 // ---------------------------------------------------------------------------
@@ -372,10 +492,10 @@ export function Meetings({
   const visibleEvents = React.useMemo(() => {
     const fromOverride = dayOverrides.get(selectedDay);
     const raw = fromOverride ?? events.filter((ev) => ev.day === selectedDay);
-    return dedupeEvents(raw).sort((a, b) =>
+    return reconcileCalendarMeetingItems(raw, meetingsById).sort((a, b) =>
       a.starts_at.localeCompare(b.starts_at),
     );
-  }, [selectedDay, events, dayOverrides]);
+  }, [selectedDay, events, dayOverrides, meetingsById]);
 
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   React.useEffect(() => {
@@ -870,7 +990,7 @@ function EventRow({
               {event.context_md}
             </p>
           )}
-          {event.kind === 'meeting' && meeting?.summary_json?.tldr && (
+          {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && (
             <p className="mt-1 text-[11px] text-muted-foreground/90 line-clamp-2 leading-snug">
               {meeting.summary_json.tldr}
             </p>
@@ -902,7 +1022,7 @@ function EventDetail({
       <div className="flex flex-col gap-5 pr-2">
         <EventDetailHeader event={event} meeting={meeting} />
         <Separator />
-        {event.kind === 'meeting' && meeting ? (
+        {meeting ? (
           <MeetingBody event={event} meeting={meeting} />
         ) : (
           <NonMeetingBody event={event} />
@@ -933,7 +1053,7 @@ function EventDetailHeader({
           <KindIcon kind={event.kind} />
           {KIND_LABELS[event.kind]}
         </Badge>
-        {event.kind === 'meeting' && meeting && (
+        {meeting && (
           <Badge variant="outline" className="text-[10px]">
             {platformLabel(meeting.platform)}
           </Badge>

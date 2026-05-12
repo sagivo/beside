@@ -4,7 +4,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   IStorage,
   IIndexStrategy,
@@ -15,6 +16,9 @@ import type {
   EntityKind,
   FrameTextSource,
   MeetingPlatform,
+  MemoryChunk,
+  MemoryChunkKind,
+  MemoryChunkSemanticMatch,
 } from '@cofounderos/interfaces';
 import { renderJournalMarkdown } from '@cofounderos/interfaces';
 import { isSelfFrame } from './parsers.js';
@@ -29,6 +33,7 @@ export interface McpServices {
   strategy: IIndexStrategy;
   model?: IModelAdapter;
   embeddingModelName?: string;
+  embeddingSearchWeight?: number;
   triggerReindex?: (full?: boolean) => Promise<void>;
   summarizeMeeting?: (
     meetingId: string,
@@ -48,6 +53,12 @@ type FrameMatch = {
     before: Frame[];
     after: Frame[];
   };
+};
+
+type MemoryChunkMatch = {
+  chunk: MemoryChunk;
+  retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
+  semanticScore?: number;
 };
 
 const DEFAULT_FRAME_TEXT_EXCERPT_CHARS = 5000;
@@ -148,9 +159,31 @@ export function createMcpServer(
         frames = frames.filter((f) => !isSelfFrame(f));
         semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
       }
-      const blendedFrames = blendFrameMatches(frames, semanticFrames, cap);
+      const blendedFrames = blendFrameMatches(frames, semanticFrames, cap, {
+        semanticWeight: services.embeddingSearchWeight,
+      });
 
-      // 2. Wiki page retrieval — the "synthesised summary" answers.
+      // 2. Memory chunk retrieval — durable summaries, meeting TL;DRs,
+      // day events, and curated manual facts/procedures.
+      let chunks: MemoryChunk[] = [];
+      let semanticChunks: MemoryChunkSemanticMatch[] = [];
+      try {
+        chunks = await services.storage.searchMemoryChunks({
+          text: query,
+          limit: fetchCap * 2,
+        });
+      } catch (err) {
+        log.debug('searchMemoryChunks unavailable', { err: String(err) });
+      }
+      semanticChunks = await semanticMemoryChunkSearch(services, query, fetchCap * 2);
+      const blendedChunks = blendMemoryChunkMatches(chunks, semanticChunks, cap, {
+        semanticWeight: services.embeddingSearchWeight,
+      });
+
+      // 3. Legacy wiki page retrieval remains in the response for
+      // clients that still consume page_matches directly. Most callers
+      // should prefer memory_chunk_matches because chunks include pages
+      // plus non-page summaries and manual memories.
       const pages = await listAllStrategyPages(services.strategy);
       const ranked = pages
         .map((p) => ({ page: p, score: scorePage(p.path, p.content, query) }))
@@ -165,6 +198,7 @@ export function createMcpServer(
           retrieval: m.retrieval,
           semantic_score: m.semanticScore,
         })),
+        memory_chunk_matches: blendedChunks.map((m) => memoryChunkPreview(m, query)),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
           score: r.score,
@@ -174,10 +208,109 @@ export function createMcpServer(
         })),
       };
       log.debug(
-        `search_memory "${query}" → ${blendedFrames.length} frames, ${ranked.length} pages`,
+        `search_memory "${query}" → ${blendedFrames.length} frames, ${blendedChunks.length} chunks, ${ranked.length} pages`,
       );
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'remember_memory',
+    {
+      description:
+        'Store a durable manual memory chunk as a fact or procedure. Use for stable preferences, project facts, operating procedures, and other long-lived knowledge that should rank alongside generated summaries.',
+      inputSchema: {
+        body: z.string().min(1).describe('Memory text to store.'),
+        title: z.string().optional().describe('Short title. Defaults to the first sentence/body line.'),
+        kind: z
+          .enum(['fact', 'procedure'])
+          .optional()
+          .describe('Manual memory kind. Default fact.'),
+        entity_path: z.string().optional().describe('Optional entity path, e.g. projects/cofounderos.'),
+        entity_kind: z
+          .enum(ENTITY_KINDS as [EntityKind, ...EntityKind[]])
+          .optional()
+          .describe('Optional entity kind for the entity_path.'),
+        day: z.string().optional().describe('Optional YYYY-MM-DD memory date.'),
+        source_refs: z
+          .array(z.string())
+          .optional()
+          .describe('Optional source references such as frame:<id>, meeting:<id>, or user:<note>.'),
+      },
+    },
+    async ({ body, title, kind, entity_path, entity_kind, day, source_refs }) => {
+      const chunk = buildManualMemoryChunk({
+        body,
+        title,
+        kind: (kind ?? 'fact') as Extract<MemoryChunkKind, 'fact' | 'procedure'>,
+        entityPath: entity_path ?? null,
+        entityKind: entity_kind ?? null,
+        day: day ?? null,
+        sourceRefs: source_refs ?? ['manual:mcp'],
+      });
+      await services.storage.upsertMemoryChunks([chunk]);
+
+      let embedded = false;
+      if (services.model && typeof services.model.embed === 'function') {
+        try {
+          const [vector] = await services.model.embed([memoryChunkEmbeddingContent(chunk)]);
+          if (vector) {
+            await services.storage.upsertMemoryChunkEmbeddings([{
+              chunkId: chunk.id,
+              model: services.embeddingModelName ?? services.model.getModelInfo().name,
+              contentHash: chunk.contentHash,
+              vector,
+            }]);
+            embedded = true;
+          }
+        } catch (err) {
+          log.debug('manual memory embedding failed; worker will retry later', { err: String(err) });
+        }
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            ok: true,
+            embedded,
+            chunk: memoryChunkRecord(chunk),
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'memory_status',
+    {
+      description:
+        'Return memory indexing health: generated/manual chunk counts, embedding coverage, stale chunks, and frame embedding coverage.',
+      inputSchema: {
+        model: z.string().optional().describe('Embedding model key. Defaults to active embedding model.'),
+      },
+    },
+    async ({ model }) => {
+      if (typeof services.storage.getMemoryIndexStats !== 'function') {
+        return {
+          content: [{ type: 'text', text: 'Storage plugin does not expose memory index stats.' }],
+          isError: true,
+        };
+      }
+      const modelName = model ?? services.embeddingModelName;
+      const stats = await services.storage.getMemoryIndexStats(modelName);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            model: modelName ?? null,
+            semantic_search_enabled: Boolean(services.model && typeof services.model.embed === 'function'),
+            embedding_search_weight: normaliseSemanticWeight(services.embeddingSearchWeight),
+            ...stats,
+          }, null, 2),
+        }],
       };
     },
   );
@@ -281,7 +414,9 @@ export function createMcpServer(
         frames = frames.filter((f) => !isSelfFrame(f));
         semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
       }
-      const blended = blendFrameMatches(frames, semanticFrames, candidateLimit)
+      const blended = blendFrameMatches(frames, semanticFrames, candidateLimit, {
+        semanticWeight: services.embeddingSearchWeight,
+      })
         .slice(requestedOffset, requestedOffset + requestedLimit);
       if (include_context) {
         await attachFrameContexts(
@@ -1366,6 +1501,103 @@ function framePreview(frame: Frame, textExcerptChars: number, query?: string): R
   };
 }
 
+function memoryChunkPreview(match: MemoryChunkMatch, query: string): Record<string, unknown> {
+  return {
+    ...memoryChunkRecord(match.chunk),
+    retrieval: match.retrieval,
+    semantic_score: match.semanticScore,
+    excerpt: extractRelevantTextExcerpt(match.chunk.body, query, 1200),
+  };
+}
+
+function memoryChunkRecord(chunk: MemoryChunk): Record<string, unknown> {
+  return {
+    id: chunk.id,
+    kind: chunk.kind,
+    source_id: chunk.sourceId,
+    title: chunk.title,
+    entity_path: chunk.entityPath,
+    entity_kind: chunk.entityKind,
+    day: chunk.day,
+    timestamp: chunk.timestamp,
+    source_refs: chunk.sourceRefs,
+    content_hash: chunk.contentHash,
+    created_at: chunk.createdAt,
+    updated_at: chunk.updatedAt,
+  };
+}
+
+function buildManualMemoryChunk(input: {
+  body: string;
+  title?: string;
+  kind: Extract<MemoryChunkKind, 'fact' | 'procedure'>;
+  entityPath: string | null;
+  entityKind: EntityKind | null;
+  day: string | null;
+  sourceRefs: string[];
+}): MemoryChunk {
+  const now = new Date().toISOString();
+  const body = input.body.trim();
+  const title = (input.title?.trim() || inferMemoryTitle(body)).slice(0, 240);
+  const sourceRefs = [...new Set((input.sourceRefs.length ? input.sourceRefs : ['manual:mcp']).filter(Boolean))];
+  const identity = [
+    input.kind,
+    title,
+    body,
+    input.entityPath ?? '',
+    input.day ?? '',
+  ].join('\n');
+  const chunk: MemoryChunk = {
+    id: `mem_${input.kind}_${hashText(identity).slice(0, 20)}`,
+    kind: input.kind,
+    sourceId: `manual:${hashText(identity).slice(0, 16)}`,
+    title,
+    body,
+    entityPath: input.entityPath,
+    entityKind: input.entityKind,
+    day: input.day,
+    timestamp: input.day ? `${input.day}T00:00:00.000Z` : now,
+    sourceRefs,
+    contentHash: '',
+    createdAt: now,
+    updatedAt: now,
+  };
+  chunk.contentHash = hashText(memoryChunkEmbeddingContent(chunk));
+  return chunk;
+}
+
+function inferMemoryTitle(body: string): string {
+  const firstLine = body.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (!firstLine) return 'Memory';
+  const sentence = firstLine.match(/^(.{1,160}?[.!?])(?:\s|$)/)?.[1];
+  return (sentence ?? firstLine).replace(/^#+\s*/, '').trim() || 'Memory';
+}
+
+function memoryChunkEmbeddingContent(chunk: Pick<
+  MemoryChunk,
+  'kind' | 'title' | 'entityPath' | 'day' | 'timestamp' | 'body'
+>): string {
+  const parts = [
+    `Kind: ${chunk.kind}`,
+    chunk.title ? `Title: ${chunk.title}` : null,
+    chunk.entityPath ? `Entity: ${chunk.entityPath}` : null,
+    chunk.day ? `Day: ${chunk.day}` : null,
+    chunk.timestamp ? `Timestamp: ${chunk.timestamp}` : null,
+    chunk.body ? `Body: ${truncateForEmbedding(chunk.body, 2400)}` : null,
+  ].filter((p): p is string => Boolean(p));
+  return parts.join('\n').trim();
+}
+
+function truncateForEmbedding(text: string, maxChars: number): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxChars) return cleaned;
+  return cleaned.slice(0, maxChars).trimEnd();
+}
+
+function hashText(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
 function normaliseTextExcerptChars(value: number | undefined): number {
   if (!Number.isFinite(value) || value == null) {
     return DEFAULT_FRAME_TEXT_EXCERPT_CHARS;
@@ -1603,11 +1835,40 @@ async function semanticFrameSearch(
   }
 }
 
+async function semanticMemoryChunkSearch(
+  services: McpServices,
+  query: string,
+  limit: number,
+  filters: {
+    kind?: MemoryChunkKind;
+    entityPath?: string;
+    day?: string;
+    from?: string;
+    to?: string;
+  } = {},
+): Promise<MemoryChunkSemanticMatch[]> {
+  if (!services.model || typeof services.model.embed !== 'function') return [];
+  try {
+    const [vector] = await services.model.embed([query]);
+    if (!vector) return [];
+    return await services.storage.searchMemoryChunkEmbeddings(vector, {
+      ...filters,
+      model: services.embeddingModelName,
+      limit,
+    });
+  } catch {
+    return [];
+  }
+}
+
 function blendFrameMatches(
   ftsFrames: Frame[],
   semanticFrames: Array<{ frame: Frame; score: number }>,
   limit: number,
+  options: { semanticWeight?: number } = {},
 ): FrameMatch[] {
+  const semanticWeight = normaliseSemanticWeight(options.semanticWeight);
+  const keywordWeight = 1 - semanticWeight;
   const byId = new Map<string, {
     frame: Frame;
     keywordRank?: number;
@@ -1631,13 +1892,14 @@ function blendFrameMatches(
     }
   });
 
-  return [...byId.values()]
+  const ranked = [...byId.values()]
     .map((m) => {
       const keywordScore = m.keywordRank ? 1 / (m.keywordRank + 1) : 0;
       const semanticScore = m.semanticRank
-        ? (m.semanticScore ?? 0) * (1 / (m.semanticRank + 1))
+        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1))
         : 0;
-      const bonus = m.keywordRank && m.semanticRank ? 0.25 : 0;
+      const bonus = m.keywordRank && m.semanticRank ? 0.16 : 0;
+      const recency = 0.08 * recencyScore(m.frame.timestamp);
       const retrieval: 'keyword' | 'semantic' | 'keyword+semantic' = m.keywordRank && m.semanticRank
         ? 'keyword+semantic'
         : m.keywordRank
@@ -1647,19 +1909,162 @@ function blendFrameMatches(
         frame: m.frame,
         retrieval,
         semanticScore: m.semanticScore,
-        rankScore: keywordScore + semanticScore + bonus,
+        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency,
       };
     })
     .sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return b.frame.timestamp.localeCompare(a.frame.timestamp);
-    })
-    .slice(0, limit)
+    });
+  return diverseSelect(ranked, limit, (a, b) => frameSimilarity(a.frame, b.frame))
     .map(({ frame, retrieval, semanticScore }) => ({
       frame,
       retrieval,
       semanticScore,
     }));
+}
+
+function blendMemoryChunkMatches(
+  keywordChunks: MemoryChunk[],
+  semanticChunks: MemoryChunkSemanticMatch[],
+  limit: number,
+  options: { semanticWeight?: number } = {},
+): MemoryChunkMatch[] {
+  const semanticWeight = normaliseSemanticWeight(options.semanticWeight);
+  const keywordWeight = 1 - semanticWeight;
+  const byId = new Map<string, {
+    chunk: MemoryChunk;
+    keywordRank?: number;
+    semanticRank?: number;
+    semanticScore?: number;
+  }>();
+  keywordChunks.forEach((chunk, idx) => {
+    byId.set(chunk.id, { chunk, keywordRank: idx + 1 });
+  });
+  semanticChunks.forEach((hit, idx) => {
+    const existing = byId.get(hit.chunk.id);
+    if (existing) {
+      existing.semanticRank = idx + 1;
+      existing.semanticScore = hit.score;
+    } else {
+      byId.set(hit.chunk.id, {
+        chunk: hit.chunk,
+        semanticRank: idx + 1,
+        semanticScore: hit.score,
+      });
+    }
+  });
+
+  const ranked = [...byId.values()]
+    .map((m) => {
+      const keywordScore = m.keywordRank ? 1 / (m.keywordRank + 1) : 0;
+      const semanticScore = m.semanticRank
+        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1))
+        : 0;
+      const bonus = m.keywordRank && m.semanticRank ? 0.18 : 0;
+      const recency = 0.06 * recencyScore(m.chunk.timestamp ?? m.chunk.updatedAt);
+      const retrieval: MemoryChunkMatch['retrieval'] = m.keywordRank && m.semanticRank
+        ? 'keyword+semantic'
+        : m.keywordRank
+          ? 'keyword'
+          : 'semantic';
+      return {
+        chunk: m.chunk,
+        retrieval,
+        semanticScore: m.semanticScore,
+        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency,
+      };
+    })
+    .sort((a, b) => {
+      if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
+      return (b.chunk.timestamp ?? b.chunk.updatedAt).localeCompare(a.chunk.timestamp ?? a.chunk.updatedAt);
+    });
+  return diverseSelect(ranked, limit, (a, b) => memoryChunkSimilarity(a.chunk, b.chunk))
+    .map(({ chunk, retrieval, semanticScore }) => ({
+      chunk,
+      retrieval,
+      semanticScore,
+    }));
+}
+
+function normaliseSemanticWeight(value: number | undefined): number {
+  if (!Number.isFinite(value ?? NaN)) return 0.35;
+  return Math.max(0, Math.min(0.85, value!));
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
+}
+
+function recencyScore(timestamp: string | null | undefined): number {
+  if (!timestamp) return 0;
+  const ms = Date.parse(timestamp);
+  if (!Number.isFinite(ms)) return 0;
+  const ageDays = Math.max(0, (Date.now() - ms) / 86_400_000);
+  return Math.exp(-ageDays / 45);
+}
+
+function diverseSelect<T extends { rankScore: number }>(
+  ranked: T[],
+  limit: number,
+  similarity: (a: T, b: T) => number,
+): T[] {
+  const selected: T[] = [];
+  const pool = [...ranked];
+  while (selected.length < limit && pool.length > 0) {
+    let bestIndex = 0;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < pool.length; i++) {
+      const candidate = pool[i]!;
+      const maxSimilarity = selected.reduce(
+        (max, item) => Math.max(max, similarity(candidate, item)),
+        0,
+      );
+      const score = candidate.rankScore - 0.18 * maxSimilarity;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
+      }
+    }
+    selected.push(pool.splice(bestIndex, 1)[0]!);
+  }
+  return selected;
+}
+
+function frameSimilarity(a: Frame, b: Frame): number {
+  let score = 0;
+  if (a.id === b.id) return 1;
+  if (a.entity_path && a.entity_path === b.entity_path) score += 0.42;
+  if (a.app && a.app === b.app) score += 0.18;
+  if (a.day && a.day === b.day) score += 0.12;
+  if (a.window_title && b.window_title) {
+    score += 0.18 * tokenOverlap(a.window_title, b.window_title);
+  }
+  const timeGap = Math.abs(Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  if (Number.isFinite(timeGap) && timeGap < 10 * 60_000) score += 0.22;
+  return clamp01(score);
+}
+
+function memoryChunkSimilarity(a: MemoryChunk, b: MemoryChunk): number {
+  let score = 0;
+  if (a.id === b.id) return 1;
+  if (a.kind === b.kind) score += 0.18;
+  if (a.entityPath && a.entityPath === b.entityPath) score += 0.42;
+  if (a.day && a.day === b.day) score += 0.14;
+  score += 0.2 * tokenOverlap(a.title, b.title);
+  return clamp01(score);
+}
+
+function tokenOverlap(a: string, b: string): number {
+  const left = new Set(queryTerms(a).filter((term) => term.length > 2));
+  const right = new Set(queryTerms(b).filter((term) => term.length > 2));
+  if (left.size === 0 || right.size === 0) return 0;
+  let shared = 0;
+  for (const term of left) {
+    if (right.has(term)) shared += 1;
+  }
+  return shared / Math.max(left.size, right.size);
 }
 
 // ---------------------------------------------------------------------------

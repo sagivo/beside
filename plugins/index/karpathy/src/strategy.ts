@@ -695,8 +695,17 @@ export class KarpathyStrategy implements IIndexStrategy {
     // reindexes cheap once the initial pass has rendered everything.
     const evidenceHash = computeEvidenceHash(pageEntity, evidence);
     if (existing && existing.evidenceHash === evidenceHash) {
+      const existingProse =
+        extractFirstSection(existing.content, ['Summary', 'What it is']) ??
+        renderDeterministicProse(pageEntity, evidence);
+      const content = renderEntityMarkdown(pageEntity, evidence, existingProse);
       return {
-        page: { ...existing, lastUpdated: existing.lastUpdated },
+        page: {
+          ...existing,
+          content,
+          sourceEventIds: evidence.sourceEventIds.slice(-500),
+          lastUpdated: content === existing.content ? existing.lastUpdated : isoTimestamp(),
+        },
         reused: true,
       };
     }
@@ -733,12 +742,7 @@ export class KarpathyStrategy implements IIndexStrategy {
       page: {
         path: `${entity.path}.md`,
         content,
-        // We no longer store the full per-event provenance in the page
-        // metadata block — the SQLite `frames`/`entities` tables are the
-        // source of truth. Keep an empty list to satisfy the IndexPage
-        // contract; reorg passes don't actually depend on it for entities
-        // built from frames.
-        sourceEventIds: existing?.sourceEventIds ?? [],
+        sourceEventIds: evidence.sourceEventIds.slice(-500),
         backlinks: existing?.backlinks ?? [],
         lastUpdated: isoTimestamp(),
         evidenceHash,
@@ -893,7 +897,9 @@ interface Evidence {
   urls: Array<{ url: string; title: string | null; lastSeen: string }>;
   textSnippets: string[];
   apps: string[];
-  keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }>;
+  sourceEventIds: string[];
+  sourceFrameIds: string[];
+  keyframes: Array<{ frameId: string; assetPath: string; timestamp: string; phash: string | null }>;
 }
 
 interface MeetingDigest {
@@ -932,6 +938,8 @@ function buildEvidence(
   related: RelatedEntityDigest[] = [],
 ): Evidence {
   const sorted = frames.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const sourceFrameIds = [...new Set(sorted.map((frame) => frame.id))];
+  const sourceEventIds = [...new Set(sorted.flatMap((frame) => frame.source_event_ids ?? []))];
 
   // 1. Activity windows — group adjacent frames within `SESSION_GAP_MS`.
   const windows: ActivityWindow[] = [];
@@ -1020,7 +1028,7 @@ function buildEvidence(
     (f): f is Frame & { asset_path: string } =>
       Boolean(f.asset_path) && Boolean(f.perceptual_hash),
   );
-  const keyframes: Array<{ assetPath: string; timestamp: string; phash: string | null }> = [];
+  const keyframes: Array<{ frameId: string; assetPath: string; timestamp: string; phash: string | null }> = [];
   if (candidates.length > 0) {
     const phashes = candidates.map((c) => c.perceptual_hash);
     const seenPaths = new Set<string>();
@@ -1032,6 +1040,7 @@ function buildEvidence(
       const c = candidates[idx]!;
       if (seenPaths.has(c.asset_path)) return;
       keyframes.push({
+        frameId: c.id,
         assetPath: c.asset_path,
         timestamp: c.timestamp,
         phash: c.perceptual_hash,
@@ -1065,6 +1074,7 @@ function buildEvidence(
     for (const f of sorted) {
       if (!f.asset_path) continue;
       keyframes.push({
+        frameId: f.id,
         assetPath: f.asset_path,
         timestamp: f.timestamp,
         phash: f.perceptual_hash,
@@ -1084,6 +1094,8 @@ function buildEvidence(
       .slice(0, 10),
     textSnippets,
     apps,
+    sourceEventIds,
+    sourceFrameIds,
     keyframes,
   };
 }
@@ -1513,12 +1525,35 @@ function renderEntityMarkdown(
     lines.push('');
   }
 
-  // 7. Top screenshots.
+  // 7. Provenance.
+  if (evidence.sourceFrameIds.length || evidence.sourceEventIds.length || evidence.meetings.length) {
+    lines.push('## Provenance');
+    if (evidence.sourceFrameIds.length) {
+      const shown = evidence.sourceFrameIds.slice(-12);
+      lines.push(
+        `- Source frames: ${shown.map((id) => `\`${id}\``).join(', ')}` +
+          (evidence.sourceFrameIds.length > shown.length ? ` (+${evidence.sourceFrameIds.length - shown.length} more)` : ''),
+      );
+    }
+    if (evidence.sourceEventIds.length) {
+      const shown = evidence.sourceEventIds.slice(-12);
+      lines.push(
+        `- Source events: ${shown.map((id) => `\`${id}\``).join(', ')}` +
+          (evidence.sourceEventIds.length > shown.length ? ` (+${evidence.sourceEventIds.length - shown.length} more)` : ''),
+      );
+    }
+    if (evidence.meetings.length) {
+      lines.push(`- Meetings: ${evidence.meetings.map((m) => `\`${m.id}\``).join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  // 8. Top screenshots.
   if (evidence.keyframes.length) {
     lines.push('## Top screenshots');
     for (const k of evidence.keyframes) {
       const time = k.timestamp.slice(11, 19);
-      lines.push(`![${entity.title} @ ${time}](${k.assetPath})`);
+      lines.push(`![${entity.title} @ ${time} (${k.frameId})](${k.assetPath})`);
     }
     lines.push('');
   }
