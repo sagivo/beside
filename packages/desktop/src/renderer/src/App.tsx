@@ -401,6 +401,7 @@ function AppInner() {
       onBootstrap={actions.onBootstrap}
       onOpenMarkdownExport={actions.onOpenMarkdownExport}
       onGoMeetings={openMeetings}
+      onSearch={runPaletteSearch}
     />
   ) : screen === 'meetings' ? (
     <Meetings

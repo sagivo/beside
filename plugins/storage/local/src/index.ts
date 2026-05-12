@@ -2724,9 +2724,12 @@ class LocalStorage implements IStorage {
     day: string,
     source: DayEventSource,
   ): Promise<void> {
-    this.db
-      .prepare('DELETE FROM day_events WHERE day = ? AND source = ?')
-      .run(day, source);
+    const ids = (
+      this.db
+        .prepare('SELECT id FROM day_events WHERE day = ? AND source = ?')
+        .all(day, source) as Array<{ id: string }>
+    ).map((row) => row.id);
+    this.deleteDayEventsAndChunks(ids);
   }
 
   async clearAllDayEvents(): Promise<void> {

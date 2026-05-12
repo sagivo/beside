@@ -188,6 +188,30 @@ async function main() {
     const captureDay = localDayKey();
     const staleVisibleDay = captureDay === '2026-05-12' ? '2026-05-13' : '2026-05-12';
     await storage.upsertFrame({
+      id: `frame_calendar_old_${randomUUID().slice(0, 8)}`,
+      timestamp: `${captureDay}T08:50:00.000Z`,
+      day: captureDay,
+      monitor: 0,
+      app: 'Calendar',
+      app_bundle_id: 'com.apple.iCal',
+      window_title: 'Calendar — month view',
+      url: null,
+      text:
+        'Calendar May 2026 Sun Mon Tue 12 Wed 13 Thu 14 Fri 15 Sat 16 8 AM 9 AM 10 AM ' +
+        'Past Strategy Review Today Sync Removed Calendar Item',
+      text_source: 'ocr',
+      asset_path: null,
+      perceptual_hash: `cal_old_${randomUUID().slice(0, 8)}`,
+      trigger: 'screenshot',
+      session_id: 'sess_calendar_smoke',
+      duration_ms: null,
+      entity_path: null,
+      entity_kind: null,
+      activity_session_id: null,
+      meeting_id: null,
+      source_event_ids: [],
+    });
+    await storage.upsertFrame({
       id: `frame_calendar_${randomUUID().slice(0, 8)}`,
       timestamp: `${captureDay}T09:00:00.000Z`,
       day: captureDay,
@@ -232,6 +256,26 @@ async function main() {
       updated_at: `${captureDay}T08:00:00.000Z`,
     });
     await storage.upsertDayEvent({
+      id: `event_removed_calendar_${randomUUID().slice(0, 8)}`,
+      day: captureDay,
+      starts_at: `${captureDay}T14:00:00.000Z`,
+      ends_at: `${captureDay}T14:30:00.000Z`,
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title: 'Removed Calendar Item',
+      source_app: 'Calendar',
+      context_md: 'This row should be removed when a newer calendar capture has fewer events.',
+      attendees: [],
+      links: [],
+      meeting_id: null,
+      evidence_frame_ids: [],
+      content_hash: 'removed-calendar-row',
+      status: 'ready',
+      failure_reason: null,
+      created_at: `${captureDay}T08:00:00.000Z`,
+      updated_at: `${captureDay}T08:00:00.000Z`,
+    });
+    await storage.upsertDayEvent({
       id: `event_stale_visible_calendar_${randomUUID().slice(0, 8)}`,
       day: staleVisibleDay,
       starts_at: `${staleVisibleDay}T08:00:00.000Z`,
@@ -240,7 +284,7 @@ async function main() {
       source: 'calendar_screen',
       title: 'Stale Visible Calendar Item',
       source_app: 'Calendar',
-      context_md: 'This row should be preserved because there is no fresh same-day candidate.',
+      context_md: 'This row should be removed because the latest calendar capture still shows this day.',
       attendees: [],
       links: [],
       meeting_id: null,
@@ -255,8 +299,12 @@ async function main() {
     const availableModel = {
       ...stubModel,
       isAvailable: async () => true,
-      complete: async () =>
-        JSON.stringify({
+      complete: async (prompt) => {
+        assert(
+          !prompt.includes('Removed Calendar Item'),
+          'calendar extraction prompt uses the latest calendar capture',
+        );
+        return JSON.stringify({
           events: [
             {
               title: 'Past Strategy Review',
@@ -283,7 +331,8 @@ async function main() {
               context: 'A dated calendar event in the future.',
             },
           ],
-        }),
+        });
+      },
     };
     const llmExtractor = new EventExtractor(storage, availableModel, logger, {
       llmEnabled: true,
@@ -304,12 +353,12 @@ async function main() {
       'calendar extraction stores current-day events',
     );
     assert(
-      !todayEvents.some((e) => e.title === 'Stale Calendar Item'),
-      'calendar extraction replaces stale events from the rescanned calendar day',
+      !todayEvents.some((e) => ['Stale Calendar Item', 'Removed Calendar Item'].includes(e.title)),
+      'calendar extraction removes stale events when a newer capture has fewer items',
     );
     assert(
-      visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
-      'calendar extraction preserves visible-day rows when there is no fresh same-day candidate',
+      !visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
+      'calendar extraction removes rows for visible days that now have no events',
     );
     assert(
       futureEvents.some((e) => e.title === 'Future Planning'),

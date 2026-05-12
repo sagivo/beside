@@ -2,19 +2,23 @@ import * as React from 'react';
 import {
   AlertCircle,
   ArrowRight,
+  Calendar,
   ChevronDown,
   CheckSquare,
   CircleStop,
+  Clock,
   ExternalLink,
+  FileText,
   FolderOpen,
-  ImageOff,
+  History,
   Inbox,
   Loader2,
+  MessageSquare,
   Mic,
   Pause,
   Play,
-  Radio,
   RefreshCcw,
+  Search as SearchIcon,
   Sparkles,
   Wand2,
   XCircle,
@@ -38,11 +42,6 @@ import {
   indexingStatusText,
   localDayKey,
 } from '@/lib/format';
-import {
-  cacheThumbnail,
-  resolveAssetUrl,
-  thumbnailCache,
-} from '@/lib/thumbnail-cache';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
 import { cn } from '@/lib/utils';
 import type {
@@ -58,8 +57,8 @@ import type {
 
 const FULL_JOURNAL_FRAME_LIMIT = 600;
 const ACTIVITY_SAMPLE_LIMIT = 500;
-const FILM_STRIP_FRAMES = 8;
-const TOP_APPS = 4;
+const TIMELINE_UPCOMING_LIMIT = 3;
+const TIMELINE_RECENT_LIMIT = 6;
 
 export function Dashboard({
   overview,
@@ -76,6 +75,7 @@ export function Dashboard({
   onBootstrap,
   onOpenMarkdownExport,
   onGoMeetings,
+  onSearch,
 }: {
   overview: RuntimeOverview | null;
   doctor: DoctorCheck[] | null;
@@ -91,6 +91,7 @@ export function Dashboard({
   onBootstrap: () => Promise<void>;
   onOpenMarkdownExport: (category?: string) => Promise<void>;
   onGoMeetings: (target?: FounderAgendaTarget | null) => void;
+  onSearch: (query: string) => void;
 }) {
   const [bootstrapping, setBootstrapping] = React.useState(false);
 
@@ -103,7 +104,7 @@ export function Dashboard({
     return (
       <div className="flex flex-col gap-10 pt-6">
         <PageHeader title="Today" description="Getting things ready…" />
-        <HeroSkeleton />
+        <TodayHomeSkeleton />
       </div>
     );
   }
@@ -115,14 +116,12 @@ export function Dashboard({
   const warnings = doctor?.filter((c) => c.status === 'warn') ?? [];
   const needsModelSetup = !overview.model.ready;
 
-  const recentFrames = journal?.frames ?? [];
-
   return (
-    <div className="flex flex-col gap-10 pt-4 pb-6">
+    <div className="flex flex-col gap-6 pt-4 pb-6">
       <PageHeader
         title="Today"
         eyebrow={prettyToday()}
-        description="A simple view of what your second brain is doing right now."
+        description="Search, briefs, timeline, and capture status for the day."
         actions={
           <Button variant="ghost" size="sm" onClick={onRefresh}>
             <RefreshCcw />
@@ -131,24 +130,20 @@ export function Dashboard({
         }
       />
 
-      <Hero
+      <TodayHome
         overview={overview}
         captureLive={captureLive}
         capturePaused={capturePaused}
         running={running}
         journal={journal}
-        loading={loading}
+        loading={loading || founderBrief.loading}
+        events={founderBrief.events}
+        meetings={founderBrief.meetings}
         onStart={onStart}
         onStop={onStop}
         onPause={onPause}
         onResume={onResume}
-      />
-
-      <FounderDashboard
-        journal={journal}
-        loading={loading || founderBrief.loading}
-        events={founderBrief.events}
-        meetings={founderBrief.meetings}
+        onSearch={onSearch}
         onGoMeetings={onGoMeetings}
       />
 
@@ -196,20 +191,6 @@ export function Dashboard({
         </Alert>
       )}
 
-      {/* Recent moments — full-bleed film strip. The most "alive" thing on the
-          screen, designed to read like Photos.app rather than another card. */}
-      {captureLive && recentFrames.length > 0 && (
-        <FilmStrip frames={recentFrames.slice(0, FILM_STRIP_FRAMES)} />
-      )}
-
-      {/* Bento tile grid — replaces the old "Activity card with 4 stats inside".
-          Each tile is its own container with its own dominant visual. */}
-      <BentoGrid
-        overview={overview}
-        journal={journal}
-        loading={loading}
-      />
-
       {/* Hard problems surface inline */}
       {failures.length > 0 && (
         <section className="flex flex-col gap-2">
@@ -246,6 +227,43 @@ function prettyToday(): string {
     month: 'long',
     day: 'numeric',
   });
+}
+
+function TodayHomeSkeleton() {
+  return (
+    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="flex min-w-0 flex-col gap-4">
+        <div className="rounded-lg border bg-card/70 p-4 shadow-card">
+          <Skeleton className="h-11 w-full rounded-lg" />
+          <div className="mt-3 flex gap-2">
+            <Skeleton className="h-7 w-28 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+            <Skeleton className="h-7 w-24 rounded-md" />
+          </div>
+        </div>
+        <div className="rounded-lg border bg-card/70 p-4 shadow-card">
+          <Skeleton className="h-4 w-28" />
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 rounded-lg" />
+            ))}
+          </div>
+        </div>
+        <div className="rounded-lg border bg-card/70 p-4 shadow-card">
+          <Skeleton className="h-4 w-32" />
+          <div className="mt-4 flex flex-col gap-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-12 rounded-md" />
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex min-w-0 flex-col gap-4">
+        <Skeleton className="h-72 rounded-lg" />
+        <Skeleton className="h-52 rounded-lg" />
+      </div>
+    </section>
+  );
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -365,80 +383,6 @@ function useFounderBrief(overview: RuntimeOverview | null): {
   return { events, meetings, loading };
 }
 
-function FounderDashboard({
-  journal,
-  loading,
-  events,
-  meetings,
-  onGoMeetings,
-}: {
-  journal: JournalDay | null;
-  loading: boolean;
-  events: DayEvent[];
-  meetings: Meeting[];
-  onGoMeetings: (target?: FounderAgendaTarget | null) => void;
-}) {
-  const cards = React.useMemo(
-    () => buildFounderCards(journal, events, meetings),
-    [journal, events, meetings],
-  );
-  const hasMaterial = cards.some((card) => card.items.length > 0);
-
-  if (loading && !hasMaterial) {
-    return (
-      <section className="flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold">Founder brief</h3>
-            <p className="text-xs text-muted-foreground">Loading today’s signals…</p>
-          </div>
-          <Skeleton className="h-8 w-24 rounded-md" />
-        </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Card key={i}>
-              <CardContent className="flex flex-col gap-3 py-1">
-                <Skeleton className="h-8 w-8 rounded-lg" />
-                <Skeleton className="h-4 w-24" />
-                <Skeleton className="h-16 w-full" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold">Founder brief</h3>
-          <p className="text-xs text-muted-foreground">
-            Replies, promises, changes, and follow-ups from today.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={() => onGoMeetings(null)}>
-          Agenda <ArrowRight className="size-3.5" />
-        </Button>
-      </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {cards.map((card) => (
-          <FounderBriefCard
-            key={card.title}
-            card={card}
-            onOpenItem={(item) =>
-              onGoMeetings(
-                item.eventId && item.day ? { eventId: item.eventId, day: item.day } : null,
-              )
-            }
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 type FounderAgendaTarget = { eventId: string; day: string };
 
 type FounderCardItem = { title: string; meta?: string; eventId?: string; day?: string };
@@ -451,59 +395,6 @@ type FounderCard = {
   empty: string;
   items: FounderCardItem[];
 };
-
-function FounderBriefCard({
-  card,
-  onOpenItem,
-}: {
-  card: FounderCard;
-  onOpenItem: (item: FounderCardItem) => void;
-}) {
-  const Icon = card.icon;
-  return (
-    <Card>
-      <CardContent className="flex min-h-[190px] flex-col gap-3 py-1">
-        <div className="flex items-start justify-between gap-2">
-          <span
-            className={cn(
-              'grid size-8 place-items-center rounded-lg bg-muted',
-              card.accent,
-            )}
-          >
-            <Icon className="size-4" />
-          </span>
-          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
-            {card.label}
-          </span>
-        </div>
-        <div>
-          <h4 className="text-sm font-semibold">{card.title}</h4>
-        </div>
-        {card.items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{card.empty}</p>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {card.items.slice(0, 3).map((item, i) => (
-              <button
-                key={`${item.title}-${i}`}
-                type="button"
-                onClick={() => onOpenItem(item)}
-                className="-mx-1 min-w-0 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-              >
-                <div className="line-clamp-2 text-sm leading-snug">{item.title}</div>
-                {item.meta ? (
-                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                    {item.meta}
-                  </div>
-                ) : null}
-              </button>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
 
 function buildFounderCards(
   journal: JournalDay | null,
@@ -529,42 +420,25 @@ function buildFounderCards(
   }));
   const replyEvents = chronological
     .filter((event) =>
-      event.kind === 'communication' ||
-      event.source === 'email_screen' ||
-      event.source === 'slack_screen',
+      isRelevantSignalEvent(event) &&
+      (event.kind === 'communication' ||
+        event.source === 'email_screen' ||
+        event.source === 'slack_screen'),
     )
-    .map((event) => ({
-      title: event.title,
-      meta: eventMeta(event),
-      eventId: event.id,
-      day: event.day,
-    }));
+    .map(signalItemForEvent);
   const taskEvents = chronological
-    .filter((event) => event.kind === 'task')
-    .map((event) => ({
-      title: event.title,
-      meta: eventMeta(event),
-      eventId: event.id,
-      day: event.day,
-    }));
-  const futureEvents = chronological
-    .filter((event) => Date.parse(event.starts_at) >= now)
-    .map((event) => ({
-      title: event.title,
-      meta: eventMeta(event),
-      eventId: event.id,
-      day: event.day,
-    }));
+    .filter((event) => event.kind === 'task' && isRelevantSignalEvent(event))
+    .map(signalItemForEvent);
   const recentChanges = chronological
-    .filter((event) => event.kind !== 'meeting')
+    .filter(
+      (event) =>
+        event.kind !== 'meeting' &&
+        Date.parse(event.starts_at) <= now &&
+        isRelevantSignalEvent(event),
+    )
     .slice(-4)
     .reverse()
-    .map((event) => ({
-      title: event.title,
-      meta: eventMeta(event),
-      eventId: event.id,
-      day: event.day,
-    }));
+    .map(signalItemForEvent);
   const topApps =
     journal && journal.frames.length > 0
       ? countByApp(journal.frames)
@@ -602,11 +476,11 @@ function buildFounderCards(
     },
     {
       title: 'Follow up',
-      label: `${openQuestions.length + decisions.length + futureEvents.length}`,
+      label: `${openQuestions.length + decisions.length}`,
       icon: AlertCircle,
       accent: 'text-amber-500 dark:text-amber-300',
-      empty: 'No open questions or upcoming events to chase.',
-      items: [...openQuestions, ...futureEvents, ...decisions],
+      empty: 'No open questions or decisions to chase.',
+      items: [...openQuestions, ...decisions],
     },
   ];
 }
@@ -617,18 +491,268 @@ function eventMeta(event: DayEvent): string {
   return [time, source].filter(Boolean).join(' · ');
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   Hero — typography-led, full-bleed when capture is live
-   No card wrapper. The single most important pixel real estate on screen.
-   ────────────────────────────────────────────────────────────────────── */
+function signalItemForEvent(event: DayEvent): FounderCardItem {
+  return {
+    title: signalTitleForEvent(event),
+    meta: eventMeta(event),
+    eventId: event.id,
+    day: event.day,
+  };
+}
 
-function Hero({
+function signalTitleForEvent(event: DayEvent): string {
+  const title = event.title.trim();
+  if (!isLowSignalText(title)) return title;
+  const context = cleanSignalContext(event.context_md);
+  if (context) return context;
+  return event.source_app || dayEventSourceShortLabel(event.source);
+}
+
+function isRelevantSignalEvent(event: DayEvent): boolean {
+  if (event.title === '__merged__') return false;
+  if (!isLowSignalText(event.title)) return true;
+  return cleanSignalContext(event.context_md).length > 0;
+}
+
+function cleanSignalContext(value?: string | null): string {
+  const cleaned = stripMarkdown(value).trim();
+  if (isLowSignalText(cleaned)) return '';
+  if (/^visible in .+ accessibility text\.?$/i.test(cleaned)) return '';
+  return cleaned;
+}
+
+function isLowSignalText(value?: string | null): boolean {
+  const cleaned = stripMarkdown(value).trim();
+  if (!cleaned) return true;
+  const lower = cleaned.toLowerCase();
+  return (
+    lower === 'n/a' ||
+    lower === 'na' ||
+    lower === 'none' ||
+    lower === 'unknown' ||
+    lower === 'untitled' ||
+    lower === '__merged__' ||
+    /^no (summary|context|title) available/.test(lower)
+  );
+}
+
+type TodayHomeProps = {
+  overview: RuntimeOverview;
+  captureLive: boolean;
+  capturePaused: boolean;
+  running: boolean;
+  journal: JournalDay | null;
+  loading: boolean;
+  events: DayEvent[];
+  meetings: Meeting[];
+  onStart: () => Promise<void>;
+  onStop: () => Promise<void>;
+  onPause: () => Promise<void>;
+  onResume: () => Promise<void>;
+  onSearch: (query: string) => void;
+  onGoMeetings: (target?: FounderAgendaTarget | null) => void;
+};
+
+function TodayHome({
   overview,
   captureLive,
   capturePaused,
   running,
   journal,
   loading,
+  events,
+  meetings,
+  onStart,
+  onStop,
+  onPause,
+  onResume,
+  onSearch,
+  onGoMeetings,
+}: TodayHomeProps) {
+  const founderCards = React.useMemo(
+    () => buildFounderCards(journal, events, meetings),
+    [journal, events, meetings],
+  );
+  const briefs = React.useMemo(
+    () => buildTimelyBriefs(meetings, founderCards),
+    [meetings, founderCards],
+  );
+  const timeline = React.useMemo(
+    () => buildTimelineItems(journal, events),
+    [journal, events],
+  );
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="flex min-w-0 flex-col gap-4">
+        <QuickSearchPanel onSearch={onSearch} />
+
+        <TimelyBriefsPanel
+          briefs={briefs}
+          onOpenItem={(item) =>
+            item.eventId && item.day ? onGoMeetings({ eventId: item.eventId, day: item.day }) : null
+          }
+        />
+
+        <ActivityTimeline
+          items={timeline}
+          loading={loading}
+          onOpenEvent={(event) => onGoMeetings({ eventId: event.id, day: event.day })}
+        />
+      </div>
+
+      <aside className="flex min-w-0 flex-col gap-4">
+        <CapturePanel
+          overview={overview}
+          captureLive={captureLive}
+          capturePaused={capturePaused}
+          running={running}
+          journal={journal}
+          onStart={onStart}
+          onStop={onStop}
+          onPause={onPause}
+          onResume={onResume}
+        />
+        <MemorySnapshot overview={overview} journal={journal} loading={loading} />
+      </aside>
+    </section>
+  );
+}
+
+function QuickSearchPanel({ onSearch }: { onSearch: (query: string) => void }) {
+  const [query, setQuery] = React.useState('');
+  const suggestions = [
+    'what changed today',
+    'open loops today',
+    'meetings today',
+    'what was I doing this morning',
+  ];
+
+  function submit(value = query) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    onSearch(trimmed);
+  }
+
+  return (
+    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+      <form
+        className="flex flex-col gap-3 sm:flex-row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submit();
+        }}
+      >
+        <div className="relative min-w-0 flex-1">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search memory..."
+            className="h-11 rounded-lg pl-9 text-base"
+          />
+        </div>
+        <Button type="submit" className="h-11 sm:w-28">
+          <SearchIcon />
+          Search
+        </Button>
+      </form>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {suggestions.map((suggestion) => (
+          <button
+            key={suggestion}
+            type="button"
+            onClick={() => submit(suggestion)}
+            className="rounded-md border bg-background/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/35 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type TimelyBriefItem = {
+  id: string;
+  title: string;
+  body: string;
+  meta: string;
+  icon: React.ComponentType<{ className?: string }>;
+  accent: string;
+  eventId?: string;
+  day?: string;
+};
+
+function TimelyBriefsPanel({
+  briefs,
+  onOpenItem,
+}: {
+  briefs: TimelyBriefItem[];
+  onOpenItem: (item: TimelyBriefItem) => void;
+}) {
+  if (briefs.length === 0) return null;
+
+  return (
+    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Insights</h3>
+          <p className="text-xs text-muted-foreground">Actionable context that is not already on the timeline.</p>
+        </div>
+        <Sparkles className="size-4 text-primary" />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {briefs.map((brief) => {
+          const Icon = brief.icon;
+          const clickable = Boolean(brief.eventId && brief.day);
+          return (
+            <button
+              key={brief.id}
+              type="button"
+              onClick={() => clickable && onOpenItem(brief)}
+              className={cn(
+                'min-w-0 rounded-lg border bg-background/55 p-3 text-left transition-colors',
+                clickable
+                  ? 'hover:border-primary/35 hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
+                  : 'cursor-default',
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  className={cn(
+                    'grid size-8 shrink-0 place-items-center rounded-md bg-muted',
+                    brief.accent,
+                  )}
+                >
+                  <Icon className="size-4" />
+                </span>
+                <div className="min-w-0">
+                  <div className="line-clamp-1 text-sm font-medium">{brief.title}</div>
+                  <p className="mt-1 line-clamp-2 text-sm leading-snug text-muted-foreground">
+                    {brief.body}
+                  </p>
+                  <div className="mt-2 truncate text-[11px] text-muted-foreground">
+                    {brief.meta}
+                  </div>
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function CapturePanel({
+  overview,
+  captureLive,
+  capturePaused,
+  running,
+  journal,
   onStart,
   onStop,
   onPause,
@@ -639,153 +763,446 @@ function Hero({
   capturePaused: boolean;
   running: boolean;
   journal: JournalDay | null;
-  loading: boolean;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onPause: () => Promise<void>;
   onResume: () => Promise<void>;
 }) {
-  const events = overview.capture.eventsToday;
-  const eventsLastHour = overview.capture.eventsLastHour;
   const activeMinutes = totalActiveMinutes(journal?.sessions ?? []);
-
-  let eyebrowLabel = 'Idle';
-  let title = 'Ready when you are';
-  let subtitle = 'Hit Start when you want me to begin remembering.';
+  let status = 'Ready';
   let tone: 'live' | 'paused' | 'idle' = 'idle';
-
   if (captureLive) {
-    eyebrowLabel = 'Live · Capturing';
-    title = 'I’m remembering for you.';
-    subtitle = 'Everything stays on this device.';
+    status = 'Live';
     tone = 'live';
   } else if (capturePaused) {
-    eyebrowLabel = 'Paused';
-    title = 'Capture is paused.';
-    subtitle = 'Resume whenever you’re ready.';
+    status = 'Paused';
     tone = 'paused';
-  } else if (running) {
-    eyebrowLabel = 'Almost there';
-    title = 'Press Start to begin.';
-    subtitle = 'The runtime is up; capture is waiting on your go-ahead.';
+  } else if (!running) {
+    status = 'Stopped';
   }
 
   return (
-    <section
-      className={cn(
-        'relative overflow-hidden rounded-2xl border bg-card/40 backdrop-blur-md',
-        tone === 'live' && 'border-primary/30 shadow-glow',
-        tone === 'paused' && 'border-warning/30',
-      )}
-    >
-      {/* Decorative gradient wash. Loud when live, subtle when paused, off when idle. */}
-      <div
-        aria-hidden
-        className={cn(
-          'pointer-events-none absolute inset-0 transition-opacity duration-700',
-          tone === 'live'
-            ? 'opacity-100 bg-gradient-hero-live'
-            : 'opacity-0',
-        )}
-      />
-      <div
-        aria-hidden
-        className={cn(
-          'pointer-events-none absolute inset-0 transition-opacity duration-700',
-          tone === 'paused' ? 'opacity-100' : 'opacity-0',
-        )}
-        style={{
-          background:
-            'radial-gradient(ellipse 700px 350px at 110% -10%, oklch(0.74 0.17 65 / 0.16) 0%, transparent 60%)',
-        }}
-      />
-
-      <div className="relative px-6 sm:px-9 pt-7 pb-7">
-        {/* Top row: eyebrow + actions */}
-        <div className="flex flex-wrap items-start justify-between gap-4 mb-7">
-          <div className="flex items-center gap-2">
-            <StatusBadge tone={tone}>{eyebrowLabel}</StatusBadge>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {!running && (
-              <Button size="lg" onClick={() => void onStart()} className="btn-brand">
-                <Play /> Start capturing
-              </Button>
-            )}
-            {running && captureLive && (
-              <Button size="lg" variant="secondary" onClick={() => void onPause()}>
-                <Pause /> Pause
-              </Button>
-            )}
-            {running && capturePaused && (
-              <Button size="lg" onClick={() => void onResume()} className="btn-brand">
-                <Play /> Resume
-              </Button>
-            )}
-            {running && (
-              <Button variant="ghost" onClick={() => void onStop()}>
-                <CircleStop /> Stop
-              </Button>
-            )}
-          </div>
+    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <StatusBadge tone={tone}>{status}</StatusBadge>
+          <h3 className="mt-3 text-lg font-semibold">
+            {captureLive ? 'Capturing today' : capturePaused ? 'Capture paused' : 'Capture ready'}
+          </h3>
         </div>
-
-        {/* Title + subtitle. Display-grade scale. */}
-        <h2 className="text-display max-w-3xl">
-          {tone === 'live' ? (
-            <>
-              <span className="text-gradient-brand">I’m remembering</span>
-              <span className="text-foreground"> for you.</span>
-            </>
-          ) : (
-            title
+        <div className="flex items-center gap-1.5">
+          {!running && (
+            <Button size="icon" onClick={() => void onStart()} title="Start capturing">
+              <Play />
+            </Button>
           )}
-        </h2>
-        <p className="mt-3 text-base text-muted-foreground max-w-xl">
-          {subtitle}
-        </p>
-
-        {/* Massive number readout */}
-        <div className="mt-9 flex flex-wrap items-end gap-x-12 gap-y-6">
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-3">
-              <span className="text-display tabular text-foreground">
-                {formatNumber(events)}
-              </span>
-              <span className="text-base text-muted-foreground">moments today</span>
-            </div>
-            <ActivityBars
-              frames={journal?.frames ?? []}
-              loading={loading}
-              accent={tone === 'live'}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-3">
-            <MiniStat
-              label="Last hour"
-              value={
-                typeof eventsLastHour === 'number'
-                  ? formatNumber(eventsLastHour)
-                  : '—'
-              }
-              hint="moments"
-            />
-            <MiniStat
-              label="Active"
-              value={formatActiveMinutes(activeMinutes)}
-              hint={journal?.sessions.length ? `${journal.sessions.length} session${journal.sessions.length === 1 ? '' : 's'}` : 'so far'}
-            />
-            <MiniStat
-              label="All time"
-              value={formatNumber(overview.storage.totalEvents)}
-              hint={formatBytes(overview.storage.totalAssetBytes)}
-            />
-          </div>
+          {running && captureLive && (
+            <Button size="icon" variant="secondary" onClick={() => void onPause()} title="Pause">
+              <Pause />
+            </Button>
+          )}
+          {running && capturePaused && (
+            <Button size="icon" onClick={() => void onResume()} title="Resume">
+              <Play />
+            </Button>
+          )}
+          {running && (
+            <Button size="icon" variant="ghost" onClick={() => void onStop()} title="Stop">
+              <CircleStop />
+            </Button>
+          )}
         </div>
       </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-3">
+        <MiniStat label="Moments" value={formatNumber(overview.capture.eventsToday)} />
+        <MiniStat
+          label="Last hour"
+          value={
+            typeof overview.capture.eventsLastHour === 'number'
+              ? formatNumber(overview.capture.eventsLastHour)
+              : '-'
+          }
+        />
+        <MiniStat label="Active" value={formatActiveMinutes(activeMinutes)} />
+      </div>
+
+      <ActivityBars
+        frames={journal?.frames ?? []}
+        loading={false}
+        accent={captureLive}
+      />
     </section>
   );
+}
+
+function MemorySnapshot({
+  overview,
+  journal,
+  loading,
+}: {
+  overview: RuntimeOverview;
+  journal: JournalDay | null;
+  loading: boolean;
+}) {
+  const apps = journal ? countByApp(journal.frames).slice(0, 3) : [];
+  const total = Math.max(1, journal?.frames.length ?? overview.capture.eventsToday);
+
+  return (
+    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold">Memory snapshot</h3>
+        {overview.indexing.running ? (
+          <span className="inline-flex items-center gap-1 text-xs text-primary">
+            <Loader2 className="size-3 animate-spin" />
+            Indexing
+          </span>
+        ) : (
+          <FileText className="size-4 text-muted-foreground" />
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <BigStat value={formatNumber(overview.index.pageCount)} label="pages" />
+        <BigStat value={formatNumber(overview.storage.totalEvents)} label="memories" muted />
+      </div>
+
+      <Separator className="my-4" />
+
+      {loading && !journal ? (
+        <BarsSkeleton />
+      ) : apps.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Top apps will appear as memory builds.</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {apps.map((row, index) => (
+            <AppBar
+              key={row.app}
+              app={row.app}
+              count={row.count}
+              percent={(row.count / total) * 100}
+              rank={index}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type TimelineItem = {
+  id: string;
+  at: string;
+  title: string;
+  meta: string;
+  description?: string;
+  bucket: 'upcoming' | 'history';
+  icon: React.ComponentType<{ className?: string }>;
+  accent: string;
+  frame?: Frame;
+  event?: DayEvent;
+};
+
+function ActivityTimeline({
+  items,
+  loading,
+  onOpenEvent,
+}: {
+  items: TimelineItem[];
+  loading: boolean;
+  onOpenEvent: (event: DayEvent) => void;
+}) {
+  const detail = useFrameDetail();
+
+  return (
+    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Activity timeline</h3>
+          <p className="text-xs text-muted-foreground">Soonest upcoming, then recent captured history.</p>
+        </div>
+        <History className="size-4 text-muted-foreground" />
+      </div>
+
+      {loading && items.length === 0 ? (
+        <div className="flex flex-col gap-3">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="flex gap-3">
+              <Skeleton className="size-8 rounded-md" />
+              <div className="flex-1">
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="mt-2 h-3 w-full" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No recent or upcoming activity captured yet today.</p>
+      ) : (
+        <div className="relative flex flex-col gap-1">
+          <div className="absolute bottom-3 left-[15px] top-3 w-px bg-border" />
+          {items.map((item, index) => {
+            const Icon = item.icon;
+            const clickable = Boolean(item.frame || item.event);
+            const showLabel = index === 0 || items[index - 1]?.bucket !== item.bucket;
+            return (
+              <React.Fragment key={item.id}>
+                {showLabel ? (
+                  <div className="relative z-10 ml-11 mt-2 text-[10px] font-medium uppercase text-muted-foreground first:mt-0">
+                    {item.bucket === 'upcoming' ? 'Up next' : 'Recent history'}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (item.frame) detail.open(item.frame);
+                    else if (item.event) onOpenEvent(item.event);
+                  }}
+                  className={cn(
+                    'relative flex min-w-0 gap-3 rounded-md px-1 py-2 text-left transition-colors',
+                    clickable
+                      ? 'hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40'
+                      : 'cursor-default',
+                  )}
+                >
+                  <span className={cn('z-10 grid size-8 shrink-0 place-items-center rounded-md bg-muted', item.accent)}>
+                    <Icon className="size-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center justify-between gap-3">
+                      <span className="line-clamp-1 text-sm font-medium">{item.title}</span>
+                      <span className="shrink-0 text-[11px] tabular text-muted-foreground">
+                        {formatLocalTime(item.at)}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                      {item.meta}
+                    </span>
+                    {item.description ? (
+                      <span className="mt-1 block line-clamp-2 text-sm leading-snug text-muted-foreground">
+                        {item.description}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              </React.Fragment>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function buildTimelyBriefs(
+  meetings: Meeting[],
+  cards: FounderCard[],
+): TimelyBriefItem[] {
+  const byTitle = new Map(cards.map((card) => [card.title, card]));
+  const replies = byTitle.get('Replies');
+  const promises = byTitle.get('Promises');
+  const followUp = byTitle.get('Follow up');
+  const readyMeetings = meetings.filter((meeting) => meeting.summary_status === 'ready');
+  const briefs: TimelyBriefItem[] = [];
+
+  if (readyMeetings.length > 0) {
+    const latest = readyMeetings
+      .slice()
+      .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))[0]!;
+    briefs.push({
+      id: `meeting-${latest.id}`,
+      title: 'Meeting summary ready',
+      body: latest.summary_json?.tldr || latest.title || platformLabel(latest.platform),
+      meta: `${formatLocalTime(latest.started_at)} · ${platformLabel(latest.platform)}`,
+      icon: MessageSquare,
+      accent: 'text-blue-500 dark:text-blue-300',
+    });
+  }
+
+  if (promises && promises.items.length > 0) {
+    briefs.push({
+      id: 'promises',
+      title: `${promises.items.length} promise${promises.items.length === 1 ? '' : 's'} to track`,
+      body: promises.items[0]?.title ?? 'Meeting action items and task captures are ready.',
+      meta: promises.items[0]?.meta ?? 'Tasks and summaries',
+      icon: CheckSquare,
+      accent: 'text-emerald-500 dark:text-emerald-300',
+      eventId: promises.items[0]?.eventId,
+      day: promises.items[0]?.day,
+    });
+  }
+
+  if (followUp && followUp.items.length > 0) {
+    briefs.push({
+      id: 'follow-up',
+      title: `${followUp.items.length} follow-up${followUp.items.length === 1 ? '' : 's'} surfaced`,
+      body: followUp.items[0]?.title ?? 'Open questions and next calendar items are ready.',
+      meta: followUp.items[0]?.meta ?? 'Open loops',
+      icon: AlertCircle,
+      accent: 'text-amber-500 dark:text-amber-300',
+      eventId: followUp.items[0]?.eventId,
+      day: followUp.items[0]?.day,
+    });
+  }
+
+  if (replies && replies.items.length > 0) {
+    briefs.push({
+      id: 'replies',
+      title: `${replies.items.length} reply signal${replies.items.length === 1 ? '' : 's'}`,
+      body: replies.items[0]?.title ?? 'Inbox and chat activity surfaced from capture.',
+      meta: replies.items[0]?.meta ?? 'Communication',
+      icon: Inbox,
+      accent: 'text-blue-500 dark:text-blue-300',
+      eventId: replies.items[0]?.eventId,
+      day: replies.items[0]?.day,
+    });
+  }
+
+  if (briefs.length === 0) {
+    return [];
+  }
+
+  return briefs.slice(0, 4);
+}
+
+function buildTimelineItems(journal: JournalDay | null, events: DayEvent[]): TimelineItem[] {
+  const now = Date.now();
+  const upcoming: TimelineItem[] = [];
+  const history: TimelineItem[] = [];
+
+  for (const event of events) {
+    const ts = Date.parse(event.starts_at);
+    if (!Number.isFinite(ts)) continue;
+    if (!isRelevantSignalEvent(event)) continue;
+    const description = cleanSignalContext(event.context_md);
+    const bucket: TimelineItem['bucket'] = ts >= now ? 'upcoming' : 'history';
+    const item: TimelineItem = {
+      id: `event-${event.id}`,
+      at: event.starts_at,
+      title: signalTitleForEvent(event),
+      meta: [kindLabel(event.kind), eventMeta(event)].filter(Boolean).join(' · '),
+      description: description.slice(0, 180),
+      bucket,
+      icon: iconForDayEvent(event),
+      accent: accentForDayEvent(event),
+      event,
+    };
+    if (bucket === 'upcoming') upcoming.push(item);
+    else history.push(item);
+  }
+
+  for (const session of journal?.sessions ?? []) {
+    if (!session.started_at) continue;
+    const ts = Date.parse(session.started_at);
+    if (!Number.isFinite(ts) || ts > now) continue;
+    const activeMs = session.active_ms ?? 0;
+    const frameCount = session.frame_count ?? 0;
+    history.push({
+      id: `session-${session.id ?? session.started_at}`,
+      at: session.started_at,
+      title: focusLabel(session),
+      meta: `${formatActiveMinutes(Math.round(activeMs / 60000))} · ${formatNumber(frameCount)} moment${frameCount === 1 ? '' : 's'}`,
+      description: session.primary_entity_path
+        ? prettyEntityPath(session.primary_entity_path)
+        : undefined,
+      bucket: 'history',
+      icon: Clock,
+      accent: 'text-primary',
+    });
+  }
+
+  const frames = (journal?.frames ?? [])
+    .filter((frame) => frame.timestamp)
+    .slice()
+    .sort((a, b) => Date.parse(b.timestamp ?? '') - Date.parse(a.timestamp ?? ''))
+    .slice(0, TIMELINE_RECENT_LIMIT);
+  for (const frame of frames) {
+    if (!frame.timestamp) continue;
+    const ts = Date.parse(frame.timestamp);
+    if (!Number.isFinite(ts) || ts > now) continue;
+    history.push({
+      id: `frame-${frame.id ?? frame.timestamp}`,
+      at: frame.timestamp,
+      title: frame.window_title || frame.entity_path || frame.url || frame.app || 'Captured moment',
+      meta: [frame.app, frame.entity_kind ? kindLabel(frame.entity_kind) : null]
+        .filter(Boolean)
+        .join(' · '),
+      bucket: 'history',
+      icon: frame.text_source === 'audio' || frame.app === 'Audio' ? Mic : FileText,
+      accent: 'text-muted-foreground',
+      frame,
+    });
+  }
+
+  const soonestUpcoming = upcoming
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+    .slice(0, TIMELINE_UPCOMING_LIMIT);
+  const recentHistory = history
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, TIMELINE_RECENT_LIMIT);
+
+  return [...soonestUpcoming, ...recentHistory];
+}
+
+function stripMarkdown(value?: string | null): string {
+  if (!value) return '';
+  return value
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[#>_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function kindLabel(kind: string): string {
+  return kind
+    .split(/[_-]/g)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function iconForDayEvent(event: DayEvent): React.ComponentType<{ className?: string }> {
+  if (event.kind === 'meeting' || event.kind === 'calendar') return Calendar;
+  if (event.kind === 'communication') return MessageSquare;
+  if (event.kind === 'task') return CheckSquare;
+  return Zap;
+}
+
+function accentForDayEvent(event: DayEvent): string {
+  if (event.kind === 'meeting' || event.kind === 'calendar') {
+    return 'text-amber-500 dark:text-amber-300';
+  }
+  if (event.kind === 'communication') return 'text-blue-500 dark:text-blue-300';
+  if (event.kind === 'task') return 'text-emerald-500 dark:text-emerald-300';
+  return 'text-primary';
+}
+
+function focusLabel(session: ActivitySession): string {
+  if (session.primary_entity_path) return prettyEntityPath(session.primary_entity_path);
+  if (session.primary_app) return session.primary_app;
+  return 'Focused work session';
+}
+
+function prettyEntityPath(path: string): string {
+  const tail = path.split('/').filter(Boolean).pop() ?? path;
+  return tail
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function platformLabel(platform: Meeting['platform']): string {
+  const labels: Record<Meeting['platform'], string> = {
+    zoom: 'Zoom',
+    meet: 'Google Meet',
+    teams: 'Teams',
+    webex: 'Webex',
+    whereby: 'Whereby',
+    around: 'Around',
+    other: 'Meeting',
+  };
+  return labels[platform] ?? 'Meeting';
 }
 
 function StatusBadge({
@@ -839,23 +1256,6 @@ function MiniStat({
       <div className="mt-1 flex items-baseline gap-1.5">
         <span className="text-2xl font-semibold tabular tracking-tight">{value}</span>
         {hint && <span className="text-xs text-muted-foreground truncate">{hint}</span>}
-      </div>
-    </div>
-  );
-}
-
-function HeroSkeleton() {
-  return (
-    <div className="rounded-2xl border bg-card/40 px-9 pt-7 pb-7 backdrop-blur-md">
-      <Skeleton className="h-5 w-24 rounded-full" />
-      <Skeleton className="mt-7 h-12 w-[60%]" />
-      <Skeleton className="mt-3 h-4 w-72" />
-      <div className="mt-9 flex gap-12">
-        <div>
-          <Skeleton className="h-12 w-40" />
-          <Skeleton className="mt-3 h-3 w-full max-w-xs" />
-        </div>
-        <Skeleton className="h-12 w-72" />
       </div>
     </div>
   );
@@ -958,196 +1358,6 @@ function formatActiveMinutes(minutes: number): string {
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
-
-/* ──────────────────────────────────────────────────────────────────────────
-   FilmStrip
-   Horizontal-scroll strip of large recent thumbnails. Designed to read like
-   a creative tool, not an admin panel.
-   ────────────────────────────────────────────────────────────────────── */
-
-function FilmStrip({ frames }: { frames: Frame[] }) {
-  return (
-    <section>
-      <div className="flex items-center gap-2 mb-3">
-        <div className="flex items-center gap-2">
-          <span className="relative grid place-items-center size-5 rounded-full bg-success/15 text-success">
-            <Radio className="size-3" />
-            <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
-          </span>
-          <h3 className="text-sm font-semibold">Just captured</h3>
-          <span className="text-xs text-muted-foreground">— click any moment</span>
-        </div>
-      </div>
-
-      <div className="-mx-1 flex gap-3 overflow-x-auto pb-2 px-1 scrollbar-none scroll-smooth">
-        {frames.map((frame, i) => (
-          <FilmFrame key={frame.id ?? i} frame={frame} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function FilmFrame({ frame }: { frame: Frame }) {
-  const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
-  const detail = useFrameDetail();
-  const isAudio = frame.text_source === 'audio' || frame.app === 'Audio';
-
-  React.useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      if (!frame.asset_path) return;
-      const cached = thumbnailCache.get(frame.asset_path);
-      if (cached) {
-        setThumbUrl(cached);
-        return;
-      }
-      try {
-        const url = await resolveAssetUrl(frame.asset_path);
-        if (cancelled) return;
-        cacheThumbnail(frame.asset_path, url);
-        setThumbUrl(url);
-      } catch {
-        setThumbUrl(null);
-      }
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [frame.asset_path]);
-
-  return (
-    <button
-      type="button"
-      onClick={() => detail.open(frame)}
-      className="group relative shrink-0 w-[260px] aspect-video rounded-xl overflow-hidden border border-border/50 bg-muted/30 shadow-card transition-all hover:scale-[1.015] hover:shadow-raised hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-    >
-      {thumbUrl ? (
-        <img
-          src={thumbUrl}
-          alt=""
-          className="size-full object-cover transition-transform group-hover:scale-[1.04]"
-        />
-      ) : (
-        <div className="size-full grid place-items-center text-muted-foreground">
-          {isAudio ? <Mic className="size-6" /> : <ImageOff className="size-6" />}
-        </div>
-      )}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/30 to-transparent px-3 py-2 text-white">
-        <div className="flex items-center justify-between text-[11px] font-medium">
-          <span className="font-mono opacity-80">
-            {formatLocalTime(frame.timestamp) || '—'}
-          </span>
-          <span className="truncate ml-2 opacity-95">{frame.app || ''}</span>
-        </div>
-        <div className="mt-0.5 truncate text-[12px] opacity-90">
-          {frame.window_title || frame.entity_path || frame.url || ''}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-/* ──────────────────────────────────────────────────────────────────────────
-   BentoGrid — 3 stat tiles, each with its own dominant visual
-   ────────────────────────────────────────────────────────────────────── */
-
-function BentoGrid({
-  overview,
-  journal,
-  loading,
-}: {
-  overview: RuntimeOverview;
-  journal: JournalDay | null;
-  loading: boolean;
-}) {
-  const apps = journal ? countByApp(journal.frames) : [];
-  const total = journal?.frames.length ?? overview.capture.eventsToday;
-  const indexing = overview.indexing.running;
-
-  return (
-    <section className="grid gap-4 lg:grid-cols-5">
-      {/* Top apps — wide tile, dominant visual */}
-      <Card className="lg:col-span-3">
-        <CardContent className="flex flex-col gap-4 py-1">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Top apps today
-            </h3>
-            {apps.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                {apps.length} app{apps.length === 1 ? '' : 's'}
-              </span>
-            )}
-          </div>
-          {loading && !journal ? (
-            <BarsSkeleton />
-          ) : apps.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-6">
-              No app usage captured yet today.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {apps.slice(0, TOP_APPS).map((row, i) => (
-                <AppBar
-                  key={row.app}
-                  app={row.app}
-                  count={row.count}
-                  percent={(row.count / Math.max(1, total)) * 100}
-                  rank={i}
-                />
-              ))}
-              {apps.length > TOP_APPS && (
-                <div className="text-xs text-muted-foreground pt-1">
-                  +{apps.length - TOP_APPS} more apps
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Memory — narrow tile, big number on top */}
-      <Card className="lg:col-span-2">
-        <CardContent className="flex flex-col gap-4 py-1">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Knowledge built
-            </h3>
-            {indexing && (
-              <span className="inline-flex items-center gap-1 text-[10px] font-medium text-primary">
-                <Loader2 className="size-3 animate-spin" />
-                Indexing
-              </span>
-            )}
-          </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
-            <BigStat
-              value={formatNumber(overview.index.pageCount)}
-              label="pages"
-            />
-            <BigStat
-              value={formatNumber(overview.index.eventsCovered)}
-              label="grouped"
-              muted
-            />
-            <BigStat
-              value={formatBytes(overview.storage.totalAssetBytes)}
-              label="on disk"
-              muted
-            />
-            <BigStat
-              value={formatNumber(overview.storage.totalEvents)}
-              label="memories"
-              muted
-            />
-          </div>
-        </CardContent>
-      </Card>
-    </section>
-  );
 }
 
 function BigStat({

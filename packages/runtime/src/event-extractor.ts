@@ -141,6 +141,8 @@ Write a SINGLE 1-3 sentence English description of what the event is about, grou
 
 Return PLAIN TEXT, no JSON, no markdown.`;
 
+const LATEST_CALENDAR_CAPTURE_WINDOW_MS = 1000;
+
 interface SourceBucket {
   source: DayEventSource;
   app: string;
@@ -708,18 +710,22 @@ export class EventExtractor {
     captureDay: string,
     bucket: SourceBucket,
   ): Promise<number> {
+    const extractionBucket =
+      bucket.source === 'calendar_screen'
+        ? latestCalendarCaptureBucket(bucket)
+        : bucket;
     const useVision =
       this.visionAttachments > 0 &&
-      bucket.source === 'calendar_screen' &&
+      extractionBucket.source === 'calendar_screen' &&
       this.model.getModelInfo().supportsVision === true;
 
     const visionImages = useVision
-      ? await this.loadVisionImages(bucket)
+      ? await this.loadVisionImages(extractionBucket)
       : [];
 
     const prompt = buildExtractionPrompt(
       captureDay,
-      bucket,
+      extractionBucket,
       this.maxPromptChars,
       visionImages.length > 0,
     );
@@ -744,13 +750,13 @@ export class EventExtractor {
               responseFormat: 'json',
             });
       parsed = safeParseExtraction(raw);
-      canReplaceCalendarView = bucket.source === 'calendar_screen' && parsed !== null;
+      canReplaceCalendarView = extractionBucket.source === 'calendar_screen' && parsed !== null;
     } catch (err) {
-      this.logger.debug(`llm extraction failed (${bucket.source} ${captureDay})`, {
+      this.logger.debug(`llm extraction failed (${extractionBucket.source} ${captureDay})`, {
         err: String(err),
       });
-      if (bucket.source === 'calendar_screen') {
-        parsed = { events: deterministicCalendarCandidates(captureDay, bucket) };
+      if (extractionBucket.source === 'calendar_screen') {
+        parsed = { events: deterministicCalendarCandidates(captureDay, extractionBucket) };
         usedDeterministicFallback = parsed.events.length > 0;
         canReplaceCalendarView = usedDeterministicFallback;
       } else {
@@ -760,19 +766,19 @@ export class EventExtractor {
 
     if (!parsed) {
       this.logger.debug(
-        `llm returned unparseable response (${bucket.source} ${captureDay}); ` +
+        `llm returned unparseable response (${extractionBucket.source} ${captureDay}); ` +
           `preview="${raw.slice(0, 160).replace(/\s+/g, ' ')}"`,
       );
-      if (bucket.source === 'calendar_screen') {
-        parsed = { events: deterministicCalendarCandidates(captureDay, bucket) };
+      if (extractionBucket.source === 'calendar_screen') {
+        parsed = { events: deterministicCalendarCandidates(captureDay, extractionBucket) };
         usedDeterministicFallback = parsed.events.length > 0;
         canReplaceCalendarView = usedDeterministicFallback;
       }
       if (!parsed) return 0;
     }
 
-    if (bucket.source === 'calendar_screen' && parsed.events.length === 0) {
-      const fallback = deterministicCalendarCandidates(captureDay, bucket);
+    if (extractionBucket.source === 'calendar_screen' && parsed.events.length === 0) {
+      const fallback = deterministicCalendarCandidates(captureDay, extractionBucket);
       if (fallback.length > 0) {
         parsed = { events: fallback };
         usedDeterministicFallback = true;
@@ -781,12 +787,12 @@ export class EventExtractor {
     }
 
     if (
-      bucket.source === 'calendar_screen' &&
+      extractionBucket.source === 'calendar_screen' &&
       parsed.events.length > 0 &&
       !usedDeterministicFallback
     ) {
       const grounded = parsed.events.filter((candidate) =>
-        calendarCandidateIsGrounded(candidate, bucket),
+        calendarCandidateIsGrounded(candidate, extractionBucket),
       );
       if (grounded.length !== parsed.events.length) {
         this.logger.debug(
@@ -796,27 +802,29 @@ export class EventExtractor {
       if (grounded.length > 0) {
         parsed = { events: grounded };
       } else {
-        const fallback = deterministicCalendarCandidates(captureDay, bucket);
+        const fallback = deterministicCalendarCandidates(captureDay, extractionBucket);
         parsed = { events: fallback };
         usedDeterministicFallback = fallback.length > 0;
         canReplaceCalendarView = fallback.length > 0;
       }
     }
 
-    if (bucket.source === 'calendar_screen' && canReplaceCalendarView) {
+    const candidatesToPersist = parsed.events.slice(0, this.maxEventsPerResponse);
+
+    if (extractionBucket.source === 'calendar_screen' && canReplaceCalendarView) {
       await this.replaceCalendarDaysWithCandidates(
         captureDay,
-        parsed.events.slice(0, this.maxEventsPerResponse),
+        extractionBucket,
+        candidatesToPersist,
       );
     }
 
-    const evidenceIds = bucket.frames.map((f) => f.id);
+    const evidenceIds = extractionBucket.frames.map((f) => f.id);
     const now = new Date().toISOString();
     let count = 0;
     let droppedInvalidDate = 0;
 
-    for (let i = 0; i < parsed.events.length && i < this.maxEventsPerResponse; i++) {
-      const candidate = parsed.events[i];
+    for (const candidate of candidatesToPersist) {
       const title = (candidate?.title ?? '').trim();
       if (!title) continue;
 
@@ -858,9 +866,9 @@ export class EventExtractor {
         starts_at: startsAt,
         ends_at: endsAt,
         kind,
-        source: bucket.source,
+        source: extractionBucket.source,
         title: title.slice(0, 200),
-        source_app: bucket.app,
+        source_app: extractionBucket.app,
         context_md: (candidate?.context ?? '').trim().slice(0, 1200) || null,
         attendees: Array.isArray(candidate?.attendees)
           ? candidate.attendees.filter((s): s is string => typeof s === 'string').slice(0, 20)
@@ -883,10 +891,10 @@ export class EventExtractor {
       }
     }
 
-    if (parsed.events.length > 0) {
+    if (candidatesToPersist.length > 0) {
       this.logger.info(
-        `extracted ${count}/${parsed.events.length} events from ${bucket.source} ` +
-          `${captureDay} (${bucket.frames.length} frames${useVision ? `, vision×${visionImages.length}` : ''})` +
+        `extracted ${count}/${candidatesToPersist.length} events from ${extractionBucket.source} ` +
+          `${captureDay} (${extractionBucket.frames.length}/${bucket.frames.length} frames${useVision ? `, vision×${visionImages.length}` : ''})` +
           (usedDeterministicFallback ? ', deterministic fallback' : '') +
           (droppedInvalidDate > 0 ? ` — dropped ${droppedInvalidDate} invalid-date` : ''),
       );
@@ -896,27 +904,20 @@ export class EventExtractor {
 
   private async replaceCalendarDaysWithCandidates(
     captureDay: string,
+    bucket: SourceBucket,
     candidates: ExtractionCandidate[],
   ): Promise<void> {
-    const candidateCounts = candidateCalendarDayCounts(captureDay, candidates);
-    if (candidateCounts.size === 0) return;
+    const visibleDays = visibleCalendarDays(captureDay, bucket, candidates);
+    if (visibleDays.size === 0) return;
 
-    for (const [day, candidateCount] of candidateCounts) {
+    const candidateCounts = candidateCalendarDayCounts(captureDay, candidates);
+
+    for (const day of visibleDays) {
       try {
-        const existing = await this.storage
-          .listDayEvents({ day, kind: 'calendar', order: 'chronological', limit: 5000 })
-          .catch(() => [] as DayEvent[]);
-        const existingCalendarRows = existing.filter(
-          (event) => event.source === 'calendar_screen',
-        );
-        if (existingCalendarRows.length > candidateCount) {
-          this.logger.debug(
-            `skipping destructive calendar replace for ${day}: ` +
-              `${candidateCount} fresh candidate(s), ${existingCalendarRows.length} existing row(s)`,
-          );
-          continue;
-        }
         await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen');
+        this.logger.debug(
+          `replaced calendar events for ${day}: ${candidateCounts.get(day) ?? 0} fresh candidate(s)`,
+        );
       } catch (err) {
         this.logger.debug(`failed to replace calendar events for ${day}`, {
           err: String(err),
@@ -1096,6 +1097,32 @@ export class EventExtractor {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function latestCalendarCaptureBucket(bucket: SourceBucket): SourceBucket {
+  if (bucket.frames.length <= 1) return bucket;
+  const frames = bucket.frames
+    .slice()
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  const latest = frames[frames.length - 1];
+  if (!latest) return bucket;
+
+  const latestMs = Date.parse(latest.timestamp);
+  const latestFrames = Number.isFinite(latestMs)
+    ? frames.filter((frame) => {
+        const frameMs = Date.parse(frame.timestamp);
+        return (
+          frame.id === latest.id ||
+          (Number.isFinite(frameMs) &&
+            Math.abs(frameMs - latestMs) <= LATEST_CALENDAR_CAPTURE_WINDOW_MS)
+        );
+      })
+    : [latest];
+
+  return {
+    ...bucket,
+    frames: latestFrames.length > 0 ? latestFrames : [latest],
+  };
+}
 
 function recentDays(lookback: number): string[] {
   const days: string[] = [];
