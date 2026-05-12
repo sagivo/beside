@@ -80,7 +80,7 @@ const FRAMES = [
     app: 'Chrome',
     url: 'https://calendar.google.com/calendar/u/0/r',
     window_title: 'Google Calendar — Today',
-    text: 'Today\n9:00 – 9:30 AM\nStandup with Maya\n11:30 AM – 12:00 PM\nInvestor Sync — Acme\n2:00 PM\nCofounderOS deep dive',
+    text: 'Today\n9:00 – 9:30 AM\nStandup with Maya\n11:30 AM – 12:00 PM\nInvestor Sync — Acme\n2:00 PM\nBeside deep dive',
   }),
   frame({
     id: 'f_slack_1',
@@ -106,8 +106,8 @@ const FRAMES = [
     id: 'f_pr_1',
     timestamp: isoAt(13, 20),
     app: 'Chrome',
-    url: 'https://github.com/cofounderos/core/pull/123',
-    window_title: 'Pull Request #123 · cofounderos/core — Review requested',
+    url: 'https://github.com/beside/core/pull/123',
+    window_title: 'Pull Request #123 · beside/core — Review requested',
     text: 'Review requested · sagiv wants to merge 3 commits into main. @you',
   }),
   frame({
@@ -121,10 +121,10 @@ const FRAMES = [
     id: 'f_cursor_1',
     timestamp: isoAt(16, 0),
     app: 'Cursor',
-    window_title: 'cofounderos — index.ts',
-    entity_path: 'projects/cofounderos',
+    window_title: 'beside — index.ts',
+    entity_path: 'projects/beside',
     entity_kind: 'project',
-    text: 'cofounderos repo, working on agent harness',
+    text: 'beside repo, working on agent harness',
   }),
   // --- edge-case fixtures ---------------------------------------------
   // Garbled OCR (e-mail badge / sidebar artefact). Should fall into the
@@ -143,7 +143,7 @@ const FRAMES = [
     app: 'Chrome',
     url: 'https://porkbun.com/checkout',
     window_title: 'Porkbun — Cart',
-    text: 'Top picks: 1. cofounderos.ai (favorite) 2. cofounderos.dev 3. cofounderos.app. liked .ai best.',
+    text: 'Top picks: 1. beside.ai (favorite) 2. beside.dev 3. beside.app. liked .ai best.',
   }),
   // Ambiguous person: another "Tanya" in a group DM, plus Tanya's
   // legitimate 1:1 DM is already in f_slack_tanya.
@@ -175,16 +175,16 @@ function session(id, sH, sM, eH, eM, app, entity) {
   };
 }
 const SESSIONS = [
-  session('s1', 9, 0, 10, 30, 'Cursor', 'projects/cofounderos'),
+  session('s1', 9, 0, 10, 30, 'Cursor', 'projects/beside'),
   session('s2', 10, 30, 11, 30, 'Slack', 'channels/sdk-warn-alerts-prod'),
-  session('s3', 13, 0, 14, 30, 'Chrome', 'projects/cofounderos'),
-  session('s4', 15, 0, 16, 30, 'Cursor', 'projects/cofounderos'),
+  session('s3', 13, 0, 14, 30, 'Chrome', 'projects/beside'),
+  session('s4', 15, 0, 16, 30, 'Cursor', 'projects/beside'),
 ];
 
 const ENTITIES = [
   {
-    path: 'projects/cofounderos',
-    title: 'cofounderos',
+    path: 'projects/beside',
+    title: 'beside',
     kind: 'project',
     lastSeen: isoAt(16, 30),
     frameCount: 24,
@@ -472,14 +472,14 @@ const SCENARIOS = [
     name: 'recall_preference_domains',
     message: 'what was my favorite domain pick?',
     intent: 'recall_preference',
-    mustContain: ['cofounderos.ai'],
+    mustContain: ['beside.ai'],
     canary: ['paris', 'tanya'],
   },
   {
-    name: 'project_status_cofounderos',
-    message: 'how is cofounderos going?',
+    name: 'project_status_beside',
+    message: 'how is beside going?',
     intent: 'project_status',
-    mustContain: ['cofounderos'],
+    mustContain: ['beside'],
     canary: ['paris', 'whatsapp'],
   },
   {
@@ -533,9 +533,9 @@ const SCENARIOS = [
     // Time-audit on a specific entity. Plan should drill into that
     // entity, not just print top-app totals.
     name: 'time_audit_specific_entity',
-    message: 'how much time did i spend on cofounderos today?',
+    message: 'how much time did i spend on beside today?',
     intent: 'time_audit',
-    mustContain: ['cofounderos'],
+    mustContain: ['beside'],
     canary: ['paris', 'tanya'],
   },
   {

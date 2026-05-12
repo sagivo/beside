@@ -51,7 +51,7 @@ const FRAMES = [
     app: 'Chrome',
     url: 'https://calendar.google.com/calendar/u/0/r',
     window_title: 'Google Calendar — Today',
-    text: 'Today\n9:00 – 9:30 AM\nStandup with Maya\n11:30 AM – 12:00 PM\nInvestor Sync — Acme\n2:00 PM\nCofounderOS deep dive',
+    text: 'Today\n9:00 – 9:30 AM\nStandup with Maya\n11:30 AM – 12:00 PM\nInvestor Sync — Acme\n2:00 PM\nBeside deep dive',
   }),
   frame({
     id: 'f_slack_1',
@@ -77,8 +77,8 @@ const FRAMES = [
     id: 'f_pr_1',
     timestamp: isoAt(13, 20),
     app: 'Chrome',
-    url: 'https://github.com/cofounderos/core/pull/123',
-    window_title: 'Pull Request #123 · cofounderos/core — Review requested',
+    url: 'https://github.com/beside/core/pull/123',
+    window_title: 'Pull Request #123 · beside/core — Review requested',
     text: 'Review requested · sagiv wants to merge 3 commits into main. @you',
   }),
   frame({
@@ -92,10 +92,10 @@ const FRAMES = [
     id: 'f_cursor_1',
     timestamp: isoAt(16, 0),
     app: 'Cursor',
-    window_title: 'cofounderos — index.ts',
-    entity_path: 'projects/cofounderos',
+    window_title: 'beside — index.ts',
+    entity_path: 'projects/beside',
     entity_kind: 'project',
-    text: 'cofounderos repo, working on agent harness',
+    text: 'beside repo, working on agent harness',
   }),
 ];
 
@@ -108,7 +108,7 @@ const SESSIONS = [
     duration_ms: 90 * 60 * 1000,
     frame_count: 12,
     primary_app: 'Cursor',
-    primary_entity_path: 'projects/cofounderos',
+    primary_entity_path: 'projects/beside',
   },
   {
     id: 's2',
@@ -124,8 +124,8 @@ const SESSIONS = [
 
 const ENTITIES = [
   {
-    path: 'projects/cofounderos',
-    title: 'cofounderos',
+    path: 'projects/beside',
+    title: 'beside',
     kind: 'project',
     lastSeen: isoAt(16, 30),
     frameCount: 24,
@@ -229,7 +229,7 @@ const cases = [
   { name: 'recall_event', message: 'when did i plan paris?', route: 'tools', intent: 'recall_event' },
   { name: 'people_context', message: "what's the latest with Tanya?", route: 'tools', intent: 'people_context' },
   { name: 'time_audit', message: 'how much time today?', route: 'tools', intent: 'time_audit' },
-  { name: 'project_status', message: 'status of cofounderos?', route: 'tools', intent: 'project_status' },
+  { name: 'project_status', message: 'status of beside?', route: 'tools', intent: 'project_status' },
   { name: 'topic_deep_dive', message: "what's the latest with onboarding?", route: 'tools', intent: 'topic_deep_dive' },
   { name: 'direct', message: 'hello!', route: 'direct', intent: 'general' },
 ];

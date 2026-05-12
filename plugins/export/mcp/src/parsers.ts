@@ -1,4 +1,4 @@
-import type { Frame } from '@cofounderos/interfaces';
+import type { Frame } from '@beside/interfaces';
 
 // ---------------------------------------------------------------------------
 // Shared classification: what's a calendar / chat / code-review frame?
@@ -54,33 +54,33 @@ const CODE_REVIEW_HOSTS = new Set([
 ]);
 
 /**
- * Apps + entity paths that represent the CofounderOS dashboard itself.
- * Frames captured *of* CofounderOS rarely add signal to a user's
+ * Apps + entity paths that represent the Beside dashboard itself.
+ * Frames captured *of* Beside rarely add signal to a user's
  * memory query — instead they pollute results because the sidebar
  * shows page titles like "Conversion tracking health" that match
  * almost any prompt. Helpers in this module use these to filter out
  * "self" frames by default.
  */
-export const COFOUNDEROS_SELF_APP_NAMES = new Set([
-  'cofounderos',
-  'cofounderos-desktop',
-  'cofounderos-dev',
+export const BESIDE_SELF_APP_NAMES = new Set([
+  'beside',
+  'beside-desktop',
+  'beside-dev',
   'electron',
 ]);
 
-export const COFOUNDEROS_SELF_ENTITY_PATHS = new Set([
-  'apps/cofounderos',
+export const BESIDE_SELF_ENTITY_PATHS = new Set([
+  'apps/beside',
   'apps/electron',
 ]);
 
 export function isSelfFrame(frame: Frame): boolean {
-  if (frame.entity_path && COFOUNDEROS_SELF_ENTITY_PATHS.has(frame.entity_path)) {
+  if (frame.entity_path && BESIDE_SELF_ENTITY_PATHS.has(frame.entity_path)) {
     return true;
   }
   const app = (frame.app ?? '').trim().toLowerCase();
-  if (app && COFOUNDEROS_SELF_APP_NAMES.has(app)) return true;
+  if (app && BESIDE_SELF_APP_NAMES.has(app)) return true;
   const bundle = (frame.app_bundle_id ?? '').toLowerCase();
-  if (bundle.includes('cofounderos')) return true;
+  if (bundle.includes('beside')) return true;
   return false;
 }
 

@@ -8,7 +8,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 
-const dataDir = process.env.COFOUNDEROS_DATA_DIR || path.join(os.homedir(), '.cofounderOS');
+const dataDir = process.env.BESIDE_DATA_DIR || path.join(os.homedir(), '.beside');
 const day = process.argv[2] || new Date().toISOString().slice(0, 10);
 
 const repoRoot = path.resolve(new URL('../../../..', import.meta.url).pathname);

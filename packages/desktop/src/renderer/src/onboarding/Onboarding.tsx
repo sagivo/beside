@@ -29,16 +29,16 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
 
   React.useEffect(() => {
     let c = false;
-    (async () => { try { const initial = await window.cofounderos?.getOverview(); if (c || !initial) return; setOverview(initial); if (initial.capture.running && !initial.capture.paused) await window.cofounderos.pauseCapture(); } catch {} })();
+    (async () => { try { const initial = await window.beside?.getOverview(); if (c || !initial) return; setOverview(initial); if (initial.capture.running && !initial.capture.paused) await window.beside.pauseCapture(); } catch {} })();
     return () => { c = true; };
   }, []);
 
   React.useEffect(() => {
-    if (window.cofounderos?.onOverview) return window.cofounderos.onOverview(setOverview);
-    const t = window.setInterval(async () => { try { const n = await window.cofounderos?.getOverview(); if (n) setOverview(n); } catch {} }, 1500); return () => window.clearInterval(t);
+    if (window.beside?.onOverview) return window.beside.onOverview(setOverview);
+    const t = window.setInterval(async () => { try { const n = await window.beside?.getOverview(); if (n) setOverview(n); } catch {} }, 1500); return () => window.clearInterval(t);
   }, []);
 
-  const refreshPermissions = React.useCallback(async () => { try { const [s, a] = await Promise.all([window.cofounderos.probeScreenPermission(), window.cofounderos.probeAccessibilityPermission()]); setScreen(s); setAccessibility(a); } catch {} }, []);
+  const refreshPermissions = React.useCallback(async () => { try { const [s, a] = await Promise.all([window.beside.probeScreenPermission(), window.beside.probeAccessibilityPermission()]); setScreen(s); setAccessibility(a); } catch {} }, []);
   React.useEffect(() => { refreshPermissions(); }, [refreshPermissions]);
 
   const stepIndex = STEPS.indexOf(step), progressPct = Math.round(((stepIndex + 1) / STEPS.length) * 100);
@@ -52,7 +52,7 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
 
   async function finish() {
     let f = overview;
-    try { f = await window.cofounderos?.getOverview(); if (!f?.capture.running) await window.cofounderos.startRuntime(); await window.cofounderos.resumeCapture(); f = await window.cofounderos?.getOverview(); } catch {}
+    try { f = await window.beside?.getOverview(); if (!f?.capture.running) await window.beside.startRuntime(); await window.beside.resumeCapture(); f = await window.beside?.getOverview(); } catch {}
     if (!gateMet.screen) return go('permissions');
     if (!(f?.model.ready ?? modelReady)) return go('install-model');
     onComplete();
@@ -60,11 +60,11 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
 
   return (
     <div className="flex h-screen flex-col bg-background bg-[radial-gradient(circle_at_top,_rgba(96,165,250,0.16),_transparent_32rem)]">
-      <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur"><BrandMark className="size-7" /><span className="font-semibold text-sm">CofounderOS</span>
+      <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur"><BrandMark className="size-7" /><span className="font-semibold text-sm">Beside</span>
         <div className="flex-1 mx-6 flex flex-col gap-1.5"><div className="flex items-center justify-between text-[11px] font-medium uppercase text-muted-foreground"><span>{STEP_LABELS[step]}</span><span>{stepIndex + 1} / {STEPS.length}</span></div><Progress value={progressPct} /></div>
         {step !== 'done' && <Button variant="ghost" size="sm" onClick={onComplete} disabled={!allGatesMet} title={allGatesMet ? 'Skip setup' : !gateMet.screen ? 'Grant Screen Recording first.' : 'Install local AI first.'} className="app-no-drag">Skip setup</Button>}
       </header>
-      {screenNeedsRelaunch && step !== 'done' && <div className="border-b border-warning/40 bg-warning/10 px-6 py-3"><div className="mx-auto flex max-w-4xl items-center gap-4"><RefreshCw className="size-4 text-warning" /><div className="flex-1 text-sm"><span className="font-medium text-warning">Screen Recording granted.</span> <span className="text-muted-foreground">Restart required.</span></div><Button size="sm" onClick={() => window.cofounderos.relaunchApp()}><RefreshCw />Restart</Button></div></div>}
+      {screenNeedsRelaunch && step !== 'done' && <div className="border-b border-warning/40 bg-warning/10 px-6 py-3"><div className="mx-auto flex max-w-4xl items-center gap-4"><RefreshCw className="size-4 text-warning" /><div className="flex-1 text-sm"><span className="font-medium text-warning">Screen Recording granted.</span> <span className="text-muted-foreground">Restart required.</span></div><Button size="sm" onClick={() => window.beside.relaunchApp()}><RefreshCw />Restart</Button></div></div>}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className={cn('mx-auto px-6 py-8 sm:py-10', step === 'welcome' ? 'max-w-5xl' : 'max-w-4xl')}>
           {step === 'welcome' && <WelcomeStep onContinue={goNext} />}
@@ -145,10 +145,10 @@ function PermissionsStep({ screen, accessibility, onRefresh, onContinue, onBack 
 
   if (!sSup && !aSup) return <StepCard title="System permissions"><p>Not applicable on your OS.</p></StepCard>;
   return (
-    <StepCard eyebrow="One-time setup" title="Give CofounderOS what it needs" lede="Screen Recording and Accessibility permissions are needed for capture." back={{ onClick: onBack }} next={{ label: 'Continue', onClick: onContinue, disabled: !sOk, title: sOk ? undefined : 'Grant Screen Recording first.' }}>
+    <StepCard eyebrow="One-time setup" title="Give Beside what it needs" lede="Screen Recording and Accessibility permissions are needed for capture." back={{ onClick: onBack }} next={{ label: 'Continue', onClick: onContinue, disabled: !sOk, title: sOk ? undefined : 'Grant Screen Recording first.' }}>
       <div className="flex flex-col gap-3">
-        {sSup && <PermissionCard icon={<Monitor className="size-5" />} title="Screen Recording" req="required" phase={sPhase} onReq={wrapReq('screen', window.cofounderos.requestScreenPermission)} onSet={() => window.cofounderos.openPermissionSettings('screen')} msg={sPhase === 'granted' ? 'Granted.' : sPhase === 'needs-relaunch' ? 'Restart required.' : 'Not granted.'} />}
-        {aSup && <PermissionCard icon={<Keyboard className="size-5" />} title="Accessibility" req="recommended" phase={aPhase} onReq={wrapReq('accessibility', window.cofounderos.requestAccessibilityPermission)} onSet={() => window.cofounderos.openPermissionSettings('accessibility')} msg={aPhase === 'granted' ? 'Granted.' : 'Not granted.'} />}
+        {sSup && <PermissionCard icon={<Monitor className="size-5" />} title="Screen Recording" req="required" phase={sPhase} onReq={wrapReq('screen', window.beside.requestScreenPermission)} onSet={() => window.beside.openPermissionSettings('screen')} msg={sPhase === 'granted' ? 'Granted.' : sPhase === 'needs-relaunch' ? 'Restart required.' : 'Not granted.'} />}
+        {aSup && <PermissionCard icon={<Keyboard className="size-5" />} title="Accessibility" req="recommended" phase={aPhase} onReq={wrapReq('accessibility', window.beside.requestAccessibilityPermission)} onSet={() => window.beside.openPermissionSettings('accessibility')} msg={aPhase === 'granted' ? 'Granted.' : 'Not granted.'} />}
       </div>
     </StepCard>
   );
@@ -160,7 +160,7 @@ function PermissionCard({ icon, title, req, phase, onReq, onSet, msg }: any) {
     <div className={cn('flex items-start gap-4 rounded-xl border bg-card p-5', g && 'border-success/40 bg-success/5', nr && 'border-warning/40 bg-warning/5')}>
       <div className={cn('size-12 shrink-0 grid place-items-center rounded-lg', g ? 'bg-success/15 text-success' : nr ? 'bg-warning/15 text-warning' : 'bg-primary/10 text-primary')}>{g ? <Check className="size-5" /> : icon}</div>
       <div className="flex-1"><div className="flex gap-2 font-medium">{title} <Badge variant={req === 'required' ? 'default' : 'muted'}>{req === 'required' ? 'Required' : 'Recommended'}</Badge></div><p className="text-sm text-muted-foreground mt-1.5">{msg}</p></div>
-      <div className="flex flex-col gap-2">{nr ? <Button onClick={() => window.cofounderos.relaunchApp()}><RefreshCw />Restart</Button> : !g ? <Button variant={req === 'required' ? 'default' : 'outline'} onClick={onReq} disabled={phase === 'requesting'}>{phase === 'requesting' ? <Loader2 className="animate-spin" /> : 'Grant'}</Button> : <Button variant="ghost" disabled><Check />Granted</Button>} {!g && !nr && <Button variant="ghost" size="sm" onClick={onSet}>Settings</Button>}</div>
+      <div className="flex flex-col gap-2">{nr ? <Button onClick={() => window.beside.relaunchApp()}><RefreshCw />Restart</Button> : !g ? <Button variant={req === 'required' ? 'default' : 'outline'} onClick={onReq} disabled={phase === 'requesting'}>{phase === 'requesting' ? <Loader2 className="animate-spin" /> : 'Grant'}</Button> : <Button variant="ghost" disabled><Check />Granted</Button>} {!g && !nr && <Button variant="ghost" size="sm" onClick={onSet}>Settings</Button>}</div>
     </div>
   );
 }
@@ -179,8 +179,8 @@ function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEve
   const [phase, setPhase] = React.useState<'idle'|'running'|'done'|'error'>('idle'), [err, setErr] = React.useState<string|null>(null);
   React.useEffect(() => {
     if (phase !== 'idle') return; setPhase('running'); onClearEvents();
-    window.cofounderos.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: chosenModel, auto_install: true } } } })
-      .then(() => window.cofounderos.bootstrapModel()).then(() => setPhase('done')).catch(e => { setPhase('error'); setErr(e.message); });
+    window.beside.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: chosenModel, auto_install: true } } } })
+      .then(() => window.beside.bootstrapModel()).then(() => setPhase('done')).catch(e => { setPhase('error'); setErr(e.message); });
   }, [phase, chosenModel, onClearEvents]);
 
   React.useEffect(() => {
@@ -205,11 +205,11 @@ function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEve
 
 function AudioStep({ onContinue, onBack }: any) {
   const [en, setEn] = React.useState(false), [wh, setWh] = React.useState<any>(null), [ist, setIst] = React.useState('idle'), [mic, setMic] = React.useState<any>(null), [busy, setBusy] = React.useState(false);
-  const rp = React.useCallback(async () => { try { setWh(await window.cofounderos.probeWhisper()); setMic(await window.cofounderos.probeMicPermission()); } catch {} }, []);
-  React.useEffect(() => { rp(); window.cofounderos.detectWhisperInstaller(); }, [rp]);
-  React.useEffect(() => { window.cofounderos.onWhisperInstallProgress?.(e => { if (e.kind === 'started') setIst('running'); else if (e.kind === 'finished') { setIst(e.available ? 'finished' : 'failed'); rp(); } else if (e.kind === 'failed') setIst('failed'); }); }, [rp]);
+  const rp = React.useCallback(async () => { try { setWh(await window.beside.probeWhisper()); setMic(await window.beside.probeMicPermission()); } catch {} }, []);
+  React.useEffect(() => { rp(); window.beside.detectWhisperInstaller(); }, [rp]);
+  React.useEffect(() => { window.beside.onWhisperInstallProgress?.(e => { if (e.kind === 'started') setIst('running'); else if (e.kind === 'finished') { setIst(e.available ? 'finished' : 'failed'); rp(); } else if (e.kind === 'failed') setIst('failed'); }); }, [rp]);
 
-  const commit = async (v: boolean) => { setBusy(true); try { if (v && mic?.status === 'not-determined') setMic(await window.cofounderos.requestMicPermission()); await window.cofounderos.saveConfigPatch({ capture: { ...(v ? { plugin: 'native' } : {}), capture_audio: v, audio: { live_recording: { enabled: v, activation: 'other_process_input', poll_interval_sec: 3 } } } }); setEn(v); if (v && wh && !wh.available && ist === 'idle') { setIst('running'); await window.cofounderos.installWhisper().catch(() => setIst('failed')); } } finally { setBusy(false); } };
+  const commit = async (v: boolean) => { setBusy(true); try { if (v && mic?.status === 'not-determined') setMic(await window.beside.requestMicPermission()); await window.beside.saveConfigPatch({ capture: { ...(v ? { plugin: 'native' } : {}), capture_audio: v, audio: { live_recording: { enabled: v, activation: 'other_process_input', poll_interval_sec: 3 } } } }); setEn(v); if (v && wh && !wh.available && ist === 'idle') { setIst('running'); await window.beside.installWhisper().catch(() => setIst('failed')); } } finally { setBusy(false); } };
 
   return (
     <StepCard eyebrow="Optional" title="Audio capture" lede="Record short microphone chunks locally." back={{ onClick: onBack }} next={{ label: en ? 'Continue' : 'Skip', onClick: onContinue, variant: en ? 'default' : 'outline' }}>
@@ -223,7 +223,7 @@ function DoneStep({ gateMet, onFinish, onInstallModel, onGoToPermissions }: any)
   return (
     <Card className="overflow-hidden py-0"><CardContent className="p-0">
       <div className="border-b bg-muted/20 px-6 py-8 text-center"><div className="mx-auto size-16 bg-primary/10 text-primary grid place-items-center rounded-2xl"><Rocket className="size-9" /></div><h1 className="mt-5 text-3xl font-semibold">{ready ? "You're all set" : 'Almost there'}</h1></div>
-      <div className="flex flex-col gap-6 p-6 sm:p-8"><div className="flex justify-center">{ready ? <Button size="xl" onClick={onFinish}>Open CofounderOS<ArrowRight /></Button> : !gateMet.screen ? <Button size="xl" onClick={onGoToPermissions}>Grant Screen Recording<ArrowRight /></Button> : <Button size="xl" onClick={onInstallModel}>Install local AI<ArrowRight /></Button>}</div></div>
+      <div className="flex flex-col gap-6 p-6 sm:p-8"><div className="flex justify-center">{ready ? <Button size="xl" onClick={onFinish}>Open Beside<ArrowRight /></Button> : !gateMet.screen ? <Button size="xl" onClick={onGoToPermissions}>Grant Screen Recording<ArrowRight /></Button> : <Button size="xl" onClick={onInstallModel}>Install local AI<ArrowRight /></Button>}</div></div>
     </CardContent></Card>
   );
 }

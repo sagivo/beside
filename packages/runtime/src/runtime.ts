@@ -7,11 +7,11 @@ import {
   validateConfig,
   writeConfig,
   writeDefaultConfigIfMissing,
-} from '@cofounderos/core';
+} from '@beside/core';
 import type {
   ActivitySession, CaptureStatus, DayEvent, DayEventKind, ExportStatus, Frame,
   FrameQuery, IndexState, Logger, Meeting, RawEvent, StorageStats,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import {
   bootstrapModel, buildOrchestrator, assertHeavyWorkAllowed, runFullReindex,
   runIncremental, runReorganisation, startAll, stopAll, type OrchestratorHandles, type OrchestratorOptions,
@@ -141,7 +141,7 @@ const ACTION_CENTER_CACHE_TTL_MS = 15 * 60_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
-export class CofounderRuntime {
+export class BesideRuntime {
   private readonly logger: Logger;
   private readonly opts: OrchestratorOptions;
   private handles: OrchestratorHandles | null = null;
@@ -556,7 +556,7 @@ export class CofounderRuntime {
   }
 }
 
-export function createRuntime(opts: RuntimeOptions = {}): CofounderRuntime { return new CofounderRuntime(opts); }
+export function createRuntime(opts: RuntimeOptions = {}): BesideRuntime { return new BesideRuntime(opts); }
 
 const AI_CAPTION_KEYS = ['ai_caption', 'caption', 'image_caption', 'screenshot_caption', 'vision_caption', 'visual_caption', 'description', 'summary'];
 const HIDDEN_METADATA_KEYS = new Set(['ax_text', 'ocr_text', 'text', 'content']);

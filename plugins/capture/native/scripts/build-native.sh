@@ -31,7 +31,7 @@ case "$(uname -m)" in
 esac
 
 DST_DIR="$ROOT/dist/native/${PLATFORM}-${ARCH}"
-DST="$DST_DIR/cofounderos-capture"
+DST="$DST_DIR/beside-capture"
 
 if ! command -v swiftc >/dev/null 2>&1; then
   echo "[capture-native] swiftc not found; skipping native helper build" >&2

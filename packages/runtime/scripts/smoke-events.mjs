@@ -84,7 +84,7 @@ function englishDate(day) {
 }
 
 async function main() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-events-smoke-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-events-smoke-'));
   try {
     const ctx = { dataDir: tmp, logger, config: { path: tmp } };
     const storage = await storageMod.default(ctx);
@@ -374,7 +374,7 @@ async function main() {
     );
 
     const structuredTmp = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'cofounderos-events-structured-calendar-'),
+      path.join(os.tmpdir(), 'beside-events-structured-calendar-'),
     );
     try {
       const structuredStorage = await storageMod.default({
@@ -474,7 +474,7 @@ async function main() {
     }
 
     const falseCalendarTmp = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'cofounderos-events-false-calendar-'),
+      path.join(os.tmpdir(), 'beside-events-false-calendar-'),
     );
     try {
       const falseStorage = await storageMod.default({

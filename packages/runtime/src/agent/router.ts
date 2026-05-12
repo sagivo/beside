@@ -1,4 +1,4 @@
-import type { IModelAdapter } from '@cofounderos/interfaces';
+import type { IModelAdapter } from '@beside/interfaces';
 import { classifyByRules } from './intent.js';
 import type { ChatIntent, ChatTurnHistoryItem } from './types.js';
 
@@ -96,9 +96,9 @@ async function llmRouteGate(
     .join('\n');
 
   const prompt = [
-    'You are the router for a personal-productivity assistant called CofounderOS, which captures the user\'s device activity (screenshots, OCR text, calendar UIs, chats, focus sessions) on disk.',
+    'You are the router for a personal-productivity assistant called Beside, which captures the user\'s device activity (screenshots, OCR text, calendar UIs, chats, focus sessions) on disk.',
     '',
-    'Hard constraint: CofounderOS has NO internet access, NO web search, and NO real-time data. It cannot answer questions about current events, news, prices, sports, or anything happening in the outside world. The only thing it knows specifically about is the user\'s own captured activity.',
+    'Hard constraint: Beside has NO internet access, NO web search, and NO real-time data. It cannot answer questions about current events, news, prices, sports, or anything happening in the outside world. The only thing it knows specifically about is the user\'s own captured activity.',
     '',
     'Given the user\'s message, decide whether the answer requires looking up that captured data ("tools") or whether it can be answered as normal conversation ("direct").',
     '',

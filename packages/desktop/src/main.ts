@@ -5,18 +5,18 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import readline from 'node:readline';
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, Tray, nativeImage, protocol, shell, dialog, systemPreferences } from 'electron';
-import { defaultDataDir, expandPath, loadConfig } from '@cofounderos/core';
+import { defaultDataDir, expandPath, loadConfig } from '@beside/core';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
 const workspaceRoot = resolveRuntimeWorkspaceRoot();
-if (app.isPackaged && !process.env.COFOUNDEROS_DATA_DIR) process.env.COFOUNDEROS_USE_PLATFORM_DATA_DIR ??= '1';
+if (app.isPackaged && !process.env.BESIDE_DATA_DIR) process.env.BESIDE_USE_PLATFORM_DATA_DIR ??= '1';
 const dataDir = defaultDataDir();
 const configPath = path.join(dataDir, 'config.yaml');
 const markdownExportDir = path.join(dataDir, 'export/markdown');
 const windowStatePath = path.join(dataDir, 'desktop-window.json');
-const rendererDevUrl = process.env.COFOUNDEROS_RENDERER_URL;
-const ASSET_PROTOCOL = 'cofounderos-asset';
+const rendererDevUrl = process.env.BESIDE_RENDERER_URL;
+const ASSET_PROTOCOL = 'beside-asset';
 
 protocol.registerSchemesAsPrivileged([{ scheme: ASSET_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } }]);
 
@@ -39,7 +39,7 @@ function saveWindowState(win: BrowserWindow): void {
 
 let tray: Tray | null = null, statusWindow: BrowserWindow | null = null, managedRuntime: RuntimeServiceClient | null = null, statusItemHelper: ChildProcess | null = null;
 let lastLogs: string[] = [], lastOverview: any = null;
-const useMacAccessoryMode = process.platform === 'darwin' && process.env.COFOUNDEROS_DESKTOP_SHOW_DOCK !== '1';
+const useMacAccessoryMode = process.platform === 'darwin' && process.env.BESIDE_DESKTOP_SHOW_DOCK !== '1';
 
 type MenuBarCaptureState = 'capturing' | 'paused' | 'stopped';
 type MenuBarIndicator = { state: MenuBarCaptureState; label: string; };
@@ -51,12 +51,12 @@ class RuntimeServiceClient {
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (r?: unknown) => void; }>();
 
   constructor() {
-    this.child = spawn(app.isPackaged ? process.execPath : (process.env.COFUNDEROS_NODE ?? 'node'), [path.join(here, 'runtime-service.js')], { env: { ...process.env, COFOUNDEROS_RESOURCE_ROOT: workspaceRoot, ...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    this.child = spawn(app.isPackaged ? process.execPath : (process.env.COFUNDEROS_NODE ?? 'node'), [path.join(here, 'runtime-service.js')], { env: { ...process.env, BESIDE_RESOURCE_ROOT: workspaceRoot, ...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     this.child.stderr?.setEncoding('utf8').on('data', (c) => appendLog(c.trimEnd()));
     this.child.on('error', (err) => this.rejectAll(err));
-    this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'CofounderOS — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow(); });
-    this.on('bootstrap-progress', (p) => statusWindow?.webContents.send('cofounderos:bootstrap-progress', p));
-    this.on('overview', (p) => { lastOverview = p; applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); statusWindow?.webContents.send('cofounderos:overview', p); });
+    this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow(); });
+    this.on('bootstrap-progress', (p) => statusWindow?.webContents.send('beside:bootstrap-progress', p));
+    this.on('overview', (p) => { lastOverview = p; applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); statusWindow?.webContents.send('beside:overview', p); });
     readline.createInterface({ input: this.child.stdout!, crlfDelay: Infinity }).on('line', (line) => this.handleLine(line));
   }
 
@@ -83,8 +83,8 @@ class RuntimeServiceClient {
   private rejectAll(err: unknown) { this.pending.forEach((p) => p.reject(err)); this.pending.clear(); }
 }
 
-app.setName('CofounderOS');
-if (process.platform === 'darwin') try { app.setAboutPanelOptions({ applicationName: 'CofounderOS' }); } catch {}
+app.setName('Beside');
+if (process.platform === 'darwin') try { app.setAboutPanelOptions({ applicationName: 'Beside' }); } catch {}
 
 let initialScreenStatus: string | null = null;
 
@@ -97,7 +97,7 @@ app.whenReady().then(async () => {
   if (useMacAccessoryMode) enterMacAccessoryMode();
   if (process.platform === 'darwin' && startNativeStatusItem()) {} else createElectronTrayFallback();
   await startDaemonIfNeeded();
-  if (process.env.COFOUNDEROS_DESKTOP_SHOW_ON_START !== '0') await showStatusWindow();
+  if (process.env.BESIDE_DESKTOP_SHOW_ON_START !== '0') await showStatusWindow();
 });
 
 function registerAssetProtocol() {
@@ -149,7 +149,7 @@ function createElectronTrayFallback() {
 
 function startNativeStatusItem() {
   try {
-    statusItemHelper = spawn(path.resolve(here, 'native/cofounderos-status-item'), [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    statusItemHelper = spawn(path.resolve(here, 'native/beside-status-item'), [], { stdio: ['pipe', 'pipe', 'pipe'] });
     statusItemHelper.stdout?.setEncoding('utf8').on('data', (c) => c.split(/\r?\n/).filter(Boolean).forEach((l: string) => {
       try { const m = JSON.parse(l); if (m.kind === 'show-status') showStatusWindow(); if (m.kind === 'quit') app.quit(); if (m.kind === 'ready') applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); } catch {}
     }));
@@ -160,9 +160,9 @@ function startNativeStatusItem() {
 }
 
 function getMenuBarIndicator(o: any, ok = o?.status === 'running', labelOverride?: string): MenuBarIndicator {
-  if (!ok) return { state: 'stopped', label: labelOverride ?? 'CofounderOS — stopped' };
-  if (o?.capture.running) return o.capture.paused ? { state: 'paused', label: labelOverride ?? 'CofounderOS — capture paused' } : { state: 'capturing', label: labelOverride ?? `CofounderOS — capturing (${o.capture.eventsToday ?? 0} today)` };
-  return { state: 'stopped', label: labelOverride ?? 'CofounderOS — idle' };
+  if (!ok) return { state: 'stopped', label: labelOverride ?? 'Beside — stopped' };
+  if (o?.capture.running) return o.capture.paused ? { state: 'paused', label: labelOverride ?? 'Beside — capture paused' } : { state: 'capturing', label: labelOverride ?? `Beside — capturing (${o.capture.eventsToday ?? 0} today)` };
+  return { state: 'stopped', label: labelOverride ?? 'Beside — idle' };
 }
 
 function applyMenuBarIndicator(i: MenuBarIndicator) {
@@ -174,11 +174,11 @@ async function refreshTray() {
   if (!tray) return;
   const h = await getHealth(), o = lastOverview ?? (managedRuntime ? await managedRuntime.call('overview').catch(() => null) : null) as any;
   const live = h.ok && o?.capture.running && !o.capture.paused, paused = h.ok && o?.capture.running && o.capture.paused;
-  applyMenuBarIndicator(getMenuBarIndicator(o, h.ok, !h.ok ? 'CofounderOS — stopped' : live ? `CofounderOS — capturing (${o.capture.eventsToday ?? 0} today)` : paused ? 'CofounderOS — capture paused' : 'CofounderOS — idle'));
+  applyMenuBarIndicator(getMenuBarIndicator(o, h.ok, !h.ok ? 'Beside — stopped' : live ? `Beside — capturing (${o.capture.eventsToday ?? 0} today)` : paused ? 'Beside — capture paused' : 'Beside — idle'));
 
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: getMenuBarIndicator(o, h.ok).label, enabled: false }, { type: 'separator' },
-    { label: 'Open CofounderOS', accelerator: 'CommandOrControl+O', click: () => showStatusWindow() },
+    { label: 'Open Beside', accelerator: 'CommandOrControl+O', click: () => showStatusWindow() },
     live ? { label: 'Pause Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('pauseCapture').catch(e => appendLog(`Pause failed: ${e}`)); await refreshTray(); } } : paused ? { label: 'Resume Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('resumeCapture').catch(e => appendLog(`Resume failed: ${e}`)); await refreshTray(); } } : { label: 'Start Capture', click: () => startRuntime(), enabled: !live && !paused && !(h.ok && !managedRuntime) },
     { type: 'separator' }, { label: 'Run Doctor', click: () => showStatusWindow({ focus: 'doctor' }) },
     { label: 'Reveal Files', submenu: [{ label: 'Markdown Export', click: () => shell.openPath(markdownExportDir) }, { label: 'Data Folder', click: () => shell.openPath(dataDir) }, { label: 'Config File', click: () => shell.openPath(configPath) }] },
@@ -191,7 +191,7 @@ async function showStatusWindow(opts: { focus?: 'doctor' } = {}) {
   enterMacStatusWindowMode();
   if (!statusWindow) {
     const s = loadWindowState();
-    statusWindow = new BrowserWindow({ ...s, title: 'CofounderOS Status', show: false, ...(resolveBrandIconPath() && { icon: resolveBrandIconPath()! }), webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(here, 'preload.cjs') } });
+    statusWindow = new BrowserWindow({ ...s, title: 'Beside Status', show: false, ...(resolveBrandIconPath() && { icon: resolveBrandIconPath()! }), webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(here, 'preload.cjs') } });
     if (s.maximized) statusWindow.maximize();
 
     let t: NodeJS.Timeout | null = null;
@@ -216,7 +216,7 @@ function enterMacStatusWindowMode() { if (useMacAccessoryMode) { app.setActivati
 
 async function renderStatusWindow() {
   const w = statusWindow; if (!w || w.isDestroyed()) return;
-  const init = () => { if (w.isDestroyed()) return; w.webContents.send('cofounderos:desktop-logs', lastLogs.slice(-120).join('\n')); if (lastOverview) w.webContents.send('cofounderos:overview', lastOverview); };
+  const init = () => { if (w.isDestroyed()) return; w.webContents.send('beside:desktop-logs', lastLogs.slice(-120).join('\n')); if (lastOverview) w.webContents.send('beside:overview', lastOverview); };
   w.webContents.once('did-finish-load', init);
   try { rendererDevUrl ? await w.loadURL(rendererDevUrl) : await w.loadFile(path.join(here, 'renderer', 'index.html')); }
   catch (err) { w.webContents.removeListener('did-finish-load', init); if (!rendererDevUrl || !/ERR_/.test(String(err))) throw err; appendLog(`Dev render nav err: ${err}`); }
@@ -230,7 +230,7 @@ async function startRuntime() {
 }
 
 async function startDaemonIfNeeded() {
-  if (process.env.COFOUNDEROS_DESKTOP_AUTOSTART === '0') return;
+  if (process.env.BESIDE_DESKTOP_AUTOSTART === '0') return;
   if ((await getHealth()).ok) return;
   await startRuntime();
 }
@@ -239,7 +239,7 @@ async function stopManagedRuntime() {
   if (!managedRuntime) return;
   const r = managedRuntime; managedRuntime = null;
   await r.call('stop').catch((e) => appendLog(`Stop failed: ${e}`)); r.close();
-  applyMenuBarIndicator({ state: 'stopped', label: 'CofounderOS — stopped' });
+  applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' });
   await refreshTray(); if (statusWindow) await renderStatusWindow();
 }
 
@@ -283,7 +283,7 @@ async function installWhisper() {
   });
 }
 
-function emitWhisperInstall(e: any) { appendLog(`whisper-install ${e.kind} ${e.installer || ''}: ${e.message || e.reason || ''}`); statusWindow?.webContents.send('cofounderos:whisper-install-progress', e); }
+function emitWhisperInstall(e: any) { appendLog(`whisper-install ${e.kind} ${e.installer || ''}: ${e.message || e.reason || ''}`); statusWindow?.webContents.send('beside:whisper-install-progress', e); }
 
 async function probeWhisperCli() {
   try {
@@ -330,51 +330,51 @@ function relaunchApp() { app.relaunch(); setTimeout(() => app.exit(0), 100); ret
 
 function registerRuntimeIpc() {
   const h = ipcMain.handle;
-  h('cofounderos:overview', () => getOverviewForRequest());
-  h('cofounderos:doctor', async () => (await getRuntimeForRequest()).call('doctor'));
-  h('cofounderos:read-config', async () => (await getRuntimeForRequest()).call('readConfig'));
-  h('cofounderos:validate-config', async (e, c) => (await getRuntimeForRequest()).call('validateConfig', c));
-  h('cofounderos:save-config-patch', async (e, p) => (await getRuntimeForRequest()).call('saveConfigPatch', p));
-  h('cofounderos:list-journal-days', async () => (await getRuntimeForRequest()).call('listJournalDays'));
-  h('cofounderos:get-journal-day', async (e, d) => (await getRuntimeForRequest()).call('getJournalDay', d));
-  h('cofounderos:list-meetings', async (e, q) => (await getRuntimeForRequest()).call('listMeetings', q));
-  h('cofounderos:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
-  h('cofounderos:get-action-center', async (e, q) => (await getRuntimeForRequest()).call('getActionCenter', q));
-  h('cofounderos:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));
-  h('cofounderos:search-frames', async (e, q) => (await getRuntimeForRequest()).call('searchFrames', q));
-  h('cofounderos:explain-search-results', async (e, q) => (await getRuntimeForRequest()).call('explainSearchResults', q));
-  h('cofounderos:get-frame-index-details', async (e, f) => (await getRuntimeForRequest()).call('getFrameIndexDetails', f));
-  h('cofounderos:asset-url', async (e, p) => { await resolveAssetPath(p); return assetUrl(p); });
-  h('cofounderos:read-asset', async (e, p) => new Uint8Array(await fs.promises.readFile(await resolveAssetPath(p))));
-  h('cofounderos:start-runtime', async () => { await startRuntime(); return (await getRuntimeForRequest()).call('overview'); });
-  h('cofounderos:stop-runtime', async () => { await stopManagedRuntime(); return { stopped: true }; });
-  h('cofounderos:pause-capture', async () => (await getRuntimeForRequest()).call('pauseCapture'));
-  h('cofounderos:resume-capture', async () => (await getRuntimeForRequest()).call('resumeCapture'));
-  h('cofounderos:trigger-index', async () => (await getRuntimeForRequest()).call('triggerIndex'));
-  h('cofounderos:trigger-reorganise', async () => (await getRuntimeForRequest()).call('triggerReorganise'));
-  h('cofounderos:trigger-full-reindex', async (e, r) => (await getRuntimeForRequest()).call('triggerFullReindex', r));
-  h('cofounderos:bootstrap-model', async () => (await getRuntimeForRequest()).call('bootstrapModel'));
-  h('cofounderos:update-model', async () => (await getRuntimeForRequest()).call('updateModel'));
-  h('cofounderos:get-start-at-login', () => app.getLoginItemSettings().openAtLogin);
-  h('cofounderos:set-start-at-login', (e, en) => { app.setLoginItemSettings({ openAtLogin: en, openAsHidden: true }); return en; });
-  h('cofounderos:open-path', async (e, t: any) => { const p = t === 'config' ? configPath : t === 'data' ? dataDir : await getMarkdownExportDir(); const err = await shell.openPath(p); if (err) throw new Error(err); return { opened: p }; });
-  h('cofounderos:copy-text', (e, t) => { clipboard.writeText(t); return { copied: true }; });
-  h('cofounderos:open-external-url', async (e, u) => ({ opened: await openExternalHttpUrl(u) }));
-  h('cofounderos:delete-frame', async (e, id) => (await getRuntimeForRequest()).call('deleteFrame', id));
-  h('cofounderos:delete-frames', async (e, q) => (await getRuntimeForRequest()).call('deleteFrames', q));
-  h('cofounderos:delete-all-memory', async () => (await getRuntimeForRequest()).call('deleteAllMemory'));
-  h('cofounderos:probe-whisper', probeWhisperCli);
-  h('cofounderos:detect-whisper-installer', async () => ({ installer: (await detectWhisperInstaller()).installer }));
-  h('cofounderos:install-whisper', installWhisper);
-  h('cofounderos:probe-ffprobe', probeFfprobe);
-  h('cofounderos:probe-mic-permission', probeMicPermission);
-  h('cofounderos:request-mic-permission', requestMicPermission);
-  h('cofounderos:probe-screen-permission', probeScreenPermission);
-  h('cofounderos:request-screen-permission', requestScreenPermission);
-  h('cofounderos:probe-accessibility-permission', probeAccessibilityPermission);
-  h('cofounderos:request-accessibility-permission', requestAccessibilityPermission);
-  h('cofounderos:open-permission-settings', (e, k: any) => openPermissionSettings(k));
-  h('cofounderos:relaunch-app', relaunchApp);
+  h('beside:overview', () => getOverviewForRequest());
+  h('beside:doctor', async () => (await getRuntimeForRequest()).call('doctor'));
+  h('beside:read-config', async () => (await getRuntimeForRequest()).call('readConfig'));
+  h('beside:validate-config', async (e, c) => (await getRuntimeForRequest()).call('validateConfig', c));
+  h('beside:save-config-patch', async (e, p) => (await getRuntimeForRequest()).call('saveConfigPatch', p));
+  h('beside:list-journal-days', async () => (await getRuntimeForRequest()).call('listJournalDays'));
+  h('beside:get-journal-day', async (e, d) => (await getRuntimeForRequest()).call('getJournalDay', d));
+  h('beside:list-meetings', async (e, q) => (await getRuntimeForRequest()).call('listMeetings', q));
+  h('beside:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
+  h('beside:get-action-center', async (e, q) => (await getRuntimeForRequest()).call('getActionCenter', q));
+  h('beside:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));
+  h('beside:search-frames', async (e, q) => (await getRuntimeForRequest()).call('searchFrames', q));
+  h('beside:explain-search-results', async (e, q) => (await getRuntimeForRequest()).call('explainSearchResults', q));
+  h('beside:get-frame-index-details', async (e, f) => (await getRuntimeForRequest()).call('getFrameIndexDetails', f));
+  h('beside:asset-url', async (e, p) => { await resolveAssetPath(p); return assetUrl(p); });
+  h('beside:read-asset', async (e, p) => new Uint8Array(await fs.promises.readFile(await resolveAssetPath(p))));
+  h('beside:start-runtime', async () => { await startRuntime(); return (await getRuntimeForRequest()).call('overview'); });
+  h('beside:stop-runtime', async () => { await stopManagedRuntime(); return { stopped: true }; });
+  h('beside:pause-capture', async () => (await getRuntimeForRequest()).call('pauseCapture'));
+  h('beside:resume-capture', async () => (await getRuntimeForRequest()).call('resumeCapture'));
+  h('beside:trigger-index', async () => (await getRuntimeForRequest()).call('triggerIndex'));
+  h('beside:trigger-reorganise', async () => (await getRuntimeForRequest()).call('triggerReorganise'));
+  h('beside:trigger-full-reindex', async (e, r) => (await getRuntimeForRequest()).call('triggerFullReindex', r));
+  h('beside:bootstrap-model', async () => (await getRuntimeForRequest()).call('bootstrapModel'));
+  h('beside:update-model', async () => (await getRuntimeForRequest()).call('updateModel'));
+  h('beside:get-start-at-login', () => app.getLoginItemSettings().openAtLogin);
+  h('beside:set-start-at-login', (e, en) => { app.setLoginItemSettings({ openAtLogin: en, openAsHidden: true }); return en; });
+  h('beside:open-path', async (e, t: any) => { const p = t === 'config' ? configPath : t === 'data' ? dataDir : await getMarkdownExportDir(); const err = await shell.openPath(p); if (err) throw new Error(err); return { opened: p }; });
+  h('beside:copy-text', (e, t) => { clipboard.writeText(t); return { copied: true }; });
+  h('beside:open-external-url', async (e, u) => ({ opened: await openExternalHttpUrl(u) }));
+  h('beside:delete-frame', async (e, id) => (await getRuntimeForRequest()).call('deleteFrame', id));
+  h('beside:delete-frames', async (e, q) => (await getRuntimeForRequest()).call('deleteFrames', q));
+  h('beside:delete-all-memory', async () => (await getRuntimeForRequest()).call('deleteAllMemory'));
+  h('beside:probe-whisper', probeWhisperCli);
+  h('beside:detect-whisper-installer', async () => ({ installer: (await detectWhisperInstaller()).installer }));
+  h('beside:install-whisper', installWhisper);
+  h('beside:probe-ffprobe', probeFfprobe);
+  h('beside:probe-mic-permission', probeMicPermission);
+  h('beside:request-mic-permission', requestMicPermission);
+  h('beside:probe-screen-permission', probeScreenPermission);
+  h('beside:request-screen-permission', requestScreenPermission);
+  h('beside:probe-accessibility-permission', probeAccessibilityPermission);
+  h('beside:request-accessibility-permission', requestAccessibilityPermission);
+  h('beside:open-permission-settings', (e, k: any) => openPermissionSettings(k));
+  h('beside:relaunch-app', relaunchApp);
 }
 
 async function getOverviewForRequest() { try { return await (await getRuntimeForRequest()).call<any>('overview'); } catch (err) { if (/closed|exited/.test(String(err))) return lastOverview; throw err; } }
@@ -387,7 +387,7 @@ function appendLog(l: string) {
   if (lastLogs.length > 400) lastLogs = lastLogs.slice(-400);
 }
 
-function resolveRuntimeWorkspaceRoot() { return process.env.COFOUNDEROS_RESOURCE_ROOT?.trim() || (app.isPackaged && (process as any).resourcesPath ? path.join((process as any).resourcesPath, 'cofounderos') : repoRoot); }
+function resolveRuntimeWorkspaceRoot() { return process.env.BESIDE_RESOURCE_ROOT?.trim() || (app.isPackaged && (process as any).resourcesPath ? path.join((process as any).resourcesPath, 'beside') : repoRoot); }
 
 function resolveBrandIconPath() {
   for (const c of [path.resolve(here, '../build/icon.png'), path.resolve(here, '../../build/icon.png'), path.resolve(repoRoot, 'packages/desktop/build/icon.png')]) { try { const i = nativeImage.createFromPath(c); if (!i.isEmpty()) return c; } catch {} }

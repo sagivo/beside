@@ -85,7 +85,7 @@ function useTodayJournal(overview: RuntimeOverview | null) {
     let c = false; setLoading(true);
     (async () => {
       try {
-        const d = localDayKey(), res = events <= FULL_JOURNAL_FRAME_LIMIT ? await window.cofounderos.getJournalDay(d) : { day: d, frames: await window.cofounderos.searchFrames({ day: d, limit: ACTIVITY_SAMPLE_LIMIT }), sessions: [] };
+        const d = localDayKey(), res = events <= FULL_JOURNAL_FRAME_LIMIT ? await window.beside.getJournalDay(d) : { day: d, frames: await window.beside.searchFrames({ day: d, limit: ACTIVITY_SAMPLE_LIMIT }), sessions: [] };
         if (!c) setJournal(res);
       } catch { if (!c) setJournal(null); } finally { if (!c) setLoading(false); }
     })();
@@ -102,7 +102,7 @@ function useFounderBrief(overview: RuntimeOverview | null) {
     (async () => {
       const d = localDayKey();
       try {
-        const [evs, mtgs] = await Promise.all([window.cofounderos.listDayEvents({ day: d, limit: 200 }).catch(() => []), window.cofounderos.listMeetings({ from: `${d}T00:00:00`, to: `${d}T23:59:59.999`, limit: 100 }).catch(() => [])]);
+        const [evs, mtgs] = await Promise.all([window.beside.listDayEvents({ day: d, limit: 200 }).catch(() => []), window.beside.listMeetings({ from: `${d}T00:00:00`, to: `${d}T23:59:59.999`, limit: 100 }).catch(() => [])]);
         if (c) return;
         setEvents(evs.filter(e => e.title !== '__merged__')); setMeetings(mtgs.filter(m => m.day === d).sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at)));
       } finally { if (!c) setLoading(false); }
@@ -118,7 +118,7 @@ function useActionCenter(overview: RuntimeOverview | null) {
     if (!overview) { setCenter(null); setLoading(false); return; }
     let c = false; setLoading(true);
     (async () => {
-      try { const res = await window.cofounderos.getActionCenter({ day: localDayKey() }); if (!c) setCenter(res); }
+      try { const res = await window.beside.getActionCenter({ day: localDayKey() }); if (!c) setCenter(res); }
       catch { if (!c) setCenter(null); } finally { if (!c) setLoading(false); }
     })();
     return () => { c = true; };

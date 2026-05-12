@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { IStorage, Frame, Logger, Meeting, MeetingPlatform, MeetingTurn, MeetingTurnSource } from '@cofounderos/interfaces';
+import type { IStorage, Frame, Logger, Meeting, MeetingPlatform, MeetingTurn, MeetingTurnSource } from '@beside/interfaces';
 
 export interface MeetingBuilderOptions { meetingIdleMs?: number; minDurationMs?: number; audioGraceMs?: number; audioLeadMs?: number; batchSize?: number; }
 export interface MeetingBuilderResult { framesProcessed: number; meetingsCreated: number; meetingsExtended: number; audioFramesAttached: number; turnsBuilt: number; }

@@ -1,4 +1,4 @@
-import type { ModelBootstrapHandler, ModelBootstrapProgress } from '@cofounderos/interfaces';
+import type { ModelBootstrapHandler, ModelBootstrapProgress } from '@beside/interfaces';
 
 /**
  * Build a stderr renderer for ModelBootstrapProgress events. Draws a

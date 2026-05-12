@@ -29,7 +29,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
   const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   React.useEffect(() => { if (config) setDraft(settingsDraftFromConfig(config)); }, [config]);
-  React.useEffect(() => { window.cofounderos.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
+  React.useEffect(() => { window.beside.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
 
   if (!config || !draft) return (
     <div className="flex flex-col gap-6 pt-6"><PageHeader title="Settings" description="Loading…" /><Skeleton className="h-9 w-72" />
@@ -45,9 +45,9 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
     if (!hasUnsavedChanges) return;
     setSaving(true);
     try {
-      const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(draft!));
+      const next = await window.beside.saveConfigPatch(configPatchFromDraft(draft!));
       onSaved(next);
-      if (opts.restart) { await window.cofounderos.stopRuntime(); await window.cofounderos.startRuntime(); toast.success('Settings saved & runtime restarted'); }
+      if (opts.restart) { await window.beside.stopRuntime(); await window.beside.startRuntime(); toast.success('Settings saved & runtime restarted'); }
       else toast.success('Settings saved', { description: 'Some changes apply on next start.' });
     } catch (err: any) { toast.error('Could not save settings', { description: err.message || String(err) }); }
     finally { setSaving(false); }
@@ -55,7 +55,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
   return (
     <div className="flex flex-col gap-6 pt-6 pb-24">
-      <PageHeader title="Settings" description="Make CofounderOS work the way you like." actions={<><Button variant="outline" size="sm" onClick={() => window.cofounderos.openPath('config')}><FolderOpen />Open config</Button><Button variant="outline" size="sm" onClick={() => window.cofounderos.openPath('data')}><FolderOpen />Open data</Button></>} />
+      <PageHeader title="Settings" description="Make Beside work the way you like." actions={<><Button variant="outline" size="sm" onClick={() => window.beside.openPath('config')}><FolderOpen />Open config</Button><Button variant="outline" size="sm" onClick={() => window.beside.openPath('data')}><FolderOpen />Open data</Button></>} />
       
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="h-auto flex-wrap justify-start self-start">
@@ -64,7 +64,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
         <TabsContent value="general" className="flex flex-col gap-4">
           <SettingsSection title="Launch and appearance" description="Set how the app starts and how the interface looks.">
-            <ToggleRow title="Open at startup" description="CofounderOS opens quietly in the background." typeLabel="boolean" checked={!!startAtLogin} onChange={(v: any) => { setStartAtLogin(v); window.cofounderos.setStartAtLogin(v).then(setStartAtLogin); }} />
+            <ToggleRow title="Open at startup" description="Beside opens quietly in the background." typeLabel="boolean" checked={!!startAtLogin} onChange={(v: any) => { setStartAtLogin(v); window.beside.setStartAtLogin(v).then(setStartAtLogin); }} />
             <Separator className="my-4" />
             <div className="flex flex-col gap-3"><div><h4 className="font-medium">Appearance</h4><p className="text-sm text-muted-foreground mt-0.5">Pick a theme.</p></div><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
           </SettingsSection>
@@ -81,7 +81,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
         <TabsContent value="permissions" className="flex flex-col gap-4"><PermissionsSettingsPanel /></TabsContent>
 
         <TabsContent value="capture" className="flex flex-col gap-4">
-          <SettingsSection title="Capture cadence" description="Control how often CofounderOS looks for changes.">
+          <SettingsSection title="Capture cadence" description="Control how often Beside looks for changes.">
             <div className="grid gap-4 sm:grid-cols-2">
               <TextField label="Capture plugin" value={draft.capturePlugin} onChange={(v: any) => set('capturePlugin', v)} typeLabel="string" />
               <NumberField label="Poll interval" value={draft.pollIntervalMs} onChange={(v: any) => set('pollIntervalMs', v)} min={1} step={100} unit="ms" typeLabel="integer" />
@@ -262,7 +262,7 @@ function AudioSettings({ d, set }: { d: any; set: any }) {
   const [whisper, setWhisper] = React.useState<any>(null), [ffprobe, setFfprobe] = React.useState<any>(null), [mic, setMic] = React.useState<any>(null), [refreshing, setRefreshing] = React.useState(false);
   const refreshProbes = React.useCallback(async () => {
     setRefreshing(true);
-    try { setWhisper(await window.cofounderos.probeWhisper()); setFfprobe(await window.cofounderos.probeFfprobe()); setMic(await window.cofounderos.probeMicPermission()); } catch {} finally { setRefreshing(false); }
+    try { setWhisper(await window.beside.probeWhisper()); setFfprobe(await window.beside.probeFfprobe()); setMic(await window.beside.probeMicPermission()); } catch {} finally { setRefreshing(false); }
   }, []);
   React.useEffect(() => { refreshProbes(); }, [refreshProbes]);
 
@@ -316,10 +316,10 @@ function AudioSettings({ d, set }: { d: any; set: any }) {
 function PermissionsSettingsPanel() {
   const [st, setSt] = React.useState<any>({});
   const refresh = React.useCallback(async () => {
-    try { setSt({ s: await window.cofounderos.probeScreenPermission(), a: await window.cofounderos.probeAccessibilityPermission(), m: await window.cofounderos.probeMicPermission() }); } catch {}
+    try { setSt({ s: await window.beside.probeScreenPermission(), a: await window.beside.probeAccessibilityPermission(), m: await window.beside.probeMicPermission() }); } catch {}
   }, []);
   React.useEffect(() => { refresh(); const t = setInterval(refresh, 2500); return () => clearInterval(t); }, [refresh]);
-  const req = async (k: string) => { await (window.cofounderos as any)[`request${k}Permission`](); refresh(); };
+  const req = async (k: string) => { await (window.beside as any)[`request${k}Permission`](); refresh(); };
   
   if (st.s?.status === 'unsupported' && st.a?.status === 'unsupported' && st.m?.status === 'unsupported') return <SettingsSection title="System permissions"><p className="text-sm">Not applicable.</p></SettingsSection>;
   return (
@@ -334,7 +334,7 @@ function PermissionsSettingsPanel() {
 
 function ModelSettings({ savedModel, savedRevision, ollamaHost, ollamaAutoInstall, modelReady, bootstrapEvents, onClearBootstrapEvents, onHostChange, onAutoInstallChange, onModelChanged }: any) {
   const [pid, setPid] = React.useState(savedModel || MODEL_CHOICES[0]!.id), [tag, setTag] = React.useState(savedModel), [ph, setPh] = React.useState<'idle'|'running'|'done'|'error'>('idle');
-  const apply = async () => { setPh('running'); onClearBootstrapEvents(); try { const n = await window.cofounderos.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: pid === '__custom__' ? tag : pid, model_revision: savedRevision + 1, auto_install: true } } } }); onModelChanged(n); await window.cofounderos.updateModel(); setPh('done'); toast.success('Switched.'); } catch (e: any) { setPh('error'); toast.error(e.message); } };
+  const apply = async () => { setPh('running'); onClearBootstrapEvents(); try { const n = await window.beside.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: pid === '__custom__' ? tag : pid, model_revision: savedRevision + 1, auto_install: true } } } }); onModelChanged(n); await window.beside.updateModel(); setPh('done'); toast.success('Switched.'); } catch (e: any) { setPh('error'); toast.error(e.message); } };
   return (
     <Card><CardContent className="flex flex-col gap-4">
       <div className="flex items-center gap-3"><div className="size-10 grid place-items-center bg-primary/10 text-primary rounded-md"><Cpu className="size-5" /></div><div className="flex-1"><h3 className="font-semibold">Local AI model</h3><p className="text-sm font-mono text-muted-foreground">{savedModel}</p></div><Button onClick={apply} disabled={ph === 'running'}><Download /> Apply model</Button></div>
@@ -346,7 +346,7 @@ function ModelSettings({ savedModel, savedRevision, ollamaHost, ollamaAutoInstal
 
 function DangerZone() {
   const [txt, setTxt] = React.useState(''), [op, setOp] = React.useState(false);
-  const del = async () => { try { await window.cofounderos.deleteAllMemory(); setOp(false); setTxt(''); toast.success('Deleted'); } catch (e: any) { toast.error(e.message); } };
+  const del = async () => { try { await window.beside.deleteAllMemory(); setOp(false); setTxt(''); toast.success('Deleted'); } catch (e: any) { toast.error(e.message); } };
   return (
     <Card className="border-destructive/40 bg-destructive/5"><CardContent className="flex flex-col gap-3">
       <div className="flex items-start gap-3"><div className="size-8 grid place-items-center bg-destructive/15 text-destructive rounded-md"><AlertTriangle className="size-4" /></div><div><h4 className="font-medium text-destructive">Delete all my memory</h4></div></div>

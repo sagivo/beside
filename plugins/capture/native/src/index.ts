@@ -11,8 +11,8 @@ import type {
   RawEventHandler,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
-import { expandPath } from '@cofounderos/core';
+} from '@beside/interfaces';
+import { expandPath } from '@beside/core';
 import { dHash, hashDiff } from './perceptual-hash.js';
 
 interface NativeCaptureConfig {
@@ -51,7 +51,7 @@ interface NativeCaptureConfig {
       /**
        * When to join an already-active microphone session:
        *   'other_process_input' — record when another process is actively
-       *     using the microphone. CofounderOS does not initiate recording based
+       *     using the microphone. Beside does not initiate recording based
        *     on meeting UI or URLs.
        *   'always' — legacy value accepted for older configs; treated as
        *     input-only so the app never opens audio by itself.
@@ -107,7 +107,7 @@ class NativeCapture implements ICapture {
       ?? (format === 'webp' ? 45 : config.jpeg_quality ?? 80);
     this.config = {
       helper_path: config.helper_path ? expandPath(config.helper_path) : undefined,
-      fixture: config.fixture ?? process.env.COFOUNDEROS_CAPTURE_FIXTURE === '1',
+      fixture: config.fixture ?? process.env.BESIDE_CAPTURE_FIXTURE === '1',
       restart_on_crash: config.restart_on_crash ?? true,
       poll_interval_ms: config.poll_interval_ms ?? 3000,
       idle_poll_interval_ms: config.idle_poll_interval_ms ?? 30_000,
@@ -124,9 +124,9 @@ class NativeCapture implements ICapture {
       capture_audio: config.capture_audio ?? true,
       whisper_model: config.whisper_model ?? 'base',
       audio: {
-        inbox_path: expandPath(config.audio?.inbox_path ?? '~/.cofounderOS/raw/audio/inbox'),
-        processed_path: expandPath(config.audio?.processed_path ?? '~/.cofounderOS/raw/audio/processed'),
-        failed_path: expandPath(config.audio?.failed_path ?? '~/.cofounderOS/raw/audio/failed'),
+        inbox_path: expandPath(config.audio?.inbox_path ?? '~/.beside/raw/audio/inbox'),
+        processed_path: expandPath(config.audio?.processed_path ?? '~/.beside/raw/audio/processed'),
+        failed_path: expandPath(config.audio?.failed_path ?? '~/.beside/raw/audio/failed'),
         tick_interval_sec: config.audio?.tick_interval_sec ?? 60,
         batch_size: config.audio?.batch_size ?? 5,
         whisper_command: config.audio?.whisper_command ?? 'whisper',
@@ -142,7 +142,7 @@ class NativeCapture implements ICapture {
           poll_interval_sec: config.audio?.live_recording?.poll_interval_sec ?? 3,
         },
       },
-      raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
+      raw_root: expandPath(config.raw_root ?? '~/.beside'),
       privacy: config.privacy ?? {
         blur_password_fields: true,
         pause_on_screen_lock: true,
@@ -246,7 +246,7 @@ class NativeCapture implements ICapture {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        COFOUNDEROS_RAW_ROOT: this.config.raw_root,
+        BESIDE_RAW_ROOT: this.config.raw_root,
       },
     });
     this.child = child;
@@ -487,7 +487,7 @@ class NativeCapture implements ICapture {
   private resolveHelperPath(): string {
     if (this.config.helper_path) return this.config.helper_path;
     const here = path.dirname(fileURLToPath(import.meta.url));
-    const exe = process.platform === 'win32' ? 'cofounderos-capture.exe' : 'cofounderos-capture';
+    const exe = process.platform === 'win32' ? 'beside-capture.exe' : 'beside-capture';
     const platformArch = `${process.platform}-${process.arch}`;
     return path.resolve(here, 'native', platformArch, exe);
   }

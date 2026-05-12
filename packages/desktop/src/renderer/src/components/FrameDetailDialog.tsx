@@ -46,7 +46,7 @@ function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
   React.useEffect(() => {
     let c = false; const q = searchContext?.query.trim(); setExp(searchContext?.explanation ?? null);
     if (!q || searchContext?.explanation || !frame.id) return () => { c = true; };
-    (async () => { try { const e = await window.cofounderos.explainSearchResults({ text: q, frames: [frame] }); if (!c) setExp(e[0]?.explanation ?? null); } catch { if (!c) setExp(null); } })();
+    (async () => { try { const e = await window.beside.explainSearchResults({ text: q, frames: [frame] }); if (!c) setExp(e[0]?.explanation ?? null); } catch { if (!c) setExp(null); } })();
     return () => { c = true; };
   }, [frame, searchContext?.explanation, searchContext?.query]);
 
@@ -54,7 +54,7 @@ function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
     let c = false; setIdxDet(null);
     if (!frame.id) { setIdxLoad(false); return () => { c = true; }; }
     setIdxLoad(true);
-    window.cofounderos.getFrameIndexDetails(frame.id).then(d => { if (!c) setIdxDet(d); }).catch(() => { if (!c) setIdxDet(null); }).finally(() => { if (!c) setIdxLoad(false); });
+    window.beside.getFrameIndexDetails(frame.id).then(d => { if (!c) setIdxDet(d); }).catch(() => { if (!c) setIdxDet(null); }).finally(() => { if (!c) setIdxLoad(false); });
     return () => { c = true; };
   }, [frame.id]);
 
@@ -99,7 +99,7 @@ function DeleteFrameButton({ frame, onDeleted }: any) {
   const del = async () => {
     if (!frame.id) return toast.error('Error', { description: 'Missing frame id.' });
     setPending(true);
-    try { await window.cofounderos.deleteFrame(frame.id); toast.success('Deleted'); onDeleted(); } catch (err: any) { toast.error('Failed', { description: err.message || String(err) }); } finally { setPending(false); }
+    try { await window.beside.deleteFrame(frame.id); toast.success('Deleted'); onDeleted(); } catch (err: any) { toast.error('Failed', { description: err.message || String(err) }); } finally { setPending(false); }
   };
   return (
     <AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10"><Trash2 />Delete</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete this moment?</AlertDialogTitle><AlertDialogDescription>This removes the screenshot permanently.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={del} disabled={pending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{pending ? 'Deleting…' : 'Delete moment'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>

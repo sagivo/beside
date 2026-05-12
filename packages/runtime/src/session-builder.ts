@@ -1,5 +1,5 @@
-import type { IStorage, Frame, ActivitySession, EntityKind, Logger } from '@cofounderos/interfaces';
-import { newActivitySessionId, dayKey } from '@cofounderos/core';
+import type { IStorage, Frame, ActivitySession, EntityKind, Logger } from '@beside/interfaces';
+import { newActivitySessionId, dayKey } from '@beside/core';
 import { isSupportingAppEntity, CODE_APPS, TERMINAL_APPS } from './entity-resolver.js';
 
 const LIFT_TARGET_KINDS: ReadonlySet<EntityKind> = new Set(['project', 'repo']);

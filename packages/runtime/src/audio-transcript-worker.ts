@@ -4,8 +4,8 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import type { Frame, IStorage, Logger, MeetingPlatform, RawEvent } from '@cofounderos/interfaces';
-import { ensureDir, expandPath, newEventId, newSessionId } from '@cofounderos/core';
+import type { Frame, IStorage, Logger, MeetingPlatform, RawEvent } from '@beside/interfaces';
+import { ensureDir, expandPath, newEventId, newSessionId } from '@beside/core';
 import { redactPii } from './pii.js';
 
 const execFileP = promisify(execFile);
@@ -108,7 +108,7 @@ export class AudioTranscriptWorker {
   }
 
   private async transcribeAudioFile(fp: string): Promise<TranscribeResult> {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-whisper-'));
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-whisper-'));
     try {
       const args = [fp, '--model', this.whisperModel, '--output_format', 'all', '--output_dir', tmp];
       if (this.whisperLanguage) args.push('--language', this.whisperLanguage);
@@ -119,7 +119,7 @@ export class AudioTranscriptWorker {
 
   private async buildEvent(sp: string, t: string, src: 'import'|'whisper', turns: ExtractedTurn[]): Promise<RawEvent> {
     const st = await fs.stat(sp), fn = path.basename(sp), sa = parseNativeChunkTimestamp(fn) ?? st.mtime, dur = src === 'whisper' ? await this.probeDurationMs(sp) : null, ctx = src === 'whisper' ? await this.findRecordingContext(sa, dur) : null;
-    return { id: newEventId(sa), timestamp: sa.toISOString(), session_id: newSessionId(), type: 'audio_transcript', app: 'Audio', app_bundle_id: 'cofounderos.audio', window_title: fn, url: null, content: t, asset_path: null, duration_ms: dur, idle_before_ms: null, screen_index: 0, metadata: { source: src, original_filename: fn, whisper_model: src === 'whisper' ? this.whisperModel : null, duration_ms: dur, turns: turns.length ? turns : undefined, recording_context: ctx ?? undefined }, privacy_filtered: false, capture_plugin: 'audio-transcript-worker' };
+    return { id: newEventId(sa), timestamp: sa.toISOString(), session_id: newSessionId(), type: 'audio_transcript', app: 'Audio', app_bundle_id: 'beside.audio', window_title: fn, url: null, content: t, asset_path: null, duration_ms: dur, idle_before_ms: null, screen_index: 0, metadata: { source: src, original_filename: fn, whisper_model: src === 'whisper' ? this.whisperModel : null, duration_ms: dur, turns: turns.length ? turns : undefined, recording_context: ctx ?? undefined }, privacy_filtered: false, capture_plugin: 'audio-transcript-worker' };
   }
 
   private async findRecordingContext(sa: Date, dur: number | null): Promise<RecordingContextCandidate | null> {

@@ -54,7 +54,7 @@ const logger = {
 };
 
 async function main() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-meetings-smoke-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-meetings-smoke-'));
   try {
     const ctx = { dataDir: tmp, logger, config: { path: tmp } };
     const storage = await storageMod.default(ctx);
@@ -117,7 +117,7 @@ async function main() {
       session_id: 'sess_demo',
       type: 'audio_transcript',
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: 'native-2026-05-07-15-30-30-000-1.m4a',
       url: null,
       content: 'Alice: kicking off Q3 roadmap. Bob: pricing slide is the key change. https://example.com/pricing',
@@ -149,7 +149,7 @@ async function main() {
       day: audioStartIso.slice(0, 10),
       monitor: 0,
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: 'native-2026-05-07-15-30-30-000-1.m4a',
       url: null,
       text: audioEvent.content,
@@ -247,7 +247,7 @@ async function main() {
       session_id: 'sess_demo_late',
       type: 'audio_transcript',
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: 'native-2026-05-07-15-33-00-000-2.m4a',
       url: null,
       content: 'Carol: add launch-risk follow-up to the Q3 roadmap.',
@@ -291,7 +291,7 @@ async function main() {
       day: lateAudioStart.slice(0, 10),
       monitor: 0,
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: lateAudioEvent.window_title,
       url: null,
       text: lateAudioEvent.content,
@@ -374,7 +374,7 @@ async function main() {
       session_id: 'sess_audio_context',
       type: 'audio_transcript',
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: 'native-2026-05-11-11-01-00-000-1.m4a',
       url: null,
       content: 'Alice: openbox sync standup is starting. Bob: I will review the GitHub sync follow-up.',
@@ -420,7 +420,7 @@ async function main() {
       day: '2026-05-11',
       monitor: 0,
       app: 'Audio',
-      app_bundle_id: 'cofounderos.audio',
+      app_bundle_id: 'beside.audio',
       window_title: 'native-2026-05-11-11-01-00-000-1.m4a',
       url: null,
       text: contextualAudioEvent.content,

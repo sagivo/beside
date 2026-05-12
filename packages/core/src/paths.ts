@@ -12,10 +12,10 @@ export function expandPath(p: string): string {
 
 /**
  * OS-conventional data directory for packaged desktop builds. The legacy
- * default remains ~/.cofounderOS for source/dev continuity, but installers
+ * default remains ~/.beside for source/dev continuity, but installers
  * can opt into this path without duplicating platform logic.
  */
-export function defaultPlatformDataDir(appName = 'CofounderOS'): string {
+export function defaultPlatformDataDir(appName = 'Beside'): string {
   if (process.platform === 'win32') {
     const root = process.env.APPDATA || process.env.LOCALAPPDATA || os.homedir();
     return path.join(root, appName);
@@ -28,19 +28,19 @@ export function defaultPlatformDataDir(appName = 'CofounderOS'): string {
 }
 
 /**
- * Default data directory. Honours $COFOUNDEROS_DATA_DIR so users (and
+ * Default data directory. Honours $BESIDE_DATA_DIR so users (and
  * CI / tests / power-users on every OS) can redirect persistent state
  * without editing config.yaml. Source/dev installs keep the historical
- * $HOME/.cofounderOS path; packaged apps can set
- * COFOUNDEROS_USE_PLATFORM_DATA_DIR=1 to use OS-conventional locations.
+ * $HOME/.beside path; packaged apps can set
+ * BESIDE_USE_PLATFORM_DATA_DIR=1 to use OS-conventional locations.
  */
 export function defaultDataDir(): string {
-  const fromEnv = process.env.COFOUNDEROS_DATA_DIR;
+  const fromEnv = process.env.BESIDE_DATA_DIR;
   if (fromEnv && fromEnv.trim().length > 0) return expandPath(fromEnv);
-  if (process.env.COFOUNDEROS_USE_PLATFORM_DATA_DIR === '1') {
+  if (process.env.BESIDE_USE_PLATFORM_DATA_DIR === '1') {
     return defaultPlatformDataDir();
   }
-  return path.join(os.homedir(), '.cofounderOS');
+  return path.join(os.homedir(), '.beside');
 }
 
 export async function ensureDir(p: string): Promise<void> {

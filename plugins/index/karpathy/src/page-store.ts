@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { IndexPage, IndexState } from '@cofounderos/interfaces';
-import { ensureDir } from '@cofounderos/core';
+import type { IndexPage, IndexState } from '@beside/interfaces';
+import { ensureDir } from '@beside/core';
 
 const STATE_FILENAME = '_state.json';
 const ROOT_INDEX_FILENAME = 'index.md';
@@ -265,7 +265,7 @@ export class PageStore {
   }
 }
 
-const META_OPEN = '<!-- cofounderos:meta';
+const META_OPEN = '<!-- beside:meta';
 const META_CLOSE = '-->';
 
 interface PageMeta {

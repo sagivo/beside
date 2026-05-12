@@ -16,7 +16,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ModelBootstrapHandler } from '@cofounderos/interfaces';
+import type { ModelBootstrapHandler } from '@beside/interfaces';
 
 const OLLAMA_INSTALL_SCRIPT_URL = 'https://ollama.com/install.sh';
 const OLLAMA_MAC_ZIP_URL = 'https://ollama.com/download/Ollama-darwin.zip';
@@ -161,7 +161,7 @@ export async function installOllamaMacOS(
     );
   }
 
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cofounderos-ollama-'));
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-ollama-'));
   try {
     const zipPath = path.join(tmpDir, 'Ollama-darwin.zip');
     const extractDir = path.join(tmpDir, 'extract');

@@ -15,8 +15,8 @@ import type {
   Meeting,
   RawEvent,
   ReorganisationSummary,
-} from '@cofounderos/interfaces';
-import { isoTimestamp } from '@cofounderos/core';
+} from '@beside/interfaces';
+import { isoTimestamp } from '@beside/core';
 import { slugify } from './bucketer.js';
 import { PageStore } from './page-store.js';
 
@@ -159,7 +159,7 @@ const NOISE_APP_SLUGS: ReadonlySet<string> = new Set([
   'control-center',
   'notification-center',
   'screencaptureui',
-  'cofounderos', // the host app itself
+  'beside', // the host app itself
   'audio', // synthetic audio_transcript fallback entity
 ]);
 
@@ -1756,7 +1756,7 @@ function renderRootIndex(pages: IndexPage[], meta: RootMeta): string {
     if (cat) summaryByCategory.set(cat, p);
   }
   const lines: string[] = [];
-  lines.push('# CofounderOS — index');
+  lines.push('# Beside — index');
   lines.push('');
   lines.push(`Last incremental run: ${meta.lastIncrementalRun ?? 'never'}`);
   lines.push(`Last reorganisation: ${meta.lastReorganisationRun ?? 'never'}`);
@@ -1939,7 +1939,7 @@ function cleanGeneratedOverview(text: string, category: string): string {
     .replace(/^```(?:markdown|md)?\s*/i, '')
     .replace(/```\s*$/i, '')
     .split('\n')
-    .filter((line) => !line.startsWith('<!-- cofounderos:meta'))
+    .filter((line) => !line.startsWith('<!-- beside:meta'))
     .filter((line) => !/^---\s*$/.test(line.trim()))
     .filter((line) => !/^#{1,6}\s+/.test(line))
     .filter((line) => !/^\s*[-*]\s+/.test(line))
@@ -1977,7 +1977,7 @@ function extractPageSummary(content: string, maxChars: number): string | null {
 
 function stripMarkdownBoilerplate(content: string): string {
   return content
-    .replace(/<!-- cofounderos:meta[\s\S]*?-->\s*/g, '')
+    .replace(/<!-- beside:meta[\s\S]*?-->\s*/g, '')
     .replace(/^---\n[\s\S]*?\n---\s*/m, '')
     .trim();
 }

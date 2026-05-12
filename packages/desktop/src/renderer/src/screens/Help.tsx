@@ -40,12 +40,12 @@ export function Help({
   async function copyDiagnostics() {
     try {
       const [overview, checks, _config] = await Promise.all([
-        window.cofounderos.getOverview(),
-        window.cofounderos.runDoctor(),
-        window.cofounderos.readConfig(),
+        window.beside.getOverview(),
+        window.beside.runDoctor(),
+        window.beside.readConfig(),
       ]);
       const text = [
-        '# CofounderOS Diagnostics',
+        '# Beside Diagnostics',
         `Generated: ${new Date().toISOString()}`,
         '',
         `Status: ${overview.status}`,
@@ -59,7 +59,7 @@ export function Help({
         '## Logs',
         logs || '(none)',
       ].join('\n');
-      await window.cofounderos.copyText(text);
+      await window.beside.copyText(text);
       toast.success('Diagnostics copied to clipboard', {
         description: 'Paste it into a support thread or save it for later.',
       });
@@ -117,7 +117,7 @@ export function Help({
               action={
                 <Button
                   variant="outline"
-                  onClick={() => void window.cofounderos.openPath('data')}
+                  onClick={() => void window.beside.openPath('data')}
                 >
                   <FolderOpen />
                   Open
@@ -131,7 +131,7 @@ export function Help({
               action={
                 <Button
                   variant="outline"
-                  onClick={() => void window.cofounderos.openPath('config')}
+                  onClick={() => void window.beside.openPath('config')}
                 >
                   <FolderOpen />
                   Open
@@ -168,7 +168,7 @@ export function Help({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => window.cofounderos.getOverview().catch(() => null)}
+            onClick={() => window.beside.getOverview().catch(() => null)}
           >
             <RefreshCcw />
             Refresh status
@@ -232,7 +232,7 @@ function AboutCard() {
         <BrandMark className="size-12" />
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-baseline gap-2">
-            <h3 className="text-xl font-semibold tracking-tight">CofounderOS</h3>
+            <h3 className="text-xl font-semibold tracking-tight">Beside</h3>
             <Badge variant="muted" className="font-mono">
               v{__APP_VERSION__}
             </Badge>
@@ -258,7 +258,7 @@ function AboutCard() {
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" asChild>
             <a
-              href="https://github.com/cofounderos/cofounderos"
+              href="https://github.com/beside/beside"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -269,7 +269,7 @@ function AboutCard() {
           </Button>
           <Button variant="outline" size="sm" asChild>
             <a
-              href="https://github.com/cofounderos/cofounderos/blob/main/README.md"
+              href="https://github.com/beside/beside/blob/main/README.md"
               target="_blank"
               rel="noopener noreferrer"
             >

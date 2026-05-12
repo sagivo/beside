@@ -4,7 +4,7 @@ import type {
   Logger,
   ModelInfo,
   PluginFactory,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 
 interface OpenAIModelConfig {
   api_key?: string;

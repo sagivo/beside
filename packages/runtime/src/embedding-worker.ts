@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import type { DayEvent, EntityKind, EntityRecord, IIndexStrategy, IModelAdapter, IStorage, Logger, Meeting, MemoryChunk, MemoryChunkKind } from '@cofounderos/interfaces';
+import type { DayEvent, EntityKind, EntityRecord, IIndexStrategy, IModelAdapter, IStorage, Logger, Meeting, MemoryChunk, MemoryChunkKind } from '@beside/interfaces';
 
 export interface EmbeddingWorkerOptions { enabled?: boolean; modelName?: string; batchSize?: number; strategy?: IIndexStrategy; unloadAfterIdleMs?: number; }
 export interface EmbeddingWorkerResult { processed: number; failed: number; remaining: number; }
@@ -117,7 +117,7 @@ export class EmbeddingWorker {
         const root = (await this.strategy.getState()).rootPath;
         for (const rel of await walkMarkdownPages(root)) {
           const pg = await this.strategy.readPage(rel).catch(() => null); if (!pg?.content) continue;
-          const b = pg.content.replace(/^---\n[\s\S]*?\n---\n?/u, '').replace(/<!--\s*cofounderos:[\s\S]*?-->\n?/giu, '').replace(/^#\s+.+?\s*$/m, '').trim();
+          const b = pg.content.replace(/^---\n[\s\S]*?\n---\n?/u, '').replace(/<!--\s*beside:[\s\S]*?-->\n?/giu, '').replace(/^#\s+.+?\s*$/m, '').trim();
           if (b) chunks.push(makeMemoryChunk({ kind: 'index_page', sourceId: rel, title: pg.content.match(/^#\s+(.+?)\s*$/m)?.[1]?.replace(/\s+/g, ' ').trim() ?? rel.replace(/\.md$/, ''), body: tr(b, 6000), entityPath: rel.replace(/\.md$/, ''), entityKind: entityKindFromPagePath(rel), day: pg.content.match(/\b(?:day|date|last_seen|first_seen)\s*:\s*(\d{4}-\d{2}-\d{2})\b/i)?.[1] ?? pg.content.match(/\b(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}/)?.[1] ?? null, timestamp: pg.lastUpdated, sourceRefs: [`index:${rel}`, ...pg.sourceEventIds.slice(0, 20).map(id => `event:${id}`)], now: n }));
         }
       } catch {}

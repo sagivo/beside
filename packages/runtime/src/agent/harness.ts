@@ -1,4 +1,4 @@
-import type { IIndexStrategy, IModelAdapter, IStorage, Logger } from '@cofounderos/interfaces';
+import type { IIndexStrategy, IModelAdapter, IStorage, Logger } from '@beside/interfaces';
 import { resolveDateAnchor } from './date.js';
 import { preferenceScore } from './noise.js';
 import { buildAnswerPrompt, buildDirectAnswerPrompt, buildDirectSystemPrompt, buildSystemPrompt } from './prompts.js';
@@ -265,7 +265,7 @@ async function synthesizePeopleContext(args: ExecArgs, query: string) {
   const images = (model.getModelInfo?.()?.supportsVision) ? await readFrameImages(tools.storage, frames.slice(0, 5)) : [];
   
   const prompt = [
-    `You are the evidence-synthesis step for CofounderOS. The user asked: "${query}".`,
+    `You are the evidence-synthesis step for Beside. The user asked: "${query}".`,
     'Produce a concise factual brief.',
     '**Synthesis:** 1-2 sentences with the useful answer, or "No useful update found."',
     '**Recent messages:** bullets.',

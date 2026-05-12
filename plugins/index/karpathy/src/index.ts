@@ -1,5 +1,5 @@
-import type { IIndexStrategy, PluginFactory } from '@cofounderos/interfaces';
-import { expandPath } from '@cofounderos/core';
+import type { IIndexStrategy, PluginFactory } from '@beside/interfaces';
+import { expandPath } from '@beside/core';
 import { KarpathyStrategy } from './strategy.js';
 
 interface FactoryConfig {

@@ -8,7 +8,7 @@ import type {
   ReorganisationSummary,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import {
   createMcpServer,
   startHttpServer,
@@ -26,7 +26,7 @@ interface McpExportConfig {
 }
 
 /**
- * MCP server exposed as a CofounderOS export plugin. The plugin is
+ * MCP server exposed as a Beside export plugin. The plugin is
  * lifecycle-only: page updates do NOT push anything (MCP clients pull
  * on demand). What we expose here is a stable HTTP endpoint plus the
  * `bindServices` setter used by the app orchestrator to connect storage

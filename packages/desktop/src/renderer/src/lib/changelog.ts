@@ -59,7 +59,7 @@ export const CHANGELOG: ChangelogEntry[] = [
   },
 ];
 
-const STORAGE_KEY = 'cofounderos:changelog-last-seen';
+const STORAGE_KEY = 'beside:changelog-last-seen';
 
 function readLastSeen(): string | null {
   try {

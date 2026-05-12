@@ -1,5 +1,5 @@
 {
-  "name": "@cofounderos/core",
+  "name": "@beside/core",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "test": "echo \"(no tests)\""
   },
   "dependencies": {
-    "@cofounderos/interfaces": "workspace:*",
+    "@beside/interfaces": "workspace:*",
     "cron-parser": "^4.9.0",
     "uuid": "^10.0.0",
     "yaml": "^2.5.1",

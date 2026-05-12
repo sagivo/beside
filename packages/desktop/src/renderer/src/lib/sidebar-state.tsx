@@ -1,6 +1,6 @@
 import * as React from 'react';
 
-const STORAGE_KEY = 'cofounderos:sidebar-collapsed';
+const STORAGE_KEY = 'beside:sidebar-collapsed';
 
 interface SidebarContextValue {
   collapsed: boolean;

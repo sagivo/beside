@@ -1,4 +1,4 @@
-import type { RawEvent } from '@cofounderos/interfaces';
+import type { RawEvent } from '@beside/interfaces';
 
 export interface BucketAssignment {
   /** Path relative to the index root, e.g. "projects/my-project.md". */

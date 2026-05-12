@@ -1,5 +1,5 @@
 /**
- * One-shot MCP Streamable HTTP check against a running CofounderOS server.
+ * One-shot MCP Streamable HTTP check against a running Beside server.
  * Run: node scripts/verify-http-client.mjs [baseUrl]
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

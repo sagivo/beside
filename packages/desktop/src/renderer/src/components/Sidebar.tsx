@@ -76,7 +76,7 @@ export function Sidebar({
         {!collapsed && (
           <div className="min-w-0">
             <div className="text-[15px] font-semibold leading-tight tracking-tight truncate">
-              CofounderOS
+              Beside
             </div>
             <div className="text-[11px] text-muted-foreground truncate mt-0.5">
               Your memory, on this device

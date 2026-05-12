@@ -15,7 +15,7 @@ import { domainFromUrl, isHttpUrl } from '@/lib/url';
 import { cn } from '@/lib/utils';
 import type { Frame } from '@/global';
 
-const RECENT_KEY = 'cofounderos:recent-searches', RECENT_LIMIT = 6, EXPLANATION_LIMIT = 8, EXPLANATION_CONCURRENCY = 1, KNOWN_APPS_SAMPLE_LIMIT = 500, KNOWN_APPS_DAY_SAMPLE = 7;
+const RECENT_KEY = 'beside:recent-searches', RECENT_LIMIT = 6, EXPLANATION_LIMIT = 8, EXPLANATION_CONCURRENCY = 1, KNOWN_APPS_SAMPLE_LIMIT = 500, KNOWN_APPS_DAY_SAMPLE = 7;
 const SUGGESTIONS = ['design doc', 'github pull request', 'slack message', 'meeting notes', 'pricing', 'roadmap'];
 
 function readRecent(): string[] { try { const r = localStorage.getItem(RECENT_KEY); return r ? (JSON.parse(r) as string[]).filter(v => typeof v === 'string').slice(0, RECENT_LIMIT) : []; } catch { return []; } }
@@ -35,7 +35,7 @@ export function Search({ days, searchRequest }: { days: string[]; searchRequest?
       try {
         const sDays = days.slice(-KNOWN_APPS_DAY_SAMPLE).reverse(); if (!sDays.length) return;
         const lim = Math.max(80, Math.ceil(KNOWN_APPS_SAMPLE_LIMIT / sDays.length));
-        const fs = (await Promise.all(sDays.map(d => window.cofounderos.searchFrames({ day: d, limit: lim }).catch(() => [])))).flat().slice(0, KNOWN_APPS_SAMPLE_LIMIT);
+        const fs = (await Promise.all(sDays.map(d => window.beside.searchFrames({ day: d, limit: lim }).catch(() => [])))).flat().slice(0, KNOWN_APPS_SAMPLE_LIMIT);
         if (!c) { setKnownApps([...new Set(fs.map(f => f.app).filter(Boolean) as string[])].sort()); setKnownDoms([...new Set(fs.map(f => domainFromUrl(f.url)).filter(Boolean) as string[])].sort()); }
       } catch {}
     })();
@@ -49,14 +49,14 @@ export function Search({ days, searchRequest }: { days: string[]; searchRequest?
     const rid = ++runRef.current; if (txt !== undefined && sync) setQ(text);
     setLoading(true); setExps({}); setActiveQ(text); setSearched(true); fKeyRef.current = fKey;
     try {
-      const res = await window.cofounderos.searchFrames({ text, day: dayF !== '__all__' ? dayF : undefined, apps: appF !== '__all__' ? [appF] : undefined, urlDomain: domF !== '__all__' ? domF : undefined, textSource: txtF !== '__all__' ? txtF as any : undefined, limit: 80 });
+      const res = await window.beside.searchFrames({ text, day: dayF !== '__all__' ? dayF : undefined, apps: appF !== '__all__' ? [appF] : undefined, urlDomain: domF !== '__all__' ? domF : undefined, textSource: txtF !== '__all__' ? txtF as any : undefined, limit: 80 });
       if (runRef.current !== rid) return; setResults(res);
       const fEx = res.slice(0, EXPLANATION_LIMIT);
       if (fEx.length) {
         (async () => {
           let i = 0; const n = async () => {
             while (runRef.current === rid && i < fEx.length) {
-              const f = fEx[i++]; try { const r = (await window.cofounderos.explainSearchResults({ text, frames: [f] }))[0]; if (runRef.current === rid && r) setExps(p => ({ ...p, [r.frameId]: r.explanation })); } catch {}
+              const f = fEx[i++]; try { const r = (await window.beside.explainSearchResults({ text, frames: [f] }))[0]; if (runRef.current === rid && r) setExps(p => ({ ...p, [r.frameId]: r.explanation })); } catch {}
             }
           };
           try { await Promise.all(Array.from({ length: Math.min(EXPLANATION_CONCURRENCY, fEx.length) }, n)); } catch { if (runRef.current === rid) setExps({}); }
@@ -115,7 +115,7 @@ function ResultCard({ frame, searchQuery, explanation, onDeleted }: any) {
         <div className="text-sm line-clamp-2">{frame.window_title || frame.url || (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}</div>
         {ctx && <div className="mt-1 flex items-start gap-1.5 rounded-lg bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground"><Sparkles className="mt-0.5 size-3 shrink-0" /><span className="line-clamp-3">{ctx}</span></div>}
         <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">{dom && <span className="inline-flex items-center gap-1"><Globe2 className="size-3" /><span className="truncate">{dom}</span></span>}{frame.entity_path && <span className="inline-flex items-center gap-1"><Layers3 className="size-3" /><span className="truncate">{frame.entity_path}</span></span>}{frame.text_source === 'audio' && <span className="inline-flex items-center gap-1"><Mic className="size-3" />transcript</span>}</div>
-        <div className="mt-2 flex gap-3"><button type="button" onClick={open} {...listItemProps} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"><SearchIcon className="size-3" />Open memory</button>{isHttpUrl(frame.url) && <button type="button" onClick={() => window.cofounderos.openExternalUrl(frame.url!)} className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-primary hover:underline"><ExternalLink className="size-3" />Open source</button>}</div>
+        <div className="mt-2 flex gap-3"><button type="button" onClick={open} {...listItemProps} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"><SearchIcon className="size-3" />Open memory</button>{isHttpUrl(frame.url) && <button type="button" onClick={() => window.beside.openExternalUrl(frame.url!)} className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-primary hover:underline"><ExternalLink className="size-3" />Open source</button>}</div>
       </div>
     </div>
   );

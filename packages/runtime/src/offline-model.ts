@@ -4,7 +4,7 @@ import type {
   CompletionOptions,
   Logger,
   ModelBootstrapHandler,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 
 /**
  * Deterministic, model-free fallback adapter. Selectable explicitly via

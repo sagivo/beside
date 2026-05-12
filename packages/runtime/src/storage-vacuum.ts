@@ -6,7 +6,7 @@ import type {
   Logger,
   FrameAsset,
   FrameAssetTier,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 
 /**
  * StorageVacuum — sliding-window retention for screenshot assets.

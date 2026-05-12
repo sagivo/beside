@@ -4,7 +4,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/native/status-item.swift"
 DST_DIR="$ROOT/dist/native"
-DST="$DST_DIR/cofounderos-status-item"
+DST="$DST_DIR/beside-status-item"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   exit 0

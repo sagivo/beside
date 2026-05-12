@@ -1,4 +1,4 @@
-import type { Logger } from '@cofounderos/interfaces';
+import type { Logger } from '@beside/interfaces';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -43,7 +43,7 @@ function resolvePlain(explicit: boolean | undefined): boolean {
 
 export function createLogger(opts: LoggerOptions = {}): Logger {
   const level: LogLevel = opts.level ?? 'info';
-  const scope = opts.scope ?? 'cofounderos';
+  const scope = opts.scope ?? 'beside';
   const plain = resolvePlain(opts.plain);
 
   const emit = (lvl: LogLevel, msg: string, rest: unknown[]): void => {

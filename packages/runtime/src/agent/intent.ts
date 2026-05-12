@@ -1,4 +1,4 @@
-import type { IModelAdapter } from '@cofounderos/interfaces';
+import type { IModelAdapter } from '@beside/interfaces';
 import type { ChatIntent } from './types.js';
 
 const INTENT_VALUES: ChatIntent[] = [

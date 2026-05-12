@@ -3,7 +3,7 @@ import type {
   ActivitySession,
   IStorage,
   EntityRecord,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import {
   classifyFrame,
   dedupeCalendarEvents,
@@ -23,7 +23,7 @@ import {
 
 export interface DailySummaryOptions {
   /**
-   * Whether to include CofounderOS-dashboard frames in aggregations and
+   * Whether to include Beside-dashboard frames in aggregations and
    * extracted artifacts. Defaults to false — the dashboard's own UI
    * tends to dominate any text-based aggregation.
    */
@@ -127,7 +127,7 @@ export async function buildDailySummary(
   if (!options.include_self && frames.length < allFrames.length) {
     const dropped = allFrames.length - frames.length;
     notes.push(
-      `Filtered out ${dropped} CofounderOS dashboard frame(s). Pass include_self=true to include them.`,
+      `Filtered out ${dropped} Beside dashboard frame(s). Pass include_self=true to include them.`,
     );
   }
 

@@ -2,7 +2,7 @@ import type { ChatIntent, ChatTurnHistoryItem, CollectedToolResults, CompactFram
 
 export function buildSystemPrompt(): string {
   return [
-    'You are CofounderOS, a personal-productivity assistant on the user\'s device.',
+    'You are Beside, a personal-productivity assistant on the user\'s device.',
     'Answer ONLY from the CONTEXT block. Never invent.',
     '',
     'Hard rules:',
@@ -19,7 +19,7 @@ export function buildSystemPrompt(): string {
 
 export function buildDirectSystemPrompt(): string {
   return [
-    'You are CofounderOS, a personal-productivity assistant.',
+    'You are Beside, a personal-productivity assistant.',
     'Answer directly from your knowledge plus history (no captured-data tools for this turn).',
     '',
     'Hard constraints:',

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { DayEvent, EntityRecord, Frame, Meeting } from '@cofounderos/interfaces';
+import type { DayEvent, EntityRecord, Frame, Meeting } from '@beside/interfaces';
 import { resolveDateAnchor } from './agent/date.js';
 import { compactFrame, getDayActivitySummary } from './agent/tools.js';
 import type { CompactFrame, DayActivitySummaryResult, DateAnchor } from './agent/types.js';
@@ -157,13 +157,13 @@ async function buildBridgeSignals(handles: OrchestratorHandles, meetings: Meetin
   const out: MeetingBridgeSignal[] = [];
   for (const m of meetings.filter(m => m.summary_json || m.summary_md).slice(-6)) {
     const fs = await handles.storage.searchFrames({ from: m.ended_at, to: new Date(Math.min(Date.parse(anchor.toIso), Date.parse(m.ended_at) + 14400000)).toISOString(), limit: 40 }).catch(() => []);
-    const wf = fs.filter(f => f.meeting_id !== m.id && f.entity_kind !== 'meeting' && !['CofounderOS', 'Audio', 'loginwindow'].includes(f.app)).map(f => compactFrame(f, 180)).filter(f => f.excerpt || f.entity_path).slice(0, 8);
+    const wf = fs.filter(f => f.meeting_id !== m.id && f.entity_kind !== 'meeting' && !['Beside', 'Audio', 'loginwindow'].includes(f.app)).map(f => compactFrame(f, 180)).filter(f => f.excerpt || f.entity_path).slice(0, 8);
     out.push({ evidence_id: meetingEvidenceId(m.id), meeting_id: m.id, title: m.summary_json?.title ?? m.title ?? m.platform, started_at: m.started_at, ended_at: m.ended_at, tldr: truncateText(m.summary_json?.tldr ?? stripMarkdown(m.summary_md ?? ''), 260), meeting_followups: [...(m.summary_json?.action_items ?? []).map(i => i.owner ? `${i.owner}: ${i.task}` : i.task), ...(m.summary_json?.open_questions ?? []).map(q => q.text)].slice(0, 6), work_after: wf.map(f => ({ evidence_id: frameEvidenceId(f.id), at: f.timestamp, app: f.app, title: truncateText(f.window_title, 120), entity: f.entity_path, excerpt: truncateText(f.excerpt ?? '', 180) })) });
   }
   return out.filter(b => b.meeting_followups.length || b.work_after.length);
 }
 
-const ACTION_CENTER_SYSTEM_PROMPT = `You are the local CofounderOS work-triage model. Return JSON.`;
+const ACTION_CENTER_SYSTEM_PROMPT = `You are the local Beside work-triage model. Return JSON.`;
 function buildActionCenterPrompt(context: ActionCenterContext): string { return `Return JSON:\n{ "followups": [], "projects": [], "meeting_bridges": [] }\n\nContext:\n${serializeContext(context)}`; }
 
 function serializeContext(ctx: ActionCenterContext) {

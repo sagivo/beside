@@ -14,10 +14,10 @@ import type {
   PluginHostContext,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 
 export interface PluginRegistryEntry {
-  packageName: string;        // npm package name, e.g. @cofounderos/storage-local
+  packageName: string;        // npm package name, e.g. @beside/storage-local
   manifest: PluginManifest;
   /** Absolute path to the package directory. */
   rootDir: string;
@@ -35,8 +35,8 @@ const INTERFACE_BY_LAYER: Record<PluginLayer, PluginInterfaceName> = {
 
 /**
  * Discovers plugin packages installed in node_modules. Each plugin must
- * ship a `plugin.json` next to its `package.json`. We scan @cofounderos/*
- * and any package whose `package.json` has `cofounderos: { plugin: true }`.
+ * ship a `plugin.json` next to its `package.json`. We scan @beside/*
+ * and any package whose `package.json` has `beside: { plugin: true }`.
  */
 export async function discoverPlugins(workspaceRoot: string, logger: Logger): Promise<PluginRegistryEntry[]> {
   const log = logger.child('plugin-loader');
@@ -65,7 +65,7 @@ export async function discoverPlugins(workspaceRoot: string, logger: Logger): Pr
  *
  * Workspace packages under `packages/` (interfaces, core, app) are NOT
  * plugins and are intentionally excluded — they're the host. We also
- * still scan `node_modules/@cofounderos/*` so npm-installed plugins
+ * still scan `node_modules/@beside/*` so npm-installed plugins
  * shipped as packages keep working.
  *
  * A directory is treated as a candidate if it contains either a
@@ -123,9 +123,9 @@ async function collectCandidatePackageDirs(root: string): Promise<string[]> {
     }
   }
 
-  // node_modules — installed plugins shipped under @cofounderos/*.
+  // node_modules — installed plugins shipped under @beside/*.
   try {
-    const ns = path.join(root, 'node_modules', '@cofounderos');
+    const ns = path.join(root, 'node_modules', '@beside');
     const entries = await fs.readdir(ns, { withFileTypes: true });
     for (const e of entries) {
       if (!e.isDirectory()) continue;
@@ -215,7 +215,7 @@ export class PluginRegistry {
   /**
    * Resolve a plugin by short name or full package name. The short name
    * is the suffix after the layer prefix in built-in packages
-   * (e.g. "local" matches "@cofounderos/storage-local").
+   * (e.g. "local" matches "@beside/storage-local").
    */
   resolve(layer: PluginLayer, name: string): PluginRegistryEntry {
     const candidates = this.byLayer(layer);

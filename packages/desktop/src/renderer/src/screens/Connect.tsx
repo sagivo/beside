@@ -20,12 +20,12 @@ export function Connect({ overview, config, onRefresh }: { overview: RuntimeOver
   const mcpC = config.config.export.plugins.find(p => p.name === 'mcp'), mdC = config.config.export.plugins.find(p => p.name === 'markdown');
   const mcpS = overview.exports.find(e => e.name === 'mcp'), mdS = overview.exports.find(e => e.name === 'markdown');
   const host = typeof mcpC?.host === 'string' ? mcpC.host : '127.0.0.1', port = typeof mcpC?.port === 'number' ? mcpC.port : 3456, url = `http://${host}:${port}`;
-  const snip = JSON.stringify({ mcpServers: { cofounderos: { url } } }, null, 2), clCmd = `claude mcp add --transport http cofounderos ${url}`;
+  const snip = JSON.stringify({ mcpServers: { beside: { url } } }, null, 2), clCmd = `claude mcp add --transport http beside ${url}`;
 
-  return <ConnectScreen url={url} snippet={snip} claudeCommand={clCmd} copyText={async (l: string, t: string) => { await window.cofounderos.copyText(t); toast.success(`${l} copied`); }} enableMcp={async () => {
+  return <ConnectScreen url={url} snippet={snip} claudeCommand={clCmd} copyText={async (l: string, t: string) => { await window.beside.copyText(t); toast.success(`${l} copied`); }} enableMcp={async () => {
     const p = [...config.config.export.plugins], i = p.findIndex(x => x.name === 'mcp'), n = { ...(i >= 0 ? p[i] : {}), name: 'mcp', enabled: true, host, port, transport: 'http' as const };
     i >= 0 ? p[i] = n : p.push(n);
-    try { await window.cofounderos.saveConfigPatch({ export: { plugins: p } }); if (overview.status === 'running') await window.cofounderos.startRuntime(); toast.success('MCP server enabled'); await onRefresh(); } catch (err: any) { toast.error('Could not enable MCP', { description: err.message }); }
+    try { await window.beside.saveConfigPatch({ export: { plugins: p } }); if (overview.status === 'running') await window.beside.startRuntime(); toast.success('MCP server enabled'); await onRefresh(); } catch (err: any) { toast.error('Could not enable MCP', { description: err.message }); }
   }} mcpEnabled={mcpC?.enabled !== false} mcpRunning={!!mcpS?.running} markdownRunning={!!mdS?.running} markdownPath={typeof mdC?.path === 'string' ? mdC.path : ''} onRefresh={onRefresh} />;
 }
 
@@ -41,7 +41,7 @@ function ConnectScreen({ url, snippet, claudeCommand, copyText, enableMcp, mcpEn
 
   return (
     <div className="flex flex-col gap-6 pt-6">
-      <PageHeader title="Connect" description="Wire CofounderOS into local AI apps over MCP." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
+      <PageHeader title="Connect" description="Wire Beside into local AI apps over MCP." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
 
       <Card className="overflow-hidden">
         <div className="border-b bg-gradient-brand-soft px-6 py-5 flex flex-wrap items-center gap-4">
@@ -53,7 +53,7 @@ function ConnectScreen({ url, snippet, claudeCommand, copyText, enableMcp, mcpEn
           <div className="flex flex-wrap items-center gap-2">
             {!mcpEnabled && <Button size="lg" onClick={async () => { setEnabling(true); try { await enableMcp(); } finally { setEnabling(false); } }} disabled={enabling} className="btn-brand">{enabling ? <Loader2 className="animate-spin" /> : <Wrench />}Enable MCP</Button>}
             <Button variant="outline" size="lg" onClick={ping} disabled={test.status === 'pending'}>{test.status === 'pending' ? <Loader2 className="animate-spin" /> : <Zap />}Test connection</Button>
-            <Button variant="ghost" size="lg" onClick={() => window.cofounderos.openExternalUrl(`${url}/health`)}><Plug />Open health URL</Button>
+            <Button variant="ghost" size="lg" onClick={() => window.beside.openExternalUrl(`${url}/health`)}><Plug />Open health URL</Button>
             {test.status === 'idle' ? <span className="text-xs text-muted-foreground/80 font-mono truncate">{`${url}/health`}</span> : test.status === 'pending' ? <span className="text-xs text-muted-foreground">Pinging...</span> : test.status === 'ok' ? <span className="inline-flex items-center gap-1.5 text-xs text-success font-medium animate-in fade-in-0"><CheckCircle2 className="size-3.5" />Connected · {test.latencyMs}ms</span> : <span className="inline-flex items-center gap-1.5 text-xs text-destructive font-medium animate-in fade-in-0" title={test.reason}><XCircle className="size-3.5" /><span className="truncate max-w-[260px]">{test.reason}</span></span>}
           </div>
           <div className="grid gap-3 md:grid-cols-3">
@@ -67,9 +67,9 @@ function ConnectScreen({ url, snippet, claudeCommand, copyText, enableMcp, mcpEn
 
       <Card><CardContent className="flex flex-wrap items-center gap-4">
         <span className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground"><FolderOpen className="size-5" /></span>
-        <div className="flex-1 min-w-[220px]"><h3 className="font-semibold">Read your memory as files</h3><p className="text-sm text-muted-foreground mt-0.5">Daily journals and index pages are exported as Markdown.</p><code className="mt-2 inline-block rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground">{markdownPath || '~/.cofounderOS/export/markdown'}</code></div>
+        <div className="flex-1 min-w-[220px]"><h3 className="font-semibold">Read your memory as files</h3><p className="text-sm text-muted-foreground mt-0.5">Daily journals and index pages are exported as Markdown.</p><code className="mt-2 inline-block rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground">{markdownPath || '~/.beside/export/markdown'}</code></div>
         <StatusPill tone={markdownRunning ? 'success' : 'muted'} pulse={markdownRunning}>{markdownRunning ? 'Running' : 'Not running'}</StatusPill>
-        <Button variant="outline" onClick={() => window.cofounderos.openPath('markdown')}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => window.cofounderos.openPath('config')}><Wrench />Config</Button>
+        <Button variant="outline" onClick={() => window.beside.openPath('markdown')}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => window.beside.openPath('config')}><Wrench />Config</Button>
       </CardContent></Card>
     </div>
   );

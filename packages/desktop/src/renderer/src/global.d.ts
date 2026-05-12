@@ -5,7 +5,7 @@ declare global {
   const __APP_VERSION__: string;
 
   interface Window {
-    cofounderos: {
+    beside: {
       getOverview: () => Promise<RuntimeOverview>;
       runDoctor: () => Promise<DoctorCheck[]>;
       readConfig: () => Promise<LoadedConfig>;
@@ -278,14 +278,14 @@ export type ModelBootstrapProgress =
 export interface LoadedConfig {
   sourcePath: string;
   dataDir: string;
-  config: CofounderConfig;
+  config: BesideConfig;
 }
 
 export type ConfigValidation =
-  | { ok: true; config: CofounderConfig }
+  | { ok: true; config: BesideConfig }
   | { ok: false; issues: Array<{ path: string; message: string }> };
 
-export interface CofounderConfig {
+export interface BesideConfig {
   app: {
     name: string;
     data_dir: string;

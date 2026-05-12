@@ -43,15 +43,15 @@ function expect(label, actual, predicate) {
   checks.push({ label, ok, actual });
 }
 
-// 1. isSelfFrame should fire on cofounderos app + entity_path
+// 1. isSelfFrame should fire on beside app + entity_path
 expect(
-  'isSelfFrame: cofounderos app',
-  isSelfFrame(frame({ app: 'CofounderOS' })),
+  'isSelfFrame: beside app',
+  isSelfFrame(frame({ app: 'Beside' })),
   (v) => v === true,
 );
 expect(
-  'isSelfFrame: apps/cofounderos entity',
-  isSelfFrame(frame({ entity_path: 'apps/cofounderos', entity_kind: 'app' })),
+  'isSelfFrame: apps/beside entity',
+  isSelfFrame(frame({ entity_path: 'apps/beside', entity_kind: 'app' })),
   (v) => v === true,
 );
 expect(
@@ -93,7 +93,7 @@ const calFrame = frame({
     '11:30 AM – 12:00 PM',
     'Lunch',
     '2:00 PM',
-    'CofounderOS sync',
+    'Beside sync',
   ].join('\n'),
 });
 const calEvents = extractCalendarEventsFromFrame(calFrame);
@@ -105,7 +105,7 @@ expect(
 expect(
   'extractCalendarEvents: parses afternoon sync',
   calEvents,
-  (events) => events.some((e) => e.title.toLowerCase().includes('cofounderos sync')),
+  (events) => events.some((e) => e.title.toLowerCase().includes('beside sync')),
 );
 expect(
   'dedupeCalendarEvents: unique titles per time_label',
@@ -174,15 +174,15 @@ expect(
 // 5. extractReviewItemFromFrame
 const prFrame = frame({
   app: 'Chrome',
-  url: 'https://github.com/cofounderos/core/pull/123',
-  window_title: 'Add daily summary endpoint by sagiv · Pull Request #123 · cofounderos/core',
+  url: 'https://github.com/beside/core/pull/123',
+  window_title: 'Add daily summary endpoint by sagiv · Pull Request #123 · beside/core',
   text: 'Open · sagiv wants to merge 3 commits into main from feature/daily-summary',
 });
 const prItem = extractReviewItemFromFrame(prFrame);
 expect(
   'extractReviewItem: ref',
   prItem?.ref,
-  (v) => v === 'cofounderos/core#123',
+  (v) => v === 'beside/core#123',
 );
 expect(
   'extractReviewItem: status open',

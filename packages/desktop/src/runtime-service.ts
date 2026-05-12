@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
-import type { Logger } from '@cofounderos/interfaces';
-import { createRuntime } from '@cofounderos/runtime';
+import type { Logger } from '@beside/interfaces';
+import { createRuntime } from '@beside/runtime';
 
 type Request = {
   id: number;
@@ -53,7 +53,7 @@ function emitLog(level: string, msg: string, rest: unknown[]): void {
 
 const runtime = createRuntime({
   logger,
-  workspaceRoot: process.env.COFOUNDEROS_RESOURCE_ROOT,
+  workspaceRoot: process.env.BESIDE_RESOURCE_ROOT,
 });
 
 const getRuntimeOverview = runtime.getOverview.bind(runtime) as (

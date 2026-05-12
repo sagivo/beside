@@ -10,8 +10,8 @@ const PluginRefSchema = z.object({
 }).passthrough();
 
 const AppSchema = z.object({
-  name: z.string().default('CofounderOS'),
-  data_dir: z.string().default('~/.cofounderOS'),
+  name: z.string().default('Beside'),
+  data_dir: z.string().default('~/.beside'),
   log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   session_id: z.string().optional(),
 });
@@ -26,9 +26,9 @@ const CaptureSchema = z.object({
   capture_audio: z.boolean().default(true),
   whisper_model: z.string().default('base'),
   audio: z.object({
-    inbox_path: z.string().default('~/.cofounderOS/raw/audio/inbox'),
-    processed_path: z.string().default('~/.cofounderOS/raw/audio/processed'),
-    failed_path: z.string().default('~/.cofounderOS/raw/audio/failed'),
+    inbox_path: z.string().default('~/.beside/raw/audio/inbox'),
+    processed_path: z.string().default('~/.beside/raw/audio/processed'),
+    failed_path: z.string().default('~/.beside/raw/audio/failed'),
     tick_interval_sec: z.number().int().positive().default(60),
     batch_size: z.number().int().positive().default(5),
     whisper_command: z.string().default('whisper'),
@@ -47,7 +47,7 @@ const CaptureSchema = z.object({
       system_audio_backend: z.enum(['core_audio_tap', 'screencapturekit', 'off']).default('core_audio_tap'),
       poll_interval_sec: z.number().int().positive().default(3),
     }).default({ enabled: true, chunk_seconds: 300, format: 'm4a', sample_rate: 16_000, channels: 1, activation: 'other_process_input', system_audio_backend: 'core_audio_tap', poll_interval_sec: 3 }),
-  }).default({ inbox_path: '~/.cofounderOS/raw/audio/inbox', processed_path: '~/.cofounderOS/raw/audio/processed', failed_path: '~/.cofounderOS/raw/audio/failed', tick_interval_sec: 60, batch_size: 5, whisper_command: 'whisper', delete_audio_after_transcribe: true, max_audio_bytes: 500 * 1024 * 1024, min_audio_bytes_per_sec: 4096, min_audio_rate_check_ms: 5000, live_recording: { enabled: true, chunk_seconds: 300, format: 'm4a', sample_rate: 16_000, channels: 1, activation: 'other_process_input', system_audio_backend: 'core_audio_tap', poll_interval_sec: 3 } }),
+  }).default({ inbox_path: '~/.beside/raw/audio/inbox', processed_path: '~/.beside/raw/audio/processed', failed_path: '~/.beside/raw/audio/failed', tick_interval_sec: 60, batch_size: 5, whisper_command: 'whisper', delete_audio_after_transcribe: true, max_audio_bytes: 500 * 1024 * 1024, min_audio_bytes_per_sec: 4096, min_audio_rate_check_ms: 5000, live_recording: { enabled: true, chunk_seconds: 300, format: 'm4a', sample_rate: 16_000, channels: 1, activation: 'other_process_input', system_audio_backend: 'core_audio_tap', poll_interval_sec: 3 } }),
   screenshot_format: z.enum(['webp', 'jpeg']).default('webp'),
   screenshot_quality: z.number().int().min(1).max(100).default(45),
   screenshot_max_dim: z.number().int().nonnegative().max(8192).default(1100),
@@ -72,7 +72,7 @@ const CaptureSchema = z.object({
 const StorageSchema = z.object({
   plugin: z.string().default('local'),
   local: z.object({
-    path: z.string().default('~/.cofounderOS'),
+    path: z.string().default('~/.beside'),
     max_size_gb: z.number().positive().default(50),
     retention_days: z.number().int().nonnegative().default(365),
     vacuum: z.object({
@@ -87,12 +87,12 @@ const StorageSchema = z.object({
       tick_interval_min: z.number().int().positive().default(15),
       batch_size: z.number().int().positive().default(50),
     }).default({ compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 }),
-  }).default({ path: '~/.cofounderOS', max_size_gb: 50, retention_days: 365, vacuum: { compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 } }),
+  }).default({ path: '~/.beside', max_size_gb: 50, retention_days: 365, vacuum: { compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 } }),
 }).passthrough();
 
 const IndexSchema = z.object({
   strategy: z.string().default('karpathy'),
-  index_path: z.string().default('~/.cofounderOS/index'),
+  index_path: z.string().default('~/.beside/index'),
   incremental_interval_min: z.number().int().positive().default(30),
   reorganise_schedule: z.string().default('0 2 * * *'),
   reorganise_on_idle: z.boolean().default(true),
@@ -168,13 +168,13 @@ export const ConfigSchema = z.object({
   system: SystemSchema,
 });
 
-export type CofounderOSConfig = z.infer<typeof ConfigSchema>;
+export type BesideConfig = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_CONFIG_FILENAME = 'config.yaml';
 
 export const DEFAULT_CONFIG_YAML = `app:
-  name: CofounderOS
-  data_dir: ~/.cofounderOS
+  name: Beside
+  data_dir: ~/.beside
   log_level: info
 
 capture:
@@ -191,9 +191,9 @@ capture:
   capture_audio: true
   whisper_model: base
   audio:
-    inbox_path: ~/.cofounderOS/raw/audio/inbox
-    processed_path: ~/.cofounderOS/raw/audio/processed
-    failed_path: ~/.cofounderOS/raw/audio/failed
+    inbox_path: ~/.beside/raw/audio/inbox
+    processed_path: ~/.beside/raw/audio/processed
+    failed_path: ~/.beside/raw/audio/failed
     tick_interval_sec: 60
     batch_size: 5
     whisper_command: whisper
@@ -232,7 +232,7 @@ capture:
 storage:
   plugin: local
   local:
-    path: ~/.cofounderOS
+    path: ~/.beside
     max_size_gb: 50
     retention_days: 365
     vacuum:
@@ -246,7 +246,7 @@ storage:
 
 index:
   strategy: karpathy
-  index_path: ~/.cofounderOS/index
+  index_path: ~/.beside/index
   incremental_interval_min: 30
   reorganise_schedule: "0 2 * * *"
   reorganise_on_idle: true
@@ -291,7 +291,7 @@ system:
 export:
   plugins:
     - name: markdown
-      path: ~/.cofounderOS/export/markdown
+      path: ~/.beside/export/markdown
     - name: mcp
       port: 3456
       host: 127.0.0.1
@@ -299,7 +299,7 @@ export:
 `;
 
 export interface LoadedConfig {
-  config: CofounderOSConfig;
+  config: BesideConfig;
   dataDir: string;
   sourcePath: string;
 }
@@ -325,17 +325,17 @@ export function validateConfig(raw: unknown) {
   return { ok: false as const, issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })) };
 }
 
-export async function writeConfig(config: CofounderOSConfig, configPath?: string): Promise<{ path: string }> {
+export async function writeConfig(config: BesideConfig, configPath?: string): Promise<{ path: string }> {
   const target = await resolveConfigPath(configPath);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(target, YAML.stringify(ConfigSchema.parse(config)), 'utf8');
   return { path: target };
 }
 
-function rerootStockPaths(config: CofounderOSConfig): void {
-  const envRoot = process.env.COFOUNDEROS_DATA_DIR;
+function rerootStockPaths(config: BesideConfig): void {
+  const envRoot = process.env.BESIDE_DATA_DIR;
   if (!envRoot || envRoot.trim().length === 0) return;
-  const STOCK = '~/.cofounderOS';
+  const STOCK = '~/.beside';
 
   const swap = (val: string): string => val === STOCK ? envRoot : val.startsWith(`${STOCK}/`) ? `${envRoot}/${val.slice(STOCK.length + 1)}` : val;
 
@@ -349,7 +349,7 @@ function rerootStockPaths(config: CofounderOSConfig): void {
 }
 
 async function resolveConfigPath(explicit?: string): Promise<string> {
-  return expandPath(explicit || process.env.COFOUNDEROS_CONFIG || path.join(defaultDataDir(), DEFAULT_CONFIG_FILENAME));
+  return expandPath(explicit || process.env.BESIDE_CONFIG || path.join(defaultDataDir(), DEFAULT_CONFIG_FILENAME));
 }
 
 export async function writeDefaultConfigIfMissing(dataDir: string = defaultDataDir()): Promise<{ created: boolean; path: string }> {

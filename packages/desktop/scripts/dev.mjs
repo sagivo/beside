@@ -10,10 +10,10 @@ const repoRoot = path.resolve(desktopRoot, '../..');
 const isWindows = process.platform === 'win32';
 const pnpmBin = isWindows ? 'pnpm.cmd' : 'pnpm';
 const electronBin = path.join(desktopRoot, 'node_modules', '.bin', isWindows ? 'electron.cmd' : 'electron');
-const rendererHost = process.env.COFOUNDEROS_RENDERER_HOST ?? '127.0.0.1';
-const rendererPort = process.env.COFOUNDEROS_RENDERER_PORT ?? '5173';
+const rendererHost = process.env.BESIDE_RENDERER_HOST ?? '127.0.0.1';
+const rendererPort = process.env.BESIDE_RENDERER_PORT ?? '5173';
 const rendererUrl =
-  process.env.COFOUNDEROS_RENDERER_URL ?? `http://${rendererHost}:${rendererPort}`;
+  process.env.BESIDE_RENDERER_URL ?? `http://${rendererHost}:${rendererPort}`;
 
 const children = new Set();
 let electron = null;
@@ -118,8 +118,8 @@ function startElectron() {
   electron = spawnChild('electron', electronBin, ['dist/main.js'], {
     cwd: desktopRoot,
     env: {
-      COFOUNDEROS_DEV: '1',
-      COFOUNDEROS_RENDERER_URL: rendererUrl,
+      BESIDE_DEV: '1',
+      BESIDE_RENDERER_URL: rendererUrl,
     },
   });
 }
@@ -259,7 +259,7 @@ async function buildPlugins() {
 }
 
 async function initialBuild() {
-  await run('building runtime packages', pnpmBin, ['--filter', '@cofounderos/runtime', 'run', 'build']);
+  await run('building runtime packages', pnpmBin, ['--filter', '@beside/runtime', 'run', 'build']);
   await run('building desktop main process', pnpmBin, ['exec', 'tsc', '-p', 'tsconfig.json'], {
     cwd: desktopRoot,
   });
@@ -287,9 +287,9 @@ async function main() {
     cwd: desktopRoot,
   });
 
-  spawnChild('interfaces watcher', pnpmBin, ['--filter', '@cofounderos/interfaces', 'run', 'dev']);
-  spawnChild('core watcher', pnpmBin, ['--filter', '@cofounderos/core', 'run', 'dev']);
-  spawnChild('runtime watcher', pnpmBin, ['--filter', '@cofounderos/runtime', 'run', 'dev']);
+  spawnChild('interfaces watcher', pnpmBin, ['--filter', '@beside/interfaces', 'run', 'dev']);
+  spawnChild('core watcher', pnpmBin, ['--filter', '@beside/core', 'run', 'dev']);
+  spawnChild('runtime watcher', pnpmBin, ['--filter', '@beside/runtime', 'run', 'dev']);
   spawnChild('desktop main watcher', pnpmBin, ['exec', 'tsc', '-p', 'tsconfig.json', '--watch', '--preserveWatchOutput'], {
     cwd: desktopRoot,
   });

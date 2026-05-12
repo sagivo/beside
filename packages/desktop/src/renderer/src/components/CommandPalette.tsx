@@ -143,10 +143,10 @@ export function CommandPalette({
               <Plug /> Copy MCP snippet
             </CommandItem>
           )}
-          <CommandItem onSelect={() => run(() => window.cofounderos.openPath('markdown'))}>
+          <CommandItem onSelect={() => run(() => window.beside.openPath('markdown'))}>
             <FolderOpen /> Open Markdown folder
           </CommandItem>
-          <CommandItem onSelect={() => run(() => window.cofounderos.openPath('data'))}>
+          <CommandItem onSelect={() => run(() => window.beside.openPath('data'))}>
             <FolderOpen /> Open data folder
           </CommandItem>
         </CommandGroup>

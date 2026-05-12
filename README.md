@@ -1,8 +1,8 @@
-# CofounderOS
+# Beside
 
 > AI-powered device capture, knowledge indexing, and agent memory system.
 
-CofounderOS runs silently in the background, records how you interact with your
+Beside runs silently in the background, records how you interact with your
 computer, and continuously organises that data into a living, self-reorganising
 knowledge base. It is the persistent memory layer your AI agents have been
 missing.
@@ -23,7 +23,7 @@ packages — see [Repository layout](#repository-layout) below.
 
 ## Platform support
 
-CofounderOS targets all three desktop OSes from the same TypeScript codebase.
+Beside targets all three desktop OSes from the same TypeScript codebase.
 The host (config, plugin loader, scheduler, MCP server, indexer) is
 platform-neutral; only the **capture layer** has OS-specific affordances.
 
@@ -75,16 +75,16 @@ native helper binary and reports the macOS permissions it needs:
 
 If any native check warns, grant the permission in **System Settings →
 Privacy & Security**, then restart the terminal/editor running
-CofounderOS.
+Beside.
 
 ### Environment variables
 
 | Variable | What it does |
 |----------|--------------|
-| `COFOUNDEROS_CONFIG` | Path to the YAML config file. Overrides the `~/.cofounderOS/config.yaml` lookup. |
-| `COFOUNDEROS_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/cofounderos` on Linux or `%APPDATA%\cofounderos` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
-| `COFOUNDEROS_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
-| `COFOUNDEROS_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Used by CI to run `capture --once` on headless Linux/macOS/Windows runners. |
+| `BESIDE_CONFIG` | Path to the YAML config file. Overrides the `~/.beside/config.yaml` lookup. |
+| `BESIDE_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/beside` on Linux or `%APPDATA%\beside` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
+| `BESIDE_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
+| `BESIDE_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Used by CI to run `capture --once` on headless Linux/macOS/Windows runners. |
 | `NO_COLOR` | Disable ANSI colour output (logs + status). |
 | `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY (CI logs that render ANSI). |
 
@@ -114,7 +114,7 @@ pnpm cli stats         # or: pnpm cli info  (alias)
 pnpm cli stats --json  # machine-readable
 
 # Start the desktop tray. It starts capturing on launch by default; set
-# COFOUNDEROS_DESKTOP_AUTOSTART=0 if you want the app to launch idle.
+# BESIDE_DESKTOP_AUTOSTART=0 if you want the app to launch idle.
 pnpm start
 
 # Headless/server mode: start the runtime through the CLI interface.
@@ -142,11 +142,11 @@ pnpm cli reset
 
 ### First-run model bootstrap
 
-CofounderOS ships **Ollama + Gemma as the default local model** and installs
+Beside ships **Ollama + Gemma as the default local model** and installs
 both for you on first run. You don't need to install or configure anything
 manually.
 
-What `cofounderos init` (and `start` / `index` on first launch) does:
+What `beside init` (and `start` / `index` on first launch) does:
 
 1. **Probes** the configured Ollama host. If reachable and the model is
    already pulled, it does nothing.
@@ -192,7 +192,7 @@ index:
 ```
 
 If bootstrap fails for any reason (no network, install script failure,
-no `winget`/`bash` available), CofounderOS falls back to the offline
+no `winget`/`bash` available), Beside falls back to the offline
 deterministic indexer **automatically** and prints clear next-step
 instructions — the rest of the pipeline keeps running.
 
@@ -217,19 +217,19 @@ index:
       model: gemma4:e2b      # any Ollama-compatible tag
 ```
 
-Then run `cofounderos init` again — it will pull just the new weights.
+Then run `beside init` again — it will pull just the new weights.
 
 ### Refreshing weights under a floating tag
 
 Ollama tags like `gemma4:e4b` are *floating* — Google occasionally
 republishes improved weights under the same name. Two ways to pick them up:
 
-1. **On demand** — run `cofounderos model:update` to force a re-pull
+1. **On demand** — run `beside model:update` to force a re-pull
    right now. Idempotent: blobs that already match by content hash are
    skipped, so the command is fast when there's nothing new.
 
 2. **On next start** — bump `model_revision` in `config.yaml`. The
-   orchestrator compares it against `~/.cofounderOS/.model-revision`
+   orchestrator compares it against `~/.beside/.model-revision`
    and force-re-pulls when the configured value is higher, then writes
    the new value to the marker. Default ships at `2`; bumping to `3`
    later refreshes every install once.
@@ -246,7 +246,7 @@ index:
 
 ## Multi-monitor capture
 
-By default CofounderOS captures only the **primary display** — one
+By default Beside captures only the **primary display** — one
 screenshot per trigger — to keep storage, CPU, and the privacy surface
 predictable. To enable multi-monitor capture:
 
@@ -323,7 +323,7 @@ them automatically. If you are not running the desktop dev loop, rerun
 For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 
 ```bash
-pnpm --filter @cofounderos/cli exec tsx src/cli.ts stats
+pnpm --filter @beside/cli exec tsx src/cli.ts stats
 ```
 
 For headless smoke tests or CI, use the capture fixture. It writes a real
@@ -331,8 +331,8 @@ synthetic screenshot + raw event through the same storage path as normal
 capture without touching desktop APIs or OS permissions:
 
 ```bash
-COFOUNDEROS_CAPTURE_FIXTURE=1 \
-COFOUNDEROS_DATA_DIR=/tmp/cofounderos-smoke \
+BESIDE_CAPTURE_FIXTURE=1 \
+BESIDE_DATA_DIR=/tmp/beside-smoke \
 pnpm cli capture --once
 ```
 
@@ -368,7 +368,7 @@ storage:
 
 ## Querying your data with AI agents
 
-Once `cofounderos start` is running, your captured data is queryable by any
+Once `beside start` is running, your captured data is queryable by any
 MCP-compatible AI agent (Claude Desktop, Claude Code, Cursor, etc.). The
 built-in MCP server exposes the index, the raw event log, and frame-level
 search as first-class tools — agents don't need to read files directly.
@@ -377,7 +377,7 @@ search as first-class tools — agents don't need to read files directly.
 
 | Tool | What it does |
 |------|--------------|
-| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
+| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
 | `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. Same `exclude_self` default. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
@@ -408,7 +408,7 @@ plus heuristic OCR parsers — they do not require a separate indexer pass and
 return fresh data on every call. The calendar / Slack / PR extractors are
 deliberately conservative: they tag candidates with `source_frame_id` so you
 can chase any individual extraction back to its screenshot via
-`get_frame_context`. Frames captured of the CofounderOS dashboard itself are
+`get_frame_context`. Frames captured of the Beside dashboard itself are
 excluded by default from every digest tool; pass `include_self: true` to
 include them.
 
@@ -432,7 +432,7 @@ index:
       embedding_model: nomic-embed-text
 ```
 
-The first `cofounderos init` / `start` after enabling embeddings pulls
+The first `beside init` / `start` after enabling embeddings pulls
 the embedding model alongside the chat model. If the active model adapter
 doesn't support embeddings, the worker logs one warning and the system
 falls back to keyword search unchanged.
@@ -461,8 +461,8 @@ contract powers wiki indexing, vision calls, and semantic embeddings.
 
 V2 audio starts with a local inbox rather than live system-audio capture.
 Drop transcript files (`.txt`, `.md`, `.vtt`, `.srt`) into the inbox and
-CofounderOS imports them directly. Drop audio files (`.wav`, `.mp3`,
-`.m4a`, `.flac`, `.ogg`, `.opus`, `.webm`, `.mp4`) and CofounderOS runs
+Beside imports them directly. Drop audio files (`.wav`, `.mp3`,
+`.m4a`, `.flac`, `.ogg`, `.opus`, `.webm`, `.mp4`) and Beside runs
 the configured local Whisper CLI, then stores the transcript as an
 `audio_transcript` event. Those transcripts become frames with
 `text_source: audio`, so normal search, sessions, entities, embeddings,
@@ -473,9 +473,9 @@ capture:
   capture_audio: true
   whisper_model: base
   audio:
-    inbox_path: ~/.cofounderOS/raw/audio/inbox
-    processed_path: ~/.cofounderOS/raw/audio/processed
-    failed_path: ~/.cofounderOS/raw/audio/failed
+    inbox_path: ~/.beside/raw/audio/inbox
+    processed_path: ~/.beside/raw/audio/processed
+    failed_path: ~/.beside/raw/audio/failed
     tick_interval_sec: 60
     batch_size: 5
     whisper_command: whisper
@@ -496,14 +496,14 @@ OpenAI Whisper's CLI. Files that fail transcription are moved to
 
 When using `capture.plugin: native` on macOS, live recording is enabled
 by default and starts only while another process is actively using audio
-input. CofounderOS does not start audio capture from meeting UI or URL
+input. Beside does not start audio capture from meeting UI or URL
 detection alone; it only joins an already-active audio session. The
 transcript worker will pick up finished `.m4a` / `.wav` chunks on its
 next tick.
 
 ### Meetings (Zoom / Google Meet / Microsoft Teams / Webex)
 
-CofounderOS detects meeting frames from app/URL signals (Zoom, Google
+Beside detects meeting frames from app/URL signals (Zoom, Google
 Meet, Microsoft Teams, Webex, Whereby, Around) and fuses them with
 overlapping audio transcripts to produce per-meeting summaries.
 
@@ -546,12 +546,12 @@ of the conversation plus the visible slides.
 
 ### Two transports
 
-The MCP server runs over **HTTP by default** (alongside `cofounderos start`),
+The MCP server runs over **HTTP by default** (alongside `beside start`),
 and can also be invoked over **stdio** for clients that spawn the server as
 a subprocess.
 
 ```bash
-# HTTP — already running as part of `cofounderos start` on http://127.0.0.1:3456
+# HTTP — already running as part of `beside start` on http://127.0.0.1:3456
 curl http://127.0.0.1:3456/health
 
 # stdio — for clients that prefer to manage the process lifecycle
@@ -575,7 +575,7 @@ Or, for Claude Code, run `claude mcp add` from any shell.
 ```json
 {
   "mcpServers": {
-    "cofounderos": {
+    "beside": {
       "url": "http://127.0.0.1:3456"
     }
   }
@@ -585,7 +585,7 @@ Or, for Claude Code, run `claude mcp add` from any shell.
 Or with the Claude Code CLI:
 
 ```bash
-claude mcp add --transport http cofounderos http://127.0.0.1:3456
+claude mcp add --transport http beside http://127.0.0.1:3456
 ```
 
 **stdio (Claude spawns the server itself):**
@@ -593,9 +593,9 @@ claude mcp add --transport http cofounderos http://127.0.0.1:3456
 ```json
 {
   "mcpServers": {
-    "cofounderos": {
+    "beside": {
       "command": "pnpm",
-      "args": ["--dir", "/absolute/path/to/cofounderos", "cli", "mcp", "--stdio"]
+      "args": ["--dir", "/absolute/path/to/beside", "cli", "mcp", "--stdio"]
     }
   }
 }
@@ -607,9 +607,9 @@ On **Windows**, use a backslash path and the `pnpm.cmd` shim
 ```json
 {
   "mcpServers": {
-    "cofounderos": {
+    "beside": {
       "command": "pnpm.cmd",
-      "args": ["--dir", "C:\\path\\to\\cofounderos", "cli", "mcp", "--stdio"]
+      "args": ["--dir", "C:\\path\\to\\beside", "cli", "mcp", "--stdio"]
     }
   }
 }
@@ -623,7 +623,7 @@ On Windows, the equivalent path is `%USERPROFILE%\.cursor\mcp.json`.
 ```json
 {
   "mcpServers": {
-    "cofounderos": {
+    "beside": {
       "url": "http://127.0.0.1:3456"
     }
   }
@@ -634,7 +634,7 @@ On Windows, the equivalent path is `%USERPROFILE%\.cursor\mcp.json`.
 
 Once configured, ask the agent something like:
 
-> What was I working on yesterday afternoon? Use the `cofounderos` tools.
+> What was I working on yesterday afternoon? Use the `beside` tools.
 
 The agent should call `get_journal` or `search_memory` and stream back a
 synthesised answer grounded in your captured frames. If a tool call fails,
@@ -660,26 +660,26 @@ the **drop-in plugin folders** — both built-in and third-party — one folder
 per layer, one folder per plugin underneath.
 
 ```
-cofounderos/
+beside/
 ├── packages/                   The host workspace packages.
 │   ├── interfaces/             Shared types: ICapture, IStorage, IModelAdapter,
 │   │                           IIndexStrategy, IExport, RawEvent schema.
 │   ├── core/                   Config loader, plugin loader, event bus, scheduler.
 │   ├── runtime/                Shared lifecycle, workers, status, journals, search.
-│   ├── cli/                    Terminal interface (cofounderos ...).
+│   ├── cli/                    Terminal interface (beside ...).
 │   └── desktop/                Electron desktop interface over the runtime.
 └── plugins/                    Drop-in plugins. No package.json needed.
     ├── capture/
     │   ├── node/               Default capture: event-driven Node recorder.
     │   └── native/             Experimental native sidecar capture plugin.
     ├── storage/
-    │   └── local/              Default storage: ~/.cofounderOS/raw + SQLite.
+    │   └── local/              Default storage: ~/.beside/raw + SQLite.
     ├── model/
     │   └── ollama/             Default model adapter (Ollama / Gemma).
     ├── index/
     │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
     └── export/
-        ├── markdown/           Default export — mirror to ~/.cofounderOS/export/markdown.
+        ├── markdown/           Default export — mirror to ~/.beside/export/markdown.
         └── mcp/                Built-in MCP server on 127.0.0.1:3456.
 ```
 
@@ -703,13 +703,13 @@ pnpm cli plugin list    # confirms discovery
 ```
 
 The host never imports any plugin by name. Discovery walks `plugins/` at
-runtime, validates `plugin.json` against `@cofounderos/interfaces`, and
+runtime, validates `plugin.json` against `@beside/interfaces`, and
 dynamically imports the entrypoint. To activate a plugin, reference it by
 manifest `name` from `config.yaml` (e.g. `storage.plugin: local`).
 
-The CLI and desktop app both call `@cofounderos/runtime`; neither owns the
+The CLI and desktop app both call `@beside/runtime`; neither owns the
 product lifecycle by itself. Packaged desktop builds should place the runtime
-resource root at `resources/cofounderos` (or set `COFOUNDEROS_RESOURCE_ROOT`)
+resource root at `resources/beside` (or set `BESIDE_RESOURCE_ROOT`)
 so runtime plugin discovery can find `plugins/` without a source checkout.
 
 Runtime dependencies common to plugins (`sharp`, `better-sqlite3`,
@@ -727,7 +727,7 @@ explicit substitutions for tractability:
 | Spec component        | Status in this repo |
 |-----------------------|---------------------|
 | Rust capture agent    | Replaced by `plugins/capture/node/` (TypeScript). Same `ICapture` interface, so the Rust agent is a drop-in replacement once built. |
-| Electron tray + UI    | Deferred. CLI exposes the full surface (`cofounderos start/stop/status/...`). Electron is a thin wrapper to be added later. |
+| Electron tray + UI    | Deferred. CLI exposes the full surface (`beside start/stop/status/...`). Electron is a thin wrapper to be added later. |
 | Audio transcription   | Capture layer surfaces the event types and config knobs; transcription itself is V2. |
 | Cloud storage / models| `IStorage` and `IModelAdapter` are stable; concrete cloud plugins live under `plugins/` and are not part of MVP. |
 

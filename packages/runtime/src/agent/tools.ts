@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ActivitySession, EntityKind, EntityRecord, Frame, IIndexStrategy, IStorage } from '@cofounderos/interfaces';
+import type { ActivitySession, EntityKind, EntityRecord, Frame, IIndexStrategy, IStorage } from '@beside/interfaces';
 import type { CalendarCheckResult, CompactFrame, CompactSession, DayActivitySummaryResult, DateAnchor, EntityListResult, EntitySummaryResult, FrameContextResult, IndexSearchResultBlock, OpenLoopsResult, SearchResultBlock, SessionDetailResult } from './types.js';
 import { dedupeCalendarFrames, dedupeOpenLoopFrames, dedupeSearchFrames, isGarbled, stripSidebarNoise } from './noise.js';
 

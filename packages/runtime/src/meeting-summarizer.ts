@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { IStorage, IModelAdapter, Logger, Meeting, MeetingTurn, MeetingSummaryJson, Frame, MeetingPlatform } from '@cofounderos/interfaces';
+import type { IStorage, IModelAdapter, Logger, Meeting, MeetingTurn, MeetingSummaryJson, Frame, MeetingPlatform } from '@beside/interfaces';
 
 export interface MeetingSummarizerOptions { dataDir: string; cooldownMs?: number; batchSize?: number; maxTranscriptChars?: number; visionAttachments?: number; enabled?: boolean; }
 export interface MeetingSummarizerResult { attempted: number; succeeded: number; failed: number; skipped: number; }

@@ -19,8 +19,8 @@ import type {
   MemoryChunk,
   MemoryChunkKind,
   MemoryChunkSemanticMatch,
-} from '@cofounderos/interfaces';
-import { renderJournalMarkdown } from '@cofounderos/interfaces';
+} from '@beside/interfaces';
+import { renderJournalMarkdown } from '@beside/interfaces';
 import { isSelfFrame } from './parsers.js';
 import {
   buildDailySummary,
@@ -139,7 +139,7 @@ export function createMcpServer(
     error: null,
   };
   const server = new McpServer({
-    name: 'cofounderos',
+    name: 'beside',
     version: '0.2.0',
   });
 
@@ -147,14 +147,14 @@ export function createMcpServer(
     'search_memory',
     {
       description:
-        'Blended search: returns the best matching frames (specific moments), memory chunks, and wiki pages (synthesised summaries). Use this as the default entrypoint. Natural date phrases such as "today", "yesterday", "last week", and "May 7" constrain frame/chunk retrieval. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
+        'Blended search: returns the best matching frames (specific moments), memory chunks, and wiki pages (synthesised summaries). Use this as the default entrypoint. Natural date phrases such as "today", "yesterday", "last week", and "May 7" constrain frame/chunk retrieval. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
       inputSchema: {
         query: z.string().describe('Natural-language search query.'),
         limit: z.number().int().min(1).max(50).optional().describe('Max results per category, default 5.'),
         exclude_self: z
           .boolean()
           .optional()
-          .describe('Drop frames captured from the CofounderOS dashboard itself. Default true.'),
+          .describe('Drop frames captured from the Beside dashboard itself. Default true.'),
       },
     },
     async ({ query, limit, exclude_self }) => {
@@ -272,7 +272,7 @@ export function createMcpServer(
           .enum(['fact', 'procedure'])
           .optional()
           .describe('Manual memory kind. Default fact.'),
-        entity_path: z.string().optional().describe('Optional entity path, e.g. projects/cofounderos.'),
+        entity_path: z.string().optional().describe('Optional entity path, e.g. projects/beside.'),
         entity_kind: z
           .enum(ENTITY_KINDS as [EntityKind, ...EntityKind[]])
           .optional()
@@ -406,7 +406,7 @@ export function createMcpServer(
         exclude_self: z
           .boolean()
           .optional()
-          .describe('Drop frames captured from the CofounderOS dashboard itself. Default true.'),
+          .describe('Drop frames captured from the Beside dashboard itself. Default true.'),
       },
     },
     async ({
@@ -688,7 +688,7 @@ export function createMcpServer(
       description:
         'Read one remembered entity by stable path. Optionally include its earliest frames as evidence.',
       inputSchema: {
-        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        path: z.string().describe('Stable entity path, e.g. "projects/beside".'),
         include_frames: z.boolean().optional().describe('Include frames belonging to this entity. Default false.'),
         frame_limit: z.number().int().min(1).max(200).optional().describe('Max frames when include_frames is true.'),
       },
@@ -734,7 +734,7 @@ export function createMcpServer(
       description:
         'Return frames for a remembered entity, oldest first. Use after list_entities/get_entity to inspect the evidence for a project, repo, doc, webpage, or app.',
       inputSchema: {
-        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        path: z.string().describe('Stable entity path, e.g. "projects/beside".'),
         limit: z.number().int().min(1).max(500).optional().describe('Max frames to return. Default 100.'),
       },
     },
@@ -767,7 +767,7 @@ export function createMcpServer(
       inputSchema: {
         path: z
           .string()
-          .describe('Anchor entity path, e.g. "projects/cofounderos" or "contacts/milan-lazic".'),
+          .describe('Anchor entity path, e.g. "projects/beside" or "contacts/milan-lazic".'),
         limit: z
           .number()
           .int()
@@ -811,7 +811,7 @@ export function createMcpServer(
       description:
         'Return per-day or per-hour attention buckets for an entity — frame count, focused minutes, and distinct activity sessions per bucket. Powers "when have I worked on X this week?" and chart-driving UIs. Buckets are returned newest first.',
       inputSchema: {
-        path: z.string().describe('Entity path, e.g. "projects/cofounderos".'),
+        path: z.string().describe('Entity path, e.g. "projects/beside".'),
         granularity: z
           .enum(['day', 'hour'])
           .optional()
@@ -1006,13 +1006,13 @@ export function createMcpServer(
     'get_daily_summary',
     {
       description:
-        'One-shot digest for a single day (YYYY-MM-DD): totals, top apps, top entities, top URL hosts, sessions with headlines, calendar events parsed from screenshots, Slack thread observations, code-review queue, and open loops. Frames captured of the CofounderOS dashboard itself are filtered out by default — pass `include_self: true` to include them.',
+        'One-shot digest for a single day (YYYY-MM-DD): totals, top apps, top entities, top URL hosts, sessions with headlines, calendar events parsed from screenshots, Slack thread observations, code-review queue, and open loops. Frames captured of the Beside dashboard itself are filtered out by default — pass `include_self: true` to include them.',
       inputSchema: {
         day: z.string().describe('Day in YYYY-MM-DD format.'),
         include_self: z
           .boolean()
           .optional()
-          .describe('Include CofounderOS dashboard frames in aggregations. Default false.'),
+          .describe('Include Beside dashboard frames in aggregations. Default false.'),
         open_loops_limit: z
           .number()
           .int()
@@ -1043,7 +1043,7 @@ export function createMcpServer(
         include_self: z
           .boolean()
           .optional()
-          .describe('Include CofounderOS dashboard frames. Default false.'),
+          .describe('Include Beside dashboard frames. Default false.'),
       },
     },
     async ({ day, include_self }) => {
@@ -1095,7 +1095,7 @@ export function createMcpServer(
         include_self: z
           .boolean()
           .optional()
-          .describe('Include CofounderOS dashboard frames. Default false.'),
+          .describe('Include Beside dashboard frames. Default false.'),
       },
     },
     async ({ query, day, since, until, kinds, limit, include_self }) => {
@@ -1167,7 +1167,7 @@ export function createMcpServer(
       description:
         'Fresh, focused rollup for one remembered entity (project / repo / channel / contact / app) in an optional time window. Returns totals, top window titles, top URL hosts, recent sessions with headlines, calendar events tied to the entity, and any open loops detected in its frames.',
       inputSchema: {
-        path: z.string().describe('Stable entity path, e.g. "projects/cofounderos".'),
+        path: z.string().describe('Stable entity path, e.g. "projects/beside".'),
         since: z.string().optional().describe('Inclusive lower bound (ISO timestamp).'),
         until: z.string().optional().describe('Inclusive upper bound (ISO timestamp).'),
         detail_limit: z
@@ -1201,7 +1201,7 @@ export function createMcpServer(
     'get_slack_activity',
     {
       description:
-        'Structured digest of Slack / chat frames observed on a day: per-channel observation count, the last representative message OCR\'d, mentions, and whether the visible message looks unanswered. Heuristic — pair with `get_frame_context` to verify any single conversation. Frames from the CofounderOS dashboard are excluded by default.',
+        'Structured digest of Slack / chat frames observed on a day: per-channel observation count, the last representative message OCR\'d, mentions, and whether the visible message looks unanswered. Heuristic — pair with `get_frame_context` to verify any single conversation. Frames from the Beside dashboard are excluded by default.',
       inputSchema: {
         day: z.string().describe('Day in YYYY-MM-DD format.'),
         channel: z
@@ -1212,7 +1212,7 @@ export function createMcpServer(
         include_self: z
           .boolean()
           .optional()
-          .describe('Include CofounderOS dashboard frames. Default false.'),
+          .describe('Include Beside dashboard frames. Default false.'),
       },
     },
     async ({ day, channel, limit, include_self }) => {
@@ -2634,8 +2634,8 @@ function inferVisibleAppFromText(text: string): string | null {
   const haystack = text.toLowerCase();
   if (!haystack.trim()) return null;
   if (
-    /\bcofounderos\b|\bindexed journal\b|\bshow moments\b|\bcopy summary\b|\bask ai\b/.test(haystack)
-  ) return 'cofounderos';
+    /\bbeside\b|\bindexed journal\b|\bshow moments\b|\bcopy summary\b|\bask ai\b/.test(haystack)
+  ) return 'beside';
   if (
     /\bcodex\s+file\s+edit\b|\bnew chat\b.*\bplugins\b|\bautomations\b.*\bprojects\b/.test(haystack)
   ) return 'codex';
@@ -2670,8 +2670,8 @@ function escapeRegExp(value: string): string {
 function appMatchesVisibleGuess(app: string, visibleApp: string): boolean {
   const normalised = app.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
   switch (visibleApp) {
-    case 'cofounderos':
-      return /\b(cofounderos|electron)\b/.test(normalised);
+    case 'beside':
+      return /\b(beside|electron)\b/.test(normalised);
     case 'browser':
       return /\b(chrome|firefox|safari|arc)\b/.test(normalised);
     case 'mail':
@@ -2684,7 +2684,7 @@ function appMatchesVisibleGuess(app: string, visibleApp: string): boolean {
 }
 
 function isVisuallySelfFrame(frame: Frame): boolean {
-  return inferVisibleApp(frame) === 'cofounderos';
+  return inferVisibleApp(frame) === 'beside';
 }
 
 function recencyScore(timestamp: string | null | undefined): number {

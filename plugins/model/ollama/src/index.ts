@@ -5,7 +5,7 @@ import type {
   PluginFactory,
   Logger,
   ModelBootstrapHandler,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import { Ollama } from 'ollama';
 import {
   installOllamaMacOS,
@@ -392,7 +392,7 @@ class OllamaAdapter implements IModelAdapter {
     opts?: { force?: boolean },
   ): Promise<void> {
     // Force-refresh path bypasses the memoised promise so callers (e.g.
-    // `cofounderos model:update`) can request a fresh pull even after a
+    // `beside model:update`) can request a fresh pull even after a
     // normal bootstrap has already resolved in this process.
     if (opts?.force) {
       const run = this.runBootstrap(onProgress ?? (() => {}), { force: true });
@@ -662,7 +662,7 @@ class OllamaAdapter implements IModelAdapter {
 const factory: PluginFactory<IModelAdapter> = (ctx) => {
   // No probing here — bootstrap (install + start + pull) happens lazily
   // when the orchestrator calls model.ensureReady(), so that inspection
-  // commands like `cofounderos status` stay snappy and never trigger a
+  // commands like `beside status` stay snappy and never trigger a
   // multi-GB download behind the user's back.
   return new OllamaAdapter((ctx.config as OllamaModelConfig) ?? {}, ctx.logger);
 };

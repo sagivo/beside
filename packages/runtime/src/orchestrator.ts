@@ -3,11 +3,11 @@ import path from 'node:path';
 import type {
   ICapture, IStorage, IModelAdapter, IIndexStrategy, IExport, Logger, RawEvent,
   PluginHostContext, ModelBootstrapHandler, ExportServices
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import {
   RawEventBus, Scheduler, PluginRegistry, discoverPlugins, findWorkspaceRoot, loadConfig,
-  LoadGuard, type CofounderOSConfig, type LoadGuardDecision, type LoadedConfig,
-} from '@cofounderos/core';
+  LoadGuard, type BesideConfig, type LoadGuardDecision, type LoadedConfig,
+} from '@beside/core';
 import { FrameBuilder } from './frame-builder.js';
 import { SessionBuilder } from './session-builder.js';
 import { MeetingBuilder } from './meeting-builder.js';
@@ -24,7 +24,7 @@ export interface OrchestratorOptions { configPath?: string; workspaceRoot?: stri
 export interface OrchestratorHandles {
   capture: ICapture; storage: IStorage; model: IModelAdapter; indexerModel: IModelAdapter;
   strategy: IIndexStrategy; exports: IExport[]; scheduler: Scheduler; bus: RawEventBus;
-  config: CofounderOSConfig; logger: Logger; loaded: LoadedConfig; registry: PluginRegistry;
+  config: BesideConfig; logger: Logger; loaded: LoadedConfig; registry: PluginRegistry;
   frameBuilder: FrameBuilder; ocrWorker: OcrWorker; audioTranscriptWorker: AudioTranscriptWorker;
   entityResolver: EntityResolverWorker; sessionBuilder: SessionBuilder; meetingBuilder: MeetingBuilder;
   meetingSummarizer: MeetingSummarizer; eventExtractor: EventExtractor; embeddingWorker: EmbeddingWorker;
@@ -107,7 +107,7 @@ async function startPassiveExports(exports: IExport[], logger: Logger) {
 export async function buildOrchestrator(logger: Logger, opts: OrchestratorOptions = {}): Promise<OrchestratorHandles> {
   const loaded = await loadConfig(opts.configPath);
   const { config, dataDir } = loaded;
-  const workspaceRoot = opts.workspaceRoot ?? process.env.COFOUNDEROS_RESOURCE_ROOT ?? findWorkspaceRoot(process.cwd());
+  const workspaceRoot = opts.workspaceRoot ?? process.env.BESIDE_RESOURCE_ROOT ?? findWorkspaceRoot(process.cwd());
 
   logger.info(`config loaded from ${loaded.sourcePath}`);
   const entries = await discoverPlugins(workspaceRoot, logger);
@@ -314,7 +314,7 @@ async function clearStaleIndexMaintenanceLock(p: string) {
   try { const s = await fsp.stat(p); if (Date.now() - s.mtimeMs <= 14400000) return false; await fsp.unlink(p); return true; } catch { return true; }
 }
 
-export function describeLoadGuardDecision(d: LoadGuardDecision, c: CofounderOSConfig) { return d.reason; }
+export function describeLoadGuardDecision(d: LoadGuardDecision, c: BesideConfig) { return d.reason; }
 
 export function assertHeavyWorkAllowed(h: OrchestratorHandles, job: string) {
   if (!h.loadGuard.check(job, { allowForced: false }).proceed) throw new Error('Heavy work deferred');
@@ -363,7 +363,7 @@ export async function stopAll(h: OrchestratorHandles) {
 }
 
 export function exportRoot(dataDir: string) { return path.join(dataDir, 'export'); }
-function getEmbeddingModelName(c: CofounderOSConfig) { const b = (c.index.model as any)[c.index.model.plugin]; return (typeof b?.embedding_model === 'string' && b.embedding_model.trim()) ? b.embedding_model : c.index.model.plugin; }
+function getEmbeddingModelName(c: BesideConfig) { const b = (c.index.model as any)[c.index.model.plugin]; return (typeof b?.embedding_model === 'string' && b.embedding_model.trim()) ? b.embedding_model : c.index.model.plugin; }
 
 export async function bootstrapModel(h: OrchestratorHandles, onP?: ModelBootstrapHandler, opts: { force?: boolean } = {}) {
   if (typeof h.model.ensureReady !== 'function') return;

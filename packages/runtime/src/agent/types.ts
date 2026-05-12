@@ -1,4 +1,4 @@
-import type { ActivitySession, Frame } from '@cofounderos/interfaces';
+import type { ActivitySession, Frame } from '@beside/interfaces';
 
 /**
  * One turn of an AI chat conversation. The harness accepts the user's
@@ -213,5 +213,5 @@ export interface CollectedToolResults {
   notes: string[];
 }
 
-/** Convenience aliases re-exported so callers don't reach into @cofounderos/interfaces. */
+/** Convenience aliases re-exported so callers don't reach into @beside/interfaces. */
 export type { ActivitySession, Frame };

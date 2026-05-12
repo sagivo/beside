@@ -8,10 +8,10 @@ importers:
 
   .:
     devDependencies:
-      '@cofounderos/core':
+      '@beside/core':
         specifier: workspace:*
         version: link:packages/core
-      '@cofounderos/interfaces':
+      '@beside/interfaces':
         specifier: workspace:*
         version: link:packages/interfaces
       '@modelcontextprotocol/sdk':
@@ -62,10 +62,10 @@ importers:
 
   packages/cli:
     dependencies:
-      '@cofounderos/core':
+      '@beside/core':
         specifier: workspace:*
         version: link:../core
-      '@cofounderos/runtime':
+      '@beside/runtime':
         specifier: workspace:*
         version: link:../runtime
     devDependencies:
@@ -87,7 +87,7 @@ importers:
 
   packages/core:
     dependencies:
-      '@cofounderos/interfaces':
+      '@beside/interfaces':
         specifier: workspace:*
         version: link:../interfaces
       cron-parser:
@@ -115,10 +115,10 @@ importers:
 
   packages/desktop:
     dependencies:
-      '@cofounderos/core':
+      '@beside/core':
         specifier: workspace:*
         version: link:../core
-      '@cofounderos/runtime':
+      '@beside/runtime':
         specifier: workspace:*
         version: link:../runtime
       '@radix-ui/react-alert-dialog':
@@ -230,10 +230,10 @@ importers:
 
   packages/runtime:
     dependencies:
-      '@cofounderos/core':
+      '@beside/core':
         specifier: workspace:*
         version: link:../core
-      '@cofounderos/interfaces':
+      '@beside/interfaces':
         specifier: workspace:*
         version: link:../interfaces
       '@modelcontextprotocol/sdk':

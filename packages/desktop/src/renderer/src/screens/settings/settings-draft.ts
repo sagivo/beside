@@ -78,8 +78,8 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     mcpHost: typeof mcp?.host === 'string' ? mcp.host : '127.0.0.1', mcpPort: typeof mcp?.port === 'number' ? mcp.port : 3456,
     mcpTransport: mcp?.transport === 'stdio' ? 'stdio' : 'http', mcpTextExcerptChars: typeof mcp?.text_excerpt_chars === 'number' ? mcp.text_excerpt_chars : 5000,
     extraExportPlugins: c.export.plugins.filter(p => !['markdown', 'mcp'].includes(p.name)), captureAudio: c.capture.capture_audio ?? true,
-    whisperModel: c.capture.whisper_model ?? 'base', audioInboxPath: a?.inbox_path ?? '~/.cofounderOS/raw/audio/inbox',
-    audioProcessedPath: a?.processed_path ?? '~/.cofounderOS/raw/audio/processed', audioFailedPath: a?.failed_path ?? '~/.cofounderOS/raw/audio/failed',
+    whisperModel: c.capture.whisper_model ?? 'base', audioInboxPath: a?.inbox_path ?? '~/.beside/raw/audio/inbox',
+    audioProcessedPath: a?.processed_path ?? '~/.beside/raw/audio/processed', audioFailedPath: a?.failed_path ?? '~/.beside/raw/audio/failed',
     audioTickIntervalSec: a?.tick_interval_sec ?? 60, audioBatchSize: a?.batch_size ?? 5, whisperCommand: a?.whisper_command ?? 'whisper',
     whisperLanguage: a?.whisper_language ?? '', maxAudioBytes: a?.max_audio_bytes ?? 500 * 1024 * 1024, minAudioBytesPerSec: a?.min_audio_bytes_per_sec ?? 4096,
     minAudioRateCheckMs: a?.min_audio_rate_check_ms ?? 5000, liveRecordingEnabled: lr?.enabled ?? false, liveRecordingFormat: lr?.format ?? 'm4a',
@@ -94,7 +94,7 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
 export function configPatchFromDraft(d: SettingsDraft) {
   const scr = integerList(d.screens);
   return {
-    app: { name: d.appName.trim() || 'CofounderOS', data_dir: d.appDataDir.trim() || '~/.cofounderOS', log_level: d.logLevel, session_id: optionalString(d.sessionId) },
+    app: { name: d.appName.trim() || 'Beside', data_dir: d.appDataDir.trim() || '~/.beside', log_level: d.logLevel, session_id: optionalString(d.sessionId) },
     capture: {
       plugin: d.captureAudio && d.liveRecordingEnabled ? 'native' : d.capturePlugin.trim() || 'node', poll_interval_ms: clampInt(d.pollIntervalMs, 1),
       idle_poll_interval_ms: clampInt(d.idlePollIntervalMs, 1), focus_settle_delay_ms: clampInt(d.focusSettleDelayMs, 0), screenshot_diff_threshold: clampNumber(d.screenshotDiffThreshold, 0, 1),
@@ -105,8 +105,8 @@ export function configPatchFromDraft(d: SettingsDraft) {
       privacy: { blur_password_fields: d.blurPasswordFields, pause_on_screen_lock: d.pauseOnScreenLock, sensitive_keywords: lines(d.sensitiveKeywords) },
       capture_audio: d.captureAudio, whisper_model: d.whisperModel.trim() || 'base',
       audio: {
-        inbox_path: d.audioInboxPath.trim() || '~/.cofounderOS/raw/audio/inbox', processed_path: d.audioProcessedPath.trim() || '~/.cofounderOS/raw/audio/processed',
-        failed_path: d.audioFailedPath.trim() || '~/.cofounderOS/raw/audio/failed', tick_interval_sec: clampInt(d.audioTickIntervalSec, 1), batch_size: clampInt(d.audioBatchSize, 1),
+        inbox_path: d.audioInboxPath.trim() || '~/.beside/raw/audio/inbox', processed_path: d.audioProcessedPath.trim() || '~/.beside/raw/audio/processed',
+        failed_path: d.audioFailedPath.trim() || '~/.beside/raw/audio/failed', tick_interval_sec: clampInt(d.audioTickIntervalSec, 1), batch_size: clampInt(d.audioBatchSize, 1),
         whisper_command: d.whisperCommand.trim() || 'whisper', whisper_language: optionalString(d.whisperLanguage), delete_audio_after_transcribe: d.deleteAudioAfterTranscribe,
         max_audio_bytes: clampInt(d.maxAudioBytes, 0), min_audio_bytes_per_sec: clampInt(d.minAudioBytesPerSec, 0), min_audio_rate_check_ms: clampInt(d.minAudioRateCheckMs, 0),
         live_recording: { enabled: d.liveRecordingEnabled, activation: 'other_process_input', system_audio_backend: d.systemAudioBackend, poll_interval_sec: clampInt(d.liveRecordingPollIntervalSec, 1), chunk_seconds: clampInt(d.chunkSeconds, 1), format: d.liveRecordingFormat, sample_rate: clampInt(d.liveRecordingSampleRate, 1), channels: clampInt(d.liveRecordingChannels, 1, 2) }
@@ -115,12 +115,12 @@ export function configPatchFromDraft(d: SettingsDraft) {
     storage: {
       plugin: d.storagePlugin.trim() || 'local',
       local: {
-        path: d.storagePath.trim() || '~/.cofounderOS', max_size_gb: clampNumber(d.maxSizeGb, 0.1), retention_days: clampInt(d.retentionDays, 0),
+        path: d.storagePath.trim() || '~/.beside', max_size_gb: clampNumber(d.maxSizeGb, 0.1), retention_days: clampInt(d.retentionDays, 0),
         vacuum: { compress_after_days: clampInt(d.compressAfterDays, 0), compress_after_minutes: optionalInt(d.compressAfterMinutes, 0), compress_quality: clampInt(d.compressQuality, 1, 100), thumbnail_after_days: clampInt(d.thumbnailAfterDays, 0), thumbnail_after_minutes: optionalInt(d.thumbnailAfterMinutes, 0), thumbnail_max_dim: clampInt(d.thumbnailMaxDim, 64, 2048), delete_after_days: clampInt(d.deleteAfterDays, 0), delete_after_minutes: optionalInt(d.deleteAfterMinutes, 0), tick_interval_min: clampInt(d.vacuumTickIntervalMin, 1), batch_size: clampInt(d.vacuumBatchSize, 1) }
       }
     },
     index: {
-      strategy: d.indexStrategy.trim() || 'karpathy', index_path: d.indexPath.trim() || '~/.cofounderOS/index', incremental_interval_min: clampInt(d.incrementalIntervalMin, 1),
+      strategy: d.indexStrategy.trim() || 'karpathy', index_path: d.indexPath.trim() || '~/.beside/index', incremental_interval_min: clampInt(d.incrementalIntervalMin, 1),
       reorganise_schedule: d.reorganiseSchedule.trim() || '0 2 * * *', reorganise_on_idle: d.reorganiseOnIdle, index_idle_trigger_min: clampInt(d.indexIdleTriggerMin, 1), batch_size: clampInt(d.indexBatchSize, 1),
       sessions: { idle_threshold_sec: clampInt(d.sessionsIdleThresholdSec, 1), afk_threshold_sec: clampInt(d.sessionsAfkThresholdSec, 1), min_active_ms: clampInt(d.sessionsMinActiveMs, 0), fallback_frame_attention_ms: clampInt(d.sessionsFallbackFrameAttentionMs, 1) },
       meetings: { idle_threshold_sec: clampInt(d.meetingsIdleThresholdSec, 1), min_duration_sec: clampInt(d.meetingsMinDurationSec, 0), audio_grace_sec: clampInt(d.meetingsAudioGraceSec, 0), summarize: d.meetingsSummarize, summarize_cooldown_sec: clampInt(d.meetingsSummarizeCooldownSec, 0), vision_attachments: clampInt(d.meetingsVisionAttachments, 0) },

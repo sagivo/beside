@@ -4,7 +4,7 @@
   "layer": "storage",
   "interface": "IStorage",
   "entrypoint": "dist/index.js",
-  "description": "Default storage: append-only JSONL + SQLite metadata index under ~/.cofounderOS/raw.",
+  "description": "Default storage: append-only JSONL + SQLite metadata index under ~/.beside/raw.",
   "config_schema": {
     "type": "object",
     "properties": {

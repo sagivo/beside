@@ -9,7 +9,7 @@
  * No package.json, no tsconfig.json, no pnpm-workspace entry. We invoke
  * `tsc` once with a synthesised config that points at the plugin's src
  * dir and emits to its dist dir. Type-checks only against the workspace
- * @cofounderos/{interfaces,core} packages.
+ * @beside/{interfaces,core} packages.
  */
 import { readdir, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';

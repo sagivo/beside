@@ -1,4 +1,4 @@
-import type { RawEvent, Logger } from '@cofounderos/interfaces';
+import type { RawEvent, Logger } from '@beside/interfaces';
 
 export type RawEventListener = (event: RawEvent) => void | Promise<void>;
 

@@ -59,19 +59,19 @@ jobs:
 
       - name: Smoke - cli doctor
         env:
-          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          BESIDE_DATA_DIR: ${{ runner.temp }}/beside-smoke
           NO_COLOR: '1'
         run: node packages/cli/dist/cli.js doctor
 
       # Plugin discovery + per-layer instantiation. Constructors only —
       # nothing is started, so capture doesn't actually probe displays.
-      # We point COFOUNDEROS_DATA_DIR at the runner workspace so the
+      # We point BESIDE_DATA_DIR at the runner workspace so the
       # SQLite db / index / export paths land in a sandbox we can blow
       # away with the runner, and we set NO_COLOR so the captured logs
       # don't include ANSI escapes.
       - name: Smoke - cli plugin list
         env:
-          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          BESIDE_DATA_DIR: ${{ runner.temp }}/beside-smoke
           NO_COLOR: '1'
         run: node packages/cli/dist/cli.js plugin list
 
@@ -82,7 +82,7 @@ jobs:
       # touch displays at construction time, this smoke will catch it.
       - name: Smoke - cli status
         env:
-          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-smoke
+          BESIDE_DATA_DIR: ${{ runner.temp }}/beside-smoke
           NO_COLOR: '1'
         run: node packages/cli/dist/cli.js status
 
@@ -92,7 +92,7 @@ jobs:
       # macOS runners without Screen Recording, and hosted Windows.
       - name: Smoke - capture once (fixture)
         env:
-          COFOUNDEROS_CAPTURE_FIXTURE: '1'
-          COFOUNDEROS_DATA_DIR: ${{ runner.temp }}/cofounderos-capture
+          BESIDE_CAPTURE_FIXTURE: '1'
+          BESIDE_DATA_DIR: ${{ runner.temp }}/beside-capture
           NO_COLOR: '1'
         run: node packages/cli/dist/cli.js capture --once

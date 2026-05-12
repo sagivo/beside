@@ -1,5 +1,5 @@
-import type { IStorage, RawEvent, Frame, Logger } from '@cofounderos/interfaces';
-import { dayKey } from '@cofounderos/core';
+import type { IStorage, RawEvent, Frame, Logger } from '@beside/interfaces';
+import { dayKey } from '@beside/core';
 import { redactPii } from './pii.js';
 
 export interface FrameBuilderResult { framesCreated: number; eventsProcessed: number; eventsDropped: number; }

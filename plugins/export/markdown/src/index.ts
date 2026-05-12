@@ -14,9 +14,9 @@ import type {
   ReorganisationSummary,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
-import { renderJournalMarkdown } from '@cofounderos/interfaces';
-import { ensureDir, expandPath } from '@cofounderos/core';
+} from '@beside/interfaces';
+import { renderJournalMarkdown } from '@beside/interfaces';
+import { ensureDir, expandPath } from '@beside/core';
 
 interface MarkdownExportConfig {
   path?: string;
@@ -488,7 +488,7 @@ Rules:
 - Keep it concise: short paragraphs plus scannable bullets.`;
 
 function stripMetaBlock(text: string): string {
-  const start = text.indexOf('<!-- cofounderos:meta');
+  const start = text.indexOf('<!-- beside:meta');
   if (start === -1) return text;
   const end = text.indexOf('-->', start);
   if (end === -1) return text;

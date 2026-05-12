@@ -10,7 +10,7 @@ import type {
   DayEventSource,
   Frame,
   Meeting,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 
 export interface EventExtractorOptions {
   dataDir?: string;

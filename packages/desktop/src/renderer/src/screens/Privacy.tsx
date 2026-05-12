@@ -26,7 +26,7 @@ export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onSt
     setAppDraft(config.config.capture.excluded_apps.join('\n')); setUrlDraft(config.config.capture.excluded_url_patterns.join('\n')); setKeywordDraft(config.config.capture.privacy.sensitive_keywords.join('\n')); setBlurPasswordFields(config.config.capture.privacy.blur_password_fields); setPauseOnScreenLock(config.config.capture.privacy.pause_on_screen_lock);
   }, [config]);
 
-  const loadRecent = React.useCallback(async () => { setLoadingRecent(true); try { setRecentFrames(await window.cofounderos.searchFrames({ day: localDayKey(), limit: 500 })); } catch { setRecentFrames([]); } finally { setLoadingRecent(false); } }, []);
+  const loadRecent = React.useCallback(async () => { setLoadingRecent(true); try { setRecentFrames(await window.beside.searchFrames({ day: localDayKey(), limit: 500 })); } catch { setRecentFrames([]); } finally { setLoadingRecent(false); } }, []);
   React.useEffect(() => { loadRecent(); }, [loadRecent]);
 
   if (!config) return <div className="flex flex-col gap-6 pt-6"><PageHeader title="Privacy" description="Loading…" /><Card><CardContent className="flex flex-col gap-4"><Skeleton className="h-16 w-full" /><Skeleton className="h-28 w-full" /><Skeleton className="h-28 w-full" /></CardContent></Card></div>;
@@ -40,21 +40,21 @@ export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onSt
     setSaving(true);
     try {
       const wasRunning = overview?.status === 'running', wasPaused = !!overview?.capture.paused;
-      onSaved(await window.cofounderos.saveConfigPatch({ capture: { excluded_apps: apps, excluded_url_patterns: urls, privacy: { blur_password_fields: blur, pause_on_screen_lock: pauseLock, sensitive_keywords: keywords } } }));
+      onSaved(await window.beside.saveConfigPatch({ capture: { excluded_apps: apps, excluded_url_patterns: urls, privacy: { blur_password_fields: blur, pause_on_screen_lock: pauseLock, sensitive_keywords: keywords } } }));
       setAppDraft(apps.join('\n')); setUrlDraft(urls.join('\n')); setKeywordDraft(keywords.join('\n')); setBlurPasswordFields(blur); setPauseOnScreenLock(pauseLock);
-      if (wasRunning) { let no = await window.cofounderos.startRuntime(); if (wasPaused && !no.capture.paused) no = await window.cofounderos.pauseCapture(); onOverview(no); }
+      if (wasRunning) { let no = await window.beside.startRuntime(); if (wasPaused && !no.capture.paused) no = await window.beside.pauseCapture(); onOverview(no); }
       toast.success('Saved', { description: wasRunning ? 'Restarted.' : 'Applies next start.' });
     } catch (err: any) { toast.error('Save failed', { description: err.message }); } finally { setSaving(false); }
   };
 
   const deleteScope = async (scope: any) => {
     setDeleting(true);
-    try { const r = await window.cofounderos.deleteFrames(scope); toast.success('Deleted', { description: `Removed ${formatNumber(r.frames)} frames, ${r.assetPaths.length} assets.` }); setPurgeApp(''); setPurgeDomain(''); await Promise.all([loadRecent(), onRefresh()]); } catch (err: any) { toast.error('Delete failed', { description: err.message }); } finally { setDeleting(false); }
+    try { const r = await window.beside.deleteFrames(scope); toast.success('Deleted', { description: `Removed ${formatNumber(r.frames)} frames, ${r.assetPaths.length} assets.` }); setPurgeApp(''); setPurgeDomain(''); await Promise.all([loadRecent(), onRefresh()]); } catch (err: any) { toast.error('Delete failed', { description: err.message }); } finally { setDeleting(false); }
   };
 
   return (
     <div className="flex flex-col gap-6 pt-6 pb-12">
-      <PageHeader title="Privacy" description="Control what CofounderOS remembers." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
+      <PageHeader title="Privacy" description="Control what Beside remembers." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
       <CaptureControl live={captureLive} paused={capturePaused} eventsToday={overview?.capture.eventsToday ?? 0} totalBytes={overview?.storage.totalAssetBytes ?? 0} onStart={onStart} onPause={onPause} onResume={onResume} />
 
       <Card><CardContent className="flex flex-col gap-5">

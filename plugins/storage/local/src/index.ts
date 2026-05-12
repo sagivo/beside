@@ -47,8 +47,8 @@ import type {
   ListDayEventsQuery,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
-import { dayKey, expandPath, ensureDir } from '@cofounderos/core';
+} from '@beside/interfaces';
+import { dayKey, expandPath, ensureDir } from '@beside/core';
 
 interface LocalStorageConfig {
   path?: string;
@@ -420,7 +420,7 @@ class LocalStorage implements IStorage {
   async markIndexed(strategy: string, eventIds: string[]): Promise<void> {
     if (eventIds.length === 0) return;
     // Find the lex-max event id in the batch. Event ids are
-    // `evt_<base36-ms>_<uuid>` (see @cofounderos/core/ids.ts), so
+    // `evt_<base36-ms>_<uuid>` (see @beside/core/ids.ts), so
     // string ordering = chronological ordering.
     let maxId = eventIds[0]!;
     for (let i = 1; i < eventIds.length; i++) {
@@ -1612,7 +1612,7 @@ class LocalStorage implements IStorage {
     );
 
     // 4. Refresh the frame's FTS row so a search like "milan" or
-    //    "cofounderos" actually matches all the frames now attributed
+    //    "beside" actually matches all the frames now attributed
     //    to that entity, not just the ones that literally typed it.
     this.refreshFrameFtsRow({
       frameId,
@@ -1917,8 +1917,8 @@ class LocalStorage implements IStorage {
 
     // FTS5 path — sanitised query, BM25 ranking. We OR-match against
     // both the title column and the tokenised path tail so a single
-    // query like "cofounder" hits both `title=Cofounderos` and
-    // `path=projects/cofounderos`.
+    // query like "beside" hits both `title=Beside` and
+    // `path=projects/beside`.
     const ftsQuery = sanitiseFtsQuery(text);
     if (ftsQuery && ftsQuery !== '""') {
       const params: Record<string, unknown> = { q: ftsQuery, limit };
@@ -1961,7 +1961,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+          'apps/screencaptureui', 'apps/beside', 'apps/audio'
         )`;
     const rows = this.db
       .prepare(
@@ -2075,8 +2075,8 @@ class LocalStorage implements IStorage {
         }
 
         // Title preference: when refreshing the lift target, use the
-        // resolver-supplied title (it already encodes "projects/cofounderos"
-        // → "Cofounderos"). For other refreshed rows, fall back to the
+        // resolver-supplied title (it already encodes "projects/beside"
+        // → "Beside"). For other refreshed rows, fall back to the
         // existing entity's title or a path-derived best guess.
         let title = path === targetPath ? input.target.title : '';
         if (!title) {
@@ -3270,14 +3270,14 @@ class LocalStorage implements IStorage {
     return stream;
   }
 
-  // Opt-in slow-query logging. When COFOUNDEROS_DB_SLOW_QUERY_MS is set
+  // Opt-in slow-query logging. When BESIDE_DB_SLOW_QUERY_MS is set
   // to a positive integer, wraps db.prepare so any subsequent
   // .run / .get / .all that exceeds the threshold logs a one-line
   // warning with the SQL preview, elapsed ms, and row count. Zero
   // overhead when the env is unset (we skip wrapping entirely), so
   // production installs are unaffected.
   private installSlowQueryLogger(db: Database.Database): void {
-    const raw = process.env.COFOUNDEROS_DB_SLOW_QUERY_MS;
+    const raw = process.env.BESIDE_DB_SLOW_QUERY_MS;
     const threshold = raw ? Number.parseInt(raw, 10) : 0;
     if (!Number.isFinite(threshold) || threshold <= 0) return;
 
@@ -3324,7 +3324,7 @@ class LocalStorage implements IStorage {
   }
 
   private async openDb(): Promise<void> {
-    const dbPath = path.join(this.root, 'cofounderOS.db');
+    const dbPath = path.join(this.root, 'beside.db');
     this.db = new Database(dbPath);
     this.installSlowQueryLogger(this.db);
     this.db.pragma('journal_mode = WAL');
@@ -3435,9 +3435,9 @@ class LocalStorage implements IStorage {
       -- copy only gives recall for page names, host tokens, and slugs.
       --
       -- entity_search holds a tokenised projection of the frame's
-      -- entity_path + entity_kind (e.g. "cofounderos project" for
-      -- projects/cofounderos). Without this column, searching
-      -- "cofounderos" only matches frames that literally type the word
+      -- entity_path + entity_kind (e.g. "beside project" for
+      -- projects/beside). Without this column, searching
+      -- "beside" only matches frames that literally type the word
       -- in their title or OCR text, missing the hundreds of frames
       -- attributed to the entity by the resolver. With it, a query
       -- like "milan" returns frames in milan-lazic's sessions even
@@ -3536,8 +3536,8 @@ class LocalStorage implements IStorage {
 
       -- entities_fts: free-text search over entity title + path tail
       -- (the human-readable parts). The path is stored alongside title so
-      -- the desktop UI can autocomplete on either ("cofounder" matches
-      -- both "projects/cofounderos" and "Cofounderos"). The kind column
+      -- the desktop UI can autocomplete on either ("beside" matches
+      -- both "projects/beside" and "Beside"). The kind column
       -- is non-tokenised so we can filter without scanning.
       CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
         path UNINDEXED,
@@ -3560,7 +3560,7 @@ class LocalStorage implements IStorage {
         'apps/electron', 'apps/cloudflare-warp',
         'apps/spotlight', 'apps/window-server', 'apps/dock',
         'apps/control-center', 'apps/notification-center',
-        'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+        'apps/screencaptureui', 'apps/beside', 'apps/audio'
       )
       BEGIN
         INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
@@ -3578,7 +3578,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+          'apps/screencaptureui', 'apps/beside', 'apps/audio'
         );
       END;
       CREATE TRIGGER IF NOT EXISTS entities_ad AFTER DELETE ON entities BEGIN
@@ -3980,7 +3980,7 @@ class LocalStorage implements IStorage {
         'apps/electron', 'apps/cloudflare-warp',
         'apps/spotlight', 'apps/window-server', 'apps/dock',
         'apps/control-center', 'apps/notification-center',
-        'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+        'apps/screencaptureui', 'apps/beside', 'apps/audio'
       )
       BEGIN
         INSERT INTO entities_fts(rowid, path, title, path_tail, kind)
@@ -3998,7 +3998,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+          'apps/screencaptureui', 'apps/beside', 'apps/audio'
         );
       END;
       CREATE TRIGGER entities_ad AFTER DELETE ON entities BEGIN
@@ -4017,7 +4017,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+          'apps/screencaptureui', 'apps/beside', 'apps/audio'
         )`,
       )
       .run().changes;
@@ -4046,7 +4046,7 @@ class LocalStorage implements IStorage {
           'apps/electron', 'apps/cloudflare-warp',
           'apps/spotlight', 'apps/window-server', 'apps/dock',
           'apps/control-center', 'apps/notification-center',
-          'apps/screencaptureui', 'apps/cofounderos', 'apps/audio'
+          'apps/screencaptureui', 'apps/beside', 'apps/audio'
         );
       `);
       this.logger.info(`migrated: backfilled entities_fts with ${entCount} entity row(s)`);
@@ -5016,7 +5016,7 @@ function rowToSession(r: RawSessionRow): ActivitySession {
  * Returns empty string when the frame has no resolved entity yet.
  *
  * Examples:
- *   ("projects/cofounderos", "project")   -> "cofounderos project"
+ *   ("projects/beside", "project")   -> "beside project"
  *   ("contacts/milan-lazic", "contact")   -> "milan lazic contact"
  *   ("channels/postman-liblab-prs", ...)  -> "postman liblab prs channel"
  *   (null, null)                          -> ""
@@ -5101,7 +5101,7 @@ async function fileExists(filePath: string): Promise<boolean> {
 const factory: PluginFactory<IStorage> = async (ctx) => {
   const cfg = ctx.config as LocalStorageConfig;
   // `local.path` is the storage root that contains raw/, checkpoints/,
-  // and cofounderOS.db. Falls back to the app's data_dir.
+  // and beside.db. Falls back to the app's data_dir.
   const root = expandPath(cfg.path ?? ctx.dataDir);
   const storage = new LocalStorage(root, ctx.logger);
   await storage.init();

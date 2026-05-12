@@ -1,6 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import type { FrameTextSource, IStorage, Logger } from '@cofounderos/interfaces';
+import type { FrameTextSource, IStorage, Logger } from '@beside/interfaces';
 import { redactPii } from './pii.js';
 
 interface OcrWorkerOptions { batchSize?: number; enabled?: boolean; storageRoot: string; sensitiveKeywords?: string[]; skipWhenAxTextChars?: number; }

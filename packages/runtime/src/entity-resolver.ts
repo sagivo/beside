@@ -1,4 +1,4 @@
-import type { Frame, EntityRef, EntityKind, IStorage, Logger } from '@cofounderos/interfaces';
+import type { Frame, EntityRef, EntityKind, IStorage, Logger } from '@beside/interfaces';
 
 type FrameResolver = (frame: Frame) => EntityRef | null;
 

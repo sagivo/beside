@@ -29,13 +29,13 @@ function AppInner() {
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => { try { return localStorage.getItem(ONBOARDING_KEY) !== '1'; } catch { return true; } });
 
   React.useEffect(() => {
-    window.cofounderos?.onDesktopLogs?.(l => setLogs(l || ''));
-    window.cofounderos?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p]));
-    window.cofounderos?.onOverview?.(setOverview);
+    window.beside?.onDesktopLogs?.(l => setLogs(l || ''));
+    window.beside?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p]));
+    window.beside?.onOverview?.(setOverview);
   }, []);
 
   React.useEffect(() => { if (!showOnboarding) loadScreen(screen); }, [screen, showOnboarding]);
-  React.useEffect(() => { const t = window.setInterval(() => window.cofounderos?.getOverview().then(setOverview).catch(() => {}), 60000); return () => window.clearInterval(t); }, []);
+  React.useEffect(() => { const t = window.setInterval(() => window.beside?.getOverview().then(setOverview).catch(() => {}), 60000); return () => window.clearInterval(t); }, []);
 
   React.useEffect(() => {
     if (screen !== 'meetings' || !overview) return;
@@ -46,25 +46,25 @@ function AppInner() {
 
   const loadScreen = async (n: Screen) => {
     try {
-      if (!window.cofounderos) throw new Error('Desktop preload bridge is unavailable.');
-      if (n === 'dashboard') { setOverview(await window.cofounderos.getOverview()); setDoctor(await window.cofounderos.runDoctor()); }
-      if (n === 'search') setDays(await window.cofounderos.listJournalDays());
-      if (n === 'connect') { setOverview(await window.cofounderos.getOverview()); setConfig(await window.cofounderos.readConfig()); }
+      if (!window.beside) throw new Error('Desktop preload bridge is unavailable.');
+      if (n === 'dashboard') { setOverview(await window.beside.getOverview()); setDoctor(await window.beside.runDoctor()); }
+      if (n === 'search') setDays(await window.beside.listJournalDays());
+      if (n === 'connect') { setOverview(await window.beside.getOverview()); setConfig(await window.beside.readConfig()); }
       if (n === 'meetings') {
         setMeetingsLoading(true);
-        try { const [e, m] = await Promise.all([window.cofounderos.listDayEvents().catch(() => []), window.cofounderos.listMeetings().catch(() => [])]); setDayEvents(e); setMeetings(m); }
+        try { const [e, m] = await Promise.all([window.beside.listDayEvents().catch(() => []), window.beside.listMeetings().catch(() => [])]); setDayEvents(e); setMeetings(m); }
         finally { setMeetingsLoading(false); }
       }
-      if (n === 'privacy') { const [o, c] = await Promise.all([window.cofounderos.getOverview(), window.cofounderos.readConfig()]); setOverview(o); setConfig(c); }
-      if (n === 'settings') setConfig(await window.cofounderos.readConfig());
+      if (n === 'privacy') { const [o, c] = await Promise.all([window.beside.getOverview(), window.beside.readConfig()]); setOverview(o); setConfig(c); }
+      if (n === 'settings') setConfig(await window.beside.readConfig());
       setError(null);
     } catch (err: any) { setError(err.message || String(err)); }
   };
 
   const copyMcpSnippet = async () => {
-    const c = config ?? (await window.cofounderos.readConfig()); if (!config) setConfig(c);
+    const c = config ?? (await window.beside.readConfig()); if (!config) setConfig(c);
     const m = c.config.export.plugins.find((p: any) => p.name === 'mcp'), h = typeof m?.host === 'string' ? m.host : '127.0.0.1', pt = typeof m?.port === 'number' ? m.port : 3456;
-    await window.cofounderos.copyText(JSON.stringify({ mcpServers: { cofounderos: { url: `http://${h}:${pt}` } } }, null, 2));
+    await window.beside.copyText(JSON.stringify({ mcpServers: { beside: { url: `http://${h}:${pt}` } } }, null, 2));
     toast.success('MCP snippet copied', { description: 'Paste it into your AI app settings.' });
   };
 
@@ -75,15 +75,15 @@ function AppInner() {
   const wrapAction = (fn: any, successMsg: string, desc?: string) => async (...args: any[]) => { try { const r = await fn(...args); if (r) setOverview(r); toast.success(successMsg, { description: desc }); } catch (e: any) { toast.error(`Could not ${successMsg.toLowerCase()}`, { description: e.message || String(e) }); } };
 
   const actions = React.useMemo(() => ({
-    onStart: wrapAction(window.cofounderos.startRuntime, 'Capture started'),
-    onStop: async () => { try { await window.cofounderos.stopRuntime(); setOverview(await window.cofounderos.getOverview().catch(() => null)); toast.info('Capture stopped'); } catch (e: any) { toast.error('Could not stop capture', { description: e.message }); } },
-    onPause: async () => { try { setOverview(await window.cofounderos.pauseCapture()); toast.info('Capture paused'); } catch (e: any) { toast.error('Could not pause capture', { description: e.message }); } },
-    onResume: wrapAction(window.cofounderos.resumeCapture, 'Capture resumed'),
-    onTriggerIndex: wrapAction(window.cofounderos.triggerIndex, 'Organizing memories…', 'This runs in the background.'),
-    onTriggerReorganise: wrapAction(window.cofounderos.triggerReorganise, 'Rebuilding summaries…', 'This runs in the background.'),
-    onTriggerFullReindex: async (d: string) => { const f = d.trim() ? `${d.trim()}T00:00:00.000` : undefined; if (!f) { toast.error('Choose a date'); return; } toast.info('Re-indexing memory…', { description: `Rebuilding from ${d}.` }); try { setOverview(await window.cofounderos.triggerFullReindex({ from: f })); toast.success('Re-index complete'); } catch (e: any) { toast.error('Could not re-index', { description: e.message }); } },
-    onBootstrap: async () => { setBootstrapEvents([]); try { await window.cofounderos.bootstrapModel(); const [o, d] = await Promise.all([window.cofounderos.getOverview(), window.cofounderos.runDoctor()]); setOverview(o); setDoctor(d); toast.success('Local AI is ready'); } catch (e: any) { toast.error('AI setup failed', { description: e.message }); } },
-    onOpenMarkdownExport: async (c?: string) => { try { await window.cofounderos.openPath(c ? { target: 'markdown', category: c } : 'markdown'); } catch (e: any) { toast.error('Could not open export', { description: e.message }); } }
+    onStart: wrapAction(window.beside.startRuntime, 'Capture started'),
+    onStop: async () => { try { await window.beside.stopRuntime(); setOverview(await window.beside.getOverview().catch(() => null)); toast.info('Capture stopped'); } catch (e: any) { toast.error('Could not stop capture', { description: e.message }); } },
+    onPause: async () => { try { setOverview(await window.beside.pauseCapture()); toast.info('Capture paused'); } catch (e: any) { toast.error('Could not pause capture', { description: e.message }); } },
+    onResume: wrapAction(window.beside.resumeCapture, 'Capture resumed'),
+    onTriggerIndex: wrapAction(window.beside.triggerIndex, 'Organizing memories…', 'This runs in the background.'),
+    onTriggerReorganise: wrapAction(window.beside.triggerReorganise, 'Rebuilding summaries…', 'This runs in the background.'),
+    onTriggerFullReindex: async (d: string) => { const f = d.trim() ? `${d.trim()}T00:00:00.000` : undefined; if (!f) { toast.error('Choose a date'); return; } toast.info('Re-indexing memory…', { description: `Rebuilding from ${d}.` }); try { setOverview(await window.beside.triggerFullReindex({ from: f })); toast.success('Re-index complete'); } catch (e: any) { toast.error('Could not re-index', { description: e.message }); } },
+    onBootstrap: async () => { setBootstrapEvents([]); try { await window.beside.bootstrapModel(); const [o, d] = await Promise.all([window.beside.getOverview(), window.beside.runDoctor()]); setOverview(o); setDoctor(d); toast.success('Local AI is ready'); } catch (e: any) { toast.error('AI setup failed', { description: e.message }); } },
+    onOpenMarkdownExport: async (c?: string) => { try { await window.beside.openPath(c ? { target: 'markdown', category: c } : 'markdown'); } catch (e: any) { toast.error('Could not open export', { description: e.message }); } }
   }), []);
 
   if (showOnboarding) return <React.Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted-foreground">Preparing welcome…</div>}><Onboarding bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onComplete={() => { try { localStorage.setItem(ONBOARDING_KEY, '1'); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} setShowOnboarding(false); setScreen('dashboard'); }} /></React.Suspense>;

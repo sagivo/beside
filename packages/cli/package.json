@@ -1,22 +1,22 @@
 {
-  "name": "@cofounderos/cli",
+  "name": "@beside/cli",
   "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "cofounderos": "dist/cli.js"
+    "beside": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "cross-env COFOUNDEROS_DEV=1 tsx watch --clear-screen=false --exclude \"**/dist/**\" --conditions=development src/cli.ts start",
+    "dev": "cross-env BESIDE_DEV=1 tsx watch --clear-screen=false --exclude \"**/dist/**\" --conditions=development src/cli.ts start",
     "test": "echo \"(no tests)\""
   },
   "dependencies": {
-    "@cofounderos/core": "workspace:*",
-    "@cofounderos/runtime": "workspace:*"
+    "@beside/core": "workspace:*",
+    "@beside/runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

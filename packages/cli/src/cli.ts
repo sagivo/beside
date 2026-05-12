@@ -7,12 +7,12 @@ import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import {
   createLogger, writeDefaultConfigIfMissing, defaultDataDir, loadConfig, expandPath, findWorkspaceRoot,
-} from '@cofounderos/core';
+} from '@beside/core';
 import {
   assertHeavyWorkAllowed, buildOrchestrator, bootstrapModel, createRuntime,
   runIncremental, runReorganisation, runFullReindex, startAll, stopAll, useOfflineModel,
-} from '@cofounderos/runtime';
-import type { OrchestratorHandles } from '@cofounderos/runtime';
+} from '@beside/runtime';
+import type { OrchestratorHandles } from '@beside/runtime';
 import { createBootstrapRenderer } from './bootstrap-progress.js';
 
 interface ParsedArgs { command: string; flags: Record<string, string | boolean>; positional: string[]; }
@@ -31,8 +31,8 @@ function parseArgs(argv: string[]): ParsedArgs {
 }
 
 function help(): void {
-  console.log(`cofounderos — AI-powered device capture, knowledge indexing, and agent memory
-Usage: cofounderos <command> [options]
+  console.log(`beside — AI-powered device capture, knowledge indexing, and agent memory
+Usage: beside <command> [options]
 Commands:
   init                       Write config.yaml + auto-install Ollama + pull default model
   status                     Show capture state, storage stats, and index state.
@@ -83,12 +83,12 @@ async function cmdInit(logger: ReturnType<typeof createLogger>, args: ParsedArgs
   console.log('\nPreparing local AI model (Ollama + Gemma)…');
   const handles = await buildOrchestrator(logger, configFromArgs(args));
   try { await ensureModelOrFallback(handles, args); } finally { await stopAll(handles); }
-  console.log('\n✓ CofounderOS is ready. Next: `cofounderos start`');
+  console.log('\n✓ Beside is ready. Next: `beside start`');
 }
 
 async function cmdStatus(logger: ReturnType<typeof createLogger>, args: ParsedArgs): Promise<void> {
   const overview = await createRuntime({ ...configFromArgs(args), logger }).getOverview();
-  console.log(`# CofounderOS — status
+  console.log(`# Beside — status
 ## Capture\nrunning: ${overview.capture.running}\npaused: ${overview.capture.paused}\nevents today: ${overview.capture.eventsToday}\nstorage: ${formatBytes(overview.capture.storageBytesToday)}\nmemory: ${overview.capture.memoryMB} MB
 ## Storage\nroot: ${overview.storageRoot}\nevents: ${overview.storage.totalEvents}\nassets: ${formatBytes(overview.storage.totalAssetBytes)}\noldest: ${overview.storage.oldestEvent ?? '-'}\nnewest: ${overview.storage.newestEvent ?? '-'}
 ## Index (${overview.index.strategy})\nroot: ${overview.index.rootPath}\npages: ${overview.index.pageCount}\nevents: ${overview.index.eventsCovered}
@@ -114,7 +114,7 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
   checks.push(...await checkNativeCaptureHelper((await runtime.readConfig()).config));
 
   const fails = checks.filter(c => c.status === 'fail').length, warns = checks.filter(c => c.status === 'warn').length;
-  console.log(`# CofounderOS — doctor\n\n${checks.map(c => `- [${c.status}] ${c.area}: ${c.message}${c.detail ? `\n    ${c.detail}` : ''}`).join('\n')}\n\nsummary: ${fails} fail, ${warns} warn, ${checks.length - fails - warns} ok/info`);
+  console.log(`# Beside — doctor\n\n${checks.map(c => `- [${c.status}] ${c.area}: ${c.message}${c.detail ? `\n    ${c.detail}` : ''}`).join('\n')}\n\nsummary: ${fails} fail, ${warns} warn, ${checks.length - fails - warns} ok/info`);
   if (fails > 0) process.exitCode = 1;
 }
 
@@ -129,7 +129,7 @@ async function checkCommand(area: string, cmd: string, purpose: string): Promise
 }
 
 async function checkNativeCaptureHelper(config: any): Promise<DoctorCheck[]> {
-  const p = config.capture.helper_path ? expandPath(config.capture.helper_path) : path.join(findWorkspaceRoot(process.cwd()), 'plugins', 'capture', 'native', 'dist', 'native', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'cofounderos-capture.exe' : 'cofounderos-capture');
+  const p = config.capture.helper_path ? expandPath(config.capture.helper_path) : path.join(findWorkspaceRoot(process.cwd()), 'plugins', 'capture', 'native', 'dist', 'native', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'beside-capture.exe' : 'beside-capture');
   try { await fsp.access(p); return [{ area: 'native-capture', status: config.capture.plugin === 'native' ? 'ok' : 'info', message: 'native helper present', detail: p }]; }
   catch { return [{ area: 'native-capture', status: config.capture.plugin === 'native' ? 'fail' : 'info', message: 'native helper not built', detail: 'Run pnpm build:plugins' }]; }
 }
@@ -143,7 +143,7 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
     const [po, pr, pe] = await Promise.all([h.storage.listFramesNeedingOcr(1000).catch(() => []), h.storage.listFramesNeedingResolution(1000).catch(() => []), h.storage.listFramesNeedingEmbedding(mi.name, 1000).catch(() => [])]);
     const mcpRef = h.config.export.plugins.find((p: any) => p.name === 'mcp') as any, mcp = mcpRef?.enabled !== false ? `http://${mcpRef?.host ?? '127.0.0.1'}:${mcpRef?.port ?? 3456}` : null, mcpOk = mcp ? await fetch(`${mcp}/health`).then(r => r.ok).catch(() => false) : false;
     
-    const dr = await Promise.all([{ label: 'raw', path: path.join(sr, 'raw') }, { label: 'checkpoints', path: path.join(sr, 'checkpoints') }, { label: 'db', path: path.join(sr, 'cofounderOS.db') }, { label: 'wal', path: path.join(sr, 'cofounderOS.db-wal') }, { label: 'index', path: is.rootPath }, { label: 'exports', path: path.join(dd, 'export') }].map(async t => ({ ...t, ...(await measurePathDetailed(t.path, Date.now())) })));
+    const dr = await Promise.all([{ label: 'raw', path: path.join(sr, 'raw') }, { label: 'checkpoints', path: path.join(sr, 'checkpoints') }, { label: 'db', path: path.join(sr, 'beside.db') }, { label: 'wal', path: path.join(sr, 'beside.db-wal') }, { label: 'index', path: is.rootPath }, { label: 'exports', path: path.join(dd, 'export') }].map(async t => ({ ...t, ...(await measurePathDetailed(t.path, Date.now())) })));
     const tb = dr.reduce((a, r) => a + r.totalBytes, 0), dbh = new Array(24).fill(0); dr.forEach(r => r.recentByHour.forEach((v, i) => dbh[i] += v));
     const ft = (await h.storage.countFramesByTier().catch(() => {})) as Record<string, number> ?? {}, tf = Object.values(ft).reduce((a, b) => a + b, 0), ents = await h.storage.listEntities({}).catch(() => []);
     const rec = await h.storage.readEvents({ from: new Date(Date.now() - 7 * 86400000).toISOString(), limit: 50000 }), bd: Record<string, number> = {}; rec.forEach(e => { const d = e.timestamp.slice(0, 10); bd[d] = (bd[d] ?? 0) + 1; });
@@ -152,7 +152,7 @@ async function cmdStats(logger: ReturnType<typeof createLogger>, args: ParsedArg
     if (args.flags.json) return console.log(JSON.stringify({ dataDir: dd, storageRoot: sr, disk: { total: tb, free: fb, breakdown: dr.map(r => ({ label: r.label, bytes: r.totalBytes })), last24Hours: dbh }, events: { total: ss.totalEvents, today: et, yesterday: ey, lastHour: l1h.length }, frames: { total: tf, byTier: ft, pending: { ocr: po.length, resolve: pr.length, embed: pe.length } }, entities: { total: ents.length }, index: { strategy: is.strategy, pages: is.pageCount, coverage: is.eventsCovered, backlog: bl.length }, model: { name: mi.name, local: mi.isLocal, ready: mr }, mcp: mcp ? { enabled: true, url: mcp, ready: mcpOk } : { enabled: false } }, null, 2));
 
     const ipct = ss.totalEvents > 0 ? Math.round((is.eventsCovered / ss.totalEvents) * 100) : 0, r24 = dbh.reduce((a, b) => a + b, 0), sd = [...dr].sort((a, b) => b.totalBytes - a.totalBytes);
-    console.log(`${color.bold(color.cyan('CofounderOS'))} stats\n\nCapture: ${cs.running ? (cs.paused ? 'paused' : 'running') : 'stopped'}, ${et} today (${formatBytes(cs.storageBytesToday)})\nIndex: ${ipct}% coverage (${is.pageCount} pages, ${is.eventsCovered}/${ss.totalEvents} events, backlog: ${bl.length})\nModel: ${mi.name} (${mr ? 'ready' : 'offline'})\nMCP: ${mcp ? (mcpOk ? 'listening' : 'offline') : 'disabled'}\nStorage: ${formatBytes(tb)} total${fb ? ` (${formatBytes(fb)} free)` : ''}\n  24h writes: ${formatBytes(r24)}\n  ${sd.slice(0, 3).map(r => `${r.label}: ${formatBytes(r.totalBytes)}`).join(' | ')}\nActivity: ${et} today, ${ey} yesterday\nFrames: ${tf} total\nEntities: ${ents.length} total`);
+    console.log(`${color.bold(color.cyan('Beside'))} stats\n\nCapture: ${cs.running ? (cs.paused ? 'paused' : 'running') : 'stopped'}, ${et} today (${formatBytes(cs.storageBytesToday)})\nIndex: ${ipct}% coverage (${is.pageCount} pages, ${is.eventsCovered}/${ss.totalEvents} events, backlog: ${bl.length})\nModel: ${mi.name} (${mr ? 'ready' : 'offline'})\nMCP: ${mcp ? (mcpOk ? 'listening' : 'offline') : 'disabled'}\nStorage: ${formatBytes(tb)} total${fb ? ` (${formatBytes(fb)} free)` : ''}\n  24h writes: ${formatBytes(r24)}\n  ${sd.slice(0, 3).map(r => `${r.label}: ${formatBytes(r.totalBytes)}`).join(' | ')}\nActivity: ${et} today, ${ey} yesterday\nFrames: ${tf} total\nEntities: ${ents.length} total`);
   } finally { await stopAll(h); }
 }
 
@@ -185,8 +185,8 @@ async function cmdStart(logger: ReturnType<typeof createLogger>, args: ParsedArg
   const handles = await buildOrchestrator(logger, configFromArgs(args));
   await ensureModelOrFallback(handles, args);
   await startAll(handles);
-  logger.info(`CofounderOS running. MCP: ${handles.exports.find(e => e.name === 'mcp')?.getStatus()}`);
-  if (process.env.COFOUNDEROS_DEV === '1') setTimeout(() => runFullReindex(handles).catch(() => {}), 60000).unref();
+  logger.info(`Beside running. MCP: ${handles.exports.find(e => e.name === 'mcp')?.getStatus()}`);
+  if (process.env.BESIDE_DEV === '1') setTimeout(() => runFullReindex(handles).catch(() => {}), 60000).unref();
   await waitForShutdown(handles);
 }
 
@@ -246,10 +246,10 @@ async function cmdModelUpdate(logger: ReturnType<typeof createLogger>, args: Par
 async function cmdReset(logger: ReturnType<typeof createLogger>, args: ParsedArgs) {
   const loaded = await loadConfig((configFromArgs(args) as any).configPath);
   const sr = expandPath(loaded.config.storage.local.path), ir = expandPath(loaded.config.index.index_path);
-  const targets = [{ label: 'raw', path: path.join(sr, 'raw') }, { label: 'db', path: path.join(sr, 'cofounderOS.db') }, { label: 'index', path: ir }];
+  const targets = [{ label: 'raw', path: path.join(sr, 'raw') }, { label: 'db', path: path.join(sr, 'beside.db') }, { label: 'index', path: ir }];
   if (args.flags['keep-config'] === false) targets.push({ label: 'config.yaml', path: loaded.sourcePath });
 
-  console.log('cofounderos reset — the following will be deleted:\n' + targets.map(t => `  · ${t.label}: ${t.path}`).join('\n') + '\n');
+  console.log('beside reset — the following will be deleted:\n' + targets.map(t => `  · ${t.label}: ${t.path}`).join('\n') + '\n');
   if (!args.flags.yes && !args.flags.y) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     const ok = await new Promise(r => rl.question('Type "wipe" to confirm: ', a => { rl.close(); r(a.trim() === 'wipe'); }));

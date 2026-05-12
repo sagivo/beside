@@ -83,7 +83,7 @@ const FRAMES = [
       '11:30 AM – 12:00 PM',
       'Investor Sync — Acme',
       '2:00 PM',
-      'CofounderOS deep dive',
+      'Beside deep dive',
     ].join('\n'),
   }),
   // Slack channel with unanswered mention
@@ -123,8 +123,8 @@ const FRAMES = [
     id: 'f_pr_1',
     timestamp: isoAt(13, 20),
     app: 'Chrome',
-    url: 'https://github.com/cofounderos/core/pull/123',
-    window_title: 'Pull Request #123 · cofounderos/core — Review requested',
+    url: 'https://github.com/beside/core/pull/123',
+    window_title: 'Pull Request #123 · beside/core — Review requested',
     text: 'Review requested · sagiv wants to merge 3 commits into main. @you',
   }),
   // Recall_event target
@@ -140,10 +140,10 @@ const FRAMES = [
     id: 'f_cursor_1',
     timestamp: isoAt(16, 0),
     app: 'Cursor',
-    window_title: 'cofounderos — index.ts',
-    entity_path: 'projects/cofounderos',
+    window_title: 'beside — index.ts',
+    entity_path: 'projects/beside',
     entity_kind: 'project',
-    text: 'cofounderos repo, working on agent harness',
+    text: 'beside repo, working on agent harness',
   }),
 ];
 
@@ -164,16 +164,16 @@ function session(id, startH, startM, endH, endM, app, entity) {
 }
 
 const SESSIONS = [
-  session('s1', 9, 0, 10, 30, 'Cursor', 'projects/cofounderos'),
+  session('s1', 9, 0, 10, 30, 'Cursor', 'projects/beside'),
   session('s2', 10, 30, 11, 30, 'Slack', 'channels/sdk-warn-alerts-prod'),
-  session('s3', 13, 0, 14, 30, 'Chrome', 'projects/cofounderos'),
-  session('s4', 15, 0, 16, 30, 'Cursor', 'projects/cofounderos'),
+  session('s3', 13, 0, 14, 30, 'Chrome', 'projects/beside'),
+  session('s4', 15, 0, 16, 30, 'Cursor', 'projects/beside'),
 ];
 
 const ENTITIES = [
   {
-    path: 'projects/cofounderos',
-    title: 'cofounderos',
+    path: 'projects/beside',
+    title: 'beside',
     kind: 'project',
     lastSeen: isoAt(16, 30),
     frameCount: 24,
@@ -365,7 +365,7 @@ function createScriptedModel({ scenario }) {
         return out;
       }
       // People synthesis
-      if (/evidence-synthesis step for CofounderOS/.test(prompt)) {
+      if (/evidence-synthesis step for Beside/.test(prompt)) {
         const out = scenario.peopleSynthesis ?? 'No useful update found.';
         completions.push({ kind: 'people-synthesis', out });
         return out;
@@ -501,13 +501,13 @@ const SCENARIOS = [
       "**Today's calendar:**",
       '- 9:00 AM — Standup with Maya',
       '- 11:30 AM — Investor Sync (Acme)',
-      '- 2:00 PM — CofounderOS deep dive',
+      '- 2:00 PM — Beside deep dive',
       '',
       '**Pending / open loops:**',
       '- @you in #sdk-warn-alerts-prod — reply needed on alert routing.',
-      '- PR #123 in cofounderos/core — review requested.',
+      '- PR #123 in beside/core — review requested.',
       '',
-      '**What you\'ve been on:** mostly cofounderos in Cursor.',
+      '**What you\'ve been on:** mostly beside in Cursor.',
     ].join('\n'),
     hallucinationCanary: ['paris', 'whatsapp'],
   },
@@ -536,7 +536,7 @@ const SCENARIOS = [
     composeAnswer: [
       '- **9:00 AM** — Standup with Maya',
       '- **11:30 AM** — Investor Sync — Acme',
-      '- **2:00 PM** — CofounderOS deep dive',
+      '- **2:00 PM** — Beside deep dive',
     ].join('\n'),
     hallucinationCanary: ['paris'],
   },
@@ -548,7 +548,7 @@ const SCENARIOS = [
     expectsTools: true,
     composeAnswer: [
       '- **#sdk-warn-alerts-prod (Slack)** — Maya asked about alert routing; reply needed.',
-      '- **PR #123 in cofounderos/core (GitHub)** — review requested.',
+      '- **PR #123 in beside/core (GitHub)** — review requested.',
     ].join('\n'),
   },
   {
@@ -585,17 +585,17 @@ const SCENARIOS = [
       '- Slack — 1h',
       '',
       '**Top focus**',
-      '- cofounderos (project) — 4h',
+      '- beside (project) — 4h',
     ].join('\n'),
   },
   {
     name: 'project_status',
-    message: "what's the status of cofounderos?",
+    message: "what's the status of beside?",
     intent: 'project_status',
     routerJson: { route: 'tools', intent: 'project_status', reason: 'status' },
     expectsTools: true,
     composeAnswer: [
-      "You've been heads-down in cofounderos this week, mostly the agent harness in Cursor.",
+      "You've been heads-down in beside this week, mostly the agent harness in Cursor.",
       '',
       '**Recent attention**',
       `- ${TODAY_YMD}: 4h`,

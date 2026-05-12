@@ -1,7 +1,7 @@
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import type { Logger } from '@cofounderos/interfaces';
+import type { Logger } from '@beside/interfaces';
 
 export interface LoadGuardConfig {
   enabled: boolean;

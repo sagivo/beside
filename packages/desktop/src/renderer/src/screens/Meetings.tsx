@@ -127,7 +127,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   const runScan = React.useCallback(async () => {
     if (scanning) return; setScanning(true);
     try {
-      const r = await window.cofounderos.triggerEventExtractor();
+      const r = await window.beside.triggerEventExtractor();
       if (r.meetingsLifted + r.llmExtracted + r.contextEnriched > 0 || r.audioTranscribed + r.audioImported > 0 || r.summariesSucceeded > 0) toast.success('Event scan complete', { description: `${r.audioTranscribed + r.audioImported > 0 ? `${r.audioTranscribed + r.audioImported} audio ` : ''}${r.meetingsCreated + r.meetingsExtended > 0 ? `${r.meetingsCreated + r.meetingsExtended} meetings ` : ''}processed` });
       else if (!r.modelAvailable) toast.info('Event scan skipped', { description: 'Model offline.' });
       else toast.info('No new events', { description: `Scanned ${r.framesScanned} frames.` });
@@ -163,7 +163,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   const loadDay = React.useCallback(async (day: string) => {
     if ((daysFromProps.includes(day) && !dayOverrides.has(day)) || perDayLoading === day) return;
     setPerDayLoading(day);
-    try { const f = await window.cofounderos.listDayEvents({ day }) ?? []; setDayOverrides(p => new Map(p).set(day, f)); }
+    try { const f = await window.beside.listDayEvents({ day }) ?? []; setDayOverrides(p => new Map(p).set(day, f)); }
     catch { setDayOverrides(p => p.has(day) ? p : new Map(p).set(day, [])); } finally { setPerDayLoading(c => c === day ? null : c); }
   }, [daysFromProps, dayOverrides, perDayLoading]);
 

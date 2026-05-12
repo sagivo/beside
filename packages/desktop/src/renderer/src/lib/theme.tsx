@@ -3,7 +3,7 @@ import * as React from 'react';
 export type ThemePreference = 'auto' | 'light' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
 
-const STORAGE_KEY = 'cofounderos:theme';
+const STORAGE_KEY = 'beside:theme';
 
 interface ThemeContextValue {
   preference: ThemePreference;

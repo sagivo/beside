@@ -13,7 +13,7 @@ import type {
   RawEventHandler,
   PluginFactory,
   Logger,
-} from '@cofounderos/interfaces';
+} from '@beside/interfaces';
 import {
   newEventId,
   newSessionId,
@@ -22,7 +22,7 @@ import {
   timeKey,
   expandPath,
   ensureDir,
-} from '@cofounderos/core';
+} from '@beside/core';
 import { dHash, hashDiff } from './perceptual-hash.js';
 import { AccessibilityTextReader } from './accessibility-text.js';
 
@@ -170,8 +170,8 @@ interface ActiveWindowInfo {
 
 const SAFE_APP = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 40);
 const FIXTURE_CAPTURE =
-  process.env.COFOUNDEROS_CAPTURE_FIXTURE === '1' ||
-  process.env.COFOUNDEROS_FAKE_DISPLAYS === '1';
+  process.env.BESIDE_CAPTURE_FIXTURE === '1' ||
+  process.env.BESIDE_FAKE_DISPLAYS === '1';
 
 /**
  * Encode a raw screenshot buffer to the configured output format. WebP
@@ -386,7 +386,7 @@ class NodeCapture implements ICapture {
       excluded_url_patterns: config.excluded_url_patterns ?? [],
       capture_audio: config.capture_audio ?? true,
       whisper_model: config.whisper_model ?? 'base',
-      raw_root: expandPath(config.raw_root ?? '~/.cofounderOS'),
+      raw_root: expandPath(config.raw_root ?? '~/.beside'),
       privacy: config.privacy ?? {
         blur_password_fields: true,
         pause_on_screen_lock: true,
@@ -475,8 +475,8 @@ class NodeCapture implements ICapture {
     // Emit an app_launch for the agent itself — useful as a session marker.
     await this.emit({
       type: 'app_launch',
-      app: 'CofounderOS',
-      app_bundle_id: 'os.cofounder.agent',
+      app: 'Beside',
+      app_bundle_id: 'so.beside.agent',
       window_title: 'capture-node started',
       url: null,
       content: null,
@@ -505,8 +505,8 @@ class NodeCapture implements ICapture {
     }
     await this.emit({
       type: 'app_quit',
-      app: 'CofounderOS',
-      app_bundle_id: 'os.cofounder.agent',
+      app: 'Beside',
+      app_bundle_id: 'so.beside.agent',
       window_title: 'capture-node stopped',
       url: null,
       content: null,
@@ -748,19 +748,19 @@ class NodeCapture implements ICapture {
    * avoids desktop APIs (`active-win`, `screenshot-desktop`, permissions,
    * X11/Wayland/Windows desktop sessions). Enable with:
    *
-   *   COFOUNDEROS_CAPTURE_FIXTURE=1
+   *   BESIDE_CAPTURE_FIXTURE=1
    *
-   * `COFOUNDEROS_FAKE_DISPLAYS=1` is accepted as a compatibility alias
+   * `BESIDE_FAKE_DISPLAYS=1` is accepted as a compatibility alias
    * because older spike docs used that name.
    */
   private async loadFixtureMods(): Promise<void> {
     if (!this.activeWinMod) {
       this.activeWinMod = async () => ({
-        title: 'CofounderOS Capture Fixture',
-        url: 'https://example.invalid/cofounderos-fixture',
+        title: 'Beside Capture Fixture',
+        url: 'https://example.invalid/beside-fixture',
         owner: {
-          name: 'CofounderOS Fixture',
-          bundleId: 'os.cofounder.fixture',
+          name: 'Beside Fixture',
+          bundleId: 'so.beside.fixture',
           processId: process.pid,
         },
         bounds: { x: 20, y: 20, width: 760, height: 520 },
@@ -782,7 +782,7 @@ class NodeCapture implements ICapture {
                 `<svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
                   <rect width="800" height="600" fill="#202a38"/>
                   <text x="48" y="84" fill="#e5eefc" font-family="Arial, sans-serif" font-size="34">
-                    CofounderOS capture fixture
+                    Beside capture fixture
                   </text>
                   <text x="48" y="138" fill="#9fb3cc" font-family="Arial, sans-serif" font-size="22">
                     ${new Date().toISOString()}
@@ -807,7 +807,7 @@ class NodeCapture implements ICapture {
         },
       );
       this.screenshotMod = shot;
-      this.logger.info('capture fixture mode enabled (COFOUNDEROS_CAPTURE_FIXTURE=1)');
+      this.logger.info('capture fixture mode enabled (BESIDE_CAPTURE_FIXTURE=1)');
     }
     await this.probeDisplays();
   }
@@ -1372,7 +1372,7 @@ class NodeCapture implements ICapture {
     const { tmpdir } = await import('node:os');
     const tmpFile = path.join(
       tmpdir(),
-      `cofounderos-shot-${process.pid}-${ord}-${Date.now()}.jpg`,
+      `beside-shot-${process.pid}-${ord}-${Date.now()}.jpg`,
     );
     try {
       await execFileP(

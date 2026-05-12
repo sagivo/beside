@@ -15,12 +15,12 @@ export function cacheThumbnail(assetPath: string, url: string): void {
 }
 
 export async function resolveAssetUrl(assetPath: string): Promise<string> {
-  if (typeof window.cofounderos.assetUrl === 'function') {
-    return await window.cofounderos.assetUrl(assetPath);
+  if (typeof window.beside.assetUrl === 'function') {
+    return await window.beside.assetUrl(assetPath);
   }
 
   // Compatibility fallback for older preload bundles.
-  const bytes = await window.cofounderos.readAsset(assetPath);
+  const bytes = await window.beside.readAsset(assetPath);
   const type = assetPath.endsWith('.png')
     ? 'image/png'
     : assetPath.match(/\.jpe?g$/)

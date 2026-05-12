@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { Logger } from '@cofounderos/interfaces';
+import type { Logger } from '@beside/interfaces';
 
 const execFileP = promisify(execFile);
 

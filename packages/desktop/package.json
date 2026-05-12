@@ -1,13 +1,13 @@
 {
-  "name": "@cofounderos/desktop",
+  "name": "@beside/desktop",
   "version": "0.2.0",
   "private": true,
-  "description": "Desktop interface for CofounderOS local memory capture and journals.",
-  "author": "CofounderOS",
+  "description": "Desktop interface for Beside local memory capture and journals.",
+  "author": "Beside",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "build:main": "pnpm --filter @cofounderos/runtime run build && tsc -p tsconfig.json && node scripts/copy-preload.mjs && bash scripts/build-native.sh",
+    "build:main": "pnpm --filter @beside/runtime run build && tsc -p tsconfig.json && node scripts/copy-preload.mjs && bash scripts/build-native.sh",
     "build": "pnpm run build:main && vite build",
     "prepare:package": "node scripts/build-icons.mjs && pnpm --dir ../.. build:plugins && node scripts/prepare-package-resources.mjs",
     "package": "pnpm run build && pnpm run prepare:package && electron-builder --dir",
@@ -18,8 +18,8 @@
     "dev": "node scripts/dev.mjs"
   },
   "dependencies": {
-    "@cofounderos/core": "workspace:*",
-    "@cofounderos/runtime": "workspace:*",
+    "@beside/core": "workspace:*",
+    "@beside/runtime": "workspace:*",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
@@ -57,8 +57,8 @@
     "vite": "^8.0.10"
   },
   "build": {
-    "appId": "com.cofounderos.desktop",
-    "productName": "CofounderOS",
+    "appId": "so.beside.desktop",
+    "productName": "Beside",
     "asar": true,
     "directories": {
       "output": "release"
@@ -69,8 +69,8 @@
     ],
     "extraResources": [
       {
-        "from": "build/resources/cofounderos",
-        "to": "cofounderos"
+        "from": "build/resources/beside",
+        "to": "beside"
       }
     ],
     "mac": {

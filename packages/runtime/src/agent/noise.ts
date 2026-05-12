@@ -51,11 +51,11 @@ export const SIDEBAR_NOISE: readonly string[] = [
   'terminal',
 ];
 
-// `cofounderos` used to live in SIDEBAR_NOISE because the app's own
+// `beside` used to live in SIDEBAR_NOISE because the app's own
 // window chrome shows up in many captures, but it's also a brand name
-// the user types into real content (e.g. `cofounderos.ai` in a domain
+// the user types into real content (e.g. `beside.ai` in a domain
 // shortlist). The substring-strip implementation below would mangle
-// those legit mentions ("cofounderos.ai" → ".ai"). We let the
+// those legit mentions ("beside.ai" → ".ai"). We let the
 // per-frame `isSelfFrame()` filter at the MCP layer handle UI captures
 // and keep the substring filter focused on chrome strings nobody types
 // on purpose.
@@ -112,7 +112,7 @@ export function stripSidebarNoise(text: string | null | undefined): string {
     if (!label) continue;
     // Anchor to non-word characters (or string ends) so labels never
     // get stripped from inside user-typed content. e.g. "apps" must
-    // not eat the 'apps' inside 'cofounderos.app(s)'. Multi-word
+    // not eat the 'apps' inside 'beside.app(s)'. Multi-word
     // labels like "open editors" still match because the boundary is
     // checked against word-char/non-word-char runs, not whitespace.
     const re = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegex(label)}(?=$|[^\\p{L}\\p{N}])`, 'giu');

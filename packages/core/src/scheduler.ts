@@ -1,5 +1,5 @@
 import cronParser from 'cron-parser';
-import type { Logger } from '@cofounderos/interfaces';
+import type { Logger } from '@beside/interfaces';
 
 export interface TaskContext {
   trigger: 'schedule' | 'manual';
