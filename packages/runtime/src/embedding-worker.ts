@@ -567,7 +567,7 @@ export class EmbeddingWorker {
     const entities = await this.storage.listEntities({ limit: 1000 }).catch(() => [] as EntityRecord[]);
     return entities.map((entity) => {
       const body = [
-        `${entity.title} is a ${entity.kind} memory observed from ${entity.firstSeen} to ${entity.lastSeen}.`,
+        `${entity.title} is a ${entity.kind} observed from ${entity.firstSeen} to ${entity.lastSeen}.`,
         `It has ${entity.frameCount} captured frame(s) and about ${Math.round(entity.totalFocusedMs / 60_000)} focused minute(s).`,
         `Stable path: ${entity.path}.`,
       ].join('\n');

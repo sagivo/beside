@@ -445,6 +445,7 @@ export async function buildOrchestrator(
   const bus = new RawEventBus(logger);
   const scheduler = new Scheduler(logger);
   const loadGuard = new LoadGuard(config.system.load_guard, logger);
+  let handlesRef: OrchestratorHandles | null = null;
 
   // Wire capture → bus → storage. The storage write is awaited so we
   // never lose events on a hang.
@@ -464,8 +465,20 @@ export async function buildOrchestrator(
     embeddingModelName: getEmbeddingModelName(config),
     embeddingSearchWeight: config.index.embeddings.search_weight,
     dataDir,
-    triggerReindex: async (_full) => {
-      await scheduler.runNow(INCREMENTAL_JOB);
+    triggerReindex: async (full = false) => {
+      const target = handlesRef;
+      if (!target) throw new Error('orchestrator handles not ready');
+      if (full) {
+        assertHeavyWorkAllowed(target, 'full-reindex');
+        await runFullReindex(target);
+        return;
+      }
+      if (scheduler.has(INCREMENTAL_JOB)) {
+        await scheduler.runNow(INCREMENTAL_JOB);
+        return;
+      }
+      assertHeavyWorkAllowed(target, INCREMENTAL_JOB);
+      await runIncremental(target);
     },
     summarizeMeeting: async (meetingId, opts) => {
       const meeting = await storage.getMeeting(meetingId);
@@ -626,7 +639,6 @@ export async function buildOrchestrator(
     },
   );
 
-  let handlesRef: OrchestratorHandles | null = null;
   const idlePowerCatchup = new IdlePowerCatchup(
     bus,
     logger.child(IDLE_POWER_CATCHUP_JOB),
@@ -778,6 +790,19 @@ export async function runIncremental(handles: OrchestratorHandles): Promise<{
   await indexerModel.unload?.().catch((err: unknown) => {
     log.debug('model unload after incremental indexing failed', { err: String(err) });
   });
+
+  if (totalCreated + totalUpdated > 0) {
+    try {
+      const embResult = await embeddingWorker.tick();
+      if (embResult.processed > 0) {
+        log.info(`refreshed semantic memory after indexing (${embResult.processed} embedding(s))`);
+      }
+    } catch (err) {
+      log.warn('post-index memory embedding refresh failed (continuing)', {
+        err: String(err),
+      });
+    }
+  }
 
   return {
     eventsProcessed: totalEvents,

@@ -61,6 +61,14 @@ type MemoryChunkMatch = {
   semanticScore?: number;
 };
 
+type DateWindow = {
+  source: 'explicit' | 'query' | 'default';
+  label: string;
+  day?: string;
+  from?: string;
+  to?: string;
+};
+
 const DEFAULT_FRAME_TEXT_EXCERPT_CHARS = 5000;
 const DEFAULT_SEARCH_FRAMES_RESPONSE_CHARS = 60000;
 const MAX_SEARCH_FRAMES_RESPONSE_CHARS = 90000;
@@ -117,6 +125,19 @@ export function createMcpServer(
 ): McpServer {
   const log = logger.child('mcp-server');
   const textExcerptChars = normaliseTextExcerptChars(options.textExcerptChars);
+  let lastReindex: {
+    status: 'idle' | 'running' | 'succeeded' | 'failed';
+    full: boolean | null;
+    requested_at: string | null;
+    completed_at: string | null;
+    error: string | null;
+  } = {
+    status: 'idle',
+    full: null,
+    requested_at: null,
+    completed_at: null,
+    error: null,
+  };
   const server = new McpServer({
     name: 'cofounderos',
     version: '0.2.0',
@@ -126,7 +147,7 @@ export function createMcpServer(
     'search_memory',
     {
       description:
-        'Blended search: returns the best matching frames (specific moments) and wiki pages (synthesised summaries). Use this as the default entrypoint. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
+        'Blended search: returns the best matching frames (specific moments), memory chunks, and wiki pages (synthesised summaries). Use this as the default entrypoint. Natural date phrases such as "today", "yesterday", "last week", and "May 7" constrain frame/chunk retrieval. CofounderOS dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
       inputSchema: {
         query: z.string().describe('Natural-language search query.'),
         limit: z.number().int().min(1).max(50).optional().describe('Max results per category, default 5.'),
@@ -139,9 +160,14 @@ export function createMcpServer(
     async ({ query, limit, exclude_self }) => {
       const cap = limit ?? 5;
       const dropSelf = exclude_self !== false;
+      const surfaceQuery = preferredSurface(query);
+      const dateWindow = inferQueryDateWindow(query);
+      const dateFilters = dateWindowToStorageFilter(dateWindow);
+      const retrievalQuery = retrievalQueryForDateAwareSearch(query, dateWindow);
+      const rankingQuery = retrievalQuery ?? query;
       // Over-fetch when filtering self frames so we still return `cap`
-      // useful results once the dashboard noise has been stripped.
-      const fetchCap = dropSelf ? cap * 2 : cap;
+      // useful results once dashboard/stale-surface noise has been stripped.
+      const fetchCap = cap * (surfaceQuery ? 8 : dropSelf ? 2 : 1);
 
       // 1. Frame-level retrieval — the "specific moment" answers.
       // Keyword FTS remains the precision path; semantic search adds
@@ -150,17 +176,27 @@ export function createMcpServer(
       let frames: Frame[] = [];
       let semanticFrames: Array<{ frame: Frame; score: number }> = [];
       try {
-        frames = await services.storage.searchFrames({ text: query, limit: fetchCap });
+        frames = await services.storage.searchFrames({
+          text: retrievalQuery,
+          ...dateFilters,
+          limit: fetchCap,
+        });
       } catch (err) {
         log.debug('searchFrames unavailable', { err: String(err) });
       }
-      semanticFrames = await semanticFrameSearch(services, query, fetchCap);
+      semanticFrames = retrievalQuery
+        ? await semanticFrameSearch(services, retrievalQuery, fetchCap, dateFilters)
+        : [];
+      if (!retrievalQuery && dateWindow) {
+        frames = frames.filter((f) => !isLowValueGenericDateFrame(f));
+      }
       if (dropSelf) {
-        frames = frames.filter((f) => !isSelfFrame(f));
-        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
+        frames = frames.filter((f) => !isSelfFrame(f) && !isVisuallySelfFrame(f));
+        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame) && !isVisuallySelfFrame(s.frame));
       }
       const blendedFrames = blendFrameMatches(frames, semanticFrames, cap, {
         semanticWeight: services.embeddingSearchWeight,
+        query: rankingQuery,
       });
 
       // 2. Memory chunk retrieval — durable summaries, meeting TL;DRs,
@@ -169,15 +205,19 @@ export function createMcpServer(
       let semanticChunks: MemoryChunkSemanticMatch[] = [];
       try {
         chunks = await services.storage.searchMemoryChunks({
-          text: query,
+          text: retrievalQuery,
+          ...dateFilters,
           limit: fetchCap * 2,
         });
       } catch (err) {
         log.debug('searchMemoryChunks unavailable', { err: String(err) });
       }
-      semanticChunks = await semanticMemoryChunkSearch(services, query, fetchCap * 2);
+      semanticChunks = retrievalQuery
+        ? await semanticMemoryChunkSearch(services, retrievalQuery, fetchCap * 2, dateFilters)
+        : [];
       const blendedChunks = blendMemoryChunkMatches(chunks, semanticChunks, cap, {
         semanticWeight: services.embeddingSearchWeight,
+        query: rankingQuery,
       });
 
       // 3. Legacy wiki page retrieval remains in the response for
@@ -185,24 +225,28 @@ export function createMcpServer(
       // should prefer memory_chunk_matches because chunks include pages
       // plus non-page summaries and manual memories.
       const pages = await listAllStrategyPages(services.strategy);
-      const ranked = pages
-        .map((p) => ({ page: p, score: scorePage(p.path, p.content, query) }))
-        .filter((r) => r.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, cap);
+      const ranked = retrievalQuery && !dateWindow
+        ? pages
+          .map((p) => ({ page: p, score: scorePage(p.path, p.content, retrievalQuery) }))
+          .filter((r) => r.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, cap)
+        : [];
 
       const result = {
         query,
+        retrieval_query: retrievalQuery ?? null,
+        date_filter: dateWindowPreview(dateWindow),
         frame_matches: blendedFrames.map((m) => ({
-          ...framePreview(m.frame, textExcerptChars, query),
+          ...framePreview(m.frame, textExcerptChars, rankingQuery),
           retrieval: m.retrieval,
           semantic_score: m.semanticScore,
         })),
-        memory_chunk_matches: blendedChunks.map((m) => memoryChunkPreview(m, query)),
+        memory_chunk_matches: blendedChunks.map((m) => memoryChunkPreview(m, rankingQuery)),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
           score: r.score,
-          excerpt: extractExcerpt(r.page.content, query),
+          excerpt: extractExcerpt(r.page.content, retrievalQuery ?? query),
           last_updated: r.page.lastUpdated,
           source_event_count: r.page.sourceEventIds.length,
         })),
@@ -308,6 +352,7 @@ export function createMcpServer(
             model: modelName ?? null,
             semantic_search_enabled: Boolean(services.model && typeof services.model.embed === 'function'),
             embedding_search_weight: normaliseSemanticWeight(services.embeddingSearchWeight),
+            last_reindex: lastReindex,
             ...stats,
           }, null, 2),
         }],
@@ -319,7 +364,7 @@ export function createMcpServer(
     'search_frames',
     {
       description:
-        'Search captured screen frames directly via FTS5 against OCR text + window title + URL. Returns specific moments with screenshot paths. Use when you need a precise "when did I see X" answer.',
+        'Search captured screen frames directly via FTS5 against OCR text + window title + URL. Returns specific moments with screenshot paths. Use when you need a precise "when did I see X" answer. Explicit `day`/`from`/`to` win; otherwise natural date phrases in `query` such as "yesterday", "last week", and "May 7" are inferred.',
       inputSchema: {
         query: z.string().describe('Free-text query.'),
         from: z.string().optional().describe('ISO timestamp lower bound.'),
@@ -388,13 +433,17 @@ export function createMcpServer(
       const requestedOffset = offset ?? 0;
       const dropSelf = exclude_self !== false;
       const candidateLimit = requestedLimit + requestedOffset;
+      const surfaceQuery = preferredSurface(query);
+      const explicitDateWindow = explicitDateWindowFromInput({ day, from, to });
+      const dateWindow = explicitDateWindow ?? inferQueryDateWindow(query);
+      const dateFilters = dateWindowToStorageFilter(dateWindow);
+      const retrievalQuery = retrievalQueryForDateAwareSearch(query, dateWindow);
+      const rankingQuery = retrievalQuery ?? query;
       // Over-fetch when filtering self frames so the post-filter list
       // still has enough rows to satisfy the requested page.
-      const fetchLimit = dropSelf ? candidateLimit * 2 : candidateLimit;
+      const fetchLimit = candidateLimit * (surfaceQuery ? 8 : dropSelf ? 2 : 1);
       const filters = {
-        from,
-        to,
-        day,
+        ...dateFilters,
         apps: app ? [app] : undefined,
         entityPath: entity_path,
         entityKind: entity_kind,
@@ -403,19 +452,22 @@ export function createMcpServer(
         textSource: text_source,
       };
       let frames = await services.storage.searchFrames({
-        text: query,
+        text: retrievalQuery,
         ...filters,
         limit: fetchLimit,
       });
       let semanticFrames = semantic === false
         ? []
-        : await semanticFrameSearch(services, query, fetchLimit, filters);
+        : retrievalQuery
+          ? await semanticFrameSearch(services, retrievalQuery, fetchLimit, filters)
+          : [];
       if (dropSelf) {
-        frames = frames.filter((f) => !isSelfFrame(f));
-        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame));
+        frames = frames.filter((f) => !isSelfFrame(f) && !isVisuallySelfFrame(f));
+        semanticFrames = semanticFrames.filter((s) => !isSelfFrame(s.frame) && !isVisuallySelfFrame(s.frame));
       }
       const blended = blendFrameMatches(frames, semanticFrames, candidateLimit, {
         semanticWeight: services.embeddingSearchWeight,
+        query: rankingQuery,
       })
         .slice(requestedOffset, requestedOffset + requestedLimit);
       if (include_context) {
@@ -430,6 +482,11 @@ export function createMcpServer(
         query,
         blended,
         normaliseSearchResponseChars(max_response_chars),
+        {
+          retrievalQuery,
+          dateWindow,
+          previewQuery: rankingQuery,
+        },
       );
       return {
         content: [
@@ -1018,12 +1075,16 @@ export function createMcpServer(
     'get_open_loops',
     {
       description:
-        '"What\'s still on my plate?" — surfaces unanswered Slack messages (questions, mentions) and open / draft GitHub PRs and issues observed in the requested window. Defaults to today. Heuristic: combine with `search_frames` to inspect the source moment for any item.',
+        '"What\'s still on my plate?" — surfaces unanswered Slack messages (questions, mentions) and open / draft GitHub PRs and issues observed in the requested window. Defaults to today. Accepts natural date phrases in `query` such as "open items from yesterday" when `day`/`since`/`until` are omitted. Heuristic: combine with `search_frames` to inspect the source moment for any item.',
       inputSchema: {
+        query: z
+          .string()
+          .optional()
+          .describe('Optional natural-language request. Date phrases are inferred if explicit date fields are omitted.'),
         day: z
           .string()
           .optional()
-          .describe('Single YYYY-MM-DD. Mutually exclusive with `since`/`until`. Defaults to today (UTC).'),
+          .describe('Single YYYY-MM-DD in the local capture day. Mutually exclusive with `since`/`until`. Defaults to today.'),
         since: z.string().optional().describe('ISO timestamp lower bound.'),
         until: z.string().optional().describe('ISO timestamp upper bound.'),
         kinds: z
@@ -1037,9 +1098,17 @@ export function createMcpServer(
           .describe('Include CofounderOS dashboard frames. Default false.'),
       },
     },
-    async ({ day, since, until, kinds, limit, include_self }) => {
+    async ({ query, day, since, until, kinds, limit, include_self }) => {
       const cap = limit ?? 15;
-      const days = resolveDayRange({ day, since, until });
+      const explicitDateWindow = explicitDateWindowFromInput({ day, from: since, to: until });
+      const dateWindow = explicitDateWindow ?? (query ? inferQueryDateWindow(query) : null) ?? defaultTodayDateWindow();
+      const days = resolveDayRange({
+        day: dateWindow.day,
+        since: dateWindow.from,
+        until: dateWindow.to,
+      });
+      const effectiveSince = dateWindow.from;
+      const effectiveUntil = dateWindow.to;
       const kindsSet = kinds ? new Set(kinds) : null;
       // Each day's digest is independent, so build them sequentially
       // and concatenate. Over-fetch per day so we can rank+dedupe
@@ -1052,8 +1121,8 @@ export function createMcpServer(
         });
         for (const loop of summary.open_loops) {
           if (kindsSet && !kindsSet.has(loop.kind)) continue;
-          if (since && loop.last_seen < since) continue;
-          if (until && loop.last_seen > until) continue;
+          if (effectiveSince && loop.last_seen < effectiveSince) continue;
+          if (effectiveUntil && loop.last_seen > effectiveUntil) continue;
           acc.push(loop);
         }
       }
@@ -1076,8 +1145,9 @@ export function createMcpServer(
               {
                 window: {
                   days,
-                  since: since ?? null,
-                  until: until ?? null,
+                  since: effectiveSince ?? null,
+                  until: effectiveUntil ?? null,
+                  date_filter: dateWindowPreview(dateWindow),
                 },
                 count: ranked.length,
                 open_loops: ranked,
@@ -1367,13 +1437,60 @@ export function createMcpServer(
           isError: true,
         };
       }
-      await services.triggerReindex(full ?? false);
+      const requestedAt = new Date().toISOString();
+      const requestedFull = full ?? false;
+      lastReindex = {
+        status: 'running',
+        full: requestedFull,
+        requested_at: requestedAt,
+        completed_at: null,
+        error: null,
+      };
+      void services.triggerReindex(requestedFull)
+        .then(() => {
+          lastReindex = {
+            ...lastReindex,
+            status: 'succeeded',
+            completed_at: new Date().toISOString(),
+            error: null,
+          };
+        })
+        .catch((err) => {
+          const message = String(err);
+          lastReindex = {
+            ...lastReindex,
+            status: 'failed',
+            completed_at: new Date().toISOString(),
+            error: message,
+          };
+          log.warn('background reindex failed', { err: message, full: requestedFull });
+        });
       return {
         content: [
-          { type: 'text', text: `reindex queued (full=${full ?? false}).` },
+          {
+            type: 'text',
+            text: JSON.stringify({
+              queued: true,
+              full: requestedFull,
+              status: lastReindex,
+              message: 'Check memory_status.last_reindex for completion or failure.',
+            }, null, 2),
+          },
         ],
       };
     },
+  );
+
+  server.registerTool(
+    'get_reindex_status',
+    {
+      description:
+        'Return the most recent MCP-triggered reindex status for this client session, including load-guard failures.',
+      inputSchema: {},
+    },
+    async () => ({
+      content: [{ type: 'text', text: JSON.stringify(lastReindex, null, 2) }],
+    }),
   );
 
   return server;
@@ -1394,27 +1511,334 @@ function resolveDayRange(input: {
 }): string[] {
   if (input.day) return [input.day];
   const today = todayKey();
-  const fromDay = input.since ? input.since.slice(0, 10) : today;
-  const toDay = input.until ? input.until.slice(0, 10) : today;
+  const fromDay = input.since ? dayKeyFromTimestampBound(input.since) ?? today : today;
+  const toDay = input.until ? dayKeyFromTimestampBound(input.until) ?? today : today;
   if (toDay < fromDay) return [today];
   const out: string[] = [];
-  const fromMs = Date.parse(`${fromDay}T00:00:00Z`);
-  const toMs = Date.parse(`${toDay}T00:00:00Z`);
+  const fromMs = localDateFromDayKey(fromDay)?.getTime() ?? NaN;
+  const toMs = localDateFromDayKey(toDay)?.getTime() ?? NaN;
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return [today];
   const days = Math.min(MAX_DAY_RANGE, Math.floor((toMs - fromMs) / 86_400_000) + 1);
   for (let i = 0; i < days; i++) {
     const ms = fromMs + i * 86_400_000;
-    out.push(new Date(ms).toISOString().slice(0, 10));
+    out.push(todayKey(new Date(ms)));
   }
   return out;
 }
 
-function todayKey(): string {
-  const d = new Date();
+function todayKey(d: Date = new Date()): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function defaultTodayDateWindow(now = new Date()): DateWindow {
+  return {
+    source: 'default',
+    label: 'today',
+    day: todayKey(now),
+  };
+}
+
+function explicitDateWindowFromInput(input: {
+  day?: string;
+  from?: string;
+  to?: string;
+}): DateWindow | null {
+  const day = input.day?.trim();
+  const from = input.from?.trim();
+  const to = input.to?.trim();
+  if (!day && !from && !to) return null;
+  if (day) {
+    return {
+      source: 'explicit',
+      label: day,
+      day,
+    };
+  }
+  return {
+    source: 'explicit',
+    label: describeDateBounds(from, to),
+    from: from ? normaliseTimestampBound(from, 'from') : undefined,
+    to: to ? normaliseTimestampBound(to, 'to') : undefined,
+  };
+}
+
+function inferQueryDateWindow(query: string, now = new Date()): DateWindow | null {
+  const lower = query.toLowerCase();
+  const today = startOfLocalDay(now);
+
+  const isoDay = lower.match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1];
+  if (isoDay && localDateFromDayKey(isoDay)) {
+    return {
+      source: 'query',
+      label: isoDay,
+      day: isoDay,
+    };
+  }
+
+  const monthNameDay = parseMonthNameDay(lower, now);
+  if (monthNameDay) {
+    return singleDayQueryWindow(monthNameDay.date, monthNameDay.label);
+  }
+
+  const numericDay = parseNumericDay(lower, now);
+  if (numericDay) {
+    return singleDayQueryWindow(numericDay.date, numericDay.label);
+  }
+
+  if (/\byesterday\b/.test(lower)) {
+    return singleDayQueryWindow(addLocalDays(today, -1), 'yesterday');
+  }
+  if (/\btoday\b/.test(lower)) {
+    return singleDayQueryWindow(today, 'today');
+  }
+  if (/\btomorrow\b/.test(lower)) {
+    return singleDayQueryWindow(addLocalDays(today, 1), 'tomorrow');
+  }
+
+  const lastNDays = lower.match(/\b(?:past|last)\s+(\d{1,2})\s+days?\b/);
+  if (lastNDays) {
+    const n = clampRangeDays(Number(lastNDays[1]));
+    return rangeQueryWindow(
+      startOfLocalDay(addLocalDays(today, -(n - 1))),
+      endOfLocalDay(today),
+      `last ${n} days`,
+    );
+  }
+
+  const lastNWeeks = lower.match(/\b(?:past|last)\s+(\d{1,2})\s+weeks?\b/);
+  if (lastNWeeks) {
+    const n = Math.max(1, Math.min(8, Number(lastNWeeks[1])));
+    return rangeQueryWindow(
+      startOfLocalDay(addLocalDays(today, -(n * 7 - 1))),
+      endOfLocalDay(today),
+      `last ${n} weeks`,
+    );
+  }
+
+  if (/\blast\s+week\b/.test(lower)) {
+    const thisWeek = startOfLocalWeek(today);
+    return rangeQueryWindow(
+      addLocalDays(thisWeek, -7),
+      endOfLocalDay(addLocalDays(thisWeek, -1)),
+      'last week',
+    );
+  }
+  if (/\b(?:this\s+week|week\s+to\s+date)\b/.test(lower)) {
+    return rangeQueryWindow(startOfLocalWeek(today), endOfLocalDay(today), 'this week');
+  }
+  if (/\bpast\s+month\b/.test(lower)) {
+    return rangeQueryWindow(startOfLocalDay(addLocalDays(today, -29)), endOfLocalDay(today), 'past month');
+  }
+  if (/\blast\s+(?:calendar\s+)?month\b/.test(lower)) {
+    return previousCalendarMonthWindow(today);
+  }
+  if (/\bthis\s+month\b/.test(lower)) {
+    return rangeQueryWindow(new Date(today.getFullYear(), today.getMonth(), 1), endOfLocalDay(today), 'this month');
+  }
+
+  return null;
+}
+
+function retrievalQueryForDateAwareSearch(query: string, dateWindow: DateWindow | null): string | undefined {
+  if (!dateWindow) return query.trim() || undefined;
+  const stripped = stripTemporalPhrases(query);
+  const terms = meaningfulQueryTerms(stripped);
+  if (terms.length === 0) return undefined;
+  return terms.join(' ');
+}
+
+function dateWindowToStorageFilter(dateWindow: DateWindow | null): { day?: string; from?: string; to?: string } {
+  if (!dateWindow) return {};
+  return {
+    day: dateWindow.day,
+    from: dateWindow.from,
+    to: dateWindow.to,
+  };
+}
+
+function dateWindowPreview(dateWindow: DateWindow | null): Record<string, unknown> | null {
+  if (!dateWindow) return null;
+  return {
+    source: dateWindow.source,
+    label: dateWindow.label,
+    day: dateWindow.day ?? null,
+    from: dateWindow.from ?? null,
+    to: dateWindow.to ?? null,
+  };
+}
+
+function singleDayQueryWindow(date: Date, label: string): DateWindow {
+  return {
+    source: 'query',
+    label,
+    day: todayKey(date),
+  };
+}
+
+function rangeQueryWindow(from: Date, to: Date, label: string): DateWindow {
+  return {
+    source: 'query',
+    label,
+    from: from.toISOString(),
+    to: to.toISOString(),
+  };
+}
+
+function previousCalendarMonthWindow(today: Date): DateWindow {
+  const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const end = endOfLocalDay(new Date(today.getFullYear(), today.getMonth(), 0));
+  return rangeQueryWindow(start, end, 'last calendar month');
+}
+
+function stripTemporalPhrases(query: string): string {
+  const monthPattern = MONTH_NAME_PATTERN;
+  return query
+    .replace(/\b(?:today|yesterday|tomorrow)\b/gi, ' ')
+    .replace(/\b(?:this\s+week|week\s+to\s+date|last\s+week|this\s+month|last\s+calendar\s+month|last\s+month|past\s+month)\b/gi, ' ')
+    .replace(/\b(?:past|last)\s+\d{1,2}\s+(?:days?|weeks?)\b/gi, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(new RegExp(`\\b(?:on|from|since|until|before|after|during|in)?\\s*${monthPattern}\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?\\b`, 'gi'), ' ')
+    .replace(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const MONTHS: Record<string, number> = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
+
+const MONTH_NAME_PATTERN = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+
+function parseMonthNameDay(query: string, now: Date): { date: Date; label: string } | null {
+  const match = query.match(new RegExp(`\\b(${MONTH_NAME_PATTERN})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`, 'i'));
+  if (!match) return null;
+  const month = MONTHS[match[1].toLowerCase()];
+  const day = Number(match[2]);
+  const explicitYear = match[3] ? Number(match[3]) : null;
+  const year = explicitYear ?? inferYearForMonthDay(now, month, day);
+  const date = validLocalDate(year, month, day);
+  if (!date) return null;
+  return {
+    date,
+    label: `${match[1]} ${day}${explicitYear ? ` ${explicitYear}` : ''}`,
+  };
+}
+
+function parseNumericDay(query: string, now: Date): { date: Date; label: string } | null {
+  const match = query.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/);
+  if (!match) return null;
+  const month = Number(match[1]) - 1;
+  const day = Number(match[2]);
+  if (month < 0 || month > 11) return null;
+  const explicitYear = match[3] ? normaliseNumericYear(Number(match[3])) : null;
+  const year = explicitYear ?? inferYearForMonthDay(now, month, day);
+  const date = validLocalDate(year, month, day);
+  if (!date) return null;
+  return {
+    date,
+    label: `${match[1]}/${match[2]}${match[3] ? `/${match[3]}` : ''}`,
+  };
+}
+
+function inferYearForMonthDay(now: Date, month: number, day: number): number {
+  const thisYear = now.getFullYear();
+  const candidate = validLocalDate(thisYear, month, day);
+  if (!candidate) return thisYear;
+  const tomorrow = addLocalDays(startOfLocalDay(now), 1);
+  return candidate.getTime() > tomorrow.getTime() ? thisYear - 1 : thisYear;
+}
+
+function normaliseNumericYear(year: number): number {
+  return year < 100 ? 2000 + year : year;
+}
+
+function validLocalDate(year: number, month: number, day: number): Date | null {
+  const date = new Date(year, month, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  return startOfLocalDay(date);
+}
+
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function endOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+}
+
+function startOfLocalWeek(date: Date): Date {
+  const day = date.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  return startOfLocalDay(addLocalDays(date, mondayOffset));
+}
+
+function localDateFromDayKey(day: string): Date | null {
+  const match = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return validLocalDate(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+}
+
+function dayKeyFromTimestampBound(value: string): string | null {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  return todayKey(date);
+}
+
+function normaliseTimestampBound(value: string, side: 'from' | 'to'): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const day = localDateFromDayKey(value);
+    if (day) return (side === 'from' ? startOfLocalDay(day) : endOfLocalDay(day)).toISOString();
+  }
+  return value;
+}
+
+function describeDateBounds(from?: string, to?: string): string {
+  if (from && to) return `${from}..${to}`;
+  if (from) return `since ${from}`;
+  if (to) return `until ${to}`;
+  return 'date range';
+}
+
+function clampRangeDays(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(MAX_DAY_RANGE, Math.floor(value)));
 }
 
 async function attachFrameContexts(
@@ -1479,6 +1903,7 @@ async function listAllStrategyPages(strategy: IIndexStrategy) {
 }
 
 function framePreview(frame: Frame, textExcerptChars: number, query?: string): Record<string, unknown> {
+  const visibleApp = inferVisibleApp(frame);
   return {
     id: frame.id,
     timestamp: frame.timestamp,
@@ -1498,6 +1923,12 @@ function framePreview(frame: Frame, textExcerptChars: number, query?: string): R
     text_chars: frame.text ? frame.text.length : 0,
     text_source: frame.text_source,
     duration_ms: frame.duration_ms,
+    evidence_quality: {
+      has_screenshot: Boolean(frame.asset_path),
+      has_text: Boolean(frame.text && frame.text.trim()),
+      visible_app: visibleApp,
+      app_matches_visible_text: visibleApp ? appMatchesVisibleGuess(frame.app, visibleApp) : null,
+    },
   };
 }
 
@@ -1623,10 +2054,18 @@ function buildSearchFramesResult(
   query: string,
   matches: FrameMatch[],
   maxResponseChars: number,
+  options: {
+    retrievalQuery?: string;
+    dateWindow?: DateWindow | null;
+    previewQuery?: string;
+  } = {},
 ): Record<string, unknown> {
   const responseBudget = Math.max(1000, maxResponseChars - 512);
+  const previewQuery = options.previewQuery ?? options.retrievalQuery ?? query;
   const result = {
     query,
+    retrieval_query: options.retrievalQuery ?? null,
+    date_filter: dateWindowPreview(options.dateWindow ?? null),
     count: matches.length,
     returned_count: 0,
     omitted_count: 0,
@@ -1636,7 +2075,7 @@ function buildSearchFramesResult(
   };
 
   for (const match of matches) {
-    const preview = largestFittingFrameSearchPreview(match, query, result, responseBudget);
+    const preview = largestFittingFrameSearchPreview(match, previewQuery, result, responseBudget);
     if (preview) {
       result.frames.push(preview);
       result.returned_count = result.frames.length;
@@ -1739,6 +2178,23 @@ function queryTerms(query: string): string[] {
     .toLowerCase()
     .match(/[a-z0-9_-]+/g);
   return [...new Set((terms ?? []).filter((term) => term.length > 1))];
+}
+
+const QUERY_STOP_WORDS = new Set([
+  'what', 'where', 'when', 'who', 'why', 'how',
+  'did', 'do', 'does', 'done', 'about', 'with', 'that', 'this',
+  'the', 'and', 'for', 'from', 'into', 'onto', 'were', 'was',
+  'are', 'is', 'am', 'any', 'some', 'look', 'looked', 'recent',
+  'recently', 'available', 'items', 'item', 'make', 'sure',
+  'today', 'yesterday', 'tomorrow', 'week', 'weeks', 'month',
+  'months', 'day', 'days', 'past', 'last', 'since', 'until',
+  'before', 'after', 'during',
+]);
+
+function meaningfulQueryTerms(query: string): string[] {
+  return queryTerms(query)
+    .filter((term) => term.length > 2)
+    .filter((term) => !QUERY_STOP_WORDS.has(term));
 }
 
 function bestQueryWindowStart(lowerText: string, terms: string[], maxChars: number): number {
@@ -1865,10 +2321,11 @@ function blendFrameMatches(
   ftsFrames: Frame[],
   semanticFrames: Array<{ frame: Frame; score: number }>,
   limit: number,
-  options: { semanticWeight?: number } = {},
+  options: { semanticWeight?: number; query?: string } = {},
 ): FrameMatch[] {
   const semanticWeight = normaliseSemanticWeight(options.semanticWeight);
   const keywordWeight = 1 - semanticWeight;
+  const surface = preferredSurface(options.query);
   const byId = new Map<string, {
     frame: Frame;
     keywordRank?: number;
@@ -1894,9 +2351,15 @@ function blendFrameMatches(
 
   const ranked = [...byId.values()]
     .map((m) => {
-      const keywordScore = m.keywordRank ? 1 / (m.keywordRank + 1) : 0;
+      const support = frameQuerySupport(m.frame, options.query);
+      const quality = frameEvidenceQuality(m.frame);
+      const surfaceMatch = surface ? frameMatchesSurface(m.frame, surface) : true;
+      const surfaceScore = surface ? (surfaceMatch ? 0.18 : -0.32) : 0;
+      const keywordScore = m.keywordRank
+        ? (1 / (m.keywordRank + 1)) * (0.25 + 0.95 * support)
+        : 0;
       const semanticScore = m.semanticRank
-        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1))
+        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1)) * (0.45 + 0.65 * support)
         : 0;
       const bonus = m.keywordRank && m.semanticRank ? 0.16 : 0;
       const recency = 0.08 * recencyScore(m.frame.timestamp);
@@ -1909,9 +2372,20 @@ function blendFrameMatches(
         frame: m.frame,
         retrieval,
         semanticScore: m.semanticScore,
-        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency,
+        support,
+        surfaceMatch,
+        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency + quality + surfaceScore,
       };
     })
+    .filter((m) => (
+      hasFrameEvidence(m.frame) &&
+      (!surface || m.surfaceMatch) &&
+      (
+        m.support > 0.05 ||
+        m.retrieval !== 'semantic' ||
+        Boolean(m.frame.text && m.frame.text.trim() && (m.semanticScore ?? 0) >= 0.88)
+      )
+    ))
     .sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return b.frame.timestamp.localeCompare(a.frame.timestamp);
@@ -1928,7 +2402,7 @@ function blendMemoryChunkMatches(
   keywordChunks: MemoryChunk[],
   semanticChunks: MemoryChunkSemanticMatch[],
   limit: number,
-  options: { semanticWeight?: number } = {},
+  options: { semanticWeight?: number; query?: string } = {},
 ): MemoryChunkMatch[] {
   const semanticWeight = normaliseSemanticWeight(options.semanticWeight);
   const keywordWeight = 1 - semanticWeight;
@@ -1957,12 +2431,16 @@ function blendMemoryChunkMatches(
 
   const ranked = [...byId.values()]
     .map((m) => {
-      const keywordScore = m.keywordRank ? 1 / (m.keywordRank + 1) : 0;
+      const support = memoryChunkQuerySupport(m.chunk, options.query);
+      const keywordScore = m.keywordRank
+        ? (1 / (m.keywordRank + 1)) * (0.35 + 0.9 * support)
+        : 0;
       const semanticScore = m.semanticRank
-        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1))
+        ? clamp01(m.semanticScore ?? 0) * (1 / Math.sqrt(m.semanticRank + 1)) * (0.45 + 0.65 * support)
         : 0;
       const bonus = m.keywordRank && m.semanticRank ? 0.18 : 0;
       const recency = 0.06 * recencyScore(m.chunk.timestamp ?? m.chunk.updatedAt);
+      const provenance = m.chunk.sourceRefs.length > 1 ? 0.04 : 0;
       const retrieval: MemoryChunkMatch['retrieval'] = m.keywordRank && m.semanticRank
         ? 'keyword+semantic'
         : m.keywordRank
@@ -1972,9 +2450,15 @@ function blendMemoryChunkMatches(
         chunk: m.chunk,
         retrieval,
         semanticScore: m.semanticScore,
-        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency,
+        support,
+        rankScore: keywordWeight * keywordScore + semanticWeight * semanticScore + bonus + recency + provenance + 0.12 * support,
       };
     })
+    .filter((m) => (
+      m.support >= 0.34 ||
+      m.retrieval !== 'semantic' ||
+      (m.semanticScore ?? 0) >= 0.9
+    ))
     .sort((a, b) => {
       if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
       return (b.chunk.timestamp ?? b.chunk.updatedAt).localeCompare(a.chunk.timestamp ?? a.chunk.updatedAt);
@@ -1995,6 +2479,212 @@ function normaliseSemanticWeight(value: number | undefined): number {
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
+}
+
+function frameQuerySupport(frame: Frame, query: string | undefined): number {
+  if (!query) return 1;
+  const terms = meaningfulQueryTerms(query);
+  if (terms.length === 0) return 1;
+  const visible = [
+    frame.text ?? '',
+    frame.window_title ?? '',
+    frame.url ?? '',
+  ].join('\n').toLowerCase();
+  const metadata = [
+    frame.app,
+    frame.entity_path ?? '',
+    frame.entity_kind ?? '',
+  ].join('\n').toLowerCase();
+
+  let visibleHits = 0;
+  let metadataHits = 0;
+  for (const term of terms) {
+    if (containsQueryTerm(visible, term)) visibleHits += 1;
+    else if (containsQueryTerm(metadata, term)) metadataHits += 1;
+  }
+  const exact = query.trim().length > 2 && visible.includes(query.trim().toLowerCase()) ? 0.2 : 0;
+  return clamp01((visibleHits + metadataHits * 0.3) / terms.length + exact);
+}
+
+function memoryChunkQuerySupport(chunk: MemoryChunk, query: string | undefined): number {
+  if (!query) return 1;
+  const terms = meaningfulQueryTerms(query);
+  if (terms.length === 0) return 1;
+  const body = [
+    chunk.title,
+    chunk.body,
+    chunk.entityPath ?? '',
+    chunk.kind,
+    ...chunk.sourceRefs,
+  ].join('\n').toLowerCase();
+  let hits = 0;
+  for (const term of terms) {
+    if (containsQueryTerm(body, term)) hits += 1;
+  }
+  const exact = query.trim().length > 2 && body.includes(query.trim().toLowerCase()) ? 0.2 : 0;
+  return clamp01(hits / terms.length + exact);
+}
+
+function frameEvidenceQuality(frame: Frame): number {
+  let score = 0;
+  if (frame.asset_path) score += 0.1;
+  else score -= frame.text_source === 'audio' ? 0.04 : 0.18;
+
+  if (frame.text && frame.text.trim()) score += 0.08;
+  else score -= 0.12;
+
+  const visibleApp = inferVisibleApp(frame);
+  if (visibleApp) {
+    score += appMatchesVisibleGuess(frame.app, visibleApp) ? 0.06 : -0.34;
+  }
+  return score;
+}
+
+function hasFrameEvidence(frame: Frame): boolean {
+  return Boolean(frame.asset_path || (frame.text && frame.text.trim()));
+}
+
+function isLowValueGenericDateFrame(frame: Frame): boolean {
+  const app = (frame.app ?? '').toLowerCase();
+  const title = (frame.window_title ?? '').toLowerCase();
+  if (app.includes('loginwindow') || title === 'loginwindow') return true;
+  if (app === 'finder' && !frame.text?.trim()) return true;
+  if (!frame.text?.trim() && !inferVisibleApp(frame)) return true;
+  if (!inferVisibleApp(frame) && isLowInformationFrameText(frame.text)) return true;
+  return false;
+}
+
+function isLowInformationFrameText(text: string | null | undefined): boolean {
+  if (!text) return true;
+  const terms = (text.toLowerCase().match(/[a-z0-9][a-z0-9._-]{1,}/g) ?? []).slice(0, 300);
+  if (terms.length < 20) return false;
+  const unique = new Set(terms);
+  return unique.size <= 3 || unique.size / terms.length < 0.08;
+}
+
+function preferredSurface(query: string | undefined): 'slack' | 'terminal' | 'mail' | null {
+  if (!query) return null;
+  const terms = new Set(meaningfulQueryTerms(query));
+  if (terms.has('slack') || terms.has('dms') || terms.has('dm')) return 'slack';
+  if (terms.has('mail') || terms.has('email') || terms.has('inbox')) return 'mail';
+  if (
+    terms.has('npm') ||
+    terms.has('pnpm') ||
+    terms.has('build') ||
+    terms.has('error') ||
+    terms.has('errors')
+  ) return 'terminal';
+  return null;
+}
+
+function frameMatchesSurface(frame: Frame, surface: 'slack' | 'terminal' | 'mail'): boolean {
+  const visible = inferVisibleApp(frame);
+  if (visible) {
+    if (surface === 'terminal') return visible === 'warp';
+    return visible === surface;
+  }
+  const app = frame.app.toLowerCase();
+  const entity = (frame.entity_path ?? '').toLowerCase();
+  switch (surface) {
+    case 'slack':
+      return app.includes('slack') || entity.startsWith('channels/');
+    case 'mail':
+      return app.includes('mail') || entity.includes('mail');
+    case 'terminal':
+      return app.includes('warp') || app.includes('terminal') || entity === 'projects/npm' || entity === 'projects/pnpm';
+  }
+  return false;
+}
+
+function inferVisibleApp(frame: Frame): string | null {
+  const title = frame.window_title ?? '';
+  const visibleFromText = inferVisibleAppFromText(frame.text ?? '');
+  if (visibleFromText) return visibleFromText;
+  if (/(^|\s-\s).*\bslack\b$|\((?:channel|dm)\)\s+-\s+.*\bslack\b$/i.test(title)) return 'slack';
+  if (/^all inboxes\b|\binbox\b.*\bmessages?\b|\bmail\b/i.test(title)) return 'mail';
+  if (/\bpnpm\b|\bnpm\b|\bwarp\b|\bterminal\b/i.test(title)) return 'warp';
+  if (/\bgoogle meet\b|\bzoom meeting\b|\bteams meeting\b|\bmeet\.google\.com\b/i.test(title)) return 'browser';
+  const haystack = [
+    title.toLowerCase(),
+    frame.text ?? '',
+  ].join('\n').toLowerCase();
+  if (!haystack.trim()) return null;
+  if (
+    /\bcodex\s+file\s+edit\b|\bnew chat\b.*\bplugins\b|\bautomations\b.*\bprojects\b/.test(haystack)
+  ) return 'codex';
+  if (
+    /\ball inboxes\b|\bmailbox\b|\bunsubscribe\b|\breply-to\b|\binbox\s*-\s*gmail\b/.test(haystack)
+  ) return 'mail';
+  if (
+    /\bslack\s+file\s+edit\b|\bdirect messages\b|\bhuddles\b|\bfind a dm\b|\bnew message\b.*\bhome\b.*\bdms\b/.test(haystack)
+  ) return 'slack';
+  if (
+    /\bcommand input\b|\bwarp\b|\bpnpm\b|\bnpm run\b|\bterminal\b/.test(haystack)
+  ) return 'warp';
+  if (
+    /\bgoogle meet\b|\bmeet\.google\.com\b|\bnew meeting\b|\bjoin\b/.test(haystack)
+  ) return 'browser';
+  if (
+    /\bfinder\b|\bquick look\b|\brecents\b|\bapplications\b/.test(haystack)
+  ) return 'finder';
+  return null;
+}
+
+function inferVisibleAppFromText(text: string): string | null {
+  const haystack = text.toLowerCase();
+  if (!haystack.trim()) return null;
+  if (
+    /\bcofounderos\b|\bindexed journal\b|\bshow moments\b|\bcopy summary\b|\bask ai\b/.test(haystack)
+  ) return 'cofounderos';
+  if (
+    /\bcodex\s+file\s+edit\b|\bnew chat\b.*\bplugins\b|\bautomations\b.*\bprojects\b/.test(haystack)
+  ) return 'codex';
+  if (
+    /\ball inboxes\b|\bmailbox\b|\bunsubscribe\b|\breply-to\b|\binbox\s*-\s*(gmail|postman)\b|\bwelcome to\b.*\bairbnb\b/.test(haystack)
+  ) return 'mail';
+  if (
+    /\bfinder\b|\bquick look\b|\brecents\b|\bapplications\b/.test(haystack.slice(0, 400))
+  ) return 'finder';
+  if (
+    /\bslack\s+file\s+edit\b|\bdirect messages\b|\bhuddles\b|\bfind a dm\b|\bnew message\b.*\bhome\b.*\bdms\b/.test(haystack)
+  ) return 'slack';
+  if (
+    /\bcommand input\b|\bwarp\b|\bpnpm\b|\bnpm run\b|\bterminal\b/.test(haystack)
+  ) return 'warp';
+  if (
+    /\bgoogle meet\b|\bmeet\.google\.com\b|\bnew meeting\b|\bjoin\b/.test(haystack)
+  ) return 'browser';
+  return null;
+}
+
+function containsQueryTerm(haystack: string, term: string): boolean {
+  if (!term) return false;
+  const escaped = escapeRegExp(term.toLowerCase());
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(haystack);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function appMatchesVisibleGuess(app: string, visibleApp: string): boolean {
+  const normalised = app.toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  switch (visibleApp) {
+    case 'cofounderos':
+      return /\b(cofounderos|electron)\b/.test(normalised);
+    case 'browser':
+      return /\b(chrome|firefox|safari|arc)\b/.test(normalised);
+    case 'mail':
+      return /\b(mail|outlook|gmail)\b/.test(normalised);
+    case 'finder':
+      return /\bfinder\b/.test(normalised);
+    default:
+      return normalised.includes(visibleApp);
+  }
+}
+
+function isVisuallySelfFrame(frame: Frame): boolean {
+  return inferVisibleApp(frame) === 'cofounderos';
 }
 
 function recencyScore(timestamp: string | null | undefined): number {

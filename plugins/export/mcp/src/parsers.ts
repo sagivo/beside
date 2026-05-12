@@ -365,8 +365,12 @@ export function extractChatFromFrame(frame: Frame): ExtractedChatSnippet | null 
   // newer messages at the bottom, so the tail of OCR text is most
   // likely to contain the message the user was actually reading.
   const tail = text.slice(-600).trim();
-  const tailLines = tail.split(/\r?\n/g).map((l) => l.trim()).filter(Boolean);
-  const message = (tailLines.slice(-3).join(' ') || tail).slice(0, 240);
+  const tailLines = tail
+    .split(/\r?\n/g)
+    .map((l) => l.trim())
+    .filter((line) => Boolean(line) && !isChatUiNoiseLine(line));
+  const message = cleanChatMessage(tailLines.slice(-3).join(' ') || tail).slice(0, 240);
+  if (!isUsefulChatMessage(message)) return null;
   const mentionSet = new Set<string>();
   for (const m of text.matchAll(MENTION_RE)) {
     if (m[1]) mentionSet.add(`@${m[1].toLowerCase()}`);
@@ -383,6 +387,33 @@ export function extractChatFromFrame(frame: Frame): ExtractedChatSnippet | null 
     source_frame_id: frame.id,
     source_app: frame.app || 'chat',
   };
+}
+
+function cleanChatMessage(raw: string): string {
+  return raw
+    .replace(/\s+/g, ' ')
+    .replace(/\bshift\s*\+\s*return\s+to\s+add\s+a\s+new\s+line\b/ig, '')
+    .replace(/\bmessage\s+(?:#[a-z0-9_-]+|[a-z][\w.-]*)\s*\+\s*aa\b/ig, '')
+    .replace(/\+\s*aa\b/ig, '')
+    .trim();
+}
+
+function isUsefulChatMessage(message: string): boolean {
+  const lower = message.toLowerCase().trim();
+  if (lower.length < 8) return false;
+  if (/^(new|threads?|dms?|huddles?|drafts?\s*&\s*sent|directories|apps?|files|later|more)$/i.test(lower)) return false;
+  if (/^message\s+(?:#[a-z0-9_-]+|[a-z][\w.-]*)\b/i.test(lower)) return false;
+  if (/\bshift\s*\+\s*return\b/i.test(lower)) return false;
+  if (/^s?\s*new\s*x?$/i.test(lower)) return false;
+  const alpha = (message.match(/[a-z]/gi) ?? []).length;
+  return alpha >= 5 && alpha / message.length >= 0.25;
+}
+
+function isChatUiNoiseLine(line: string): boolean {
+  const lower = line.toLowerCase().trim();
+  if (!lower) return true;
+  if (isUsefulChatMessage(line)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------

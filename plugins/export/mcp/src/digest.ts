@@ -433,7 +433,7 @@ function buildOpenLoops(
   // Slack: anything that looks unanswered or directly mentions someone.
   const slackBuckets = new Map<string, OpenLoop>();
   for (const s of snippets) {
-    if (!s.looks_unanswered && s.mentions.length === 0) continue;
+    if (!isActionableChatLoop(s)) continue;
     const refKey = `${s.source_app}|${s.channel ?? 'DM'}|${s.message.slice(0, 60).toLowerCase()}`;
     const prev = slackBuckets.get(refKey);
     if (!prev || s.observed_at > prev.last_seen) {
@@ -480,6 +480,25 @@ function buildOpenLoops(
   return out
     .sort((a, b) => b.last_seen.localeCompare(a.last_seen))
     .slice(0, limit);
+}
+
+function isActionableChatLoop(snippet: ExtractedChatSnippet): boolean {
+  const message = snippet.message.trim();
+  if (!message) return false;
+  if (isChatLoopNoise(message)) return false;
+  if (snippet.looks_unanswered) return true;
+  if (snippet.mentions.length === 0) return false;
+  return /\b(ptal|please|can you|could you|would you|wdyt|review|take a look|thoughts|blocked|need|any update|any updates|let me know)\b/i.test(message);
+}
+
+function isChatLoopNoise(message: string): boolean {
+  const lower = message.toLowerCase().trim();
+  if (lower.length < 8) return true;
+  if (/^message\s+(?:#[a-z0-9_-]+|[a-z][\w.-]*)\b/i.test(lower)) return true;
+  if (/\bshift\s*\+\s*return\b/i.test(lower)) return true;
+  if (/^s?\s*new\s*x?$/i.test(lower)) return true;
+  if (/^as of today at \d{1,2}:\d{2}\s*(am|pm)\s+open in jira sync thread$/i.test(lower)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------

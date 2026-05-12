@@ -1487,9 +1487,14 @@ async function cmdMcp(logger: ReturnType<typeof createLogger>, args: ParsedArgs)
         strategy: handles.strategy,
         model: handles.model,
         embeddingModelName: handles.embeddingWorker.getModelName(),
+        embeddingSearchWeight: handles.config.index.embeddings.search_weight,
         dataDir: handles.loaded.dataDir,
-        triggerReindex: async () => {
-          assertHeavyWorkAllowed(handles, 'index-incremental');
+        triggerReindex: async (full = false) => {
+          assertHeavyWorkAllowed(handles, full ? 'full-reindex' : 'index-incremental');
+          if (full) {
+            await runFullReindex(handles);
+            return;
+          }
           await runIncremental(handles);
         },
       });
