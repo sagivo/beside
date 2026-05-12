@@ -3,7 +3,6 @@ import {
   ChevronsRight,
   HelpCircle,
   LayoutDashboard,
-  MessageSquare,
   Plug,
   Search,
   Settings,
@@ -36,13 +35,12 @@ const NAV_PRIMARY: NavItem[] = [
   { id: 'meetings', label: 'Agenda', icon: Video, shortcut: '2' },
   { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '3' },
   { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
-  { id: 'chat', label: 'Ask AI', icon: MessageSquare, shortcut: '5' },
 ];
 
 const NAV_SECONDARY: NavItem[] = [
-  { id: 'connect', label: 'Connect', icon: Plug, shortcut: '6' },
-  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '7' },
-  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '8' },
+  { id: 'connect', label: 'Connect', icon: Plug, shortcut: '5' },
+  { id: 'settings', label: 'Settings', icon: Settings, shortcut: '6' },
+  { id: 'help', label: 'Help', icon: HelpCircle, shortcut: '7' },
 ];
 
 export function Sidebar({

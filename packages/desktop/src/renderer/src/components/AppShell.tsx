@@ -64,10 +64,9 @@ export function AppShell({
       '2': 'meetings',
       '3': 'privacy',
       '4': 'search',
-      '5': 'chat',
-      '6': 'connect',
-      '7': 'settings',
-      '8': 'help',
+      '5': 'connect',
+      '6': 'settings',
+      '7': 'help',
     };
 
     function onKey(e: KeyboardEvent) {
@@ -84,7 +83,7 @@ export function AppShell({
       // so the user can still type "1" inside Search / Settings inputs.
       if (isInsideEditableField(e.target)) return;
 
-      // Cmd+1..8: jump screens
+      // Cmd+1..7: jump screens
       if (mod && SCREEN_KEYS[e.key]) {
         e.preventDefault();
         stateRef.current.onChange(SCREEN_KEYS[e.key]!);
@@ -131,13 +130,9 @@ export function AppShell({
 
       <main className="flex flex-1 flex-col overflow-hidden">
         <div className="app-drag h-8 shrink-0" aria-hidden />
-        {screen === 'chat' ? (
-          <div className="app-no-drag flex-1 min-h-0 overflow-hidden">{children}</div>
-        ) : (
-          <div className="flex-1 overflow-y-auto">
-            <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
-          </div>
-        )}
+        <div className="flex-1 overflow-y-auto">
+          <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
+        </div>
       </main>
 
       <CommandPalette

@@ -1,550 +1,143 @@
-import type {
-  Frame,
-  EntityRef,
-  EntityKind,
-  IStorage,
-  Logger,
-} from '@cofounderos/interfaces';
-
-/**
- * EntityResolver — turns a frame into a stable `EntityRef` (kind + path).
- *
- * This is the place to teach CofounderOS what "thing" any given moment
- * belongs to. Each resolver is a small pure function tried in priority
- * order; the first non-null match wins. Adding a new entity kind is one
- * new resolver function in this file.
- *
- * The path returned is **also the on-disk path of the wiki page** for that
- * entity, so it must be filesystem-safe and stable across runs.
- */
+import type { Frame, EntityRef, EntityKind, IStorage, Logger } from '@cofounderos/interfaces';
 
 type FrameResolver = (frame: Frame) => EntityRef | null;
 
-const RESOLVERS: FrameResolver[] = [
-  resolveMeeting,
-  resolveRepo,
-  resolveDoc,
-  resolveChannel,
-  resolveContact,
-  resolveProject,
-  resolveWebpage,
-  resolveApp, // last resort — every framed event resolves to *something*
-];
+const RESOLVERS: FrameResolver[] = [resolveMeeting, resolveRepo, resolveDoc, resolveChannel, resolveContact, resolveProject, resolveWebpage, resolveApp];
 
 export function resolveEntity(frame: Frame): EntityRef | null {
-  for (const r of RESOLVERS) {
-    const result = r(frame);
-    if (result) return result;
-  }
+  for (const r of RESOLVERS) { const res = r(frame); if (res) return res; }
   return null;
 }
 
 export class EntityResolverWorker {
   private readonly logger: Logger;
-  constructor(
-    private readonly storage: IStorage,
-    logger: Logger,
-    private readonly batchSize = 500,
-  ) {
-    this.logger = logger.child('entity-resolver');
-  }
+  constructor(private readonly storage: IStorage, logger: Logger, private readonly batchSize = 500) { this.logger = logger.child('entity-resolver'); }
 
-  /** Resolve up to `batchSize` unresolved frames in one pass. */
   async tick(): Promise<{ resolved: number; remaining: number }> {
-    const frames = await this.storage.listFramesNeedingResolution(this.batchSize);
-    if (frames.length === 0) return { resolved: 0, remaining: 0 };
-    const items: Array<{ frameId: string; entity: EntityRef }> = [];
-    for (const f of frames) {
-      const ref = resolveEntity(f);
-      if (ref) items.push({ frameId: f.id, entity: ref });
-    }
-    if (items.length === 0) return { resolved: 0, remaining: frames.length };
-    try {
-      await this.storage.resolveFramesToEntities(items);
-    } catch (err) {
-      this.logger.debug(`failed to resolve ${items.length} frames`, {
-        err: String(err),
-      });
-      return { resolved: 0, remaining: frames.length };
-    }
-    this.logger.debug(
-      `resolved ${items.length}/${frames.length} frames to entities`,
-    );
-    return {
-      resolved: items.length,
-      remaining: Math.max(0, frames.length - items.length),
-    };
+    const fs = await this.storage.listFramesNeedingResolution(this.batchSize); if (!fs.length) return { resolved: 0, remaining: 0 };
+    const items = fs.map(f => ({ frameId: f.id, entity: resolveEntity(f) })).filter(i => i.entity) as { frameId: string; entity: EntityRef }[];
+    if (!items.length) return { resolved: 0, remaining: fs.length };
+    try { await this.storage.resolveFramesToEntities(items); } catch (e) { this.logger.debug(`failed to resolve ${items.length}`, { err: String(e) }); return { resolved: 0, remaining: fs.length }; }
+    this.logger.debug(`resolved ${items.length}/${fs.length} frames`);
+    return { resolved: items.length, remaining: Math.max(0, fs.length - items.length) };
   }
 
-  /** Drain the resolution backlog. Used by `--full-reindex`. */
   async drain(): Promise<{ resolved: number }> {
-    let total = 0;
-    for (let i = 0; i < 10_000; i++) {
-      const r = await this.tick();
-      total += r.resolved;
-      if (r.resolved === 0) break;
-    }
-    return { resolved: total };
+    let tot = 0; for (let i = 0; i < 10000; i++) { const r = await this.tick(); tot += r.resolved; if (!r.resolved) break; } return { resolved: tot };
   }
 }
 
-// ===========================================================================
-// Resolvers — each is a small pure function. Priority = array order above.
-// ===========================================================================
+const MEETING_APPS = new Set(['Google Meet', 'Zoom', 'zoom.us', 'zoom.us (Meeting)', 'Microsoft Teams', 'Webex', 'Around', 'Whereby', 'Tuple', 'Pop', 'Tandem']);
+const MEETING_DOMAINS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'whereby.com', 'webex.com', 'around.co'];
 
-const MEETING_APPS = new Set([
-  'Google Meet',
-  'Zoom',
-  'zoom.us',
-  'zoom.us (Meeting)',
-  'Microsoft Teams',
-  'Webex',
-  'Around',
-  'Whereby',
-  'Tuple',
-  'Pop',
-  'Tandem',
-]);
-
-const MEETING_DOMAINS = [
-  'meet.google.com',
-  'zoom.us',
-  'teams.microsoft.com',
-  'whereby.com',
-  'webex.com',
-  'around.co',
-];
-
-function resolveMeeting(frame: Frame): EntityRef | null {
-  const app = frame.app ?? '';
-  const url = frame.url ?? '';
-  const inMeetingApp = MEETING_APPS.has(app);
-  const inMeetingDomain = hasMeetingUrl(url);
-  const textEvidence = meetingEvidenceFromText(frame.text);
-  if (!inMeetingApp && !inMeetingDomain && !textEvidence) return null;
-
-  const day = frame.timestamp.slice(0, 10);
-  const title = cleanMeetingEntityTitle(
-    textEvidence?.title ?? frame.window_title ?? textEvidence?.fallbackTitle ?? '',
-    frame,
-    textEvidence?.fallbackTitle,
-  );
-  const slug = slugify(title) || 'untitled';
-  return {
-    kind: 'meeting',
-    path: `meetings/${day}-${slug}`,
-    title: `${title} (${day})`,
-  };
+function resolveMeeting(f: Frame): EntityRef | null {
+  const a = f.app ?? '', u = f.url ?? '', te = meetingEvidenceFromText(f.text);
+  if (!MEETING_APPS.has(a) && !hasMeetingUrl(u) && !te) return null;
+  const t = cleanMeetingEntityTitle(te?.title ?? f.window_title ?? te?.fallbackTitle ?? '', f, te?.fallbackTitle), slug = slugify(t) || 'untitled', d = f.timestamp.slice(0, 10);
+  return { kind: 'meeting', path: `meetings/${d}-${slug}`, title: `${t} (${d})` };
 }
 
-function hasMeetingUrl(url: string): boolean {
-  if (!url) return false;
-  if (/\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(url)) {
-    return true;
-  }
-  if (/\bzoom\.us\/(?:j|my|wc)\//i.test(url)) return true;
-  if (/\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(url)) return true;
-  return MEETING_DOMAINS
-    .filter((d) => d !== 'meet.google.com' && d !== 'zoom.us' && d !== 'teams.microsoft.com')
-    .some((d) => url.includes(d));
+function hasMeetingUrl(u: string): boolean {
+  if (!u) return false;
+  if (/\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(u) || /\bzoom\.us\/(?:j|my|wc)\//i.test(u) || /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(u)) return true;
+  return MEETING_DOMAINS.filter(d => !['meet.google.com', 'zoom.us', 'teams.microsoft.com'].includes(d)).some(d => u.includes(d));
 }
 
 const REPO_HOSTS = new Set(['github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org']);
 
-function resolveRepo(frame: Frame): EntityRef | null {
-  const url = frame.url;
-  if (!url) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  const host = parsed.hostname.replace(/^www\./, '');
-  if (!REPO_HOSTS.has(host)) return null;
-  const parts = parsed.pathname.split('/').filter(Boolean);
-  if (parts.length < 2) return null;
-  const [owner, repo] = parts as [string, string];
-  // Skip GitHub features that aren't repos: settings, marketplace, search, etc.
-  if (
-    /^(settings|marketplace|search|notifications|pulls|issues|topics|trending)$/.test(
-      owner,
-    )
-  ) {
-    return null;
-  }
-  const slug = `${slugify(owner)}-${slugify(repo)}`;
-  return {
-    kind: 'repo',
-    path: `repos/${slug}`,
-    title: `${owner}/${repo}`,
-  };
+function resolveRepo(f: Frame): EntityRef | null {
+  if (!f.url) return null; try {
+    const u = new URL(f.url), h = u.hostname.replace(/^www\./, ''); if (!REPO_HOSTS.has(h)) return null;
+    const p = u.pathname.split('/').filter(Boolean); if (p.length < 2 || /^(settings|marketplace|search|notifications|pulls|issues|topics|trending)$/.test(p[0]!)) return null;
+    return { kind: 'repo', path: `repos/${slugify(p[0]!)}-${slugify(p[1]!)}`, title: `${p[0]}/${p[1]}` };
+  } catch { return null; }
 }
 
-function resolveDoc(frame: Frame): EntityRef | null {
-  const url = frame.url;
-  if (!url) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
+function resolveDoc(f: Frame): EntityRef | null {
+  if (!f.url) return null; try {
+    const u = new URL(f.url), h = u.hostname.replace(/^www\./, '');
+    if (h === 'notion.so' || h.endsWith('.notion.so')) return { kind: 'doc', path: `docs/notion-${slugify(u.pathname.split('/').filter(Boolean).pop()?.replace(/-?[a-f0-9]{32}$/i, '') || 'untitled')}`, title: titleFromFrame(f, 'Notion page') };
+    if (h === 'docs.google.com') { const p = u.pathname.split('/').filter(Boolean); return { kind: 'doc', path: `docs/gdocs-${p[0] ?? 'doc'}-${(p[2] ?? '').slice(0, 12) || 'unknown'}`, title: titleFromFrame(f, `Google ${p[0] ?? 'doc'}`) }; }
+    if (h === 'linear.app') { const p = u.pathname.split('/').filter(Boolean), i = p.indexOf('issue'); if (i >= 0 && p[i+1]) return { kind: 'doc', path: `docs/linear-${slugify(p[i+1]!)}`, title: titleFromFrame(f, `Linear ${p[i+1]}`) }; }
     return null;
-  }
-  const host = parsed.hostname.replace(/^www\./, '');
-  // Notion: notion.so/<workspace>/<title-with-id> — anchor on the path stem.
-  if (host === 'notion.so' || host.endsWith('.notion.so')) {
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    const last = parts[parts.length - 1] ?? '';
-    // Strip the trailing 32-char hex id Notion appends to slugs.
-    const slug = slugify(last.replace(/-?[a-f0-9]{32}$/i, '')) || 'untitled';
-    return {
-      kind: 'doc',
-      path: `docs/notion-${slug}`,
-      title: titleFromFrame(frame, 'Notion page'),
-    };
-  }
-  // Google Docs / Sheets / Slides.
-  if (host === 'docs.google.com') {
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    const kind = parts[0] ?? 'doc';
-    const id = parts[2] ?? '';
-    return {
-      kind: 'doc',
-      path: `docs/gdocs-${kind}-${id.slice(0, 12) || 'unknown'}`,
-      title: titleFromFrame(frame, `Google ${kind}`),
-    };
-  }
-  // Linear issue.
-  if (host === 'linear.app') {
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    const idx = parts.indexOf('issue');
-    const issueId = idx >= 0 ? parts[idx + 1] : null;
-    if (issueId) {
-      return {
-        kind: 'doc',
-        path: `docs/linear-${slugify(issueId)}`,
-        title: titleFromFrame(frame, `Linear ${issueId}`),
-      };
-    }
-  }
-  return null;
+  } catch { return null; }
 }
 
 const CHANNEL_APPS = new Set(['Slack', 'Discord']);
 
-function resolveChannel(frame: Frame): EntityRef | null {
-  if (!CHANNEL_APPS.has(frame.app)) return null;
-  const title = frame.window_title || '';
-  // Slack title formats:
-  //   "channel-name (Channel) - Workspace - Slack"
-  //   "channel-name (Private channel) - …"
-  //   "First Last (DM) - …"
-  //   "Threads - Workspace - Slack"
-  // Discord title format:
-  //   "#channel-name | Server"
-  //   "@username | Discord"
-  const slackChannel = /^(#?)([\w._-]+)\s*\((Channel|Private channel|Private)\)/i.exec(title);
-  if (slackChannel) {
-    const name = slackChannel[2] ?? '';
-    // Slack title shape: "channel (Channel) - WORKSPACE - <maybe badge counter> - Slack".
-    // The workspace is the FIRST segment after "(Channel) - ", not the last
-    // before "- Slack" — that segment is often a badge like "2 new items".
-    const wsMatch = /\(\s*(?:Channel|Private channel|Private)\s*\)\s*-\s*([^-\n]+?)\s*(?:-|$)/i.exec(
-      title,
-    );
-    const workspace = (wsMatch?.[1] ?? '').trim();
-    const slug = workspace
-      ? `${slugify(workspace)}-${slugify(name)}`
-      : slugify(name);
-    return {
-      kind: 'channel',
-      path: `channels/${slug}`,
-      title: workspace ? `#${name} — ${workspace}` : `#${name}`,
-    };
-  }
-  const discordChannel = /^#\s*([\w._-]+)\s*\|\s*(.+)$/.exec(title);
-  if (discordChannel) {
-    const channel = discordChannel[1] ?? '';
-    const server = discordChannel[2]?.replace(/\s+\|\s+Discord\s*$/i, '').trim() ?? '';
-    const slug = server ? `${slugify(server)}-${slugify(channel)}` : slugify(channel);
-    return {
-      kind: 'channel',
-      path: `channels/${slug}`,
-      title: `#${channel} — ${server}`,
-    };
-  }
+function resolveChannel(f: Frame): EntityRef | null {
+  if (!CHANNEL_APPS.has(f.app)) return null;
+  const t = f.window_title || '';
+  const sm = /^(#?)([\w._-]+)\s*\((Channel|Private channel|Private)\)/i.exec(t);
+  if (sm) { const ws = /\(\s*(?:Channel|Private channel|Private)\s*\)\s*-\s*([^-\n]+?)\s*(?:-|$)/i.exec(t)?.[1]?.trim() ?? ''; return { kind: 'channel', path: `channels/${ws ? `${slugify(ws)}-${slugify(sm[2]!)}` : slugify(sm[2]!)}`, title: ws ? `#${sm[2]} — ${ws}` : `#${sm[2]}` }; }
+  const dm = /^#\s*([\w._-]+)\s*\|\s*(.+)$/.exec(t);
+  if (dm) { const s = dm[2]?.replace(/\s+\|\s+Discord\s*$/i, '').trim() ?? ''; return { kind: 'channel', path: `channels/${s ? `${slugify(s)}-${slugify(dm[1]!)}` : slugify(dm[1]!)}`, title: `#${dm[1]} — ${s}` }; }
   return null;
 }
 
-function resolveContact(frame: Frame): EntityRef | null {
-  if (!CHANNEL_APPS.has(frame.app)) return null;
-  const title = frame.window_title || '';
-  // Slack DMs render as "Person Name (DM) - …".
-  const slackDm = /^(.+?)\s*\((?:DM|Direct message)\)/i.exec(title);
-  if (slackDm) {
-    const name = slackDm[1]?.trim() ?? '';
-    if (name) {
-      return {
-        kind: 'contact',
-        path: `contacts/${slugify(name)}`,
-        title: name,
-      };
-    }
-  }
+function resolveContact(f: Frame): EntityRef | null {
+  if (!CHANNEL_APPS.has(f.app)) return null;
+  const n = /^(.+?)\s*\((?:DM|Direct message)\)/i.exec(f.window_title || '')?.[1]?.trim();
+  return n ? { kind: 'contact', path: `contacts/${slugify(n)}`, title: n } : null;
+}
+
+export const CODE_APPS = new Set(['Code', 'Code - Insiders', 'Visual Studio Code', 'Cursor', 'Cursor Nightly', 'Windsurf', 'WebStorm', 'IntelliJ IDEA', 'IntelliJ IDEA Ultimate', 'PyCharm', 'PyCharm Professional', 'GoLand', 'RustRover', 'CLion', 'Rider', 'PhpStorm', 'RubyMine', 'DataGrip', 'Xcode', 'Sublime Text', 'Zed', 'Nova']);
+export const TERMINAL_APPS = new Set(['Terminal', 'iTerm2', 'iTerm', 'Warp', 'Hyper', 'Alacritty', 'kitty', 'WezTerm', 'Tabby']);
+export const SUPPORTING_APP_SLUGS: ReadonlySet<string> = new Set([...CODE_APPS, ...TERMINAL_APPS].map(a => slugify(a)));
+export function isSupportingAppEntity(p: string | null | undefined): boolean { return !!p?.startsWith('apps/') && SUPPORTING_APP_SLUGS.has(p.slice(5)); }
+
+function resolveProject(f: Frame): EntityRef | null {
+  const ic = CODE_APPS.has(f.app), it = TERMINAL_APPS.has(f.app); if (!ic && !it) return null;
+  const p = deriveProjectName(f.window_title || '', f.app, it); return p ? { kind: 'project', path: `projects/${slugify(p)}`, title: p } : null;
+}
+
+function resolveWebpage(f: Frame): EntityRef | null {
+  if (!f.url) return null; try { const u = new URL(f.url); if (!['http:', 'https:'].includes(u.protocol)) return null; const h = u.hostname.replace(/^www\./, ''); return h ? { kind: 'webpage', path: `web/${slugify(h)}`, title: titleFromFrame(f, h) } : null; } catch { return null; }
+}
+
+function resolveApp(f: Frame): EntityRef | null { return f.app ? { kind: 'app', path: `apps/${slugify(f.app)}`, title: f.app } : null; }
+
+function deriveProjectName(t: string, a: string, it: boolean): string | null {
+  const sm = t.match(/(?: — | – | - | · )([^—–·]+?)\s*$/); if (sm?.[1] && sm[1].trim().toLowerCase() !== a.toLowerCase()) return sm[1].trim();
+  const bm = t.match(/\[([^\]]+)\]\s*$/); if (bm?.[1]) return bm[1].trim();
+  if (it) { const ph = t.match(/(?:~?\/)?([\w._-]+)\/?\s*$/); if (ph?.[1]?.length && ph[1].length > 1) return ph[1]; }
   return null;
-}
-
-export const CODE_APPS = new Set([
-  'Code',
-  'Code - Insiders',
-  'Visual Studio Code',
-  'Cursor',
-  'Cursor Nightly',
-  'Windsurf',
-  'WebStorm',
-  'IntelliJ IDEA',
-  'IntelliJ IDEA Ultimate',
-  'PyCharm',
-  'PyCharm Professional',
-  'GoLand',
-  'RustRover',
-  'CLion',
-  'Rider',
-  'PhpStorm',
-  'RubyMine',
-  'DataGrip',
-  'Xcode',
-  'Sublime Text',
-  'Zed',
-  'Nova',
-]);
-
-export const TERMINAL_APPS = new Set([
-  'Terminal',
-  'iTerm2',
-  'iTerm',
-  'Warp',
-  'Hyper',
-  'Alacritty',
-  'kitty',
-  'WezTerm',
-  'Tabby',
-]);
-
-/**
- * Apps whose `apps/<slug>` entity is a "fallback" rather than a true
- * top-level identity — when the per-frame resolver couldn't tease a
- * project / repo / channel out of the window title, the frame ends up
- * here. The SessionBuilder uses this set to decide which orphan frames
- * are eligible to be lifted into a session's dominant non-app entity.
- *
- * Notably absent: communications apps (Slack, Mail, Discord, WhatsApp).
- * Their `apps/*` fallback usually means "user was on the home / threads
- * view, not a specific channel" and lifting those into an unrelated
- * project would be wrong. Leave them where the per-frame resolver put
- * them.
- */
-export const SUPPORTING_APP_SLUGS: ReadonlySet<string> = new Set(
-  [...CODE_APPS, ...TERMINAL_APPS].map((a) => slugify(a)),
-);
-
-/** Returns true if `entityPath` is `apps/<slug>` for a supporting app. */
-export function isSupportingAppEntity(entityPath: string | null | undefined): boolean {
-  if (!entityPath || !entityPath.startsWith('apps/')) return false;
-  return SUPPORTING_APP_SLUGS.has(entityPath.slice('apps/'.length));
-}
-
-function resolveProject(frame: Frame): EntityRef | null {
-  const isCode = CODE_APPS.has(frame.app);
-  const isTerm = TERMINAL_APPS.has(frame.app);
-  if (!isCode && !isTerm) return null;
-  const project = deriveProjectName(frame.window_title || '', frame.app, isTerm);
-  if (!project) return null;
-  return {
-    kind: 'project',
-    path: `projects/${slugify(project)}`,
-    title: project,
-  };
-}
-
-function resolveWebpage(frame: Frame): EntityRef | null {
-  const url = frame.url;
-  if (!url) return null;
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-  const host = parsed.hostname.replace(/^www\./, '');
-  if (!host) return null;
-  // Group by host — pages on the same site collapse into one wiki entry.
-  // Title prefers what the user actually saw.
-  return {
-    kind: 'webpage',
-    path: `web/${slugify(host)}`,
-    title: titleFromFrame(frame, host),
-  };
-}
-
-function resolveApp(frame: Frame): EntityRef | null {
-  if (!frame.app) return null;
-  return {
-    kind: 'app',
-    path: `apps/${slugify(frame.app)}`,
-    title: frame.app,
-  };
-}
-
-// ===========================================================================
-// Helpers
-// ===========================================================================
-
-function deriveProjectName(
-  title: string,
-  app: string,
-  isTerminal: boolean,
-): string | null {
-  // Common editor patterns:
-  //   "filename — projectname"
-  //   "filename - projectname"
-  //   "filename · projectname"
-  //   "● filename — projectname"
-  //   "filename [projectname]"
-  // Project names themselves can contain hyphens, so only spaced separators
-  // count as the boundary.
-  const sepMatch = title.match(/(?: — | – | - | · )([^—–·]+?)\s*$/);
-  if (sepMatch && sepMatch[1]) {
-    const candidate = sepMatch[1].trim();
-    // Reject endings that are obviously the app name itself.
-    if (candidate.toLowerCase() !== app.toLowerCase()) return candidate;
-  }
-  const bracketMatch = title.match(/\[([^\]]+)\]\s*$/);
-  if (bracketMatch && bracketMatch[1]) return bracketMatch[1].trim();
-  // Terminal titles often include a path or zsh prompt — last path segment
-  // is the best project guess.
-  if (isTerminal) {
-    const pathHint = title.match(/(?:~?\/)?([\w._-]+)\/?\s*$/);
-    if (pathHint && pathHint[1] && pathHint[1].length > 1) {
-      return pathHint[1];
-    }
-  }
-  return null;
-}
-
-function stripMeetingSuffix(title: string): string {
-  return title
-    .replace(/[\-—–]\s*(Google Meet|Zoom|Microsoft Teams|Webex|Around|Whereby)\s*$/i, '')
-    .replace(/^\s*Meet\s*[\-—–]\s*/i, '')
-    .trim();
 }
 
 const MEETING_TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
 const GENERIC_MEETING_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s+meet|meet|microsoft\s+teams|teams|webex|whereby|around|you have ended the meeting|camera and microphone recording|microphone recording|audio playing|google chrome|chrome|profile)$/i;
 
-function cleanMeetingEntityTitle(
-  rawTitle: string,
-  frame: Frame,
-  fallbackTitle?: string,
-): string {
-  let title = stripMeetingSuffix(stripBrowserSuffixes(rawTitle || '')).replace(/\s+/g, ' ').trim();
-  const parts = title
-    .split(/\s+[-–—]\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .filter((part) => !MEETING_TITLE_NOISE_SEGMENT_RE.test(part));
-
-  if (parts.length > 0) title = parts.join(' - ');
-  else title = '';
-
-  if (!title || GENERIC_MEETING_TITLE_RE.test(title)) return fallbackTitle ?? fallbackMeetingTitle(frame);
-  return title;
+function cleanMeetingEntityTitle(r: string, f: Frame, fb?: string): string {
+  let t = r.replace(/[\-—–]\s*(Google Meet|Zoom|Microsoft Teams|Webex|Around|Whereby)\s*$/i, '').replace(/^\s*Meet\s*[\-—–]\s*/i, '').replace(/\s+[—–\-]\s+(Mozilla Firefox|Google Chrome|Chrome|Safari|Brave|Arc|Edge|Microsoft Edge|Vivaldi|Opera).*$/i, '').replace(/\s+/g, ' ').trim();
+  const p = t.split(/\s+[-–—]\s+/).map(x => x.trim()).filter(Boolean).filter(x => !MEETING_TITLE_NOISE_SEGMENT_RE.test(x));
+  t = p.length ? p.join(' - ') : '';
+  return !t || GENERIC_MEETING_TITLE_RE.test(t) ? (fb ?? fallbackMeetingTitle(f)) : t;
 }
 
-function fallbackMeetingTitle(frame: Frame): string {
-  const app = frame.app ?? '';
-  const url = frame.url ?? '';
-  const text = frame.text ?? '';
-  if (/zoom/i.test(app) || url.includes('zoom.us')) return 'Zoom';
-  if (/google meet/i.test(app) || url.includes('meet.google.com') || /meet\.google\.com/i.test(text)) return 'Google Meet';
-  if (/microsoft teams/i.test(app) || url.includes('teams.microsoft.com') || /teams\.microsoft\.com/i.test(text)) return 'Microsoft Teams';
-  if (/webex/i.test(app) || url.includes('webex.com') || /webex\.com/i.test(text)) return 'Webex';
-  if (/whereby/i.test(app) || url.includes('whereby.com') || /whereby\.com/i.test(text)) return 'Whereby';
-  if (/around/i.test(app) || url.includes('around.co') || /around\.co/i.test(text)) return 'Around';
+function fallbackMeetingTitle(f: Frame): string {
+  const a = f.app ?? '', u = f.url ?? '', t = f.text ?? '';
+  if (/zoom/i.test(a) || u.includes('zoom.us')) return 'Zoom';
+  if (/google meet/i.test(a) || u.includes('meet.google.com') || /meet\.google\.com/i.test(t)) return 'Google Meet';
+  if (/microsoft teams/i.test(a) || u.includes('teams.microsoft.com') || /teams\.microsoft\.com/i.test(t)) return 'Microsoft Teams';
+  if (/webex/i.test(a) || u.includes('webex.com') || /webex\.com/i.test(t)) return 'Webex';
+  if (/whereby/i.test(a) || u.includes('whereby.com') || /whereby\.com/i.test(t)) return 'Whereby';
+  if (/around/i.test(a) || u.includes('around.co') || /around\.co/i.test(t)) return 'Around';
   return 'Meeting';
 }
 
-function meetingEvidenceFromText(text: string | null): { title?: string; fallbackTitle: string } | null {
-  if (!text) return null;
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^[\s•*·-]+/, '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  const haystack = lines.join('\n');
-
-  for (const line of lines) {
-    const meet = line.match(/^(?:Google\s+)?Meet\s*[-–—]\s*(.{3,80})$/i);
-    if (meet?.[1]) return { title: meet[1].trim(), fallbackTitle: 'Google Meet' };
-    const zoom = line.match(/^Zoom(?:\s+Meeting)?\s*[-–—]\s*(.{3,80})$/i);
-    if (zoom?.[1]) return { title: zoom[1].trim(), fallbackTitle: 'Zoom' };
-    const teams = line.match(/^(?:Microsoft\s+)?Teams\s*[-–—]\s*(.{3,80})$/i);
-    if (teams?.[1]) return { title: teams[1].trim(), fallbackTitle: 'Microsoft Teams' };
+function meetingEvidenceFromText(t: string | null): { title?: string; fallbackTitle: string } | null {
+  if (!t) return null; const ls = t.split(/\r?\n/).map(l => l.replace(/^[\s•*·-]+/, '').replace(/\s+/g, ' ').trim()).filter(Boolean), h = ls.join('\n');
+  for (const l of ls) {
+    if (/^(?:Google\s+)?Meet\s*[-–—]\s*(.{3,80})$/i.test(l)) return { title: l.match(/^(?:Google\s+)?Meet\s*[-–—]\s*(.{3,80})$/i)![1].trim(), fallbackTitle: 'Google Meet' };
+    if (/^Zoom(?:\s+Meeting)?\s*[-–—]\s*(.{3,80})$/i.test(l)) return { title: l.match(/^Zoom(?:\s+Meeting)?\s*[-–—]\s*(.{3,80})$/i)![1].trim(), fallbackTitle: 'Zoom' };
+    if (/^(?:Microsoft\s+)?Teams\s*[-–—]\s*(.{3,80})$/i.test(l)) return { title: l.match(/^(?:Microsoft\s+)?Teams\s*[-–—]\s*(.{3,80})$/i)![1].trim(), fallbackTitle: 'Microsoft Teams' };
   }
-
-  const hasMeetUrl = /\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(haystack);
-  const hasMeetUi = /\b(join now|ask gemini|use gemini to take notes|share notes and transcript|camera is starting|other ways to join|leave call|meeting details)\b/i.test(haystack);
-  if (hasMeetUrl && hasMeetUi) return { fallbackTitle: 'Google Meet' };
-
-  const hasZoomUrl = /\b(?:[\w.-]+\.)?zoom\.us\/(?:j|my|wc)\//i.test(haystack);
-  const hasZoomUi = /\b(join(?: with)? computer audio|start video|participants|leave meeting|waiting room)\b/i.test(haystack);
-  if (hasZoomUrl && hasZoomUi) return { fallbackTitle: 'Zoom' };
-
-  const hasTeamsUrl = /\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(haystack);
-  const hasTeamsUi = /\b(join now|leave|people|raise|camera|microphone)\b/i.test(haystack);
-  if (hasTeamsUrl && hasTeamsUi) return { fallbackTitle: 'Microsoft Teams' };
-
+  if (/\bmeet\.google\.com\/(?!landing\b)[a-z]{3}-[a-z]{4}-[a-z]{3}\b/i.test(h) && /\b(join now|ask gemini|use gemini to take notes|share notes and transcript|camera is starting|other ways to join|leave call|meeting details)\b/i.test(h)) return { fallbackTitle: 'Google Meet' };
+  if (/\b(?:[\w.-]+\.)?zoom\.us\/(?:j|my|wc)\//i.test(h) && /\b(join(?: with)? computer audio|start video|participants|leave meeting|waiting room)\b/i.test(h)) return { fallbackTitle: 'Zoom' };
+  if (/\bteams\.microsoft\.com\/(?:l\/meetup-join|_\#\/meetup)\b/i.test(h) && /\b(join now|leave|people|raise|camera|microphone)\b/i.test(h)) return { fallbackTitle: 'Microsoft Teams' };
   return null;
 }
 
-function stripBrowserSuffixes(title: string): string {
-  return title
-    .replace(/\s+[—–\-]\s+(Mozilla Firefox|Google Chrome|Chrome|Safari|Brave|Arc|Edge|Microsoft Edge|Vivaldi|Opera).*$/i, '')
-    .trim();
-}
-
-function titleFromFrame(frame: Frame, fallback: string): string {
-  const t = stripBrowserSuffixes(frame.window_title || '').trim();
-  if (t.length > 4 && t.length < 120) return t;
-  return fallback;
-}
-
-export function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/['"`]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
-}
-
-export function entityKindLabel(kind: EntityKind): string {
-  switch (kind) {
-    case 'project':
-      return 'Projects';
-    case 'repo':
-      return 'Repos';
-    case 'meeting':
-      return 'Meetings';
-    case 'contact':
-      return 'Contacts';
-    case 'channel':
-      return 'Channels';
-    case 'doc':
-      return 'Docs';
-    case 'webpage':
-      return 'Web';
-    case 'app':
-      return 'Apps';
-  }
-}
+function titleFromFrame(f: Frame, fb: string): string { const t = (f.window_title || '').replace(/\s+[—–\-]\s+(Mozilla Firefox|Google Chrome|Chrome|Safari|Brave|Arc|Edge|Microsoft Edge|Vivaldi|Opera).*$/i, '').trim(); return t.length > 4 && t.length < 120 ? t : fb; }
+export function slugify(s: string): string { return s.toLowerCase().replace(/['"`]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60); }
+export function entityKindLabel(k: EntityKind): string { return { project: 'Projects', repo: 'Repos', meeting: 'Meetings', contact: 'Contacts', channel: 'Channels', doc: 'Docs', webpage: 'Web', app: 'Apps' }[k]; }

@@ -62,14 +62,6 @@ declare global {
         callback: (event: WhisperInstallProgress) => void,
       ) => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
-      startChat: (params: {
-        turnId: string;
-        conversationId: string;
-        message: string;
-        history: Array<{ role: 'user' | 'assistant'; content: string }>;
-      }) => Promise<{ turnId: string; completed: boolean }>;
-      cancelChat: (turnId: string) => Promise<{ cancelled: boolean }>;
-      onChatEvent?: (callback: (event: ChatStreamEvent) => void) => (() => void);
       listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
       listDayEvents: (query?: {
         day?: string;
@@ -106,47 +98,6 @@ declare global {
     };
   }
 }
-
-export type ChatIntent =
-  | 'day_overview'
-  | 'calendar_check'
-  | 'open_loops'
-  | 'recall_preference'
-  | 'recall_event'
-  | 'project_status'
-  | 'people_context'
-  | 'time_audit'
-  | 'topic_deep_dive'
-  | 'general';
-
-export interface ChatDateAnchor {
-  day: string;
-  label: string;
-  fromIso: string;
-  toIso: string;
-}
-
-export type ChatStreamEvent =
-  | { kind: 'phase'; turnId: string; phase: 'classify' | 'plan' | 'execute' | 'compose' }
-  | { kind: 'reasoning'; turnId: string; text: string }
-  | { kind: 'intent'; turnId: string; intent: ChatIntent; anchor: ChatDateAnchor }
-  | {
-      kind: 'tool-call';
-      turnId: string;
-      tool: string;
-      args: Record<string, unknown>;
-      callId: string;
-    }
-  | {
-      kind: 'tool-result';
-      turnId: string;
-      callId: string;
-      tool: string;
-      summary: string;
-    }
-  | { kind: 'content'; turnId: string; delta: string }
-  | { kind: 'done'; turnId: string }
-  | { kind: 'error'; turnId: string; message: string };
 
 export interface RuntimeOverview {
   status: string;
@@ -613,6 +564,7 @@ export type RuntimeActionCenterUrgency = 'high' | 'medium' | 'low';
 export type RuntimeFollowupCategory = 'reply' | 'send' | 'decide' | 'schedule' | 'task';
 
 export interface RuntimeActionCenterFollowup {
+  app?: string;
   category: RuntimeFollowupCategory;
   title: string;
   body: string;

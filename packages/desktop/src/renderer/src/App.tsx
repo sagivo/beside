@@ -4,499 +4,91 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ErrorView } from '@/components/ErrorView';
 import { FrameDetailProvider } from '@/components/FrameDetailDialog';
 import { Toaster, toast } from '@/components/ui/sonner';
-import { chatStore } from '@/lib/chat-store';
 import { SidebarStateProvider } from '@/lib/sidebar-state';
 import { ThemeProvider } from '@/lib/theme';
-import {
-  ONBOARDING_KEY,
-  ONBOARDING_MODEL_KEY,
-  ONBOARDING_STEP_KEY,
-  type Screen,
-} from '@/types';
-
-const Connect = React.lazy(() =>
-  import('@/screens/Connect').then((mod) => ({ default: mod.Connect })),
-);
-const Dashboard = React.lazy(() =>
-  import('@/screens/Dashboard').then((mod) => ({ default: mod.Dashboard })),
-);
-const Help = React.lazy(() => import('@/screens/Help').then((mod) => ({ default: mod.Help })));
-const Search = React.lazy(() =>
-  import('@/screens/Search').then((mod) => ({ default: mod.Search })),
-);
-const Settings = React.lazy(() =>
-  import('@/screens/Settings').then((mod) => ({ default: mod.Settings })),
-);
-const Chat = React.lazy(() => import('@/screens/Chat').then((mod) => ({ default: mod.Chat })));
-const Meetings = React.lazy(() =>
-  import('@/screens/Meetings').then((mod) => ({ default: mod.Meetings })),
-);
-const Privacy = React.lazy(() =>
-  import('@/screens/Privacy').then((mod) => ({ default: mod.Privacy })),
-);
-
-// Onboarding is a sizeable flow (~33KB source, ~6 step components)
-// that 99% of the time only runs once per install. Lazy-loading it keeps
-// it out of the main bundle so the dashboard paints faster on every
-// subsequent launch — Vite emits it as its own chunk.
-const Onboarding = React.lazy(() =>
-  import('@/onboarding/Onboarding').then((mod) => ({ default: mod.Onboarding })),
-);
-import type {
-  DayEvent,
-  DoctorCheck,
-  LoadedConfig,
-  Meeting,
-  ModelBootstrapProgress,
-  RuntimeOverview,
-} from '@/global';
-
+import { ONBOARDING_KEY, ONBOARDING_MODEL_KEY, ONBOARDING_STEP_KEY, type Screen } from '@/types';
+import type { DayEvent, DoctorCheck, LoadedConfig, Meeting, ModelBootstrapProgress, RuntimeOverview } from '@/global';
 import '@/lib/thumbnail-cache';
 
-const AGENDA_REFRESH_JOBS = new Set([
-  'audio-transcript-worker',
-  'meeting-builder',
-  'meeting-summarizer',
-  'event-extractor',
-]);
-
-type MeetingFocusRequest = {
-  id: number;
-  target: { eventId: string; day: string } | null;
-};
+const Connect = React.lazy(() => import('@/screens/Connect').then(m => ({ default: m.Connect })));
+const Dashboard = React.lazy(() => import('@/screens/Dashboard').then(m => ({ default: m.Dashboard })));
+const Help = React.lazy(() => import('@/screens/Help').then(m => ({ default: m.Help })));
+const Search = React.lazy(() => import('@/screens/Search').then(m => ({ default: m.Search })));
+const Settings = React.lazy(() => import('@/screens/Settings').then(m => ({ default: m.Settings })));
+const Meetings = React.lazy(() => import('@/screens/Meetings').then(m => ({ default: m.Meetings })));
+const Privacy = React.lazy(() => import('@/screens/Privacy').then(m => ({ default: m.Privacy })));
+const Onboarding = React.lazy(() => import('@/onboarding/Onboarding').then(m => ({ default: m.Onboarding })));
 
 export function App() {
-  return (
-    <ThemeProvider>
-      <SidebarStateProvider>
-        <FrameDetailProvider>
-          <AppInner />
-          <Toaster />
-        </FrameDetailProvider>
-      </SidebarStateProvider>
-    </ThemeProvider>
-  );
+  return <ThemeProvider><SidebarStateProvider><FrameDetailProvider><AppInner /><Toaster /></FrameDetailProvider></SidebarStateProvider></ThemeProvider>;
 }
 
 function AppInner() {
-  const [screen, setScreen] = React.useState<Screen>('dashboard');
-  const [overview, setOverview] = React.useState<RuntimeOverview | null>(null);
-  const [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null);
-  const [days, setDays] = React.useState<string[]>([]);
-  const [config, setConfig] = React.useState<LoadedConfig | null>(null);
-  const [logs, setLogs] = React.useState('');
-  const [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]);
-  const [meetings, setMeetings] = React.useState<Meeting[]>([]);
-  const [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]);
-  const [meetingsLoading, setMeetingsLoading] = React.useState(false);
-  const [meetingFocusRequest, setMeetingFocusRequest] =
-    React.useState<MeetingFocusRequest | null>(null);
-  const [error, setError] = React.useState<string | null>(null);
-  const [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(
-    null,
-  );
-  const searchRequestId = React.useRef(0);
-  const meetingFocusRequestId = React.useRef(0);
-  const agendaRefreshKeyRef = React.useRef('');
-  const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => {
-    try {
-      return localStorage.getItem(ONBOARDING_KEY) !== '1';
-    } catch {
-      return true;
-    }
-  });
+  const [screen, setScreen] = React.useState<Screen>('dashboard'), [overview, setOverview] = React.useState<RuntimeOverview | null>(null), [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null), [days, setDays] = React.useState<string[]>([]), [config, setConfig] = React.useState<LoadedConfig | null>(null), [logs, setLogs] = React.useState(''), [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]), [meetings, setMeetings] = React.useState<Meeting[]>([]), [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]), [meetingsLoading, setMeetingsLoading] = React.useState(false), [meetingFocusRequest, setMeetingFocusRequest] = React.useState<{ id: number; target: { eventId: string; day: string } | null } | null>(null), [error, setError] = React.useState<string | null>(null), [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(null);
+  const searchRequestId = React.useRef(0), meetingFocusRequestId = React.useRef(0), agendaRefreshKeyRef = React.useRef('');
+  const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => { try { return localStorage.getItem(ONBOARDING_KEY) !== '1'; } catch { return true; } });
 
   React.useEffect(() => {
-    window.cofounderos?.onDesktopLogs?.((nextLogs) => setLogs(nextLogs || ''));
-    window.cofounderos?.onBootstrapProgress?.((progress) => {
-      setBootstrapEvents((events) => [...events.slice(-80), progress]);
-    });
-    // Real-time overview push from the runtime service. Replaces what
-    // used to be a 2-5s setInterval — main.ts forwards every overview
-    // snapshot the runtime emits (heartbeat + after each mutation).
-    window.cofounderos?.onOverview?.((next) => setOverview(next));
+    window.cofounderos?.onDesktopLogs?.(l => setLogs(l || ''));
+    window.cofounderos?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p]));
+    window.cofounderos?.onOverview?.(setOverview);
   }, []);
 
-  React.useEffect(() => {
-    if (!showOnboarding) void loadScreen(screen);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screen, showOnboarding]);
-
-  // Sparse safety-net poll. We trust the push channel for normal
-  // operation; this only fires if the runtime service wedges or the
-  // IPC listener drops updates. 60s is fine because the runtime's
-  // active/idle heartbeat covers steady-state freshness, and a wedge is
-  // rare enough that 60s recovery is acceptable.
-  React.useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (!window.cofounderos) return;
-      void window.cofounderos.getOverview().then(setOverview).catch(() => undefined);
-    }, 60000);
-    return () => window.clearInterval(timer);
-  }, []);
+  React.useEffect(() => { if (!showOnboarding) loadScreen(screen); }, [screen, showOnboarding]);
+  React.useEffect(() => { const t = window.setInterval(() => window.cofounderos?.getOverview().then(setOverview).catch(() => {}), 60000); return () => window.clearInterval(t); }, []);
 
   React.useEffect(() => {
     if (screen !== 'meetings' || !overview) return;
-    const key = (overview.backgroundJobs ?? [])
-      .filter((job) => AGENDA_REFRESH_JOBS.has(job.name))
-      .map((job) => `${job.name}:${job.lastCompletedAt ?? ''}:${job.runCount}`)
-      .join('|');
-    if (!key || key === agendaRefreshKeyRef.current) return;
-    agendaRefreshKeyRef.current = key;
-    void loadScreen('meetings');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const k = (overview.backgroundJobs ?? []).filter(j => ['audio-transcript-worker', 'meeting-builder', 'meeting-summarizer', 'event-extractor'].includes(j.name)).map(j => `${j.name}:${j.lastCompletedAt ?? ''}:${j.runCount}`).join('|');
+    if (!k || k === agendaRefreshKeyRef.current) return;
+    agendaRefreshKeyRef.current = k; loadScreen('meetings');
   }, [screen, overview?.system?.overviewGeneratedAt]);
 
-  async function loadScreen(next: Screen) {
+  const loadScreen = async (n: Screen) => {
     try {
       if (!window.cofounderos) throw new Error('Desktop preload bridge is unavailable.');
-      if (next === 'dashboard') {
-        setOverview(await window.cofounderos.getOverview());
-        setDoctor(await window.cofounderos.runDoctor());
-      }
-      if (next === 'search') {
-        const nextDays = await window.cofounderos.listJournalDays();
-        setDays(nextDays);
-      }
-      if (next === 'connect') {
-        setOverview(await window.cofounderos.getOverview());
-        setConfig(await window.cofounderos.readConfig());
-      }
-      if (next === 'meetings') {
+      if (n === 'dashboard') { setOverview(await window.cofounderos.getOverview()); setDoctor(await window.cofounderos.runDoctor()); }
+      if (n === 'search') setDays(await window.cofounderos.listJournalDays());
+      if (n === 'connect') { setOverview(await window.cofounderos.getOverview()); setConfig(await window.cofounderos.readConfig()); }
+      if (n === 'meetings') {
         setMeetingsLoading(true);
-        try {
-          // Pull events + meetings in parallel; meetings are still
-          // shown inline on the event-log detail panel for kind=meeting
-          // events (TL;DR / action items / transcript chars come from
-          // the Meeting row, not the DayEvent row).
-          const [evList, mtgList] = await Promise.all([
-            window.cofounderos.listDayEvents().catch(() => [] as DayEvent[]),
-            window.cofounderos.listMeetings().catch(() => [] as Meeting[]),
-          ]);
-          setDayEvents(evList);
-          setMeetings(mtgList);
-        } finally {
-          setMeetingsLoading(false);
-        }
+        try { const [e, m] = await Promise.all([window.cofounderos.listDayEvents().catch(() => []), window.cofounderos.listMeetings().catch(() => [])]); setDayEvents(e); setMeetings(m); }
+        finally { setMeetingsLoading(false); }
       }
-      if (next === 'privacy') {
-        const [nextOverview, nextConfig] = await Promise.all([
-          window.cofounderos.getOverview(),
-          window.cofounderos.readConfig(),
-        ]);
-        setOverview(nextOverview);
-        setConfig(nextConfig);
-      }
-      if (next === 'settings') setConfig(await window.cofounderos.readConfig());
+      if (n === 'privacy') { const [o, c] = await Promise.all([window.cofounderos.getOverview(), window.cofounderos.readConfig()]); setOverview(o); setConfig(c); }
+      if (n === 'settings') setConfig(await window.cofounderos.readConfig());
       setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
+    } catch (err: any) { setError(err.message || String(err)); }
+  };
 
-  async function copyMcpSnippet() {
-    const cfg = config ?? (await window.cofounderos.readConfig());
-    if (!config) setConfig(cfg);
-    const mcp = cfg.config.export.plugins.find((p) => p.name === 'mcp');
-    const host = typeof mcp?.host === 'string' ? mcp.host : '127.0.0.1';
-    const port = typeof mcp?.port === 'number' ? mcp.port : 3456;
-    const url = `http://${host}:${port}`;
-    const snippet = JSON.stringify({ mcpServers: { cofounderos: { url } } }, null, 2);
-    await window.cofounderos.copyText(snippet);
+  const copyMcpSnippet = async () => {
+    const c = config ?? (await window.cofounderos.readConfig()); if (!config) setConfig(c);
+    const m = c.config.export.plugins.find((p: any) => p.name === 'mcp'), h = typeof m?.host === 'string' ? m.host : '127.0.0.1', pt = typeof m?.port === 'number' ? m.port : 3456;
+    await window.cofounderos.copyText(JSON.stringify({ mcpServers: { cofounderos: { url: `http://${h}:${pt}` } } }, null, 2));
     toast.success('MCP snippet copied', { description: 'Paste it into your AI app settings.' });
-  }
+  };
 
-  function runPaletteSearch(query: string) {
-    const q = query.trim();
-    if (!q) return;
-    searchRequestId.current += 1;
-    setSearchRequest({ id: searchRequestId.current, query: q });
-    setScreen('search');
-  }
+  const runPaletteSearch = (q: string) => { const t = q.trim(); if (t) { searchRequestId.current++; setSearchRequest({ id: searchRequestId.current, query: t }); setScreen('search'); } };
+  const openMeetings = (t: any = null) => { meetingFocusRequestId.current++; setMeetingFocusRequest({ id: meetingFocusRequestId.current, target: t }); setScreen('meetings'); };
+  const navigateToScreen = React.useCallback((n: Screen) => setScreen(n), []);
 
-  function openMeetings(target: MeetingFocusRequest['target'] = null) {
-    meetingFocusRequestId.current += 1;
-    setMeetingFocusRequest({ id: meetingFocusRequestId.current, target });
-    setScreen('meetings');
-  }
+  const wrapAction = (fn: any, successMsg: string, desc?: string) => async (...args: any[]) => { try { const r = await fn(...args); if (r) setOverview(r); toast.success(successMsg, { description: desc }); } catch (e: any) { toast.error(`Could not ${successMsg.toLowerCase()}`, { description: e.message || String(e) }); } };
 
-  // Navigating into the AI Chat tab from another screen should drop the
-  // user into a fresh conversation rather than re-opening whichever chat
-  // happened to be active last. Clicking the tab while already on chat
-  // is a no-op so we don't churn through empty "New chat" entries.
-  const navigateToScreen = React.useCallback(
-    (next: Screen) => {
-      setScreen((current) => {
-        if (next === 'chat' && current !== 'chat') {
-          const conv = chatStore.create();
-          chatStore.setActiveId(conv.id);
-        }
-        return next;
-      });
-    },
-    [],
-  );
+  const actions = React.useMemo(() => ({
+    onStart: wrapAction(window.cofounderos.startRuntime, 'Capture started'),
+    onStop: async () => { try { await window.cofounderos.stopRuntime(); setOverview(await window.cofounderos.getOverview().catch(() => null)); toast.info('Capture stopped'); } catch (e: any) { toast.error('Could not stop capture', { description: e.message }); } },
+    onPause: async () => { try { setOverview(await window.cofounderos.pauseCapture()); toast.info('Capture paused'); } catch (e: any) { toast.error('Could not pause capture', { description: e.message }); } },
+    onResume: wrapAction(window.cofounderos.resumeCapture, 'Capture resumed'),
+    onTriggerIndex: wrapAction(window.cofounderos.triggerIndex, 'Organizing memories…', 'This runs in the background.'),
+    onTriggerReorganise: wrapAction(window.cofounderos.triggerReorganise, 'Rebuilding summaries…', 'This runs in the background.'),
+    onTriggerFullReindex: async (d: string) => { const f = d.trim() ? `${d.trim()}T00:00:00.000` : undefined; if (!f) { toast.error('Choose a date'); return; } toast.info('Re-indexing memory…', { description: `Rebuilding from ${d}.` }); try { setOverview(await window.cofounderos.triggerFullReindex({ from: f })); toast.success('Re-index complete'); } catch (e: any) { toast.error('Could not re-index', { description: e.message }); } },
+    onBootstrap: async () => { setBootstrapEvents([]); try { await window.cofounderos.bootstrapModel(); const [o, d] = await Promise.all([window.cofounderos.getOverview(), window.cofounderos.runDoctor()]); setOverview(o); setDoctor(d); toast.success('Local AI is ready'); } catch (e: any) { toast.error('AI setup failed', { description: e.message }); } },
+    onOpenMarkdownExport: async (c?: string) => { try { await window.cofounderos.openPath(c ? { target: 'markdown', category: c } : 'markdown'); } catch (e: any) { toast.error('Could not open export', { description: e.message }); } }
+  }), []);
 
-  // Capture / index actions with toast feedback. Centralised here so the
-  // Dashboard, AppShell command palette, and any future surface all get the
-  // same UX without duplicating the toast wiring.
-  const actions = React.useMemo(
-    () => ({
-      onStart: async () => {
-        try {
-          setOverview(await window.cofounderos.startRuntime());
-          toast.success('Capture started');
-        } catch (err) {
-          toast.error('Could not start capture', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onStop: async () => {
-        try {
-          await window.cofounderos.stopRuntime();
-          setOverview(await window.cofounderos.getOverview().catch(() => null));
-          toast.info('Capture stopped');
-        } catch (err) {
-          toast.error('Could not stop capture', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onPause: async () => {
-        try {
-          setOverview(await window.cofounderos.pauseCapture());
-          toast.info('Capture paused');
-        } catch (err) {
-          toast.error('Could not pause capture', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onResume: async () => {
-        try {
-          setOverview(await window.cofounderos.resumeCapture());
-          toast.success('Capture resumed');
-        } catch (err) {
-          toast.error('Could not resume capture', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onTriggerIndex: async () => {
-        try {
-          setOverview(await window.cofounderos.triggerIndex());
-          toast.success('Organizing memories…', {
-            description: 'This runs in the background.',
-          });
-        } catch (err) {
-          toast.error('Could not start indexer', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onTriggerReorganise: async () => {
-        try {
-          setOverview(await window.cofounderos.triggerReorganise());
-          toast.success('Rebuilding summaries…', {
-            description: 'This runs in the background.',
-          });
-        } catch (err) {
-          toast.error('Could not rebuild summaries', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onTriggerFullReindex: async (fromDate: string) => {
-        const from = normaliseDateStart(fromDate);
-        if (!from) {
-          toast.error('Choose a date to re-index from');
-          return;
-        }
-        toast.info('Re-indexing memory…', {
-          description: `Rebuilding generated pages from ${fromDate}.`,
-        });
-        try {
-          setOverview(await window.cofounderos.triggerFullReindex({ from }));
-          toast.success('Re-index complete', {
-            description: 'Generated pages and summaries were rebuilt from raw captures.',
-          });
-        } catch (err) {
-          toast.error('Could not re-index memory', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onBootstrap: async () => {
-        setBootstrapEvents([]);
-        try {
-          await window.cofounderos.bootstrapModel();
-          const [nextOverview, nextDoctor] = await Promise.all([
-            window.cofounderos.getOverview(),
-            window.cofounderos.runDoctor(),
-          ]);
-          setOverview(nextOverview);
-          setDoctor(nextDoctor);
-          toast.success('Local AI is ready');
-        } catch (err) {
-          toast.error('AI setup failed', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-      onOpenMarkdownExport: async (category?: string) => {
-        try {
-          await window.cofounderos.openPath(
-            category ? { target: 'markdown', category } : 'markdown',
-          );
-        } catch (err) {
-          toast.error('Could not open Markdown export', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      },
-    }),
-    [],
-  );
+  if (showOnboarding) return <React.Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted-foreground">Preparing welcome…</div>}><Onboarding bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onComplete={() => { try { localStorage.setItem(ONBOARDING_KEY, '1'); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} setShowOnboarding(false); setScreen('dashboard'); }} /></React.Suspense>;
 
-  if (showOnboarding) {
-    return (
-      <React.Suspense fallback={<OnboardingLoadingScrim />}>
-        <Onboarding
-          bootstrapEvents={bootstrapEvents}
-          onClearBootstrapEvents={() => setBootstrapEvents([])}
-          onComplete={() => {
-            try {
-              localStorage.setItem(ONBOARDING_KEY, '1');
-              localStorage.removeItem(ONBOARDING_STEP_KEY);
-              localStorage.removeItem(ONBOARDING_MODEL_KEY);
-            } catch {
-              /* ignore */
-            }
-            setShowOnboarding(false);
-            setScreen('dashboard');
-          }}
-        />
-      </React.Suspense>
-    );
-  }
+  const c = error ? <div className="pt-6"><ErrorView error={error} onRetry={() => loadScreen(screen)} /></div> : screen === 'dashboard' ? <Dashboard overview={overview} doctor={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('dashboard')} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onTriggerFullReindex={actions.onTriggerFullReindex} onBootstrap={actions.onBootstrap} onOpenMarkdownExport={actions.onOpenMarkdownExport} onGoMeetings={openMeetings} onSearch={runPaletteSearch} /> : screen === 'meetings' ? <Meetings events={dayEvents} meetings={meetings} loading={meetingsLoading} focusRequest={meetingFocusRequest} onRefresh={() => loadScreen('meetings')} /> : screen === 'privacy' ? <Privacy config={config} overview={overview} onRefresh={() => loadScreen('privacy')} onSaved={setConfig} onOverview={setOverview} onStart={actions.onStart} onPause={actions.onPause} onResume={actions.onResume} /> : screen === 'search' ? <Search days={days} searchRequest={searchRequest} /> : screen === 'connect' ? <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} /> : screen === 'settings' ? <Settings config={config} overview={overview} bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onSaved={setConfig} /> : <Help logs={logs} onRestartOnboarding={() => { try { localStorage.removeItem(ONBOARDING_KEY); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} setShowOnboarding(true); }} />;
 
-  const screenContent = error ? (
-    <div className="pt-6">
-      <ErrorView error={error} onRetry={() => loadScreen(screen)} />
-    </div>
-  ) : screen === 'dashboard' ? (
-    <Dashboard
-      overview={overview}
-      doctor={doctor}
-      bootstrapEvents={bootstrapEvents}
-      onRefresh={() => loadScreen('dashboard')}
-      onStart={actions.onStart}
-      onStop={actions.onStop}
-      onPause={actions.onPause}
-      onResume={actions.onResume}
-      onTriggerIndex={actions.onTriggerIndex}
-      onTriggerReorganise={actions.onTriggerReorganise}
-      onTriggerFullReindex={actions.onTriggerFullReindex}
-      onBootstrap={actions.onBootstrap}
-      onOpenMarkdownExport={actions.onOpenMarkdownExport}
-      onGoMeetings={openMeetings}
-      onSearch={runPaletteSearch}
-    />
-  ) : screen === 'meetings' ? (
-    <Meetings
-      events={dayEvents}
-      meetings={meetings}
-      loading={meetingsLoading}
-      focusRequest={meetingFocusRequest}
-      onRefresh={() => loadScreen('meetings')}
-    />
-  ) : screen === 'privacy' ? (
-    <Privacy
-      config={config}
-      overview={overview}
-      onRefresh={() => loadScreen('privacy')}
-      onSaved={setConfig}
-      onOverview={setOverview}
-      onStart={actions.onStart}
-      onPause={actions.onPause}
-      onResume={actions.onResume}
-    />
-  ) : screen === 'search' ? (
-    <Search days={days} searchRequest={searchRequest} />
-  ) : screen === 'chat' ? (
-    <Chat />
-  ) : screen === 'connect' ? (
-    <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} />
-  ) : screen === 'settings' ? (
-    <Settings
-      config={config}
-      overview={overview}
-      bootstrapEvents={bootstrapEvents}
-      onClearBootstrapEvents={() => setBootstrapEvents([])}
-      onSaved={setConfig}
-    />
-  ) : (
-    <Help
-      logs={logs}
-      onRestartOnboarding={() => {
-        try {
-          localStorage.removeItem(ONBOARDING_KEY);
-          localStorage.removeItem(ONBOARDING_STEP_KEY);
-          localStorage.removeItem(ONBOARDING_MODEL_KEY);
-        } catch {
-          /* ignore */
-        }
-        setShowOnboarding(true);
-      }}
-    />
-  );
-
-  return (
-    <AppShell
-      screen={screen}
-      onChange={navigateToScreen}
-      overview={overview}
-      onStart={actions.onStart}
-      onStop={actions.onStop}
-      onPause={actions.onPause}
-      onResume={actions.onResume}
-      onSearch={runPaletteSearch}
-      onTriggerIndex={actions.onTriggerIndex}
-      onTriggerReorganise={actions.onTriggerReorganise}
-      onBootstrap={actions.onBootstrap}
-      onCopyMcpSnippet={copyMcpSnippet}
-    >
-      <ErrorBoundary resetKey={screen}>
-        <React.Suspense fallback={<ScreenLoading />}>{screenContent}</React.Suspense>
-      </ErrorBoundary>
-    </AppShell>
-  );
-}
-
-function normaliseDateStart(date: string): string | undefined {
-  const trimmed = date.trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return undefined;
-  return `${trimmed}T00:00:00.000`;
-}
-
-function ScreenLoading() {
-  return (
-    <div className="grid min-h-[50vh] place-items-center text-muted-foreground text-sm">
-      Loading…
-    </div>
-  );
-}
-
-/**
- * Briefly visible scrim while the lazy-loaded Onboarding chunk fetches.
- * In practice this is a couple hundred ms on first install, then never
- * again — but we still need a fallback so React.Suspense doesn't throw.
- */
-function OnboardingLoadingScrim() {
-  return (
-    <div className="grid h-screen place-items-center bg-background text-muted-foreground text-sm">
-      Preparing welcome…
-    </div>
-  );
+  return <AppShell screen={screen} onChange={navigateToScreen} overview={overview} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onSearch={runPaletteSearch} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onBootstrap={actions.onBootstrap} onCopyMcpSnippet={copyMcpSnippet}><ErrorBoundary resetKey={screen}><React.Suspense fallback={<div className="grid min-h-[50vh] place-items-center text-sm text-muted-foreground">Loading…</div>}>{c}</React.Suspense></ErrorBoundary></AppShell>;
 }

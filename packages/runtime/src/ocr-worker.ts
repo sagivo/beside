@@ -3,142 +3,25 @@ import fs from 'node:fs/promises';
 import type { FrameTextSource, IStorage, Logger } from '@cofounderos/interfaces';
 import { redactPii } from './pii.js';
 
-/**
- * OCR worker — runs in the background, picks screenshot frames whose pixels
- * have not been OCR'd yet, runs Tesseract over the screenshot, redacts PII,
- * writes the text back via `storage.setFrameText`.
- *
- * Tesseract.js is a pure-WASM build with no system dependency, which
- * matches our "ships out of the box" promise. It costs ~1-3s per frame
- * on a modern Mac and ~12MB of one-time language-data download. The
- * worker is therefore throttled (small batches, sleeps between) and can
- * be paused / disabled via config.
- *
- * Design notes:
- *  - Lazy-loads tesseract.js so the package's startup cost is unchanged
- *    until OCR actually runs.
- *  - Reuses a single Tesseract worker across ticks (worker creation is
- *    expensive — ~2s — and would dominate runtime if recreated).
- *  - Never blocks indexing or capture: failures are logged and the frame
- *    is marked as attempted so corrupt assets do not loop forever.
- */
+interface OcrWorkerOptions { batchSize?: number; enabled?: boolean; storageRoot: string; sensitiveKeywords?: string[]; skipWhenAxTextChars?: number; }
+export interface OcrWorkerResult { processed: number; failed: number; remaining: number; }
+type TesseractWorker = { recognize(image: string | Buffer): Promise<{ data: { text: string } }>; setParameters(params: Record<string, string>): Promise<unknown>; terminate(): Promise<unknown>; };
 
-interface OcrWorkerOptions {
-  /** Frames per tick. Each frame ≈ 1–3s on Apple Silicon. Default 3. */
-  batchSize?: number;
-  /** Skip OCR entirely (still wires up the worker for tests). */
-  enabled?: boolean;
-  /** Storage root (absolute) — used to resolve relative `asset_path`. */
-  storageRoot: string;
-  /** Substrings whose presence causes a *line* to be redacted. */
-  sensitiveKeywords?: string[];
-  /**
-   * When a frame already has accessibility-text coverage of at least
-   * this many characters, skip OCR for that frame entirely. AX text is
-   * verbatim from the focused app's text widgets (Slack, Mail, Cursor,
-   * browsers, Notion, Linear, …) — substantially better than OCR for
-   * those apps, and once we have ~400+ chars the marginal value of
-   * adding OCR-recovered toolbar/menu text rarely justifies 1-3s of
-   * Tesseract CPU per frame. Set 0 to always run OCR.
-   */
-  skipWhenAxTextChars?: number;
-}
-
-/**
- * Default AX-text length above which we treat OCR as redundant. Tuned
- * conservatively — at 400 chars the focused window has surfaced a
- * meaningful body of text via the AX tree, and `mergeVisualText`'s
- * line-level dedupe means OCR contributions on top of that are
- * typically a handful of menu/toolbar labels. Tunable via the
- * `skipWhenAxTextChars` option.
- */
-const DEFAULT_SKIP_WHEN_AX_TEXT_CHARS = 400;
-
-export interface OcrWorkerResult {
-  processed: number;
-  failed: number;
-  remaining: number;
-}
-
-// Minimal subset of the tesseract.js Worker we actually use. We model
-// terminate() as `Promise<unknown>` so the real type's `Promise<ConfigResult>`
-// satisfies it without forcing us to import tesseract.js at type-check time.
-type TesseractWorker = {
-  recognize(image: string | Buffer): Promise<{ data: { text: string } }>;
-  setParameters(params: Record<string, string>): Promise<unknown>;
-  terminate(): Promise<unknown>;
-};
-
-/**
- * Longest edge (px) of the temporary image we feed to Tesseract. This does
- * not change the stored screenshot. It gives downscaled UI captures enough
- * pixels for small text while still capping native Retina screenshots before
- * Leptonica starts treating hairline borders as text candidates.
- */
 const OCR_WORKING_MAX_DIM = 2000;
-
-/**
- * Leptonica (the image library Tesseract bundles) writes diagnostic lines
- * like `Error in boxClipToRectangle: box outside rectangle` directly to the
- * process's native stderr via `fprintf`. They are non-fatal — Leptonica
- * recovers, OCR continues — but they bypass tesseract.js's `logger`
- * callback and `debug_file` parameter entirely, so the only place we can
- * suppress them is at the Node stderr boundary.
- *
- * We install a one-time, additive filter: any line that exactly matches a
- * known Leptonica chatter pattern is dropped; everything else (including
- * unfamiliar Leptonica messages we *do* want to see) passes through
- * untouched. The patch is idempotent and never replaces a previously
- * patched write, so multiple OcrWorker instances are safe.
- */
-// Loosened to `startsWith`-style anchored prefixes. Leptonica occasionally
-// appends coordinate hints ("box outside rectangle: x = 12, y = …") or
-// trailing whitespace that broke the previous strict `^…\s*$` form, so
-// users would still see noise leak through. We match the function-and-error
-// preamble and let anything after slide.
-const LEPTONICA_NOISE = [
-  /^Error in boxClipToRectangle:/,
-  /^Error in pixScanForForeground:/,
-  /^Image too small to scale!!/,
-];
-
+const LEPTONICA_NOISE = [/^Error in boxClipToRectangle:/, /^Error in pixScanForForeground:/, /^Image too small to scale!!/];
 let stderrFilterInstalled = false;
-function installLeptonicaStderrFilter(): void {
-  if (stderrFilterInstalled) return;
-  stderrFilterInstalled = true;
-  const original = process.stderr.write.bind(process.stderr);
-  // We accept the same overloads as `process.stderr.write`. Leptonica often
-  // writes through native stderr as Buffer chunks, so inspect UTF-8 text in
-  // both string and Uint8Array paths while passing unrelated chunks through.
-  const filtered = ((
-    chunk: string | Uint8Array,
-    encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
-    cb?: (err?: Error | null) => void,
-  ): boolean => {
-    const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
-    const out = filterLeptonicaNoise(text);
-    if (out === text) {
-      return original(chunk, encodingOrCb as BufferEncoding, cb);
-    }
-    const done = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
-    if (out.length === 0) {
-      if (done) done();
-      return true;
-    }
-    return original(out, done);
-  }) as typeof process.stderr.write;
-  process.stderr.write = filtered;
-}
 
-function filterLeptonicaNoise(text: string): string {
-  const lines = text.split('\n');
-  const kept = lines.filter((line, idx) => {
-    // Preserve a trailing empty string that comes from a terminating newline
-    // so unrelated multi-line chunks keep their final line boundary.
-    if (idx === lines.length - 1 && line === '') return true;
-    return !LEPTONICA_NOISE.some((re) => re.test(line));
-  });
-  return kept.join('\n');
+function installLeptonicaStderrFilter(): void {
+  if (stderrFilterInstalled) return; stderrFilterInstalled = true;
+  const o = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: string | Uint8Array, e?: BufferEncoding | ((err?: Error | null) => void), cb?: (err?: Error | null) => void) => {
+    const t = typeof c === 'string' ? c : Buffer.from(c).toString('utf8');
+    const out = t.split('\n').filter((l, i, a) => (i === a.length - 1 && l === '') || !LEPTONICA_NOISE.some(re => re.test(l))).join('\n');
+    if (out === t) return o(c, e as BufferEncoding, cb);
+    const d = typeof e === 'function' ? e : cb;
+    if (!out.length) { if (d) d(); return true; }
+    return o(out, d);
+  }) as any;
 }
 
 export class OcrWorker {
@@ -148,432 +31,102 @@ export class OcrWorker {
   private readonly storageRoot: string;
   private readonly sensitiveKeywords: string[];
   private readonly skipWhenAxTextChars: number;
-
   private workerPromise: Promise<TesseractWorker | null> | null = null;
   private terminating = false;
-  private startupLogged = false;
-  private axSkipCount = 0;
-  /**
-   * Wall-clock of the last actual Tesseract `recognize()` call. We use
-   * this to free the worker after a period of OCR-free ticks — on a
-   * desk where the user is mostly in apps with rich Accessibility text
-   * (Slack/Cursor/browser), Tesseract gets called rarely yet the worker
-   * sits in memory holding ~50-100 MB plus its trained data file.
-   */
   private lastTesseractUseAt: number | null = null;
-  /**
-   * Idle window before a loaded Tesseract worker is freed. 10 min is
-   * comfortably longer than the scheduler's tick cadence (30 s) so we
-   * don't thrash on slightly bursty workloads, but short enough that
-   * the desktop's footprint shrinks when the user moves to a screen
-   * cocktail of OCR-skippable apps for a while. Reload on next real
-   * use takes ~1 s + lazy import.
-   */
-  private readonly tesseractIdleEvictMs = 10 * 60_000;
 
-  constructor(
-    private readonly storage: IStorage,
-    logger: Logger,
-    opts: OcrWorkerOptions,
-  ) {
+  constructor(private readonly storage: IStorage, logger: Logger, opts: OcrWorkerOptions) {
     this.logger = logger.child('ocr-worker');
-    this.batchSize = opts.batchSize ?? 3;
-    this.enabled = opts.enabled ?? true;
-    this.storageRoot = opts.storageRoot;
-    this.sensitiveKeywords = opts.sensitiveKeywords ?? [];
-    this.skipWhenAxTextChars = Math.max(
-      0,
-      opts.skipWhenAxTextChars ?? DEFAULT_SKIP_WHEN_AX_TEXT_CHARS,
-    );
-    // Install the stderr filter eagerly so Leptonica chatter is suppressed
-    // from the very first OCR tick. Previously the filter was set up
-    // lazily inside `getWorker()`, which left a small race where the
-    // initial Tesseract worker boot could flush a backlog of messages
-    // before the patch landed.
+    this.batchSize = opts.batchSize ?? 3; this.enabled = opts.enabled ?? true; this.storageRoot = opts.storageRoot;
+    this.sensitiveKeywords = opts.sensitiveKeywords ?? []; this.skipWhenAxTextChars = Math.max(0, opts.skipWhenAxTextChars ?? 400);
     if (this.enabled) installLeptonicaStderrFilter();
   }
 
-  /** One pass: process up to `batchSize` pending frames. */
   async tick(): Promise<OcrWorkerResult> {
-    if (!this.enabled || this.terminating) {
-      return { processed: 0, failed: 0, remaining: 0 };
-    }
-    // Free the Tesseract worker after a sustained idle period. Cheap —
-    // a property check + maybe a `terminate()` once every ~10 min.
+    if (!this.enabled || this.terminating) return { processed: 0, failed: 0, remaining: 0 };
     await this.maybeEvictIdleTesseractWorker();
     const tasks = await this.storage.listFramesNeedingOcr(this.batchSize);
-    if (tasks.length === 0) {
-      return { processed: 0, failed: 0, remaining: 0 };
-    }
+    if (!tasks.length) return { processed: 0, failed: 0, remaining: 0 };
 
-    // First pass: drain frames that don't actually need Tesseract.
-    //
-    //   1. AX-text-already-covers — when the focused app surfaces
-    //      enough text via the Accessibility tree, OCR's marginal
-    //      value rarely justifies 1-3s of CPU per frame. AX text is
-    //      verbatim from the widget tree (Slack, Mail, Cursor,
-    //      browsers, Notion, Linear, …); the merge in mergeVisualText
-    //      typically only gains a handful of menu/toolbar labels on
-    //      top.
-    //
-    //   2. Perceptual-hash cache hit — when the user toggles back to
-    //      a window/tab they've already seen, the captured pixels are
-    //      identical and Tesseract will return the same text it did
-    //      the first time. Reusing the prior result is correct and
-    //      saves the entire recognize() cost.
-    //
-    // In both cases we mark the row with a terminal text_source so it
-    // moves out of `listFramesNeedingOcr`'s candidate set.
-    const phashLookupAvailable =
-      typeof this.storage.findOcrTextByPerceptualHash === 'function';
-    let processed = 0;
-    let axSkipped = 0;
-    let phashSkipped = 0;
-    const remaining: typeof tasks = [];
-    for (const task of tasks) {
+    let processed = 0, failed = 0; const rem: typeof tasks = [];
+    for (const t of tasks) {
       if (this.terminating) break;
-      const existingText = (task.existing_text ?? '').trim();
-      if (
-        this.skipWhenAxTextChars > 0 &&
-        task.existing_source === 'accessibility' &&
-        existingText.length >= this.skipWhenAxTextChars
-      ) {
+      const exT = (t.existing_text ?? '').trim();
+      if (this.skipWhenAxTextChars > 0 && t.existing_source === 'accessibility' && exT.length >= this.skipWhenAxTextChars) {
+        try { await this.storage.setFrameText(t.id, exT, 'ocr_accessibility'); processed++; continue; } catch {}
+      }
+      if (t.perceptual_hash && this.storage.findOcrTextByPerceptualHash) {
         try {
-          await this.storage.setFrameText(task.id, existingText, 'ocr_accessibility');
-          processed += 1;
-          axSkipped += 1;
-          this.axSkipCount += 1;
-          continue;
-        } catch (err) {
-          this.logger.debug('ax-skip mark failed; falling through to OCR', {
-            id: task.id,
-            err: String(err),
-          });
-        }
+          const c = await this.storage.findOcrTextByPerceptualHash(t.perceptual_hash, t.id);
+          if (c?.text) { await this.storage.setFrameText(t.id, mergeVisualText(c.text, exT), exT && t.existing_source === 'accessibility' ? 'ocr_accessibility' : c.source); processed++; continue; }
+        } catch {}
       }
-
-      // Perceptual-hash cache lookup. Cheap (indexed) and saves the
-      // ~1-3s recognize() round-trip when it hits.
-      if (phashLookupAvailable && task.perceptual_hash) {
-        try {
-          const cached = await this.storage.findOcrTextByPerceptualHash!(
-            task.perceptual_hash,
-            task.id,
-          );
-          if (cached && cached.text) {
-            const merged = mergeVisualText(cached.text, existingText);
-            const source = existingText && task.existing_source === 'accessibility'
-              ? 'ocr_accessibility'
-              : cached.source;
-            await this.storage.setFrameText(task.id, merged, source);
-            processed += 1;
-            phashSkipped += 1;
-            continue;
-          }
-        } catch (err) {
-          this.logger.debug('phash cache lookup failed; falling through to OCR', {
-            id: task.id,
-            err: String(err),
-          });
-        }
-      }
-
-      remaining.push(task);
+      rem.push(t);
     }
 
-    if (remaining.length === 0) {
-      // Everything in this batch was AX-covered or pixel-cached. Don't
-      // even boot Tesseract — it's a ~2s / ~100 MB warmup we'd
-      // otherwise pay for nothing on AX-rich or static-screen workloads.
-      if (processed > 0) {
-        this.logger.debug(
-          `ocr: ${processed} processed (${axSkipped} ax-skipped, ${phashSkipped} phash-cached, 0 failed)`,
-        );
-      }
-      return { processed, failed: 0, remaining: 0 };
-    }
+    if (!rem.length) return { processed, failed: 0, remaining: 0 };
 
-    const worker = await this.getWorker();
-    if (!worker) {
-      // Tesseract failed to load; disable until restart so we don't
-      // log an error every 30s for the rest of the session.
-      this.logger.warn('OCR worker disabled (tesseract.js unavailable)');
-      return { processed, failed: remaining.length, remaining: remaining.length };
-    }
+    const w = await this.getWorker();
+    if (!w) { this.logger.warn('tesseract unavailable'); return { processed, failed: rem.length, remaining: rem.length }; }
 
-    let failed = 0;
-    for (const task of remaining) {
+    for (const t of rem) {
       if (this.terminating) break;
+      const exT = (t.existing_text ?? '').trim(), src = exT && t.existing_source === 'accessibility' ? 'ocr_accessibility' : 'ocr';
       try {
-        const abs = path.isAbsolute(task.asset_path)
-          ? task.asset_path
-          : path.join(this.storageRoot, task.asset_path);
-        const existingText = (task.existing_text ?? '').trim();
-        const completedSource = completedOcrSource(task.existing_source, existingText);
-        // Confirm the file still exists; old screenshots may have been
-        // vacuumed away.
-        try {
-          await fs.access(abs);
-        } catch {
-          await this.storage.setFrameText(task.id, existingText, completedSource);
-          processed += 1;
-          continue;
-        }
-        const input = await prepareForOcr(abs);
-        if (input === null) {
-          // Image too small / unreadable to OCR — record empty text so
-          // it won't be re-queued, and skip the recognize() call (which
-          // is what was producing the Leptonica box-clip noise).
-          await this.storage.setFrameText(task.id, existingText, completedSource);
-          processed += 1;
-          continue;
-        }
-        const result = await worker.recognize(input);
-        this.lastTesseractUseAt = Date.now();
-        const raw = (result.data.text ?? '').trim();
-        const cleaned = redactPii(raw, this.sensitiveKeywords);
-        const merged = mergeVisualText(cleaned, existingText);
-        await this.storage.setFrameText(task.id, merged, completedSource);
-        processed += 1;
-      } catch (err) {
-        failed += 1;
-        this.logger.debug(`ocr failed for frame ${task.id}`, { err: String(err) });
-        // Mark as OCR-attempted so we don't retry forever on a corrupt file.
-        try {
-          const existingText = (task.existing_text ?? '').trim();
-          await this.storage.setFrameText(
-            task.id,
-            existingText,
-            completedOcrSource(task.existing_source, existingText),
-          );
-        } catch {
-          // ignore
-        }
-      }
+        const abs = path.isAbsolute(t.asset_path) ? t.asset_path : path.join(this.storageRoot, t.asset_path);
+        try { await fs.access(abs); } catch { await this.storage.setFrameText(t.id, exT, src); processed++; continue; }
+        const i = await prepareForOcr(abs);
+        if (!i) { await this.storage.setFrameText(t.id, exT, src); processed++; continue; }
+        const res = await w.recognize(i); this.lastTesseractUseAt = Date.now();
+        await this.storage.setFrameText(t.id, mergeVisualText(redactPii((res.data.text ?? '').trim(), this.sensitiveKeywords), exT), src);
+        processed++;
+      } catch (err) { failed++; try { await this.storage.setFrameText(t.id, exT, src); } catch {} }
     }
-    if (processed > 0) {
-      this.logger.debug(
-        `ocr: ${processed} processed (${axSkipped} ax-skipped, ${phashSkipped} phash-cached, ${failed} failed)`,
-      );
-    }
-    return {
-      processed,
-      failed,
-      remaining: Math.max(0, tasks.length - processed),
-    };
+    return { processed, failed, remaining: Math.max(0, tasks.length - processed) };
   }
 
   async drain(maxTicks = 1000): Promise<OcrWorkerResult> {
-    const total: OcrWorkerResult = { processed: 0, failed: 0, remaining: 0 };
-    for (let i = 0; i < maxTicks; i++) {
-      const r = await this.tick();
-      total.processed += r.processed;
-      total.failed += r.failed;
-      total.remaining = r.remaining;
-      const touched = r.processed + r.failed;
-      if (touched === 0) break;
-      // If a tick only failed, there may have been no durable progress
-      // (for example, tesseract.js failed to initialise). Avoid a tight
-      // retry loop and let a later scheduler beat try again.
-      if (r.processed === 0) break;
-      if (touched < this.batchSize) break;
-    }
-    return total;
+    const tot = { processed: 0, failed: 0, remaining: 0 };
+    for (let i = 0; i < maxTicks; i++) { const r = await this.tick(); tot.processed += r.processed; tot.failed += r.failed; tot.remaining = r.remaining; if (!r.processed || r.processed + r.failed < this.batchSize) break; }
+    return tot;
   }
 
-  async stop(): Promise<void> {
-    this.terminating = true;
-    const w = await this.workerPromise;
-    if (w) {
-      try {
-        await w.terminate();
-      } catch (err) {
-        this.logger.debug('worker terminate failed', { err: String(err) });
-      }
-    }
-    this.workerPromise = null;
-  }
+  async stop(): Promise<void> { this.terminating = true; const w = await this.workerPromise; if (w) try { await w.terminate(); } catch {} this.workerPromise = null; }
 
-  /**
-   * Free the Tesseract worker if it hasn't been used to actually
-   * recognize a frame in `tesseractIdleEvictMs` ms. AX-text-skip
-   * and phash-skip paths don't bump `lastTesseractUseAt`, so a long
-   * stretch in OCR-friendly apps lets the worker get evicted.
-   *
-   * Cheap — when the worker is unloaded, this is just a property
-   * check; when it's loaded but in-use, the timestamp was just bumped.
-   */
   private async maybeEvictIdleTesseractWorker(): Promise<void> {
-    if (!this.workerPromise) return;
-    if (this.lastTesseractUseAt == null) return;
-    if (Date.now() - this.lastTesseractUseAt < this.tesseractIdleEvictMs) return;
-    const promise = this.workerPromise;
-    this.workerPromise = null;
-    this.lastTesseractUseAt = null;
-    try {
-      const w = await promise;
-      if (w) await w.terminate();
-      this.logger.info(
-        `OCR worker evicted (idle for >${Math.round(this.tesseractIdleEvictMs / 60_000)}m)`,
-      );
-    } catch (err) {
-      this.logger.debug('idle OCR worker eviction failed', { err: String(err) });
-    }
+    if (!this.workerPromise || !this.lastTesseractUseAt || Date.now() - this.lastTesseractUseAt < 600000) return;
+    const p = this.workerPromise; this.workerPromise = null; this.lastTesseractUseAt = null;
+    try { const w = await p; if (w) await w.terminate(); } catch {}
   }
 
   private async getWorker(): Promise<TesseractWorker | null> {
     if (this.workerPromise) return this.workerPromise;
-    this.workerPromise = (async (): Promise<TesseractWorker | null> => {
+    this.workerPromise = (async () => {
       try {
-        // Defensive: idempotent re-install in case OcrWorker was
-        // constructed with `enabled: false` and toggled on later.
         installLeptonicaStderrFilter();
-        if (!this.startupLogged) {
-          this.logger.info(
-            'starting OCR worker (first run downloads ~12MB of language data; subsequent runs are cached)',
-          );
-          this.startupLogged = true;
-        }
-        // Lazy import — keeps tesseract.js out of the cold-start path.
-        // Cast through `unknown` because tesseract.js's published types
-        // are wide and we only use a narrow slice (recognize + terminate).
-        const ts = (await import('tesseract.js')) as unknown as {
-          createWorker: (
-            lang?: string,
-            oem?: number,
-            opts?: Record<string, unknown>,
-          ) => Promise<TesseractWorker>;
-        };
-        const worker = await ts.createWorker('eng', 1, {
-          // Quiet down tesseract.js — its default logger spams every page.
-          logger: () => undefined,
-        });
-        // PSM 11 = sparse text. Screenshots of UIs aren't paragraphs, they
-        // are scattered labels, buttons, menus. PSM 11 produces far fewer
-        // degenerate single-column "line" candidates than the default PSM 3,
-        // which both improves recall on UI text and silences most of
-        // Leptonica's "Image too small to scale!!" warnings.
-        //
-        // `debug_file` redirects Tesseract/Leptonica's native stderr chatter
-        // (which the JS `logger` callback above cannot intercept) to /dev/null.
-        try {
-          await worker.setParameters({
-            tessedit_pageseg_mode: '11',
-            debug_file: '/dev/null',
-          });
-        } catch (err) {
-          this.logger.debug('setParameters failed (continuing with defaults)', {
-            err: String(err),
-          });
-        }
-        return worker;
-      } catch (err) {
-        this.logger.warn('failed to initialise tesseract.js', { err: String(err) });
-        return null;
-      }
+        const ts = (await import('tesseract.js')) as any, w = await ts.createWorker('eng', 1, { logger: () => {} });
+        try { await w.setParameters({ tessedit_pageseg_mode: '11', debug_file: '/dev/null' }); } catch {}
+        return w;
+      } catch { return null; }
     })();
     return this.workerPromise;
   }
 }
 
-function completedOcrSource(
-  existingSource: FrameTextSource | null,
-  existingText: string,
-): Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'> {
-  return existingSource === 'accessibility' && existingText
-    ? 'ocr_accessibility'
-    : 'ocr';
+function mergeVisualText(o: string, a: string): string {
+  const l: string[] = [], s = new Set<string>();
+  for (const b of [o, a]) for (const r of b.split(/\r?\n/)) { const c = r.replace(/\s+/g, ' ').trim(); if (c && !s.has(c.toLowerCase())) { s.add(c.toLowerCase()); l.push(c); } }
+  return l.join('\n').trim();
 }
 
-function mergeVisualText(ocrText: string, accessibilityText: string): string {
-  const lines: string[] = [];
-  const seen = new Set<string>();
-
-  for (const block of [ocrText, accessibilityText]) {
-    for (const rawLine of block.split(/\r?\n/)) {
-      const line = rawLine.replace(/\s+/g, ' ').trim();
-      if (!line) continue;
-      const key = line.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      lines.push(line);
-    }
-  }
-
-  return lines.join('\n').trim();
-}
-
-/**
- * Prepare a temporary OCR input without changing the captured asset.
- * Stored screenshots are usually WebP and may be capped for disk usage, so
- * we decode through sharp, resize to a stable working size, normalize
- * contrast, and hand Tesseract a PNG buffer. Dark-mode screenshots are
- * inverted because Tesseract is much better at black text on light
- * backgrounds than the reverse.
- *
- * Falls back to the raw file path on failure so a sharp glitch never blocks
- * OCR entirely.
- */
-/**
- * Minimum image dimension (px) we'll send to Tesseract. Below this,
- * Leptonica's page segmentation produces degenerate boxes that overflow
- * the image rectangle, triggering the
- *   `Error in boxClipToRectangle: box outside rectangle`
- *   `Error in pixScanForForeground: invalid box`
- * native-stderr noise. The threshold is intentionally conservative: real
- * UI screenshots are always orders of magnitude larger; anything smaller
- * is almost certainly a corrupt capture (failed permission, screen lock
- * race, off-screen window) where there's nothing to OCR anyway.
- */
-const OCR_MIN_DIM = 64;
-
-async function prepareForOcr(absPath: string): Promise<string | Buffer | null> {
+async function prepareForOcr(abs: string): Promise<string | Buffer | null> {
   try {
-    // Lazy import to keep `sharp` out of the cold-start path. The encode
-    // happens once per frame and is dwarfed by tesseract's recognize().
-    const sharp = (await import('sharp')).default;
-    const img = sharp(absPath, { failOn: 'none' });
-    const meta = await img.metadata();
-    if (
-      !meta.width ||
-      !meta.height ||
-      meta.width < OCR_MIN_DIM ||
-      meta.height < OCR_MIN_DIM
-    ) {
-      // Skip — caller treats `null` as "no text, don't bother Tesseract".
-      return null;
-    }
-    const stats = await img
-      .clone()
-      .resize({ width: 64, height: 64, fit: 'inside' })
-      .grayscale()
-      .stats();
-    const meanLuminance = stats.channels[0]?.mean ?? 255;
-    let pipeline = img
-      .resize({
-        width: OCR_WORKING_MAX_DIM,
-        height: OCR_WORKING_MAX_DIM,
-        fit: 'inside',
-      })
-      .grayscale()
-      .normalise();
-    if (meanLuminance < 128) {
-      pipeline = pipeline.negate({ alpha: false });
-    }
-    // `compressionLevel: 0` writes a "stored" (uncompressed) PNG. We
-    // hand the buffer directly to Tesseract and discard it, so the
-    // larger byte size never hits disk or the network — and skipping
-    // zlib altogether shaves a few ms per frame from the encode. Level
-    // 1 was the previous "fastest with some compression"; level 0 is
-    // strictly faster for an in-memory consumer.
-    return await pipeline
-      .png({ compressionLevel: 0 })
-      .toBuffer();
-  } catch {
-    return absPath;
-  }
+    const sharp = (await import('sharp')).default, img = sharp(abs, { failOn: 'none' }), meta = await img.metadata();
+    if (!meta.width || !meta.height || meta.width < 64 || meta.height < 64) return null;
+    let pipe = img.resize({ width: OCR_WORKING_MAX_DIM, height: OCR_WORKING_MAX_DIM, fit: 'inside' }).grayscale().normalise();
+    if (((await img.clone().resize({ width: 64, height: 64, fit: 'inside' }).grayscale().stats()).channels[0]?.mean ?? 255) < 128) pipe = pipe.negate({ alpha: false });
+    return await pipe.png({ compressionLevel: 0 }).toBuffer();
+  } catch { return abs; }
 }
 
-// Re-export so existing callers of `import { redactPii } from './ocr-worker.js'`
-// continue to work — the canonical home is now `./pii.ts`.
 export { redactPii } from './pii.js';

@@ -55,13 +55,6 @@ const api = {
   onOverview: (callback) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview) => callback(overview));
   },
-  startChat: (params) => ipcRenderer.invoke('cofounderos:chat-start', params),
-  cancelChat: (turnId) => ipcRenderer.invoke('cofounderos:chat-cancel', turnId),
-  onChatEvent: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on('cofounderos:chat-event', listener);
-    return () => ipcRenderer.removeListener('cofounderos:chat-event', listener);
-  },
   listMeetings: (query) => ipcRenderer.invoke('cofounderos:list-meetings', query),
   listDayEvents: (query) => ipcRenderer.invoke('cofounderos:list-day-events', query),
   getActionCenter: (query) => ipcRenderer.invoke('cofounderos:get-action-center', query),

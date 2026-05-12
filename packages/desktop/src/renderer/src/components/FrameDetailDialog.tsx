@@ -1,31 +1,7 @@
 import * as React from 'react';
-import {
-  Calendar,
-  Clock,
-  ExternalLink,
-  FileText,
-  ImageOff,
-  Layers,
-  Sparkles,
-  Trash2,
-} from 'lucide-react';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { Calendar, Clock, ExternalLink, FileText, ImageOff, Layers, Sparkles, Trash2 } from 'lucide-react';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -35,448 +11,101 @@ import { formatLocalTime, localDayKey, prettyDay } from '@/lib/format';
 import { buildFrameSearchContext } from '@/lib/search-context';
 import type { Frame, FrameIndexDetails } from '@/global';
 
-type DeleteHandler = (frame: Frame) => void | Promise<void>;
-
-interface FrameSearchContext {
-  query: string;
-  explanation?: string;
-}
-
-interface FrameDetailContextValue {
-  open: (frame: Frame, opts?: { onDeleted?: DeleteHandler; searchContext?: FrameSearchContext }) => void;
-  close: () => void;
-}
+type DeleteHandler = (f: Frame) => void | Promise<void>;
+interface FrameSearchContext { query: string; explanation?: string; }
+interface FrameDetailContextValue { open: (f: Frame, o?: { onDeleted?: DeleteHandler; searchContext?: FrameSearchContext }) => void; close: () => void; }
 
 const FrameDetailContext = React.createContext<FrameDetailContextValue | null>(null);
 
 export function FrameDetailProvider({ children }: { children: React.ReactNode }) {
-  const [frame, setFrame] = React.useState<Frame | null>(null);
-  const [searchContext, setSearchContext] = React.useState<FrameSearchContext | null>(null);
-  // Per-open `onDeleted` callback so screens can refresh their lists when
-  // a frame opened from them gets deleted. Stored in a ref so re-renders
-  // don't reset the binding.
-  const onDeletedRef = React.useRef<DeleteHandler | null>(null);
-
-  const value = React.useMemo<FrameDetailContextValue>(
-    () => ({
-      open: (next, opts) => {
-        onDeletedRef.current = opts?.onDeleted ?? null;
-        setSearchContext(opts?.searchContext ?? null);
-        setFrame(next);
-      },
-      close: () => {
-        setFrame(null);
-        setSearchContext(null);
-      },
-    }),
-    [],
-  );
-
-  return (
-    <FrameDetailContext.Provider value={value}>
-      {children}
-      <FrameDetailDialog
-        frame={frame}
-        searchContext={searchContext}
-        onOpenChange={(open) => {
-          if (!open) {
-            setFrame(null);
-            setSearchContext(null);
-            onDeletedRef.current = null;
-          }
-        }}
-        onDeleted={(deleted) => {
-          const cb = onDeletedRef.current;
-          onDeletedRef.current = null;
-          setFrame(null);
-          setSearchContext(null);
-          if (cb) void cb(deleted);
-        }}
-      />
-    </FrameDetailContext.Provider>
-  );
+  const [frame, setFrame] = React.useState<Frame | null>(null), [sc, setSc] = React.useState<FrameSearchContext | null>(null), odRef = React.useRef<DeleteHandler | null>(null);
+  const val = React.useMemo<FrameDetailContextValue>(() => ({ open: (n, o) => { odRef.current = o?.onDeleted ?? null; setSc(o?.searchContext ?? null); setFrame(n); }, close: () => { setFrame(null); setSc(null); } }), []);
+  return <FrameDetailContext.Provider value={val}>{children}<FrameDetailDialog frame={frame} searchContext={sc} onOpenChange={(o: boolean) => { if (!o) { setFrame(null); setSc(null); odRef.current = null; } }} onDeleted={(d: Frame) => { const cb = odRef.current; odRef.current = null; setFrame(null); setSc(null); if (cb) void cb(d); }} /></FrameDetailContext.Provider>;
 }
 
 export function useFrameDetail(): FrameDetailContextValue {
-  const ctx = React.useContext(FrameDetailContext);
-  if (!ctx) throw new Error('useFrameDetail must be used within <FrameDetailProvider>');
-  return ctx;
+  const ctx = React.useContext(FrameDetailContext); if (!ctx) throw new Error('useFrameDetail must be used within <FrameDetailProvider>'); return ctx;
 }
 
-function FrameDetailDialog({
-  frame,
-  searchContext,
-  onOpenChange,
-  onDeleted,
-}: {
-  frame: Frame | null;
-  searchContext: FrameSearchContext | null;
-  onOpenChange: (open: boolean) => void;
-  onDeleted: (frame: Frame) => void;
-}) {
-  return (
-    <Dialog open={frame !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl gap-0 overflow-hidden p-0">
-        {frame ? (
-          <FrameDetailBody
-            frame={frame}
-            searchContext={searchContext}
-            onDeleted={() => onDeleted(frame)}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
+function FrameDetailDialog({ frame, searchContext, onOpenChange, onDeleted }: any) {
+  return <Dialog open={frame !== null} onOpenChange={onOpenChange}><DialogContent className="max-w-4xl gap-0 overflow-hidden p-0">{frame ? <FrameDetailBody frame={frame} searchContext={searchContext} onDeleted={() => onDeleted(frame)} /> : null}</DialogContent></Dialog>;
 }
 
-function FrameDetailBody({
-  frame,
-  searchContext,
-  onDeleted,
-}: {
-  frame: Frame;
-  searchContext: FrameSearchContext | null;
-  onDeleted: () => void;
-}) {
-  const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
-  const [detailExplanation, setDetailExplanation] = React.useState<string | null>(
-    searchContext?.explanation ?? null,
-  );
-  const [indexDetails, setIndexDetails] = React.useState<FrameIndexDetails | null>(null);
-  const [indexDetailsLoading, setIndexDetailsLoading] = React.useState(false);
+function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
+  const [thumbUrl, setThumbUrl] = React.useState<string | null>(null), [exp, setExp] = React.useState<string | null>(searchContext?.explanation ?? null), [idxDet, setIdxDet] = React.useState<FrameIndexDetails | null>(null), [idxLoad, setIdxLoad] = React.useState(false);
 
   React.useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      if (!frame.asset_path) {
-        setThumbUrl(null);
-        return;
-      }
-      const cached = thumbnailCache.get(frame.asset_path);
-      if (cached) {
-        setThumbUrl(cached);
-        return;
-      }
-      try {
-        const url = await resolveAssetUrl(frame.asset_path);
-        if (cancelled) return;
-        cacheThumbnail(frame.asset_path, url);
-        setThumbUrl(url);
-      } catch {
-        setThumbUrl(null);
-      }
-    }
-    void load();
-    return () => {
-      cancelled = true;
+    let c = false; const load = async () => {
+      if (!frame.asset_path) return setThumbUrl(null);
+      const ch = thumbnailCache.get(frame.asset_path); if (ch) return setThumbUrl(ch);
+      try { const u = await resolveAssetUrl(frame.asset_path); if (!c) { cacheThumbnail(frame.asset_path, u); setThumbUrl(u); } } catch { setThumbUrl(null); }
     };
+    load(); return () => { c = true; };
   }, [frame.asset_path]);
 
   React.useEffect(() => {
-    let cancelled = false;
-    const query = searchContext?.query.trim();
-    setDetailExplanation(searchContext?.explanation ?? null);
-    if (!query || searchContext?.explanation || !frame.id) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    void (async () => {
-      try {
-        const explained = await window.cofounderos.explainSearchResults({
-          text: query,
-          frames: [frame],
-        });
-        if (!cancelled) setDetailExplanation(explained[0]?.explanation ?? null);
-      } catch {
-        if (!cancelled) setDetailExplanation(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    let c = false; const q = searchContext?.query.trim(); setExp(searchContext?.explanation ?? null);
+    if (!q || searchContext?.explanation || !frame.id) return () => { c = true; };
+    (async () => { try { const e = await window.cofounderos.explainSearchResults({ text: q, frames: [frame] }); if (!c) setExp(e[0]?.explanation ?? null); } catch { if (!c) setExp(null); } })();
+    return () => { c = true; };
   }, [frame, searchContext?.explanation, searchContext?.query]);
 
   React.useEffect(() => {
-    let cancelled = false;
-    setIndexDetails(null);
-    if (!frame.id) {
-      setIndexDetailsLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setIndexDetailsLoading(true);
-    void window.cofounderos
-      .getFrameIndexDetails(frame.id)
-      .then((details) => {
-        if (!cancelled) setIndexDetails(details);
-      })
-      .catch(() => {
-        if (!cancelled) setIndexDetails(null);
-      })
-      .finally(() => {
-        if (!cancelled) setIndexDetailsLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    let c = false; setIdxDet(null);
+    if (!frame.id) { setIdxLoad(false); return () => { c = true; }; }
+    setIdxLoad(true);
+    window.cofounderos.getFrameIndexDetails(frame.id).then(d => { if (!c) setIdxDet(d); }).catch(() => { if (!c) setIdxDet(null); }).finally(() => { if (!c) setIdxLoad(false); });
+    return () => { c = true; };
   }, [frame.id]);
 
-  const title =
-    frame.window_title ||
-    frame.entity_path ||
-    frame.url ||
-    (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 80) : 'Untitled moment');
-  const time = formatLocalTime(frame.timestamp, { seconds: true });
-  const day = frame.day || (frame.timestamp ? localDayKey(new Date(frame.timestamp)) : '');
-  const metadataEntries = Object.entries(indexDetails?.metadata ?? {}).filter(
-    ([key]) => !AI_CAPTION_KEYS.has(key),
-  );
-  const searchContextText = searchContext
-    ? detailExplanation ?? buildFrameSearchContext(searchContext.query, frame)
-    : null;
+  const title = frame.window_title || frame.entity_path || frame.url || (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 80) : 'Untitled moment');
+  const time = formatLocalTime(frame.timestamp, { seconds: true }), day = frame.day || (frame.timestamp ? localDayKey(new Date(frame.timestamp)) : '');
+  const mdE = Object.entries(idxDet?.metadata ?? {}).filter(([k]) => !new Set(['ai_caption', 'caption', 'image_caption', 'screenshot_caption', 'vision_caption', 'visual_caption', 'description', 'summary']).has(k));
+  const scTxt = searchContext ? exp ?? buildFrameSearchContext(searchContext.query, frame) : null;
 
   return (
     <div className="grid h-[80vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[1.4fr_1fr]">
       <div className="bg-muted/40 flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
-        {thumbUrl ? (
-          <img
-            src={thumbUrl}
-            alt="Captured screenshot"
-            onError={() => setThumbUrl(null)}
-            className="block max-h-full max-w-full object-contain rounded-md border border-border bg-black shadow-sm"
-          />
-        ) : (
-          <div className="flex flex-col items-center gap-2 text-muted-foreground p-8">
-            <ImageOff className="size-10" />
-            <span className="text-sm">No screenshot available</span>
-          </div>
-        )}
+        {thumbUrl ? <img src={thumbUrl} alt="Screenshot" onError={() => setThumbUrl(null)} className="block max-h-full max-w-full object-contain rounded-md border border-border bg-black shadow-sm" /> : <div className="flex flex-col items-center gap-2 text-muted-foreground p-8"><ImageOff className="size-10" /><span className="text-sm">No screenshot available</span></div>}
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-col border-l border-border">
         <div className="px-6 pt-6 pb-3 border-b border-border">
           <DialogTitle className="text-base leading-snug line-clamp-3">{title}</DialogTitle>
-          <DialogDescription className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge variant="muted">{frame.app || 'Unknown app'}</Badge>
-            {frame.activity_session_id ? (
-              <Badge variant="outline" className="font-mono text-[10px]">
-                session {frame.activity_session_id.slice(0, 8)}
-              </Badge>
-            ) : null}
-          </DialogDescription>
+          <DialogDescription className="mt-2 flex flex-wrap items-center gap-2"><Badge variant="muted">{frame.app || 'Unknown app'}</Badge>{frame.activity_session_id && <Badge variant="outline" className="font-mono text-[10px]">session {frame.activity_session_id.slice(0, 8)}</Badge>}</DialogDescription>
         </div>
 
-        <ScrollArea className="flex-1">
-          <div className="px-6 py-4 flex flex-col gap-4">
-            <DetailRow icon={<Calendar />} label="Day" value={day ? prettyDay(day) : '—'} />
-            <DetailRow icon={<Clock />} label="Time" value={time || '—'} />
-            {frame.url ? (
-              <DetailRow
-                icon={<ExternalLink />}
-                label="URL"
-                value={
-                  <a
-                    href={frame.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline break-all"
-                  >
-                    {frame.url}
-                  </a>
-                }
-              />
-            ) : null}
-            {frame.entity_path ? (
-              <DetailRow
-                icon={<Layers />}
-                label="Entity"
-                value={<span className="font-mono text-xs break-all">{frame.entity_path}</span>}
-              />
-            ) : null}
-            {searchContext ? (
-              <div>
-                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                  <Sparkles className="size-3.5" />
-                  <span>Search context</span>
-                </div>
-                <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
-                  {searchContextText || 'No searchable context is available for this result yet.'}
-                </div>
-              </div>
-            ) : null}
-            {indexDetails?.caption ? (
-              <div>
-                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                  <Sparkles className="size-3.5" />
-                  <span>AI caption</span>
-                </div>
-                <div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">
-                  {indexDetails.caption}
-                </div>
-              </div>
-            ) : null}
-            {indexDetails?.indexingText || indexDetailsLoading ? (
-              <div>
-                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                  <Layers className="size-3.5" />
-                  <span>Indexed metadata</span>
-                </div>
-                <div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-auto font-mono">
-                  {indexDetails?.indexingText ??
-                    (indexDetailsLoading ? 'Loading indexing metadata…' : '')}
-                </div>
-              </div>
-            ) : null}
-            {metadataEntries.length > 0 ? (
-              <div>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                  Event metadata
-                </div>
-                <dl className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">
-                  {metadataEntries.map(([key, value]) => (
-                    <div key={key} className="grid grid-cols-[120px_1fr] gap-2">
-                      <dt className="font-mono text-muted-foreground break-all">{key}</dt>
-                      <dd className="font-mono break-all">{formatMetadataValue(value)}</dd>
-                    </div>
-                  ))}
-                </dl>
-              </div>
-            ) : null}
-            {frame.text ? (
-              <div>
-                <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                  <FileText className="size-3.5" />
-                  <span>Captured text</span>
-                </div>
-                <div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-auto font-mono">
-                  {frame.text}
-                </div>
-              </div>
-            ) : null}
-            {frame.asset_path ? (
-              <div>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">
-                  Screenshot path
-                </div>
-                <div className="font-mono text-[11px] text-muted-foreground break-all">
-                  {frame.asset_path}
-                </div>
-              </div>
-            ) : null}
-          </div>
-        </ScrollArea>
+        <ScrollArea className="flex-1"><div className="px-6 py-4 flex flex-col gap-4">
+          <DetailRow icon={<Calendar />} label="Day" value={day ? prettyDay(day) : '—'} />
+          <DetailRow icon={<Clock />} label="Time" value={time || '—'} />
+          {frame.url && <DetailRow icon={<ExternalLink />} label="URL" value={<a href={frame.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all">{frame.url}</a>} />}
+          {frame.entity_path && <DetailRow icon={<Layers />} label="Entity" value={<span className="font-mono text-xs break-all">{frame.entity_path}</span>} />}
+          {searchContext && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Sparkles className="size-3.5" /><span>Search context</span></div><div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">{scTxt || 'No searchable context is available for this result yet.'}</div></div>}
+          {idxDet?.caption && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Sparkles className="size-3.5" /><span>AI caption</span></div><div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">{idxDet.caption}</div></div>}
+          {(idxDet?.indexingText || idxLoad) && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Layers className="size-3.5" /><span>Indexed metadata</span></div><div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-auto font-mono">{idxDet?.indexingText ?? (idxLoad ? 'Loading indexing metadata…' : '')}</div></div>}
+          {mdE.length > 0 && <div><div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Event metadata</div><dl className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">{mdE.map(([k, v]) => <div key={k} className="grid grid-cols-[120px_1fr] gap-2"><dt className="font-mono text-muted-foreground break-all">{k}</dt><dd className="font-mono break-all">{v == null ? '—' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v)}</dd></div>)}</dl></div>}
+          {frame.text && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><FileText className="size-3.5" /><span>Captured text</span></div><div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-auto font-mono">{frame.text}</div></div>}
+          {frame.asset_path && <div><div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Screenshot path</div><div className="font-mono text-[11px] text-muted-foreground break-all">{frame.asset_path}</div></div>}
+        </div></ScrollArea>
 
-        <div className="border-t border-border px-6 py-3 flex items-center justify-end">
-          <DeleteFrameButton frame={frame} onDeleted={onDeleted} />
-        </div>
+        <div className="border-t border-border px-6 py-3 flex items-center justify-end"><DeleteFrameButton frame={frame} onDeleted={onDeleted} /></div>
       </div>
     </div>
   );
 }
 
-function DeleteFrameButton({
-  frame,
-  onDeleted,
-}: {
-  frame: Frame;
-  onDeleted: () => void;
-}) {
+function DeleteFrameButton({ frame, onDeleted }: any) {
   const [pending, setPending] = React.useState(false);
-
-  async function handleDelete() {
-    if (!frame.id) {
-      toast.error('Cannot delete this moment', { description: 'Missing frame id.' });
-      return;
-    }
+  const del = async () => {
+    if (!frame.id) return toast.error('Error', { description: 'Missing frame id.' });
     setPending(true);
-    try {
-      await window.cofounderos.deleteFrame(frame.id);
-      toast.success('Moment deleted', {
-        description: 'Removed from your memory and disk.',
-      });
-      onDeleted();
-    } catch (err) {
-      toast.error('Could not delete moment', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setPending(false);
-    }
-  }
-
+    try { await window.cofounderos.deleteFrame(frame.id); toast.success('Deleted'); onDeleted(); } catch (err: any) { toast.error('Failed', { description: err.message || String(err) }); } finally { setPending(false); }
+  };
   return (
-    <AlertDialog>
-      <AlertDialogTrigger asChild>
-        <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10">
-          <Trash2 />
-          Delete
-        </Button>
-      </AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete this moment?</AlertDialogTitle>
-          <AlertDialogDescription>
-            The screenshot and any captured text for this frame will be removed
-            permanently from this device. This can't be undone.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() => void handleDelete()}
-            disabled={pending}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-          >
-            {pending ? 'Deleting…' : 'Delete moment'}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
+    <AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10"><Trash2 />Delete</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete this moment?</AlertDialogTitle><AlertDialogDescription>This removes the screenshot permanently.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={del} disabled={pending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{pending ? 'Deleting…' : 'Delete moment'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   );
 }
 
-function DetailRow({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
-        <span className="[&>svg]:size-3.5">{icon}</span>
-        <span>{label}</span>
-      </div>
-      <div className="text-sm">{value}</div>
-    </div>
-  );
-}
-
-const AI_CAPTION_KEYS = new Set([
-  'ai_caption',
-  'caption',
-  'image_caption',
-  'screenshot_caption',
-  'vision_caption',
-  'visual_caption',
-  'description',
-  'summary',
-]);
-
-function formatMetadataValue(value: unknown): string {
-  if (value == null) return '—';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+function DetailRow({ icon, label, value }: any) {
+  return <div className="flex flex-col gap-1"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground"><span className="[&>svg]:size-3.5">{icon}</span><span>{label}</span></div><div className="text-sm">{value}</div></div>;
 }

@@ -1,36 +1,7 @@
 import * as React from 'react';
-import {
-  AlertTriangle,
-  Check,
-  CheckCircle2,
-  Cpu,
-  Download,
-  ExternalLink,
-  FolderOpen,
-  Keyboard,
-  Loader2,
-  Mic,
-  Monitor,
-  Moon,
-  RefreshCw,
-  Shield,
-  Sparkles,
-  Sun,
-  Trash2,
-  X,
-} from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Cpu, Download, ExternalLink, FolderOpen, Keyboard, Loader2, Mic, Monitor, Moon, RefreshCw, Shield, Sparkles, Sun, Trash2, X } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -46,2794 +17,345 @@ import { PageHeader } from '@/components/PageHeader';
 import { StatusPill } from '@/components/StatusPill';
 import { formatBytes } from '@/lib/format';
 import { formatBootstrapLine, pullPercent } from '@/lib/bootstrap-phases';
-import {
-  MODEL_CHOICES,
-  findModelChoice,
-  isPlausibleOllamaTag,
-} from '@/lib/model-catalog';
+import { MODEL_CHOICES, findModelChoice, isPlausibleOllamaTag } from '@/lib/model-catalog';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
-import {
-  NumberField,
-  OptionalNumberField,
-  SaveBar,
-  SelectField,
-  SettingsSection,
-  TextAreaField,
-  TextField,
-  ToggleRow,
-} from '@/screens/settings/settings-controls';
-import {
-  configPatchFromDraft,
-  settingsDraftFromConfig,
-  type BackgroundModelJobs,
-  type CaptureMode,
-  type LiveRecordingFormat,
-  type LogLevel,
-  type McpTransport,
-  type ScreenshotFormat,
-  type SettingsDraft,
-  type SystemAudioBackend,
-} from '@/screens/settings/settings-draft';
-import type {
-  AccessibilityPermission,
-  LoadedConfig,
-  MicPermission,
-  ModelBootstrapProgress,
-  RuntimeOverview,
-  ScreenPermission,
-  WhisperProbe,
-} from '@/global';
+import { NumberField, OptionalNumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
+import { configPatchFromDraft, settingsDraftFromConfig, type BackgroundModelJobs, type CaptureMode, type LiveRecordingFormat, type LogLevel, type McpTransport, type ScreenshotFormat, type SettingsDraft, type SystemAudioBackend } from '@/screens/settings/settings-draft';
+import type { AccessibilityPermission, LoadedConfig, MicPermission, ModelBootstrapProgress, RuntimeOverview, ScreenPermission, WhisperProbe } from '@/global';
 
-export function Settings({
-  config,
-  overview,
-  bootstrapEvents,
-  onClearBootstrapEvents,
-  onSaved,
-}: {
-  config: LoadedConfig | null;
-  /**
-   * Live runtime overview pushed from the main process. The AI tab uses
-   * `overview.model.ready` to render the "ready / updating" status pill
-   * and to know when a force-refresh has produced a usable model again.
-   */
-  overview: RuntimeOverview | null;
-  /**
-   * Bootstrap progress events streamed from the runtime. Used by the AI
-   * tab to render a live progress bar during model install / refresh.
-   */
-  bootstrapEvents: ModelBootstrapProgress[];
-  /** Clear the local copy of bootstrap events before kicking off a new run. */
-  onClearBootstrapEvents: () => void;
-  onSaved: (config: LoadedConfig) => void;
-}) {
-  const [draft, setDraft] = React.useState<SettingsDraft | null>(null);
-  const [saving, setSaving] = React.useState(false);
-  const [startAtLogin, setStartAtLogin] = React.useState<boolean | null>(null);
+export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEvents, onSaved }: { config: LoadedConfig | null; overview: RuntimeOverview | null; bootstrapEvents: ModelBootstrapProgress[]; onClearBootstrapEvents: () => void; onSaved: (config: LoadedConfig) => void; }) {
+  const [draft, setDraft] = React.useState<SettingsDraft | null>(null), [saving, setSaving] = React.useState(false), [startAtLogin, setStartAtLogin] = React.useState<boolean | null>(null);
   const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
-  React.useEffect(() => {
-    if (config) setDraft(settingsDraftFromConfig(config));
-  }, [config]);
+  React.useEffect(() => { if (config) setDraft(settingsDraftFromConfig(config)); }, [config]);
+  React.useEffect(() => { window.cofounderos.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
 
-  React.useEffect(() => {
-    void window.cofounderos
-      .getStartAtLogin()
-      .then(setStartAtLogin)
-      .catch(() => setStartAtLogin(false));
-  }, []);
+  if (!config || !draft) return (
+    <div className="flex flex-col gap-6 pt-6"><PageHeader title="Settings" description="Loading…" /><Skeleton className="h-9 w-72" />
+      <Card><CardContent className="flex flex-col gap-4">{[1, 2, 3, 4].map(i => <div key={i} className="flex justify-between gap-4"><div className="flex-1 space-y-2"><Skeleton className="h-4 w-40" /><Skeleton className="h-3 w-72" /></div><Skeleton className="h-5 w-9 rounded-full" /></div>)}</CardContent></Card>
+    </div>
+  );
 
-  if (!config || !draft) {
-    return (
-      <div className="flex flex-col gap-6 pt-6">
-        <PageHeader title="Settings" description="Loading…" />
-        <Skeleton className="h-9 w-72" />
-        <Card>
-          <CardContent className="flex flex-col gap-4">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="flex items-center justify-between gap-4">
-                <div className="flex-1 space-y-2">
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-3 w-72" />
-                </div>
-                <Skeleton className="h-5 w-9 rounded-full" />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  const loadedConfig = config;
-  const currentDraft = draft;
-
-  const set = <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => {
-    setDraft({ ...currentDraft, [key]: value });
-  };
-  const baseline = settingsDraftFromConfig(loadedConfig);
-  const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(baseline);
+  const set = (key: keyof SettingsDraft, value: any) => setDraft({ ...draft, [key]: value });
+  const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settingsDraftFromConfig(config));
+  const resetDraft = () => setDraft(settingsDraftFromConfig(config!));
 
   async function save(opts: { restart?: boolean } = {}) {
     if (!hasUnsavedChanges) return;
     setSaving(true);
     try {
-      const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(currentDraft));
+      const next = await window.cofounderos.saveConfigPatch(configPatchFromDraft(draft!));
       onSaved(next);
-      if (opts.restart) {
-        try {
-          await window.cofounderos.stopRuntime();
-          await window.cofounderos.startRuntime();
-          toast.success('Settings saved & runtime restarted');
-        } catch (err) {
-          toast.error('Saved, but restart failed', {
-            description: err instanceof Error ? err.message : String(err),
-          });
-        }
-      } else {
-        toast.success('Settings saved', {
-          description: 'Some changes apply on next start.',
-        });
-      }
-    } catch (err) {
-      toast.error('Could not save settings', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function toggleStartAtLogin(enabled: boolean) {
-    setStartAtLogin(enabled);
-    const actual = await window.cofounderos.setStartAtLogin(enabled);
-    setStartAtLogin(actual);
-  }
-
-  function resetDraft() {
-    setDraft(settingsDraftFromConfig(loadedConfig));
+      if (opts.restart) { await window.cofounderos.stopRuntime(); await window.cofounderos.startRuntime(); toast.success('Settings saved & runtime restarted'); }
+      else toast.success('Settings saved', { description: 'Some changes apply on next start.' });
+    } catch (err: any) { toast.error('Could not save settings', { description: err.message || String(err) }); }
+    finally { setSaving(false); }
   }
 
   return (
     <div className="flex flex-col gap-6 pt-6 pb-24">
-      <PageHeader
-        title="Settings"
-        description="Make CofounderOS work the way you like."
-        actions={
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void window.cofounderos.openPath('config')}
-            >
-              <FolderOpen />
-              Open config
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void window.cofounderos.openPath('data')}
-            >
-              <FolderOpen />
-              Open data folder
-            </Button>
-          </>
-        }
-      />
-
+      <PageHeader title="Settings" description="Make CofounderOS work the way you like." actions={<><Button variant="outline" size="sm" onClick={() => window.cofounderos.openPath('config')}><FolderOpen />Open config</Button><Button variant="outline" size="sm" onClick={() => window.cofounderos.openPath('data')}><FolderOpen />Open data</Button></>} />
+      
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="h-auto flex-wrap justify-start self-start">
-          <TabsTrigger value="general">General</TabsTrigger>
-          <TabsTrigger value="permissions">Permissions</TabsTrigger>
-          <TabsTrigger value="capture">Capture</TabsTrigger>
-          <TabsTrigger value="privacy">Privacy</TabsTrigger>
-          <TabsTrigger value="storage">Storage</TabsTrigger>
-          <TabsTrigger value="ai">AI</TabsTrigger>
-          <TabsTrigger value="audio">Audio</TabsTrigger>
-          <TabsTrigger value="index">Index</TabsTrigger>
-          <TabsTrigger value="export">Export</TabsTrigger>
-          <TabsTrigger value="system">System</TabsTrigger>
+          {['general', 'permissions', 'capture', 'privacy', 'storage', 'ai', 'audio', 'index', 'export', 'system'].map((v: any) => <TabsTrigger key={v} value={v}>{v.charAt(0).toUpperCase() + v.slice(1)}</TabsTrigger>)}
         </TabsList>
 
         <TabsContent value="general" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Launch and appearance"
-            description="Set how the app starts and how the interface looks."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Open at startup"
-                description="CofounderOS opens quietly in the background when you sign in."
-                typeLabel="boolean"
-                checked={Boolean(startAtLogin)}
-                onChange={(v) => void toggleStartAtLogin(v)}
-              />
-              <Separator className="my-4" />
-              <div className="flex flex-col gap-3">
-                <div>
-                  <h4 className="font-medium">Appearance</h4>
-                  <p className="text-sm text-muted-foreground mt-0.5">
-                    Match your system, or pick a fixed theme.
-                  </p>
-                </div>
-                <ThemePicker value={themePreference} onChange={setThemePreference} />
-              </div>
-            </div>
+          <SettingsSection title="Launch and appearance" description="Set how the app starts and how the interface looks.">
+            <ToggleRow title="Open at startup" description="CofounderOS opens quietly in the background." typeLabel="boolean" checked={!!startAtLogin} onChange={(v: any) => { setStartAtLogin(v); window.cofounderos.setStartAtLogin(v).then(setStartAtLogin); }} />
+            <Separator className="my-4" />
+            <div className="flex flex-col gap-3"><div><h4 className="font-medium">Appearance</h4><p className="text-sm text-muted-foreground mt-0.5">Pick a theme.</p></div><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
           </SettingsSection>
-
-          <SettingsSection
-            title="App configuration"
-            description="Identity, data location, logging, and optional session scoping."
-          >
+          <SettingsSection title="App configuration" description="Identity, data location, and logging.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <TextField
-                label="App name"
-                value={draft.appName}
-                onChange={(v) => set('appName', v)}
-                typeLabel="string"
-                hint="Used in app metadata and logs. Most people can leave this alone."
-              />
-              <SelectField
-                label="Log level"
-                value={draft.logLevel}
-                onChange={(v) => set('logLevel', v as LogLevel)}
-                typeLabel="enum"
-                hint="Use info for normal use, debug only when troubleshooting."
-                options={[
-                  { value: 'debug', label: 'Debug' },
-                  { value: 'info', label: 'Info' },
-                  { value: 'warn', label: 'Warn' },
-                  { value: 'error', label: 'Error' },
-                ]}
-              />
-              <TextField
-                label="Data directory"
-                value={draft.appDataDir}
-                onChange={(v) => set('appDataDir', v)}
-                typeLabel="path"
-                hint="Root folder for config, exports, and default storage. Restart after changing."
-              />
-              <TextField
-                label="Session ID"
-                value={draft.sessionId}
-                onChange={(v) => set('sessionId', v)}
-                typeLabel="string"
-                hint="Optional. Leave blank unless you intentionally separate runs."
-                placeholder="optional"
-              />
+              <TextField label="App name" value={draft.appName} onChange={(v: any) => set('appName', v)} typeLabel="string" hint="Used in logs." />
+              <SelectField label="Log level" value={draft.logLevel} onChange={(v: any) => set('logLevel', v)} typeLabel="enum" options={[{ value: 'debug', label: 'Debug' }, { value: 'info', label: 'Info' }, { value: 'warn', label: 'Warn' }, { value: 'error', label: 'Error' }]} />
+              <TextField label="Data directory" value={draft.appDataDir} onChange={(v: any) => set('appDataDir', v)} typeLabel="path" hint="Restart after changing." />
+              <TextField label="Session ID" value={draft.sessionId} onChange={(v: any) => set('sessionId', v)} typeLabel="string" hint="Optional." />
             </div>
           </SettingsSection>
         </TabsContent>
 
-        <TabsContent value="permissions" className="flex flex-col gap-4">
-          <PermissionsSettingsPanel />
-        </TabsContent>
+        <TabsContent value="permissions" className="flex flex-col gap-4"><PermissionsSettingsPanel /></TabsContent>
 
         <TabsContent value="capture" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Capture cadence"
-            description="Control how often CofounderOS looks for active-window and visual changes."
-          >
+          <SettingsSection title="Capture cadence" description="Control how often CofounderOS looks for changes.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <TextField
-                label="Capture plugin"
-                value={draft.capturePlugin}
-                onChange={(v) => set('capturePlugin', v)}
-                typeLabel="string"
-                hint="The installed capture adapter to use. The default is node."
-              />
-              <NumberField
-                label="Poll interval"
-                value={draft.pollIntervalMs}
-                onChange={(v) => set('pollIntervalMs', v)}
-                min={1}
-                step={100}
-                unit="ms"
-                typeLabel="integer"
-                hint="Lower values react faster but use more CPU."
-              />
-              <NumberField
-                label="Idle poll interval"
-                value={draft.idlePollIntervalMs}
-                onChange={(v) => set('idlePollIntervalMs', v)}
-                min={1}
-                step={1000}
-                unit="ms"
-                typeLabel="integer"
-                hint="Polling cadence while the machine is idle. Set near poll interval to disable backoff."
-              />
-              <NumberField
-                label="Focus settle delay"
-                value={draft.focusSettleDelayMs}
-                onChange={(v) => set('focusSettleDelayMs', v)}
-                min={0}
-                step={50}
-                unit="ms"
-                typeLabel="integer"
-                hint="Wait after app switches before taking a screenshot."
-              />
-              <NumberField
-                label="Visual change threshold"
-                value={draft.screenshotDiffThreshold}
-                onChange={(v) => set('screenshotDiffThreshold', v)}
-                min={0}
-                max={1}
-                step={0.01}
-                typeLabel="number"
-                hint="0 captures tiny changes; 1 captures only total visual changes."
-              />
-              <NumberField
-                label="Idle threshold"
-                value={draft.idleThresholdSec}
-                onChange={(v) => set('idleThresholdSec', v)}
-                min={1}
-                step={5}
-                unit="sec"
-                typeLabel="integer"
-                hint="After this much inactivity, capture enters idle mode."
-              />
+              <TextField label="Capture plugin" value={draft.capturePlugin} onChange={(v: any) => set('capturePlugin', v)} typeLabel="string" />
+              <NumberField label="Poll interval" value={draft.pollIntervalMs} onChange={(v: any) => set('pollIntervalMs', v)} min={1} step={100} unit="ms" typeLabel="integer" />
+              <NumberField label="Idle poll interval" value={draft.idlePollIntervalMs} onChange={(v: any) => set('idlePollIntervalMs', v)} min={1} step={1000} unit="ms" typeLabel="integer" />
+              <NumberField label="Focus settle delay" value={draft.focusSettleDelayMs} onChange={(v: any) => set('focusSettleDelayMs', v)} min={0} step={50} unit="ms" typeLabel="integer" />
+              <NumberField label="Visual change threshold" value={draft.screenshotDiffThreshold} onChange={(v: any) => set('screenshotDiffThreshold', v)} min={0} max={1} step={0.01} typeLabel="number" />
+              <NumberField label="Idle threshold" value={draft.idleThresholdSec} onChange={(v: any) => set('idleThresholdSec', v)} min={1} step={5} unit="sec" typeLabel="integer" />
             </div>
           </SettingsSection>
-
-          <SettingsSection
-            title="Screenshot encoding"
-            description="Balance file size, readability, and compatibility."
-          >
+          <SettingsSection title="Screenshot encoding" description="Balance file size, readability, and compatibility.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <SelectField
-                label="Screenshot format"
-                value={draft.screenshotFormat}
-                onChange={(v) => set('screenshotFormat', v as ScreenshotFormat)}
-                typeLabel="enum"
-                hint="WebP is smaller; JPEG is useful for older tools."
-                options={[
-                  { value: 'webp', label: 'WebP' },
-                  { value: 'jpeg', label: 'JPEG' },
-                ]}
-              />
-              <NumberField
-                label="Screenshot quality"
-                value={draft.screenshotQuality}
-                onChange={(v) => set('screenshotQuality', v)}
-                min={1}
-                max={100}
-                step={1}
-                typeLabel="integer"
-                hint="1 is smallest, 100 is highest quality. Screen text is usually readable around 45."
-              />
-              <OptionalNumberField
-                label="Legacy JPEG quality"
-                value={draft.jpegQuality}
-                onChange={(v) => set('jpegQuality', v)}
-                min={1}
-                max={100}
-                step={1}
-                typeLabel="integer"
-                hint="Deprecated override for older JPEG configs. Leave blank to use screenshot quality."
-              />
-              <NumberField
-                label="Max screenshot dimension"
-                value={draft.screenshotMaxDim}
-                onChange={(v) => set('screenshotMaxDim', v)}
-                min={0}
-                max={8192}
-                step={50}
-                unit="px"
-                typeLabel="integer"
-                hint="Caps the longest edge. 0 keeps native resolution."
-              />
-              <NumberField
-                label="Content-change throttle"
-                value={draft.contentChangeMinIntervalMs}
-                onChange={(v) => set('contentChangeMinIntervalMs', v)}
-                min={0}
-                step={1000}
-                unit="ms"
-                typeLabel="integer"
-                hint="Minimum time between soft visual-change captures. 0 disables the throttle."
-              />
+              <SelectField label="Screenshot format" value={draft.screenshotFormat} onChange={(v: any) => set('screenshotFormat', v)} typeLabel="enum" options={[{ value: 'webp', label: 'WebP' }, { value: 'jpeg', label: 'JPEG' }]} />
+              <NumberField label="Screenshot quality" value={draft.screenshotQuality} onChange={(v: any) => set('screenshotQuality', v)} min={1} max={100} step={1} typeLabel="integer" />
+              <NumberField label="Max screenshot dimension" value={draft.screenshotMaxDim} onChange={(v: any) => set('screenshotMaxDim', v)} min={0} max={8192} step={50} unit="px" typeLabel="integer" />
+              <NumberField label="Content-change throttle" value={draft.contentChangeMinIntervalMs} onChange={(v: any) => set('contentChangeMinIntervalMs', v)} min={0} step={1000} unit="ms" typeLabel="integer" />
             </div>
           </SettingsSection>
-
-          <SettingsSection
-            title="Displays and ignore rules"
-            description="Choose the screens and apps that are eligible for capture."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Capture multiple displays"
-                description="Record more than the primary display on each trigger."
-                typeLabel="boolean"
-                checked={draft.multiScreen}
-                onChange={(v) => set('multiScreen', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <TextField
-                  label="Screen indexes"
-                  value={draft.screens}
-                  onChange={(v) => set('screens', v)}
-                  typeLabel="integer list"
-                  hint="Comma-separated display indexes, such as 0, 1. Leave blank to use every detected display."
-                  placeholder="0, 1"
-                />
-                <SelectField
-                  label="Multi-display mode"
-                  value={draft.captureMode}
-                  onChange={(v) => set('captureMode', v as CaptureMode)}
-                  typeLabel="enum"
-                  hint="Active captures the focused display; all captures every selected display."
-                  options={[
-                    { value: 'active', label: 'Active display' },
-                    { value: 'all', label: 'All selected displays' },
-                  ]}
-                />
-                <TextAreaField
-                  label="Apps to ignore"
-                  value={draft.excludedApps}
-                  onChange={(v) => set('excludedApps', v)}
-                  typeLabel="string list"
-                  hint="One app name per line. Matching apps are not saved."
-                  placeholder="One app name per line"
-                />
-                <TextAreaField
-                  label="URLs to ignore"
-                  value={draft.excludedUrlPatterns}
-                  onChange={(v) => set('excludedUrlPatterns', v)}
-                  typeLabel="string list"
-                  hint="One rule per line. Use domains like example.com, subdomains like *.example.com, or paths like example.com/private/*."
-                  placeholder="example.com"
-                />
-              </div>
+          <SettingsSection title="Displays and ignore rules" description="Choose screens and apps eligible for capture.">
+            <ToggleRow title="Capture multiple displays" description="Record more than the primary display." typeLabel="boolean" checked={draft.multiScreen} onChange={(v: any) => set('multiScreen', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <TextField label="Screen indexes" value={draft.screens} onChange={(v: any) => set('screens', v)} typeLabel="integer list" hint="e.g. 0, 1" />
+              <SelectField label="Multi-display mode" value={draft.captureMode} onChange={(v: any) => set('captureMode', v)} typeLabel="enum" options={[{ value: 'active', label: 'Active display' }, { value: 'all', label: 'All displays' }]} />
+              <TextAreaField label="Apps to ignore" value={draft.excludedApps} onChange={(v: any) => set('excludedApps', v)} typeLabel="string list" hint="One app per line." />
+              <TextAreaField label="URLs to ignore" value={draft.excludedUrlPatterns} onChange={(v: any) => set('excludedUrlPatterns', v)} typeLabel="string list" hint="One domain/path per line." />
             </div>
           </SettingsSection>
         </TabsContent>
 
         <TabsContent value="privacy" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Redaction and lock behavior"
-            description="Guardrails that keep sensitive screen content out of memory."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Blur password fields"
-                description="Skip password boxes so they're never captured."
-                typeLabel="boolean"
-                checked={draft.blurPasswordFields}
-                onChange={(v) => set('blurPasswordFields', v)}
-              />
-              <Separator className="my-4" />
-              <ToggleRow
-                title="Pause when screen is locked"
-                description="Stop capturing when you step away from your computer."
-                typeLabel="boolean"
-                checked={draft.pauseOnScreenLock}
-                onChange={(v) => set('pauseOnScreenLock', v)}
-              />
-              <Separator className="my-4" />
-              <TextAreaField
-                label="Words to skip"
-                value={draft.sensitiveKeywords}
-                onChange={(v) => set('sensitiveKeywords', v)}
-                typeLabel="string list"
-                hint="Anything containing these words will not be saved. One keyword per line."
-                placeholder="One per line, e.g. salary, passport"
-              />
+          <SettingsSection title="Redaction and lock behavior" description="Guardrails to keep sensitive content out.">
+            <ToggleRow title="Blur password fields" description="Skip password boxes." typeLabel="boolean" checked={draft.blurPasswordFields} onChange={(v: any) => set('blurPasswordFields', v)} />
+            <Separator className="my-4" /><ToggleRow title="Pause when screen is locked" description="Stop capturing when away." typeLabel="boolean" checked={draft.pauseOnScreenLock} onChange={(v: any) => set('pauseOnScreenLock', v)} />
+            <Separator className="my-4" /><TextAreaField label="Words to skip" value={draft.sensitiveKeywords} onChange={(v: any) => set('sensitiveKeywords', v)} typeLabel="string list" hint="One keyword per line." />
+          </SettingsSection>
+          <SettingsSection title="Accessibility text" description="Use macOS Accessibility for accurate text reading.">
+            <ToggleRow title="Read visible app text" description="Add Accessibility text to screenshots." typeLabel="boolean" checked={draft.accessibilityEnabled} onChange={(v: any) => set('accessibilityEnabled', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <NumberField label="Accessibility timeout" value={draft.accessibilityTimeoutMs} onChange={(v: any) => set('accessibilityTimeoutMs', v)} min={1} step={100} unit="ms" typeLabel="integer" />
+              <NumberField label="Maximum text characters" value={draft.accessibilityMaxChars} onChange={(v: any) => set('accessibilityMaxChars', v)} min={1} step={500} typeLabel="integer" />
+              <NumberField label="Maximum UI elements" value={draft.accessibilityMaxElements} onChange={(v: any) => set('accessibilityMaxElements', v)} min={1} step={250} typeLabel="integer" />
+              <TextAreaField label="Apps to ignore" value={draft.accessibilityExcludedApps} onChange={(v: any) => set('accessibilityExcludedApps', v)} typeLabel="string list" hint="One app per line." />
             </div>
           </SettingsSection>
-
-          <SettingsSection
-            title="Accessibility text"
-            description="Use macOS Accessibility data to read app text more accurately than OCR."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Read visible app text"
-                description="Adds Accessibility text to screenshots when available, then falls back to OCR."
-                typeLabel="boolean"
-                checked={draft.accessibilityEnabled}
-                onChange={(v) => set('accessibilityEnabled', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <NumberField
-                  label="Accessibility timeout"
-                  value={draft.accessibilityTimeoutMs}
-                  onChange={(v) => set('accessibilityTimeoutMs', v)}
-                  min={1}
-                  step={100}
-                  unit="ms"
-                  typeLabel="integer"
-                  hint="Maximum time spent asking the focused app for text."
-                />
-                <NumberField
-                  label="Maximum text characters"
-                  value={draft.accessibilityMaxChars}
-                  onChange={(v) => set('accessibilityMaxChars', v)}
-                  min={1}
-                  step={500}
-                  typeLabel="integer"
-                  hint="Caps text stored from one Accessibility read."
-                />
-                <NumberField
-                  label="Maximum UI elements"
-                  value={draft.accessibilityMaxElements}
-                  onChange={(v) => set('accessibilityMaxElements', v)}
-                  min={1}
-                  step={250}
-                  typeLabel="integer"
-                  hint="Caps how many Accessibility nodes are inspected per read."
-                />
-                <TextAreaField
-                  label="Accessibility apps to ignore"
-                  value={draft.accessibilityExcludedApps}
-                  onChange={(v) => set('accessibilityExcludedApps', v)}
-                  typeLabel="string list"
-                  hint="One app per line. These apps can still use OCR unless also ignored above."
-                  placeholder="One app name per line"
-                />
-              </div>
-            </div>
-          </SettingsSection>
-
           <DangerZone />
         </TabsContent>
 
         <TabsContent value="storage" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Storage root and limits"
-            description="Decide where memory lives and how much disk CofounderOS may use."
-          >
+          <SettingsSection title="Storage root and limits" description="Decide where memory lives.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <TextField
-                label="Storage plugin"
-                value={draft.storagePlugin}
-                onChange={(v) => set('storagePlugin', v)}
-                typeLabel="string"
-                hint="The installed storage adapter to use. The default is local."
-              />
-              <TextField
-                label="Storage path"
-                value={draft.storagePath}
-                onChange={(v) => set('storagePath', v)}
-                typeLabel="path"
-                hint="Screenshots, SQLite, and checkpoints live under this folder."
-              />
-              <NumberField
-                label="Maximum space"
-                value={draft.maxSizeGb}
-                onChange={(v) => set('maxSizeGb', v)}
-                min={0.1}
-                step={1}
-                unit="GB"
-                typeLabel="number"
-                hint="Soft cap for local storage. Use a larger value if you keep long visual history."
-              />
-              <NumberField
-                label="Keep memories for"
-                value={draft.retentionDays}
-                onChange={(v) => set('retentionDays', v)}
-                min={0}
-                step={1}
-                unit="days"
-                typeLabel="integer"
-                hint="0 keeps metadata forever. Screenshot asset cleanup is controlled below."
-              />
+              <TextField label="Storage plugin" value={draft.storagePlugin} onChange={(v: any) => set('storagePlugin', v)} typeLabel="string" />
+              <TextField label="Storage path" value={draft.storagePath} onChange={(v: any) => set('storagePath', v)} typeLabel="path" />
+              <NumberField label="Maximum space" value={draft.maxSizeGb} onChange={(v: any) => set('maxSizeGb', v)} min={0.1} step={1} unit="GB" typeLabel="number" />
+              <NumberField label="Keep memories for" value={draft.retentionDays} onChange={(v: any) => set('retentionDays', v)} min={0} step={1} unit="days" typeLabel="integer" />
             </div>
           </SettingsSection>
-
-          <SettingsSection
-            title="Screenshot vacuum"
-            description="Downsize or remove old screenshot files while keeping text searchable."
-          >
+          <SettingsSection title="Screenshot vacuum" description="Downsize or remove old screenshot files.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <OptionalNumberField
-                label="Compress after"
-                value={draft.compressAfterMinutes}
-                onChange={(v) => set('compressAfterMinutes', v)}
-                min={0}
-                step={15}
-                unit="min"
-                typeLabel="integer"
-                hint="Minute-granularity window. Leave blank to use the day fallback; 0 disables compression."
-              />
-              <NumberField
-                label="Compress after fallback"
-                value={draft.compressAfterDays}
-                onChange={(v) => set('compressAfterDays', v)}
-                min={0}
-                step={1}
-                unit="days"
-                typeLabel="integer"
-                hint="Used only when minute value is not present."
-              />
-              <NumberField
-                label="Compressed quality"
-                value={draft.compressQuality}
-                onChange={(v) => set('compressQuality', v)}
-                min={1}
-                max={100}
-                step={1}
-                typeLabel="integer"
-                hint="Lower values save more disk; higher values preserve screenshots."
-              />
-              <OptionalNumberField
-                label="Thumbnail after"
-                value={draft.thumbnailAfterMinutes}
-                onChange={(v) => set('thumbnailAfterMinutes', v)}
-                min={0}
-                step={60}
-                unit="min"
-                typeLabel="integer"
-                hint="Minute window for thumbnailing. Leave blank to use the day fallback; 0 disables thumbnailing."
-              />
-              <NumberField
-                label="Thumbnail after fallback"
-                value={draft.thumbnailAfterDays}
-                onChange={(v) => set('thumbnailAfterDays', v)}
-                min={0}
-                step={1}
-                unit="days"
-                typeLabel="integer"
-                hint="Used only when minute value is not present."
-              />
-              <NumberField
-                label="Thumbnail max dimension"
-                value={draft.thumbnailMaxDim}
-                onChange={(v) => set('thumbnailMaxDim', v)}
-                min={64}
-                max={2048}
-                step={16}
-                unit="px"
-                typeLabel="integer"
-                hint="Longest edge of thumbnails kept for old screenshots."
-              />
-              <OptionalNumberField
-                label="Delete screenshots after"
-                value={draft.deleteAfterMinutes}
-                onChange={(v) => set('deleteAfterMinutes', v)}
-                min={0}
-                step={60}
-                unit="min"
-                typeLabel="integer"
-                hint="Minute window for deleting old image files. Leave blank to use the day fallback; 0 keeps images."
-              />
-              <NumberField
-                label="Delete after fallback"
-                value={draft.deleteAfterDays}
-                onChange={(v) => set('deleteAfterDays', v)}
-                min={0}
-                step={1}
-                unit="days"
-                typeLabel="integer"
-                hint="Text stays searchable even after screenshot files are removed."
-              />
-              <NumberField
-                label="Vacuum interval"
-                value={draft.vacuumTickIntervalMin}
-                onChange={(v) => set('vacuumTickIntervalMin', v)}
-                min={1}
-                step={1}
-                unit="min"
-                typeLabel="integer"
-                hint="How often the cleanup worker wakes up."
-              />
-              <NumberField
-                label="Vacuum batch size"
-                value={draft.vacuumBatchSize}
-                onChange={(v) => set('vacuumBatchSize', v)}
-                min={1}
-                step={10}
-                typeLabel="integer"
-                hint="Files processed per cleanup tick. Smaller batches are gentler."
-              />
+              <OptionalNumberField label="Compress after (min)" value={draft.compressAfterMinutes} onChange={(v: any) => set('compressAfterMinutes', v)} min={0} step={15} typeLabel="integer" />
+              <NumberField label="Compress after (days)" value={draft.compressAfterDays} onChange={(v: any) => set('compressAfterDays', v)} min={0} step={1} typeLabel="integer" />
+              <NumberField label="Compressed quality" value={draft.compressQuality} onChange={(v: any) => set('compressQuality', v)} min={1} max={100} step={1} typeLabel="integer" />
+              <OptionalNumberField label="Thumbnail after (min)" value={draft.thumbnailAfterMinutes} onChange={(v: any) => set('thumbnailAfterMinutes', v)} min={0} step={60} typeLabel="integer" />
+              <NumberField label="Thumbnail after (days)" value={draft.thumbnailAfterDays} onChange={(v: any) => set('thumbnailAfterDays', v)} min={0} step={1} typeLabel="integer" />
+              <NumberField label="Thumbnail max dim" value={draft.thumbnailMaxDim} onChange={(v: any) => set('thumbnailMaxDim', v)} min={64} max={2048} step={16} unit="px" typeLabel="integer" />
+              <OptionalNumberField label="Delete after (min)" value={draft.deleteAfterMinutes} onChange={(v: any) => set('deleteAfterMinutes', v)} min={0} step={60} typeLabel="integer" />
+              <NumberField label="Delete after (days)" value={draft.deleteAfterDays} onChange={(v: any) => set('deleteAfterDays', v)} min={0} step={1} typeLabel="integer" />
+              <NumberField label="Vacuum interval (min)" value={draft.vacuumTickIntervalMin} onChange={(v: any) => set('vacuumTickIntervalMin', v)} min={1} step={1} typeLabel="integer" />
+              <NumberField label="Vacuum batch size" value={draft.vacuumBatchSize} onChange={(v: any) => set('vacuumBatchSize', v)} min={1} step={10} typeLabel="integer" />
             </div>
           </SettingsSection>
         </TabsContent>
 
         <TabsContent value="ai" className="flex flex-col gap-4">
-          <ModelSettings
-            savedModel={loadedConfig.config.index.model.ollama?.model ?? ''}
-            savedRevision={loadedConfig.config.index.model.ollama?.model_revision ?? 1}
-            ollamaHost={draft.ollamaHost}
-            ollamaAutoInstall={draft.ollamaAutoInstall}
-            modelReady={overview?.model.ready ?? false}
-            bootstrapEvents={bootstrapEvents}
-            onClearBootstrapEvents={onClearBootstrapEvents}
-            onHostChange={(v) => set('ollamaHost', v)}
-            onAutoInstallChange={(v) => set('ollamaAutoInstall', v)}
-            onModelChanged={(next) => onSaved(next)}
-          />
-
-          <SettingsSection
-            title="Provider and model internals"
-            description="Configure the model adapter, embeddings, warm-loading, and hosted model fallbacks."
-          >
+          <ModelSettings savedModel={config.config.index.model.ollama?.model ?? ''} savedRevision={config.config.index.model.ollama?.model_revision ?? 1} ollamaHost={draft.ollamaHost} ollamaAutoInstall={draft.ollamaAutoInstall} modelReady={overview?.model.ready ?? false} bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={onClearBootstrapEvents} onHostChange={(v: any) => set('ollamaHost', v)} onAutoInstallChange={(v: any) => set('ollamaAutoInstall', v)} onModelChanged={onSaved} />
+          <SettingsSection title="Provider and internals" description="Configure adapter, embeddings, and API fallbacks.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <TextField
-                label="Model provider"
-                value={draft.modelPlugin}
-                onChange={(v) => set('modelPlugin', v)}
-                typeLabel="string"
-                hint="Installed model adapter name. Common choices are ollama, openai, and claude."
-              />
-              <TextField
-                label="Ollama embedding model"
-                value={draft.ollamaEmbeddingModel}
-                onChange={(v) => set('ollamaEmbeddingModel', v)}
-                typeLabel="string"
-                hint="Used for semantic search vectors. nomic-embed-text is the default."
-              />
-              <TextField
-                label="Ollama vision model"
-                value={draft.ollamaVisionModel}
-                onChange={(v) => set('ollamaVisionModel', v)}
-                typeLabel="string"
-                hint="Optional override for image-aware answers. Blank uses the primary model."
-                placeholder="optional"
-              />
-              <TextField
-                label="Indexer model"
-                value={draft.ollamaIndexerModel}
-                onChange={(v) => set('ollamaIndexerModel', v)}
-                typeLabel="string"
-                hint="Optional smaller local model for summaries and organization."
-                placeholder="optional"
-              />
-              <TextField
-                label="Ollama keep alive"
-                value={draft.ollamaKeepAlive}
-                onChange={(v) => set('ollamaKeepAlive', v)}
-                typeLabel="string | number"
-                hint="Examples: 30s, 5m, or -1. Controls how long Ollama keeps weights warm."
-              />
-              <NumberField
-                label="Host unload after idle"
-                value={draft.ollamaUnloadAfterIdleMin}
-                onChange={(v) => set('ollamaUnloadAfterIdleMin', v)}
-                min={0}
-                step={1}
-                unit="min"
-                typeLabel="number"
-                hint="0 relies on Ollama's keep_alive. Set higher only for special warm-load setups."
-              />
-              <NumberField
-                label="Model revision"
-                value={draft.ollamaModelRevision}
-                onChange={(v) => set('ollamaModelRevision', v)}
-                min={0}
-                step={1}
-                typeLabel="integer"
-                hint="Bump this to force a model re-pull on next start."
-              />
-              <TextField
-                label="OpenAI API key"
-                value={draft.openaiApiKey}
-                onChange={(v) => set('openaiApiKey', v)}
-                typeLabel="secret string"
-                hint="Blank uses OPENAI_API_KEY from the environment."
-                inputType="password"
-                placeholder="optional"
-              />
-              <TextField
-                label="OpenAI base URL"
-                value={draft.openaiBaseUrl}
-                onChange={(v) => set('openaiBaseUrl', v)}
-                typeLabel="URL"
-                hint="Use the default for OpenAI, or point to any OpenAI-compatible API."
-              />
-              <TextField
-                label="OpenAI chat model"
-                value={draft.openaiModel}
-                onChange={(v) => set('openaiModel', v)}
-                typeLabel="string"
-                hint="Used for text completion when the OpenAI-compatible provider is active."
-              />
-              <TextField
-                label="OpenAI vision model"
-                value={draft.openaiVisionModel}
-                onChange={(v) => set('openaiVisionModel', v)}
-                typeLabel="string"
-                hint="Optional override for vision requests. Blank uses the chat model."
-                placeholder="optional"
-              />
-              <TextField
-                label="OpenAI embedding model"
-                value={draft.openaiEmbeddingModel}
-                onChange={(v) => set('openaiEmbeddingModel', v)}
-                typeLabel="string"
-                hint="Used for semantic vectors when the OpenAI-compatible provider is active."
-              />
-              <TextField
-                label="Claude API key"
-                value={draft.claudeApiKey}
-                onChange={(v) => set('claudeApiKey', v)}
-                typeLabel="secret string"
-                hint="Blank relies on the environment if your model adapter supports it."
-                inputType="password"
-                placeholder="optional"
-              />
-              <TextField
-                label="Claude model"
-                value={draft.claudeModel}
-                onChange={(v) => set('claudeModel', v)}
-                typeLabel="string"
-                hint="Used only when the Claude provider is selected."
-              />
+              <TextField label="Model provider" value={draft.modelPlugin} onChange={(v: any) => set('modelPlugin', v)} typeLabel="string" hint="ollama, openai, claude." />
+              <TextField label="Embedding model" value={draft.ollamaEmbeddingModel} onChange={(v: any) => set('ollamaEmbeddingModel', v)} typeLabel="string" />
+              <TextField label="Vision model" value={draft.ollamaVisionModel} onChange={(v: any) => set('ollamaVisionModel', v)} typeLabel="string" placeholder="optional" />
+              <TextField label="Indexer model" value={draft.ollamaIndexerModel} onChange={(v: any) => set('ollamaIndexerModel', v)} typeLabel="string" placeholder="optional" />
+              <TextField label="Ollama keep alive" value={draft.ollamaKeepAlive} onChange={(v: any) => set('ollamaKeepAlive', v)} typeLabel="string | number" />
+              <NumberField label="Unload after idle" value={draft.ollamaUnloadAfterIdleMin} onChange={(v: any) => set('ollamaUnloadAfterIdleMin', v)} min={0} step={1} unit="min" typeLabel="number" />
+              <NumberField label="Model revision" value={draft.ollamaModelRevision} onChange={(v: any) => set('ollamaModelRevision', v)} min={0} step={1} typeLabel="integer" />
+              <TextField label="OpenAI API key" value={draft.openaiApiKey} onChange={(v: any) => set('openaiApiKey', v)} typeLabel="secret string" inputType="password" placeholder="optional" />
+              <TextField label="OpenAI base URL" value={draft.openaiBaseUrl} onChange={(v: any) => set('openaiBaseUrl', v)} typeLabel="URL" />
+              <TextField label="OpenAI chat model" value={draft.openaiModel} onChange={(v: any) => set('openaiModel', v)} typeLabel="string" />
+              <TextField label="Claude API key" value={draft.claudeApiKey} onChange={(v: any) => set('claudeApiKey', v)} typeLabel="secret string" inputType="password" placeholder="optional" />
+              <TextField label="Claude model" value={draft.claudeModel} onChange={(v: any) => set('claudeModel', v)} typeLabel="string" />
             </div>
           </SettingsSection>
         </TabsContent>
 
         <TabsContent value="audio">
-          <AudioSettings
-            capturePlugin={draft.capturePlugin}
-            captureAudio={draft.captureAudio}
-            liveRecordingEnabled={draft.liveRecordingEnabled}
-            systemAudioBackend={draft.systemAudioBackend}
-            whisperModel={draft.whisperModel}
-            chunkSeconds={draft.chunkSeconds}
-            deleteAudioAfterTranscribe={draft.deleteAudioAfterTranscribe}
-            audioInboxPath={draft.audioInboxPath}
-            audioProcessedPath={draft.audioProcessedPath}
-            audioFailedPath={draft.audioFailedPath}
-            audioTickIntervalSec={draft.audioTickIntervalSec}
-            audioBatchSize={draft.audioBatchSize}
-            whisperCommand={draft.whisperCommand}
-            whisperLanguage={draft.whisperLanguage}
-            maxAudioBytes={draft.maxAudioBytes}
-            minAudioBytesPerSec={draft.minAudioBytesPerSec}
-            minAudioRateCheckMs={draft.minAudioRateCheckMs}
-            liveRecordingFormat={draft.liveRecordingFormat}
-            liveRecordingSampleRate={draft.liveRecordingSampleRate}
-            liveRecordingChannels={draft.liveRecordingChannels}
-            liveRecordingPollIntervalSec={draft.liveRecordingPollIntervalSec}
-            set={set}
-          />
+          <AudioSettings d={draft} set={set} />
         </TabsContent>
 
         <TabsContent value="index" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Organization schedule"
-            description="Control the wiki-like index and background organization cadence."
-          >
+          <SettingsSection title="Organization schedule" description="Control index and background updates.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <TextField
-                label="Index strategy"
-                value={draft.indexStrategy}
-                onChange={(v) => set('indexStrategy', v)}
-                typeLabel="string"
-                hint="The installed index strategy. The default is karpathy."
-              />
-              <TextField
-                label="Index path"
-                value={draft.indexPath}
-                onChange={(v) => set('indexPath', v)}
-                typeLabel="path"
-                hint="Where generated index pages are stored."
-              />
-              <NumberField
-                label="Incremental interval"
-                value={draft.incrementalIntervalMin}
-                onChange={(v) => set('incrementalIntervalMin', v)}
-                min={1}
-                step={1}
-                unit="min"
-                typeLabel="integer"
-                hint="Used only when background model jobs are scheduled."
-              />
-              <TextField
-                label="Reorganize schedule"
-                value={draft.reorganiseSchedule}
-                onChange={(v) => set('reorganiseSchedule', v)}
-                typeLabel="cron string"
-                hint="Cron expression for full index reorganization."
-              />
-              <NumberField
-                label="Idle trigger"
-                value={draft.indexIdleTriggerMin}
-                onChange={(v) => set('indexIdleTriggerMin', v)}
-                min={1}
-                step={1}
-                unit="min"
-                typeLabel="integer"
-                hint="Idle time before deferred heavy index work may run."
-              />
-              <NumberField
-                label="Index batch size"
-                value={draft.indexBatchSize}
-                onChange={(v) => set('indexBatchSize', v)}
-                min={1}
-                step={10}
-                typeLabel="integer"
-                hint="Items processed per indexing pass."
-              />
+              <TextField label="Index strategy" value={draft.indexStrategy} onChange={(v: any) => set('indexStrategy', v)} typeLabel="string" />
+              <TextField label="Index path" value={draft.indexPath} onChange={(v: any) => set('indexPath', v)} typeLabel="path" />
+              <NumberField label="Incremental interval" value={draft.incrementalIntervalMin} onChange={(v: any) => set('incrementalIntervalMin', v)} min={1} step={1} unit="min" typeLabel="integer" />
+              <TextField label="Reorganize schedule" value={draft.reorganiseSchedule} onChange={(v: any) => set('reorganiseSchedule', v)} typeLabel="cron string" />
+              <NumberField label="Idle trigger" value={draft.indexIdleTriggerMin} onChange={(v: any) => set('indexIdleTriggerMin', v)} min={1} step={1} unit="min" typeLabel="integer" />
+              <NumberField label="Index batch size" value={draft.indexBatchSize} onChange={(v: any) => set('indexBatchSize', v)} min={1} step={10} typeLabel="integer" />
             </div>
             <Separator className="my-4" />
-            <ToggleRow
-              title="Reorganize while idle"
-              description="Allow idle-on-power catch-up to run expensive index work."
-              typeLabel="boolean"
-              checked={draft.reorganiseOnIdle}
-              onChange={(v) => set('reorganiseOnIdle', v)}
-            />
+            <ToggleRow title="Reorganize while idle" description="Run expensive index work when idle." typeLabel="boolean" checked={draft.reorganiseOnIdle} onChange={(v: any) => set('reorganiseOnIdle', v)} />
           </SettingsSection>
-
-          <SettingsSection
-            title="Sessions and meetings"
-            description="Tune how raw frames become work sessions and meeting records."
-          >
+          <SettingsSection title="Sessions and meetings" description="Tune session builders.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <NumberField
-                label="Session idle gap"
-                value={draft.sessionsIdleThresholdSec}
-                onChange={(v) => set('sessionsIdleThresholdSec', v)}
-                min={1}
-                step={30}
-                unit="sec"
-                typeLabel="integer"
-                hint="A larger gap merges nearby activity into longer sessions."
-              />
-              <NumberField
-                label="AFK marker threshold"
-                value={draft.sessionsAfkThresholdSec}
-                onChange={(v) => set('sessionsAfkThresholdSec', v)}
-                min={1}
-                step={30}
-                unit="sec"
-                typeLabel="integer"
-                hint="Gaps above this appear as idle markers in journals."
-              />
-              <NumberField
-                label="Minimum active time"
-                value={draft.sessionsMinActiveMs}
-                onChange={(v) => set('sessionsMinActiveMs', v)}
-                min={0}
-                step={1000}
-                unit="ms"
-                typeLabel="integer"
-                hint="Shorter sessions are dropped from primary session lists."
-              />
-              <NumberField
-                label="Fallback frame attention"
-                value={draft.sessionsFallbackFrameAttentionMs}
-                onChange={(v) => set('sessionsFallbackFrameAttentionMs', v)}
-                min={1}
-                step={1000}
-                unit="ms"
-                typeLabel="integer"
-                hint="Attention time assumed for frames without better duration data."
-              />
-              <NumberField
-                label="Meeting idle gap"
-                value={draft.meetingsIdleThresholdSec}
-                onChange={(v) => set('meetingsIdleThresholdSec', v)}
-                min={1}
-                step={30}
-                unit="sec"
-                typeLabel="integer"
-                hint="Gap that closes a detected active meeting."
-              />
-              <NumberField
-                label="Minimum meeting duration"
-                value={draft.meetingsMinDurationSec}
-                onChange={(v) => set('meetingsMinDurationSec', v)}
-                min={0}
-                step={30}
-                unit="sec"
-                typeLabel="integer"
-                hint="Shorter meetings are kept but skipped for model summary."
-              />
-              <NumberField
-                label="Audio grace window"
-                value={draft.meetingsAudioGraceSec}
-                onChange={(v) => set('meetingsAudioGraceSec', v)}
-                min={0}
-                step={10}
-                unit="sec"
-                typeLabel="integer"
-                hint="Audio arriving this long after meeting close still attaches."
-              />
-              <NumberField
-                label="Summary cooldown"
-                value={draft.meetingsSummarizeCooldownSec}
-                onChange={(v) => set('meetingsSummarizeCooldownSec', v)}
-                min={0}
-                step={30}
-                unit="sec"
-                typeLabel="integer"
-                hint="Wait after a meeting ends so Whisper can finish before summary."
-              />
-              <NumberField
-                label="Vision attachments"
-                value={draft.meetingsVisionAttachments}
-                onChange={(v) => set('meetingsVisionAttachments', v)}
-                min={0}
-                step={1}
-                typeLabel="integer"
-                hint="Number of key screenshots sent to the vision model per meeting summary."
-              />
+              <NumberField label="Session idle gap" value={draft.sessionsIdleThresholdSec} onChange={(v: any) => set('sessionsIdleThresholdSec', v)} min={1} step={30} unit="sec" typeLabel="integer" />
+              <NumberField label="AFK marker threshold" value={draft.sessionsAfkThresholdSec} onChange={(v: any) => set('sessionsAfkThresholdSec', v)} min={1} step={30} unit="sec" typeLabel="integer" />
+              <NumberField label="Minimum active time" value={draft.sessionsMinActiveMs} onChange={(v: any) => set('sessionsMinActiveMs', v)} min={0} step={1000} unit="ms" typeLabel="integer" />
+              <NumberField label="Fallback frame attention" value={draft.sessionsFallbackFrameAttentionMs} onChange={(v: any) => set('sessionsFallbackFrameAttentionMs', v)} min={1} step={1000} unit="ms" typeLabel="integer" />
+              <NumberField label="Meeting idle gap" value={draft.meetingsIdleThresholdSec} onChange={(v: any) => set('meetingsIdleThresholdSec', v)} min={1} step={30} unit="sec" typeLabel="integer" />
+              <NumberField label="Minimum meeting duration" value={draft.meetingsMinDurationSec} onChange={(v: any) => set('meetingsMinDurationSec', v)} min={0} step={30} unit="sec" typeLabel="integer" />
+              <NumberField label="Audio grace window" value={draft.meetingsAudioGraceSec} onChange={(v: any) => set('meetingsAudioGraceSec', v)} min={0} step={10} unit="sec" typeLabel="integer" />
+              <NumberField label="Summary cooldown" value={draft.meetingsSummarizeCooldownSec} onChange={(v: any) => set('meetingsSummarizeCooldownSec', v)} min={0} step={30} unit="sec" typeLabel="integer" />
+              <NumberField label="Vision attachments" value={draft.meetingsVisionAttachments} onChange={(v: any) => set('meetingsVisionAttachments', v)} min={0} step={1} typeLabel="integer" />
             </div>
             <Separator className="my-4" />
-            <ToggleRow
-              title="Summarize meetings"
-              description="Use the model to generate TL;DR, decisions, and action items."
-              typeLabel="boolean"
-              checked={draft.meetingsSummarize}
-              onChange={(v) => set('meetingsSummarize', v)}
-            />
+            <ToggleRow title="Summarize meetings" description="Generate TL;DR via model." typeLabel="boolean" checked={draft.meetingsSummarize} onChange={(v: any) => set('meetingsSummarize', v)} />
           </SettingsSection>
-
-          <SettingsSection
-            title="Semantic embeddings"
-            description="Blend vector search with keyword search for conceptual recall."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Generate embeddings"
-                description="Creates semantic vectors from frame text, titles, and URLs."
-                typeLabel="boolean"
-                checked={draft.embeddingsEnabled}
-                onChange={(v) => set('embeddingsEnabled', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <NumberField
-                  label="Embedding batch size"
-                  value={draft.embeddingsBatchSize}
-                  onChange={(v) => set('embeddingsBatchSize', v)}
-                  min={1}
-                  step={1}
-                  typeLabel="integer"
-                  hint="Frames embedded per worker pass."
-                />
-                <NumberField
-                  label="Embedding interval"
-                  value={draft.embeddingsTickIntervalMin}
-                  onChange={(v) => set('embeddingsTickIntervalMin', v)}
-                  min={1}
-                  step={1}
-                  unit="min"
-                  typeLabel="integer"
-                  hint="How often the embedding worker wakes up."
-                />
-                <NumberField
-                  label="Search blend weight"
-                  value={draft.embeddingsSearchWeight}
-                  onChange={(v) => set('embeddingsSearchWeight', v)}
-                  min={0.01}
-                  step={0.05}
-                  typeLabel="number"
-                  hint="Higher values give semantic matches more influence in search ranking."
-                />
-              </div>
+          <SettingsSection title="Semantic embeddings" description="Blend vector search with keyword search.">
+            <ToggleRow title="Generate embeddings" description="Create semantic vectors." typeLabel="boolean" checked={draft.embeddingsEnabled} onChange={(v: any) => set('embeddingsEnabled', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <NumberField label="Batch size" value={draft.embeddingsBatchSize} onChange={(v: any) => set('embeddingsBatchSize', v)} min={1} step={1} typeLabel="integer" />
+              <NumberField label="Interval" value={draft.embeddingsTickIntervalMin} onChange={(v: any) => set('embeddingsTickIntervalMin', v)} min={1} step={1} unit="min" typeLabel="integer" />
+              <NumberField label="Weight" value={draft.embeddingsSearchWeight} onChange={(v: any) => set('embeddingsSearchWeight', v)} min={0.01} step={0.05} typeLabel="number" />
             </div>
           </SettingsSection>
         </TabsContent>
 
         <TabsContent value="export" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Markdown export"
-            description="Mirror organized memory pages to regular Markdown files."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Enable Markdown export"
-                description="Writes daily journals and index pages to a folder you can browse or sync."
-                typeLabel="boolean"
-                checked={draft.markdownEnabled}
-                onChange={(v) => set('markdownEnabled', v)}
-              />
-              <Separator className="my-4" />
-              <TextField
-                label="Folder for daily journals"
-                value={draft.markdownPath}
-                onChange={(v) => set('markdownPath', v)}
-                typeLabel="path"
-                hint="Where Markdown export files are written."
-              />
-            </div>
+          <SettingsSection title="Markdown export" description="Mirror pages to Markdown files.">
+            <ToggleRow title="Enable Markdown export" description="Writes journals to folder." typeLabel="boolean" checked={draft.markdownEnabled} onChange={(v: any) => set('markdownEnabled', v)} />
+            <Separator className="my-4" />
+            <TextField label="Folder path" value={draft.markdownPath} onChange={(v: any) => set('markdownPath', v)} typeLabel="path" />
           </SettingsSection>
-
-          <SettingsSection
-            title="AI app connection"
-            description="Configure the built-in MCP server for external AI tools."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Enable MCP server"
-                description="Exposes memory tools to MCP-compatible apps on this machine."
-                typeLabel="boolean"
-                checked={draft.mcpEnabled}
-                onChange={(v) => set('mcpEnabled', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <TextField
-                  label="MCP host"
-                  value={draft.mcpHost}
-                  onChange={(v) => set('mcpHost', v)}
-                  typeLabel="host string"
-                  hint="127.0.0.1 keeps the server local to this computer."
-                />
-                <NumberField
-                  label="MCP port"
-                  value={draft.mcpPort}
-                  onChange={(v) => set('mcpPort', v)}
-                  min={1}
-                  max={65535}
-                  step={1}
-                  typeLabel="integer"
-                  hint="Choose an unused local TCP port."
-                />
-                <SelectField
-                  label="MCP transport"
-                  value={draft.mcpTransport}
-                  onChange={(v) => set('mcpTransport', v as McpTransport)}
-                  typeLabel="enum"
-                  hint="HTTP is best for the desktop server; stdio is for standalone launches."
-                  options={[
-                    { value: 'http', label: 'HTTP' },
-                    { value: 'stdio', label: 'stdio' },
-                  ]}
-                />
-                <NumberField
-                  label="Frame text excerpt"
-                  value={draft.mcpTextExcerptChars}
-                  onChange={(v) => set('mcpTextExcerptChars', v)}
-                  min={0}
-                  step={500}
-                  typeLabel="integer"
-                  hint="Maximum OCR/Accessibility characters returned per frame preview. 0 means no excerpt."
-                />
-              </div>
+          <SettingsSection title="AI app connection" description="Configure built-in MCP server.">
+            <ToggleRow title="Enable MCP server" description="Exposes memory tools." typeLabel="boolean" checked={draft.mcpEnabled} onChange={(v: any) => set('mcpEnabled', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <TextField label="Host" value={draft.mcpHost} onChange={(v: any) => set('mcpHost', v)} typeLabel="string" />
+              <NumberField label="Port" value={draft.mcpPort} onChange={(v: any) => set('mcpPort', v)} min={1} max={65535} step={1} typeLabel="integer" />
+              <SelectField label="Transport" value={draft.mcpTransport} onChange={(v: any) => set('mcpTransport', v)} typeLabel="enum" options={[{ value: 'http', label: 'HTTP' }, { value: 'stdio', label: 'stdio' }]} />
+              <NumberField label="Text excerpt chars" value={draft.mcpTextExcerptChars} onChange={(v: any) => set('mcpTextExcerptChars', v)} min={0} step={500} typeLabel="integer" />
             </div>
           </SettingsSection>
         </TabsContent>
 
         <TabsContent value="system" className="flex flex-col gap-4">
-          <SettingsSection
-            title="Background work"
-            description="Decide when expensive model work runs without an explicit click."
-          >
-            <SelectField
-              label="Background model jobs"
-              value={draft.backgroundModelJobs}
-              onChange={(v) => set('backgroundModelJobs', v as BackgroundModelJobs)}
-              typeLabel="enum"
-              hint="Manual is laptop-friendly. Scheduled keeps the index warmer in the background."
-              options={[
-                { value: 'manual', label: 'Manual' },
-                { value: 'scheduled', label: 'Scheduled' },
-              ]}
-            />
+          <SettingsSection title="Background work" description="Decide when expensive model work runs.">
+            <SelectField label="Background jobs" value={draft.backgroundModelJobs} onChange={(v: any) => set('backgroundModelJobs', v)} typeLabel="enum" options={[{ value: 'manual', label: 'Manual' }, { value: 'scheduled', label: 'Scheduled' }]} />
           </SettingsSection>
-
-          <SettingsSection
-            title="Load guard"
-            description="Pause heavy work when the computer is busy, low on memory, or low on battery."
-          >
-            <div className="flex flex-col gap-0">
-              <ToggleRow
-                title="Enable load guard"
-                description="Defers OCR, Whisper, embeddings, summaries, and vacuum when system pressure is high."
-                typeLabel="boolean"
-                checked={draft.loadGuardEnabled}
-                onChange={(v) => set('loadGuardEnabled', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <NumberField
-                  label="CPU load threshold"
-                  value={draft.loadGuardThreshold}
-                  onChange={(v) => set('loadGuardThreshold', v)}
-                  min={0.01}
-                  max={8}
-                  step={0.05}
-                  typeLabel="number"
-                  hint="Normalized 1-minute load average. 0.7 means about 70% of CPU capacity."
-                />
-                <NumberField
-                  label="Memory threshold"
-                  value={draft.loadGuardMemoryThreshold}
-                  onChange={(v) => set('loadGuardMemoryThreshold', v)}
-                  min={0.01}
-                  max={1}
-                  step={0.01}
-                  typeLabel="number"
-                  hint="Used-memory ratio. 0.9 skips heavy work near 90% memory use."
-                />
-                <NumberField
-                  label="Low-battery threshold"
-                  value={draft.loadGuardLowBatteryThresholdPct}
-                  onChange={(v) => set('loadGuardLowBatteryThresholdPct', v)}
-                  min={0}
-                  max={100}
-                  step={1}
-                  unit="%"
-                  typeLabel="integer"
-                  hint="While unplugged, heavy work is skipped below this battery level. 0 disables."
-                />
-                <NumberField
-                  label="Max consecutive CPU skips"
-                  value={draft.loadGuardMaxConsecutiveSkips}
-                  onChange={(v) => set('loadGuardMaxConsecutiveSkips', v)}
-                  min={0}
-                  step={1}
-                  typeLabel="integer"
-                  hint="0 never forces a CPU-overload run. Memory and battery skips are never forced."
-                />
-              </div>
+          <SettingsSection title="Load guard" description="Pause heavy work when busy.">
+            <ToggleRow title="Enable load guard" description="Defers OCR, Whisper, embeddings, etc." typeLabel="boolean" checked={draft.loadGuardEnabled} onChange={(v: any) => set('loadGuardEnabled', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <NumberField label="CPU load threshold" value={draft.loadGuardThreshold} onChange={(v: any) => set('loadGuardThreshold', v)} min={0.01} max={8} step={0.05} typeLabel="number" />
+              <NumberField label="Memory threshold" value={draft.loadGuardMemoryThreshold} onChange={(v: any) => set('loadGuardMemoryThreshold', v)} min={0.01} max={1} step={0.01} typeLabel="number" />
+              <NumberField label="Low-battery threshold" value={draft.loadGuardLowBatteryThresholdPct} onChange={(v: any) => set('loadGuardLowBatteryThresholdPct', v)} min={0} max={100} step={1} unit="%" typeLabel="integer" />
+              <NumberField label="Max consecutive skips" value={draft.loadGuardMaxConsecutiveSkips} onChange={(v: any) => set('loadGuardMaxConsecutiveSkips', v)} min={0} step={1} typeLabel="integer" />
             </div>
           </SettingsSection>
         </TabsContent>
       </Tabs>
 
-      <SaveBar
-        hasUnsavedChanges={hasUnsavedChanges}
-        saving={saving}
-        onSave={() => void save()}
-        onSaveAndRestart={() => void save({ restart: true })}
-        onReset={resetDraft}
-      />
+      <SaveBar hasUnsavedChanges={hasUnsavedChanges} saving={saving} onSave={() => save()} onSaveAndRestart={() => save({ restart: true })} onReset={resetDraft} />
     </div>
   );
 }
 
-const WHISPER_MODELS: Array<{ id: string; label: string; size: string; quality: string }> = [
-  { id: 'tiny', label: 'tiny', size: '~75 MB', quality: 'Fastest, lower quality' },
-  { id: 'base', label: 'base', size: '~150 MB', quality: 'Recommended' },
-  { id: 'small', label: 'small', size: '~500 MB', quality: 'Better, slower' },
-  { id: 'medium', label: 'medium', size: '~1.5 GB', quality: 'Best, much slower' },
-];
-
-function AudioSettings({
-  capturePlugin,
-  captureAudio,
-  liveRecordingEnabled,
-  systemAudioBackend,
-  whisperModel,
-  chunkSeconds,
-  deleteAudioAfterTranscribe,
-  audioInboxPath,
-  audioProcessedPath,
-  audioFailedPath,
-  audioTickIntervalSec,
-  audioBatchSize,
-  whisperCommand,
-  whisperLanguage,
-  maxAudioBytes,
-  minAudioBytesPerSec,
-  minAudioRateCheckMs,
-  liveRecordingFormat,
-  liveRecordingSampleRate,
-  liveRecordingChannels,
-  liveRecordingPollIntervalSec,
-  set,
-}: {
-  capturePlugin: string;
-  captureAudio: boolean;
-  liveRecordingEnabled: boolean;
-  systemAudioBackend: SystemAudioBackend;
-  whisperModel: string;
-  chunkSeconds: number;
-  deleteAudioAfterTranscribe: boolean;
-  audioInboxPath: string;
-  audioProcessedPath: string;
-  audioFailedPath: string;
-  audioTickIntervalSec: number;
-  audioBatchSize: number;
-  whisperCommand: string;
-  whisperLanguage: string;
-  maxAudioBytes: number;
-  minAudioBytesPerSec: number;
-  minAudioRateCheckMs: number;
-  liveRecordingFormat: LiveRecordingFormat;
-  liveRecordingSampleRate: number;
-  liveRecordingChannels: number;
-  liveRecordingPollIntervalSec: number;
-  set: <K extends keyof SettingsDraft>(key: K, value: SettingsDraft[K]) => void;
-}) {
-  const [whisper, setWhisper] = React.useState<WhisperProbe | null>(null);
-  const [ffprobe, setFfprobe] = React.useState<{ available: boolean; path?: string } | null>(null);
-  const [mic, setMic] = React.useState<MicPermission | null>(null);
-  const [refreshing, setRefreshing] = React.useState(false);
-
+function AudioSettings({ d, set }: { d: any; set: any }) {
+  const [whisper, setWhisper] = React.useState<any>(null), [ffprobe, setFfprobe] = React.useState<any>(null), [mic, setMic] = React.useState<any>(null), [refreshing, setRefreshing] = React.useState(false);
   const refreshProbes = React.useCallback(async () => {
     setRefreshing(true);
-    try {
-      const [w, f, m] = await Promise.all([
-        window.cofounderos.probeWhisper(),
-        window.cofounderos.probeFfprobe(),
-        window.cofounderos.probeMicPermission(),
-      ]);
-      setWhisper(w);
-      setFfprobe(f);
-      setMic(m);
-    } catch {
-      /* ignore */
-    } finally {
-      setRefreshing(false);
-    }
+    try { setWhisper(await window.cofounderos.probeWhisper()); setFfprobe(await window.cofounderos.probeFfprobe()); setMic(await window.cofounderos.probeMicPermission()); } catch {} finally { setRefreshing(false); }
   }, []);
-
-  React.useEffect(() => {
-    void refreshProbes();
-  }, [refreshProbes]);
-
-  async function handleRequestMic() {
-    const after = await window.cofounderos.requestMicPermission();
-    setMic(after);
-  }
-
-  const liveCaptureNeedsNative =
-    captureAudio && liveRecordingEnabled && capturePlugin.trim() !== 'native';
-  const setCaptureAudio = (enabled: boolean) => {
-    set('captureAudio', enabled);
-    if (!enabled) set('liveRecordingEnabled', false);
-    else if (liveRecordingEnabled && capturePlugin.trim() !== 'native') {
-      set('capturePlugin', 'native');
-    }
-  };
-  const setLiveRecordingEnabled = (enabled: boolean) => {
-    set('liveRecordingEnabled', enabled);
-    if (enabled) {
-      set('captureAudio', true);
-      if (capturePlugin.trim() !== 'native') set('capturePlugin', 'native');
-    }
-  };
+  React.useEffect(() => { refreshProbes(); }, [refreshProbes]);
 
   return (
     <div className="flex flex-col gap-4">
-      <Card>
-        <CardContent className="flex flex-col gap-0">
-          <ToggleRow
-            title="Process audio and transcripts"
-            description="Import audio files from the inbox and transcribe them locally with Whisper."
-            typeLabel="boolean"
-            checked={captureAudio}
-            onChange={setCaptureAudio}
-          />
-          {captureAudio && (
-            <>
-              {liveCaptureNeedsNative && (
-                <>
-                  <Separator className="my-4" />
-                  <Alert>
-                    <AlertTriangle className="size-4" />
-                    <AlertTitle>Native capture required</AlertTitle>
-                    <AlertDescription>
-                      Live meeting audio uses the native capture plugin. Enabling live recording
-                      switches the capture plugin to native when you save.
-                    </AlertDescription>
-                  </Alert>
-                </>
-              )}
-              <Separator className="my-4" />
-              <ToggleRow
-                title="Live microphone recording"
-                description="Record short chunks only after another app is already using audio input."
-                typeLabel="boolean"
-                checked={liveRecordingEnabled}
-                onChange={setLiveRecordingEnabled}
-              />
-              <Separator className="my-4" />
-              <div className="flex flex-col gap-3">
-                <div>
-                  <h4 className="font-medium">Whisper model</h4>
-                  <p className="text-sm text-muted-foreground mt-0.5">
-                    Trade-off between transcription quality and speed.
-                  </p>
-                </div>
-                <RadioGroup
-                  value={whisperModel}
-                  onValueChange={(v) => set('whisperModel', v)}
-                  className="grid gap-2 sm:grid-cols-2"
-                >
-                  {WHISPER_MODELS.map((m) => (
-                    <Label
-                      key={m.id}
-                      htmlFor={`wm-${m.id}`}
-                      className={cn(
-                        'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
-                        whisperModel === m.id
-                          ? 'border-primary ring-2 ring-primary/20'
-                          : 'hover:bg-accent/40',
-                      )}
-                    >
-                      <RadioGroupItem
-                        value={m.id}
-                        id={`wm-${m.id}`}
-                        className="mt-0.5"
-                      />
-                      <div className="min-w-0">
-                        <div className="font-medium">{m.label}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {m.size} · {m.quality}
-                        </div>
-                      </div>
-                    </Label>
-                  ))}
-                </RadioGroup>
-              </div>
-              <Separator className="my-4" />
-              <div className="flex flex-col gap-3">
-                <div>
-                  <h4 className="font-medium">Remote participant audio</h4>
-                  <p className="text-sm text-muted-foreground mt-0.5">
-                    Choose how CofounderOS joins remote audio after another app opens input.
-                  </p>
-                </div>
-                <RadioGroup
-                  value={systemAudioBackend}
-                  onValueChange={(v) => set('systemAudioBackend', v as SystemAudioBackend)}
-                  className="grid gap-2"
-                >
-                  <Label
-                    htmlFor="sab-core"
-                    className={cn(
-                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
-                      systemAudioBackend === 'core_audio_tap'
-                        ? 'border-primary ring-2 ring-primary/20'
-                        : 'hover:bg-accent/40',
-                    )}
-                  >
-                    <RadioGroupItem value="core_audio_tap" id="sab-core" className="mt-0.5" />
-                    <div className="min-w-0">
-                      <div className="font-medium">Core Audio tap</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        Recommended on macOS 14.2+. Joins system output without the
-                        macOS screen-sharing indicator once another app is using input.
-                      </div>
-                    </div>
-                  </Label>
-                  <Label
-                    htmlFor="sab-off"
-                    className={cn(
-                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
-                      systemAudioBackend === 'off'
-                        ? 'border-primary ring-2 ring-primary/20'
-                        : 'hover:bg-accent/40',
-                    )}
-                  >
-                    <RadioGroupItem value="off" id="sab-off" className="mt-0.5" />
-                    <div className="min-w-0">
-                      <div className="font-medium">Mic only</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        Records your voice only. Remote participants are not captured.
-                      </div>
-                    </div>
-                  </Label>
-                  <Label
-                    htmlFor="sab-sck"
-                    className={cn(
-                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
-                      systemAudioBackend === 'screencapturekit'
-                        ? 'border-primary ring-2 ring-primary/20'
-                        : 'hover:bg-accent/40',
-                    )}
-                  >
-                    <RadioGroupItem value="screencapturekit" id="sab-sck" className="mt-0.5" />
-                    <div className="min-w-0">
-                      <div className="font-medium">ScreenCaptureKit fallback</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        Joins remote audio on older macOS versions, but macOS shows
-                        "Currently Sharing" while active.
-                      </div>
-                    </div>
-                  </Label>
-                </RadioGroup>
-              </div>
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <NumberField
-                  label="Chunk length (seconds)"
-                  value={chunkSeconds}
-                  onChange={(v) => set('chunkSeconds', v)}
-                  min={1}
-                  step={30}
-                  unit="sec"
-                  typeLabel="integer"
-                  hint="Shorter chunks = faster feedback during calls, more Whisper invocations."
-                />
-                <SelectField
-                  label="Recording format"
-                  value={liveRecordingFormat}
-                  onChange={(v) => set('liveRecordingFormat', v as LiveRecordingFormat)}
-                  typeLabel="enum"
-                  hint="m4a is the supported live-recording container."
-                  options={[{ value: 'm4a', label: 'm4a' }]}
-                />
-                <NumberField
-                  label="Sample rate"
-                  value={liveRecordingSampleRate}
-                  onChange={(v) => set('liveRecordingSampleRate', v)}
-                  min={1}
-                  step={1000}
-                  unit="Hz"
-                  typeLabel="integer"
-                  hint="16000 Hz is a good speech transcription default."
-                />
-                <NumberField
-                  label="Audio channels"
-                  value={liveRecordingChannels}
-                  onChange={(v) => set('liveRecordingChannels', v)}
-                  min={1}
-                  max={2}
-                  step={1}
-                  typeLabel="integer"
-                  hint="1 is mono and smaller. 2 keeps stereo input."
-                />
-                <NumberField
-                  label="Input poll interval"
-                  value={liveRecordingPollIntervalSec}
-                  onChange={(v) => set('liveRecordingPollIntervalSec', v)}
-                  min={1}
-                  step={1}
-                  unit="sec"
-                  typeLabel="integer"
-                  hint="How often CofounderOS checks whether another app still has mic input."
-                />
-              </div>
-              <Separator className="my-4" />
-              <ToggleRow
-                title="Delete audio after transcribing"
-                description="Recommended. The redacted transcript stays; the raw audio file is removed so credentials and other PII don't linger on disk."
-                typeLabel="boolean"
-                checked={deleteAudioAfterTranscribe}
-                onChange={(v) => set('deleteAudioAfterTranscribe', v)}
-              />
-              <Separator className="my-4" />
-              <div className="grid gap-4 sm:grid-cols-2">
-                <TextField
-                  label="Audio inbox path"
-                  value={audioInboxPath}
-                  onChange={(v) => set('audioInboxPath', v)}
-                  typeLabel="path"
-                  hint="Audio files dropped here are imported and transcribed."
-                />
-                <TextField
-                  label="Processed audio path"
-                  value={audioProcessedPath}
-                  onChange={(v) => set('audioProcessedPath', v)}
-                  typeLabel="path"
-                  hint="Successfully processed source files move here when they are retained."
-                />
-                <TextField
-                  label="Failed audio path"
-                  value={audioFailedPath}
-                  onChange={(v) => set('audioFailedPath', v)}
-                  typeLabel="path"
-                  hint="Files that cannot be processed are moved here for inspection."
-                />
-                <NumberField
-                  label="Transcript worker interval"
-                  value={audioTickIntervalSec}
-                  onChange={(v) => set('audioTickIntervalSec', v)}
-                  min={1}
-                  step={5}
-                  unit="sec"
-                  typeLabel="integer"
-                  hint="How often the audio import worker scans the inbox."
-                />
-                <NumberField
-                  label="Transcript batch size"
-                  value={audioBatchSize}
-                  onChange={(v) => set('audioBatchSize', v)}
-                  min={1}
-                  step={1}
-                  typeLabel="integer"
-                  hint="Audio files processed per worker tick."
-                />
-                <TextField
-                  label="Whisper command"
-                  value={whisperCommand}
-                  onChange={(v) => set('whisperCommand', v)}
-                  typeLabel="command string"
-                  hint="Executable used for transcription. Keep as whisper unless you installed a compatible wrapper."
-                />
-                <TextField
-                  label="Whisper language"
-                  value={whisperLanguage}
-                  onChange={(v) => set('whisperLanguage', v)}
-                  typeLabel="string"
-                  hint="Optional language code. Blank lets Whisper auto-detect."
-                  placeholder="optional"
-                />
-                <NumberField
-                  label="Maximum audio file size"
-                  value={maxAudioBytes}
-                  onChange={(v) => set('maxAudioBytes', v)}
-                  min={0}
-                  step={1024 * 1024}
-                  unit="bytes"
-                  typeLabel="integer"
-                  hint="Reject larger files before Whisper. 0 disables the size cap."
-                />
-                <NumberField
-                  label="Minimum audio byte rate"
-                  value={minAudioBytesPerSec}
-                  onChange={(v) => set('minAudioBytesPerSec', v)}
-                  min={0}
-                  step={512}
-                  unit="bytes/sec"
-                  typeLabel="integer"
-                  hint="Files below this byte rate are treated as silence. 0 disables the check."
-                />
-                <NumberField
-                  label="Minimum rate-check length"
-                  value={minAudioRateCheckMs}
-                  onChange={(v) => set('minAudioRateCheckMs', v)}
-                  min={0}
-                  step={500}
-                  unit="ms"
-                  typeLabel="integer"
-                  hint="Shorter clips skip the silence byte-rate check."
-                />
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="size-8 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
-                <Mic className="size-4" />
-              </div>
-              <div>
-                <h4 className="font-medium">Status</h4>
-                <p className="text-sm text-muted-foreground mt-0.5">
-                  Conditional audio capture needs Whisper installed and microphone permission.
-                </p>
-              </div>
+      <Card><CardContent className="flex flex-col gap-0">
+        <ToggleRow title="Process audio" description="Transcribe with Whisper." typeLabel="boolean" checked={d.captureAudio} onChange={(v: any) => { set('captureAudio', v); if (!v) set('liveRecordingEnabled', false); else if (d.liveRecordingEnabled && d.capturePlugin !== 'native') set('capturePlugin', 'native'); }} />
+        {d.captureAudio && (
+          <>
+            {d.liveRecordingEnabled && d.capturePlugin !== 'native' && <><Separator className="my-4" /><Alert><AlertTriangle className="size-4" /><AlertTitle>Native capture required</AlertTitle><AlertDescription>Live audio requires native plugin.</AlertDescription></Alert></>}
+            <Separator className="my-4" /><ToggleRow title="Live microphone recording" description="Record chunks while in use." typeLabel="boolean" checked={d.liveRecordingEnabled} onChange={(v: any) => { set('liveRecordingEnabled', v); if (v) { set('captureAudio', true); if (d.capturePlugin !== 'native') set('capturePlugin', 'native'); } }} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <SelectField label="Whisper model" value={d.whisperModel} onChange={(v: any) => set('whisperModel', v)} options={[{ value: 'tiny', label: 'tiny' }, { value: 'base', label: 'base' }, { value: 'small', label: 'small' }, { value: 'medium', label: 'medium' }]} />
+              <SelectField label="Remote audio backend" value={d.systemAudioBackend} onChange={(v: any) => set('systemAudioBackend', v)} options={[{ value: 'core_audio_tap', label: 'Core Audio' }, { value: 'off', label: 'Mic only' }, { value: 'screencapturekit', label: 'ScreenCaptureKit' }]} />
+              <NumberField label="Chunk length (sec)" value={d.chunkSeconds} onChange={(v: any) => set('chunkSeconds', v)} min={1} step={30} />
+              <SelectField label="Format" value={d.liveRecordingFormat} onChange={(v: any) => set('liveRecordingFormat', v)} options={[{ value: 'm4a', label: 'm4a' }]} />
+              <NumberField label="Sample rate" value={d.liveRecordingSampleRate} onChange={(v: any) => set('liveRecordingSampleRate', v)} min={1} step={1000} />
+              <NumberField label="Channels" value={d.liveRecordingChannels} onChange={(v: any) => set('liveRecordingChannels', v)} min={1} max={2} step={1} />
+              <NumberField label="Input poll interval" value={d.liveRecordingPollIntervalSec} onChange={(v: any) => set('liveRecordingPollIntervalSec', v)} min={1} step={1} />
             </div>
-            <Button size="sm" variant="outline" onClick={() => void refreshProbes()} disabled={refreshing}>
-              {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              Re-check
-            </Button>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            <SettingsStatusRow
-              label="Whisper"
-              status={whisper === null ? 'pending' : whisper.available ? 'ok' : 'missing'}
-              detail={
-                whisper === null
-                  ? 'Checking…'
-                  : whisper.available
-                    ? whisper.path ?? 'installed'
-                    : 'Not found on PATH. Install instructions below.'
-              }
-            />
-            <SettingsStatusRow
-              label="ffprobe (for accurate durations)"
-              status={ffprobe === null ? 'pending' : ffprobe.available ? 'ok' : 'optional-missing'}
-              detail={
-                ffprobe === null
-                  ? 'Checking…'
-                  : ffprobe.available
-                    ? ffprobe.path ?? 'installed'
-                    : 'Optional. Without ffprobe, audio events have no duration_ms. Install with `brew install ffmpeg`.'
-              }
-            />
-            {mic && mic.status !== 'unsupported' && (
-              <SettingsStatusRow
-                label="Microphone permission"
-                status={
-                  mic.status === 'granted'
-                    ? 'ok'
-                    : mic.status === 'denied' || mic.status === 'restricted'
-                      ? 'missing'
-                      : 'pending'
-                }
-                detail={
-                  mic.status === 'granted'
-                    ? 'Granted'
-                    : mic.status === 'denied'
-                      ? 'Denied. Open System Settings → Privacy & Security → Microphone and enable CofounderOS.'
-                      : mic.status === 'restricted'
-                        ? "Restricted by a profile or parental control."
-                        : 'Not yet asked. Click Request below to prompt.'
-                }
-                action={
-                  mic.status === 'not-determined'
-                    ? { label: 'Request', onClick: () => void handleRequestMic() }
-                    : undefined
-                }
-              />
-            )}
-          </div>
-
-          {whisper && !whisper.available && (
-            <WhisperOneClickInstall onInstalled={() => void refreshProbes()} />
-          )}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function SettingsStatusRow({
-  label,
-  status,
-  detail,
-  action,
-}: {
-  label: string;
-  status: 'ok' | 'missing' | 'optional-missing' | 'pending';
-  detail?: string;
-  action?: { label: string; onClick: () => void };
-}) {
-  return (
-    <div className="flex items-start gap-3 rounded-md border bg-muted/30 p-3">
-      <div className="mt-0.5">
-        {status === 'ok' ? (
-          <Check className="size-4 text-success" />
-        ) : status === 'missing' ? (
-          <X className="size-4 text-destructive" />
-        ) : status === 'optional-missing' ? (
-          <Shield className="size-4 text-muted-foreground" />
-        ) : (
-          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+            <Separator className="my-4" /><ToggleRow title="Delete audio after transcribing" description="Keep transcript, delete raw audio." typeLabel="boolean" checked={d.deleteAudioAfterTranscribe} onChange={(v: any) => set('deleteAudioAfterTranscribe', v)} />
+            <Separator className="my-4" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <TextField label="Inbox path" value={d.audioInboxPath} onChange={(v: any) => set('audioInboxPath', v)} />
+              <TextField label="Processed path" value={d.audioProcessedPath} onChange={(v: any) => set('audioProcessedPath', v)} />
+              <TextField label="Failed path" value={d.audioFailedPath} onChange={(v: any) => set('audioFailedPath', v)} />
+              <NumberField label="Worker interval" value={d.audioTickIntervalSec} onChange={(v: any) => set('audioTickIntervalSec', v)} min={1} step={5} />
+              <NumberField label="Batch size" value={d.audioBatchSize} onChange={(v: any) => set('audioBatchSize', v)} min={1} step={1} />
+              <TextField label="Whisper command" value={d.whisperCommand} onChange={(v: any) => set('whisperCommand', v)} />
+              <TextField label="Language" value={d.whisperLanguage} onChange={(v: any) => set('whisperLanguage', v)} placeholder="optional" />
+              <NumberField label="Max file bytes" value={d.maxAudioBytes} onChange={(v: any) => set('maxAudioBytes', v)} min={0} step={1024*1024} />
+              <NumberField label="Min bytes/sec" value={d.minAudioBytesPerSec} onChange={(v: any) => set('minAudioBytesPerSec', v)} min={0} step={512} />
+              <NumberField label="Min rate-check length (ms)" value={d.minAudioRateCheckMs} onChange={(v: any) => set('minAudioRateCheckMs', v)} min={0} step={500} />
+            </div>
+          </>
         )}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="text-sm font-medium">{label}</div>
-        {detail && <div className="text-xs text-muted-foreground mt-0.5 break-words">{detail}</div>}
-      </div>
-      {action && (
-        <Button size="sm" variant="outline" onClick={action.onClick}>
-          {action.label}
-        </Button>
-      )}
+      </CardContent></Card>
+      
+      <Card><CardContent className="flex flex-col gap-3">
+        <div className="flex justify-between items-center"><div className="flex items-center gap-3"><div className="size-8 grid place-items-center bg-primary/10 text-primary rounded-md"><Mic className="size-4" /></div><div><h4 className="font-medium">Status</h4></div></div><Button size="sm" variant="outline" onClick={refreshProbes} disabled={refreshing}>{refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />} Re-check</Button></div>
+        <div className="flex flex-col gap-2">
+          <div className="p-3 border rounded-md bg-muted/30"><div className="text-sm font-medium">Whisper</div><div className="text-xs text-muted-foreground">{whisper ? (whisper.available ? whisper.path : 'Not found') : 'Checking...'}</div></div>
+          <div className="p-3 border rounded-md bg-muted/30"><div className="text-sm font-medium">ffprobe</div><div className="text-xs text-muted-foreground">{ffprobe ? (ffprobe.available ? ffprobe.path : 'Missing') : 'Checking...'}</div></div>
+        </div>
+      </CardContent></Card>
     </div>
   );
 }
 
-function WhisperOneClickInstall({ onInstalled }: { onInstalled: () => void }) {
-  const [installer, setInstaller] = React.useState<
-    'brew' | 'pipx' | 'pip3' | 'pip' | null | undefined
-  >(undefined);
-  const [state, setState] = React.useState<'idle' | 'running' | 'failed' | 'finished'>(
-    'idle',
-  );
-  const [log, setLog] = React.useState<string[]>([]);
-  const [error, setError] = React.useState<string | null>(null);
-  const [activeInstaller, setActiveInstaller] = React.useState<
-    'brew' | 'pipx' | 'pip3' | 'pip' | null
-  >(null);
-
-  React.useEffect(() => {
-    void window.cofounderos
-      .detectWhisperInstaller()
-      .then((res) => setInstaller(res.installer))
-      .catch(() => setInstaller(null));
+function PermissionsSettingsPanel() {
+  const [st, setSt] = React.useState<any>({});
+  const refresh = React.useCallback(async () => {
+    try { setSt({ s: await window.cofounderos.probeScreenPermission(), a: await window.cofounderos.probeAccessibilityPermission(), m: await window.cofounderos.probeMicPermission() }); } catch {}
   }, []);
-
-  React.useEffect(() => {
-    if (!window.cofounderos.onWhisperInstallProgress) return;
-    window.cofounderos.onWhisperInstallProgress((event) => {
-      if (event.kind === 'started') {
-        setState('running');
-        setError(null);
-        setLog([`$ ${event.message ?? `${event.installer} install openai-whisper`}`]);
-        setActiveInstaller(event.installer);
-      } else if (event.kind === 'log') {
-        setLog((prev) => [...prev.slice(-80), event.message]);
-      } else if (event.kind === 'finished') {
-        setState(event.available ? 'finished' : 'failed');
-        if (!event.available) {
-          setError(
-            "Install completed but Whisper still isn't on PATH. Try restarting CofounderOS from a fresh terminal.",
-          );
-        }
-        onInstalled();
-      } else if (event.kind === 'failed') {
-        setState('failed');
-        setError(event.reason ?? 'Install failed.');
-      }
-    });
-  }, [onInstalled]);
-
-  async function runInstall() {
-    setState('running');
-    setError(null);
-    setLog([]);
-    try {
-      const res = await window.cofounderos.installWhisper();
-      if (!res.started) {
-        setState('failed');
-        setError(res.reason ?? 'Could not start the installer.');
-      } else if (res.installer) {
-        setActiveInstaller(res.installer);
-      }
-    } catch (err) {
-      setState('failed');
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  if (installer === undefined) {
-    return null;
-  }
-
-  if (installer === null) {
-    return (
-      <Alert variant="warning">
-        <Shield />
-        <AlertTitle>We can't auto-install Whisper here</AlertTitle>
-        <AlertDescription>
-          CofounderOS couldn't find Homebrew, pipx, or pip on your system. Install one of those and
-          come back, or skip transcription for now.
-        </AlertDescription>
-      </Alert>
-    );
-  }
-
+  React.useEffect(() => { refresh(); const t = setInterval(refresh, 2500); return () => clearInterval(t); }, [refresh]);
+  const req = async (k: string) => { await (window.cofounderos as any)[`request${k}Permission`](); refresh(); };
+  
+  if (st.s?.status === 'unsupported' && st.a?.status === 'unsupported' && st.m?.status === 'unsupported') return <SettingsSection title="System permissions"><p className="text-sm">Not applicable.</p></SettingsSection>;
   return (
-    <div className="rounded-md border bg-muted/30 p-4 flex flex-col gap-3">
-      <div className="flex items-start gap-3">
-        <div className="size-8 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
-          {state === 'running' ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : state === 'finished' ? (
-            <Check className="size-4" />
-          ) : state === 'failed' ? (
-            <X className="size-4 text-destructive" />
-          ) : (
-            <Mic className="size-4" />
-          )}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h4 className="font-medium text-sm">
-            {state === 'finished'
-              ? 'Whisper installed'
-              : state === 'running'
-                ? `Installing Whisper via ${activeInstaller ?? installer}…`
-                : state === 'failed'
-                  ? 'Install ran into a snag'
-                  : `Install Whisper via ${installer}`}
-          </h4>
-          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-            {state === 'running'
-              ? 'This usually takes a minute or two. The install runs locally — nothing leaves this device.'
-              : state === 'failed'
-                ? error ?? 'See the log below.'
-                : 'CofounderOS will run the install for you using your existing package manager.'}
-          </p>
-        </div>
-        {state !== 'running' && (
-          <Button
-            size="sm"
-            variant={state === 'failed' ? 'outline' : 'default'}
-            onClick={() => void runInstall()}
-          >
-            {state === 'failed' ? (
-              <>
-                <RefreshCw />
-                Try again
-              </>
-            ) : (
-              'Install Whisper'
-            )}
-          </Button>
-        )}
+    <SettingsSection title="System permissions" description="macOS settings.">
+      <div className="flex flex-col gap-3">
+        {st.s?.status !== 'unsupported' && <div className="p-4 border rounded-lg bg-card"><div className="font-medium text-sm">Screen Recording {st.s?.status === 'granted' && <Check className="inline size-4 text-success" />}</div><Button size="sm" onClick={() => req('Screen')}>Request</Button></div>}
+        {st.a?.status !== 'unsupported' && <div className="p-4 border rounded-lg bg-card"><div className="font-medium text-sm">Accessibility {st.a?.status === 'granted' && <Check className="inline size-4 text-success" />}</div><Button size="sm" onClick={() => req('Accessibility')}>Request</Button></div>}
       </div>
-      <SettingsInstallLogDisclosure log={log} />
-    </div>
+    </SettingsSection>
   );
 }
 
-function SettingsInstallLogDisclosure({ log }: { log: string[] }) {
-  if (log.length === 0) return null;
+function ModelSettings({ savedModel, savedRevision, ollamaHost, ollamaAutoInstall, modelReady, bootstrapEvents, onClearBootstrapEvents, onHostChange, onAutoInstallChange, onModelChanged }: any) {
+  const [pid, setPid] = React.useState(savedModel || MODEL_CHOICES[0]!.id), [tag, setTag] = React.useState(savedModel), [ph, setPh] = React.useState<'idle'|'running'|'done'|'error'>('idle');
+  const apply = async () => { setPh('running'); onClearBootstrapEvents(); try { const n = await window.cofounderos.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: pid === '__custom__' ? tag : pid, model_revision: savedRevision + 1, auto_install: true } } } }); onModelChanged(n); await window.cofounderos.updateModel(); setPh('done'); toast.success('Switched.'); } catch (e: any) { setPh('error'); toast.error(e.message); } };
   return (
-    <details className="text-xs">
-      <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
-        Show install details
-      </summary>
-      <pre className="mt-2 max-h-40 overflow-auto rounded-md border bg-card p-3 font-mono text-[11px] leading-snug">
-        {log.slice(-12).join('\n')}
-      </pre>
-    </details>
+    <Card><CardContent className="flex flex-col gap-4">
+      <div className="flex items-center gap-3"><div className="size-10 grid place-items-center bg-primary/10 text-primary rounded-md"><Cpu className="size-5" /></div><div className="flex-1"><h3 className="font-semibold">Local AI model</h3><p className="text-sm font-mono text-muted-foreground">{savedModel}</p></div><Button onClick={apply} disabled={ph === 'running'}><Download /> Apply model</Button></div>
+      <Separator />
+      <RadioGroup value={pid} onValueChange={setPid} className="grid gap-2 sm:grid-cols-2">{MODEL_CHOICES.map(m => <Label key={m.id} className={cn('p-3 border rounded-md cursor-pointer flex gap-3', pid === m.id && 'border-primary ring-2 ring-primary/20')}><RadioGroupItem value={m.id} /><div className="font-medium text-sm">{m.name}</div></Label>)}</RadioGroup>
+    </CardContent></Card>
   );
 }
 
 function DangerZone() {
-  const [confirmText, setConfirmText] = React.useState('');
-  const [pending, setPending] = React.useState(false);
-  const [open, setOpen] = React.useState(false);
-
-  const requiredPhrase = 'DELETE';
-  const canConfirm = confirmText.trim() === requiredPhrase;
-
-  async function handleDelete() {
-    setPending(true);
-    try {
-      const result = await window.cofounderos.deleteAllMemory();
-      toast.success('All memory deleted', {
-        description: `Removed ${result.frames.toLocaleString()} moments and ${formatBytes(result.assetBytes)} of screenshots.`,
-      });
-      setConfirmText('');
-      setOpen(false);
-    } catch (err) {
-      toast.error('Could not delete memory', {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setPending(false);
-    }
-  }
-
+  const [txt, setTxt] = React.useState(''), [op, setOp] = React.useState(false);
+  const del = async () => { try { await window.cofounderos.deleteAllMemory(); setOp(false); setTxt(''); toast.success('Deleted'); } catch (e: any) { toast.error(e.message); } };
   return (
-    <Card className="border-destructive/40 bg-destructive/5">
-      <CardContent className="flex flex-col gap-3">
-        <div className="flex items-start gap-3">
-          <div className="size-8 shrink-0 grid place-items-center rounded-md bg-destructive/15 text-destructive">
-            <AlertTriangle className="size-4" />
-          </div>
-          <div>
-            <h4 className="font-medium text-destructive">Delete all my memory</h4>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Removes every captured moment, screenshot, session, and search index from this
-              device. The app keeps running and starts capturing fresh data afterwards. There
-              is no undo.
-            </p>
-          </div>
-        </div>
-        <div>
-          <AlertDialog
-            open={open}
-            onOpenChange={(next) => {
-              setOpen(next);
-              if (!next) setConfirmText('');
-            }}
-          >
-            <AlertDialogTrigger asChild>
-              <Button variant="destructive">
-                <Trash2 />
-                Delete everything…
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete all memory?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This permanently removes every captured moment, screenshot, and the entire
-                  search index from this device. It can't be undone, and there is no backup copy to
-                  restore from.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="danger-confirm">
-                  Type <span className="font-mono font-semibold">{requiredPhrase}</span> to
-                  confirm.
-                </Label>
-                <Input
-                  id="danger-confirm"
-                  value={confirmText}
-                  onChange={(e) => setConfirmText(e.currentTarget.value)}
-                  placeholder={requiredPhrase}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={(e) => {
-                    e.preventDefault();
-                    if (canConfirm && !pending) void handleDelete();
-                  }}
-                  disabled={!canConfirm || pending}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
-                  {pending ? 'Deleting…' : 'Delete everything'}
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        </div>
-      </CardContent>
-    </Card>
+    <Card className="border-destructive/40 bg-destructive/5"><CardContent className="flex flex-col gap-3">
+      <div className="flex items-start gap-3"><div className="size-8 grid place-items-center bg-destructive/15 text-destructive rounded-md"><AlertTriangle className="size-4" /></div><div><h4 className="font-medium text-destructive">Delete all my memory</h4></div></div>
+      <AlertDialog open={op} onOpenChange={setOp}><AlertDialogTrigger asChild><Button variant="destructive"><Trash2 /> Delete everything...</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogTitle>Delete?</AlertDialogTitle><AlertDialogDescription>Type DELETE to confirm.</AlertDialogDescription><Input value={txt} onChange={e => setTxt(e.target.value)} /><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={del} disabled={txt !== 'DELETE'}>Confirm</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    </CardContent></Card>
   );
 }
 
-function ThemePicker({
-  value,
-  onChange,
-}: {
-  value: ThemePreference;
-  onChange: (next: ThemePreference) => void;
-}) {
-  const options: Array<{ id: ThemePreference; label: string; icon: React.ReactNode }> = [
-    { id: 'auto', label: 'Auto', icon: <Monitor /> },
-    { id: 'light', label: 'Light', icon: <Sun /> },
-    { id: 'dark', label: 'Dark', icon: <Moon /> },
-  ];
-  return (
-    <RadioGroup
-      value={value}
-      onValueChange={(v) => onChange(v as ThemePreference)}
-      className="grid grid-cols-3 gap-2"
-    >
-      {options.map((opt) => (
-        <Label
-          key={opt.id}
-          htmlFor={`theme-${opt.id}`}
-          className={cn(
-            'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border bg-card p-3 text-sm font-normal transition-colors',
-            value === opt.id
-              ? 'border-primary ring-2 ring-primary/20'
-              : 'hover:bg-accent/40',
-          )}
-        >
-          <RadioGroupItem value={opt.id} id={`theme-${opt.id}`} className="sr-only" />
-          <div className="size-8 grid place-items-center text-muted-foreground [&>svg]:size-4">
-            {opt.icon}
-          </div>
-          <span className="font-medium">{opt.label}</span>
-        </Label>
-      ))}
-    </RadioGroup>
-  );
-}
-
-/**
- * Settings → Permissions panel. Lets users repair / re-grant the
- * macOS permissions CofounderOS uses any time after onboarding.
- * Mirrors the onboarding `PermissionsStep` but lives at a stable
- * surface so users always have a place to fix permissions if a macOS
- * upgrade or a config change wipes them.
- */
-function PermissionsSettingsPanel() {
-  const [screen, setScreen] = React.useState<ScreenPermission | null>(null);
-  const [accessibility, setAccessibility] = React.useState<AccessibilityPermission | null>(null);
-  const [mic, setMic] = React.useState<MicPermission | null>(null);
-  const [requesting, setRequesting] = React.useState<
-    'screen' | 'accessibility' | 'microphone' | null
-  >(null);
-
-  const refresh = React.useCallback(async () => {
-    try {
-      const [s, a, m] = await Promise.all([
-        window.cofounderos.probeScreenPermission(),
-        window.cofounderos.probeAccessibilityPermission(),
-        window.cofounderos.probeMicPermission(),
-      ]);
-      setScreen(s);
-      setAccessibility(a);
-      setMic(m);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
-
-  React.useEffect(() => {
-    const handler = () => void refresh();
-    window.addEventListener('focus', handler);
-    return () => window.removeEventListener('focus', handler);
-  }, [refresh]);
-
-  async function request(kind: 'screen' | 'accessibility' | 'microphone') {
-    setRequesting(kind);
-    try {
-      if (kind === 'screen') await window.cofounderos.requestScreenPermission();
-      if (kind === 'accessibility') await window.cofounderos.requestAccessibilityPermission();
-      if (kind === 'microphone') await window.cofounderos.requestMicPermission();
-    } finally {
-      setRequesting(null);
-      void refresh();
-    }
-  }
-
-  const screenStatus = screen?.status ?? 'unsupported';
-  const screenSupported = screenStatus !== 'unsupported';
-  const screenGranted = screenStatus === 'granted';
-  const screenNeedsRelaunch = screen?.needsRelaunch === true;
-
-  const accessibilityStatus = accessibility?.status ?? 'unsupported';
-  const accessibilitySupported = accessibilityStatus !== 'unsupported';
-  const accessibilityGranted = accessibilityStatus === 'granted';
-
-  const micStatus = mic?.status ?? 'unsupported';
-  const micSupported = micStatus !== 'unsupported';
-  const micGranted = micStatus === 'granted';
-
-  if (!screenSupported && !accessibilitySupported && !micSupported) {
-    return (
-      <SettingsSection
-        title="System permissions"
-        description="Per-app permissions don't apply on this OS — CofounderOS uses standard system APIs."
-      >
-        <p className="text-sm text-muted-foreground">
-          Nothing to manage here on your platform.
-        </p>
-      </SettingsSection>
-    );
-  }
-
-  return (
-    <>
-      {screenNeedsRelaunch && (
-        <Alert variant="warning">
-          <RefreshCw />
-          <AlertTitle>Restart required to apply Screen Recording</AlertTitle>
-          <AlertDescription>
-            macOS only honours the new Screen Recording grant after the next launch.
-            <div className="mt-3">
-              <Button size="sm" onClick={() => void window.cofounderos.relaunchApp()}>
-                <RefreshCw />
-                Restart CofounderOS
-              </Button>
-            </div>
-          </AlertDescription>
-        </Alert>
-      )}
-      <SettingsSection
-        title="System permissions"
-        description="CofounderOS asks for these only to power local capture. Toggle them in System Settings any time."
-      >
-        <div className="flex flex-col gap-3">
-          {screenSupported && (
-            <SettingsPermissionRow
-              icon={<Monitor className="size-5" />}
-              title="Screen Recording"
-              requirement="required"
-              granted={screenGranted}
-              needsRelaunch={screenNeedsRelaunch}
-              statusText={
-                screenGranted
-                  ? screenNeedsRelaunch
-                    ? 'Granted — restart to apply.'
-                    : 'Granted. Capture can take screenshots.'
-                  : screenStatus === 'denied'
-                    ? 'Denied. Capture cannot take screenshots.'
-                    : screenStatus === 'restricted'
-                      ? 'Restricted by a profile. CofounderOS cannot capture.'
-                      : 'Not granted yet.'
-              }
-              busy={requesting === 'screen'}
-              onRequest={() => void request('screen')}
-              onOpenSettings={() =>
-                void window.cofounderos.openPermissionSettings('screen')
-              }
-            />
-          )}
-          {accessibilitySupported && (
-            <SettingsPermissionRow
-              icon={<Keyboard className="size-5" />}
-              title="Accessibility"
-              requirement="recommended"
-              granted={accessibilityGranted}
-              statusText={
-                accessibilityGranted
-                  ? 'Granted. Window focus and on-screen text are available.'
-                  : 'Not granted. Capture falls back to OCR-only text and reduced window metadata.'
-              }
-              busy={requesting === 'accessibility'}
-              onRequest={() => void request('accessibility')}
-              onOpenSettings={() =>
-                void window.cofounderos.openPermissionSettings('accessibility')
-              }
-            />
-          )}
-          {micSupported && (
-            <SettingsPermissionRow
-              icon={<Mic className="size-5" />}
-              title="Microphone"
-              requirement="optional"
-              granted={micGranted}
-              statusText={
-                micGranted
-                  ? 'Granted. Live audio capture can record while another app uses the mic.'
-                  : micStatus === 'denied'
-                    ? 'Denied. Live audio capture is disabled.'
-                    : micStatus === 'restricted'
-                      ? 'Restricted by a profile. Live audio capture is disabled.'
-                      : 'Not requested yet. CofounderOS will prompt when audio capture starts.'
-              }
-              busy={requesting === 'microphone'}
-              onRequest={() => void request('microphone')}
-              onOpenSettings={() =>
-                void window.cofounderos.openPermissionSettings('microphone')
-              }
-            />
-          )}
-        </div>
-      </SettingsSection>
-    </>
-  );
-}
-
-function SettingsPermissionRow({
-  icon,
-  title,
-  requirement,
-  granted,
-  needsRelaunch,
-  statusText,
-  busy,
-  onRequest,
-  onOpenSettings,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  requirement: 'required' | 'recommended' | 'optional';
-  granted: boolean;
-  needsRelaunch?: boolean;
-  statusText: string;
-  busy: boolean;
-  onRequest: () => void;
-  onOpenSettings: () => void;
-}) {
-  const requirementBadge =
-    requirement === 'required' ? (
-      <Badge>Required</Badge>
-    ) : requirement === 'recommended' ? (
-      <Badge variant="muted">Recommended</Badge>
-    ) : (
-      <Badge variant="outline">Optional</Badge>
-    );
-  return (
-    <div
-      className={cn(
-        'flex flex-wrap items-start gap-4 rounded-lg border bg-card p-4',
-        granted ? 'border-success/30 bg-success/5' : undefined,
-      )}
-    >
-      <div
-        className={cn(
-          'size-10 shrink-0 grid place-items-center rounded-md',
-          granted ? 'bg-success/15 text-success' : 'bg-primary/10 text-primary',
-        )}
-      >
-        {granted ? <Check className="size-4" /> : icon}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <h4 className="text-sm font-medium">{title}</h4>
-          {requirementBadge}
-          {granted && (
-            <Badge variant="outline" className="border-success/40 text-success">
-              <CheckCircle2 />
-              Granted
-            </Badge>
-          )}
-          {needsRelaunch && (
-            <Badge variant="outline" className="border-warning/40 text-warning">
-              <RefreshCw />
-              Restart needed
-            </Badge>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{statusText}</p>
-      </div>
-      <div className="flex items-center gap-2">
-        {!granted && (
-          <Button size="sm" onClick={onRequest} disabled={busy}>
-            {busy ? <Loader2 className="animate-spin" /> : null}
-            Grant access
-          </Button>
-        )}
-        <Button size="sm" variant="ghost" onClick={onOpenSettings}>
-          <ExternalLink />
-          System Settings
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// AI / model picker
-// ────────────────────────────────────────────────────────────────────────────
-
-const CUSTOM_MODEL_ID = '__custom__';
-
-/**
- * Model picker on the AI tab. Owns its own state because changing the
- * model is a discrete action (save config + force-pull weights + stream
- * progress) rather than a bag of generic settings the global SaveBar can
- * batch up. The `Host` and `Auto-install` fields stay in the parent
- * draft and ride the SaveBar — they're cheap to apply on next start.
- *
- * Two primary actions:
- * 1. **Apply model** — when the picked model differs from what's saved.
- *    Saves config, then runs a forced bootstrap so the new weights get
- *    pulled even if the tag is already cached.
- * 2. **Refresh weights** — when the picked model matches what's saved.
- *    Force-re-pulls under the same tag to pick up updated weights for
- *    floating tags like `gemma4:e2b` (Ollama re-uses cached blobs by
- *    content hash so a refresh with no actual new bytes is fast).
- *
- * Both share one progress bar; we infer phase from the bootstrap event
- * stream the runtime emits and the renderer already subscribes to in
- * App.tsx.
- */
-function ModelSettings({
-  savedModel,
-  savedRevision,
-  ollamaHost,
-  ollamaAutoInstall,
-  modelReady,
-  bootstrapEvents,
-  onClearBootstrapEvents,
-  onHostChange,
-  onAutoInstallChange,
-  onModelChanged,
-}: {
-  savedModel: string;
-  savedRevision: number;
-  ollamaHost: string;
-  ollamaAutoInstall: boolean;
-  modelReady: boolean;
-  bootstrapEvents: ModelBootstrapProgress[];
-  onClearBootstrapEvents: () => void;
-  onHostChange: (value: string) => void;
-  onAutoInstallChange: (value: boolean) => void;
-  onModelChanged: (config: LoadedConfig) => void;
-}) {
-  // Picker state: which radio is selected, and the custom-tag input.
-  // We seed both from the saved config so the UI matches reality on
-  // first paint and after a successful apply.
-  const initialIsCustom = !MODEL_CHOICES.some((m) => m.id === savedModel);
-  const [pickerId, setPickerId] = React.useState<string>(
-    initialIsCustom ? CUSTOM_MODEL_ID : savedModel || MODEL_CHOICES[0]!.id,
-  );
-  const [customTag, setCustomTag] = React.useState<string>(
-    initialIsCustom ? savedModel : '',
-  );
-
-  // Re-sync if the upstream `savedModel` changes (another window saved
-  // settings, or we just finished an apply). We don't want to clobber
-  // an in-flight selection mid-typing, so only sync when the saved
-  // model differs from what the picker currently resolves to.
-  const resolvedPickerModel =
-    pickerId === CUSTOM_MODEL_ID ? customTag.trim() : pickerId;
-  React.useEffect(() => {
-    if (savedModel && savedModel !== resolvedPickerModel) {
-      const isCustom = !MODEL_CHOICES.some((m) => m.id === savedModel);
-      setPickerId(isCustom ? CUSTOM_MODEL_ID : savedModel);
-      setCustomTag(isCustom ? savedModel : '');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedModel]);
-
-  // Action state: idle | running | done | error. Driven by the bootstrap
-  // event stream so the bar still updates if the user navigates away
-  // and back (events are buffered in App.tsx).
-  const [phase, setPhase] = React.useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
-  const [intent, setIntent] = React.useState<'switch' | 'refresh' | null>(null);
-
-  React.useEffect(() => {
-    if (phase !== 'running') return;
-    for (let i = bootstrapEvents.length - 1; i >= 0; i--) {
-      const ev = bootstrapEvents[i]!;
-      if (
-        ev.kind === 'install_failed' ||
-        ev.kind === 'pull_failed' ||
-        ev.kind === 'server_failed'
-      ) {
-        setPhase('error');
-        setErrorMessage(ev.reason || `${ev.kind} failed`);
-        return;
-      }
-      if (ev.kind === 'ready') {
-        setPhase('done');
-        return;
-      }
-    }
-  }, [bootstrapEvents, phase]);
-
-  // Last pull-progress event drives the progress bar.
-  const lastPullProgress = React.useMemo(() => {
-    for (let i = bootstrapEvents.length - 1; i >= 0; i--) {
-      const ev = bootstrapEvents[i]!;
-      if (
-        ev.kind === 'pull_progress' &&
-        typeof ev.completed === 'number' &&
-        typeof ev.total === 'number'
-      ) {
-        return ev;
-      }
-    }
-    return null;
-  }, [bootstrapEvents]);
-
-  const customValid =
-    pickerId !== CUSTOM_MODEL_ID || isPlausibleOllamaTag(customTag);
-  const targetModel = resolvedPickerModel;
-  const dirty = !!targetModel && targetModel !== savedModel;
-  const canApply =
-    !!targetModel && customValid && phase !== 'running';
-  const canRefresh =
-    !dirty && !!savedModel && phase !== 'running';
-
-  async function applyAndPull(): Promise<void> {
-    if (!canApply) return;
-    setErrorMessage(null);
-    onClearBootstrapEvents();
-    setPhase('running');
-    setIntent('switch');
-    try {
-      // Save the new model (and bump the revision so the marker file
-      // is consistent — the force-pull would already do the work, but
-      // bumping ensures a future restart doesn't try to "refresh"
-      // again unnecessarily).
-      const next = await window.cofounderos.saveConfigPatch({
-        index: {
-          model: {
-            plugin: 'ollama',
-            ollama: {
-              model: targetModel,
-              model_revision: savedRevision + 1,
-              auto_install: true,
-            },
-          },
-        },
-      });
-      onModelChanged(next);
-      // Force-pull so the new weights actually land (and so a custom
-      // tag pointing at fresh weights gets refreshed too).
-      await window.cofounderos.updateModel();
-      setPhase('done');
-      toast.success(`Model switched to ${targetModel}`, {
-        description: 'New weights are ready.',
-      });
-    } catch (err) {
-      setPhase('error');
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      toast.error('Could not switch model', { description: msg });
-    }
-  }
-
-  async function refreshWeights(): Promise<void> {
-    if (!canRefresh) return;
-    setErrorMessage(null);
-    onClearBootstrapEvents();
-    setPhase('running');
-    setIntent('refresh');
-    try {
-      // Bump the revision so future restarts don't repeat this work.
-      const next = await window.cofounderos.saveConfigPatch({
-        index: {
-          model: {
-            plugin: 'ollama',
-            ollama: { model_revision: savedRevision + 1 },
-          },
-        },
-      });
-      onModelChanged(next);
-      await window.cofounderos.updateModel();
-      setPhase('done');
-      toast.success(`${savedModel} is up to date`);
-    } catch (err) {
-      setPhase('error');
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      toast.error('Could not refresh weights', { description: msg });
-    }
-  }
-
-  const currentChoice = findModelChoice(savedModel);
-  const statusLabel = phase === 'running'
-    ? intent === 'refresh'
-      ? 'Refreshing weights…'
-      : 'Installing…'
-    : modelReady
-      ? 'Ready'
-      : 'Not installed';
-  const statusTone: 'success' | 'warning' | 'muted' =
-    phase === 'running' ? 'muted' : modelReady ? 'success' : 'warning';
-
-  return (
-    <>
-      <Card>
-        <CardContent className="flex flex-col gap-4">
-          {/* Current model summary */}
-          <div className="flex items-start gap-3">
-            <div className="size-10 shrink-0 grid place-items-center rounded-md bg-primary/10 text-primary">
-              <Cpu className="size-5" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="font-semibold">Local AI model</h3>
-                <StatusPill tone={statusTone} size="compact">{statusLabel}</StatusPill>
-              </div>
-              <p className="text-sm text-muted-foreground mt-0.5 break-all">
-                <span className="font-mono">{savedModel || '(none)'}</span>
-                {currentChoice && (
-                  <span className="text-muted-foreground/80">
-                    {' · '}
-                    {currentChoice.vendor} · {currentChoice.size}
-                  </span>
-                )}
-              </p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void refreshWeights()}
-              disabled={!canRefresh}
-              title={
-                dirty
-                  ? 'Apply the selected model first to refresh its weights.'
-                  : 'Re-pull the current model to pick up updated weights under the same tag.'
-              }
-            >
-              {phase === 'running' && intent === 'refresh' ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <RefreshCw />
-              )}
-              Refresh weights
-            </Button>
-          </div>
-
-          <Separator />
-
-          {/* Picker */}
-          <div className="flex flex-col gap-3">
-            <div>
-              <h4 className="font-medium">Choose a model</h4>
-              <p className="text-sm text-muted-foreground mt-0.5">
-                Pick from popular options below, or paste any tag from{' '}
-                <a
-                  href="https://ollama.com/library"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="underline hover:text-foreground"
-                >
-                  ollama.com/library
-                </a>
-                .
-              </p>
-            </div>
-
-            <RadioGroup
-              value={pickerId}
-              onValueChange={(v) => setPickerId(v)}
-              className="grid gap-2 sm:grid-cols-2"
-            >
-              {MODEL_CHOICES.map((m) => {
-                const isSaved = m.id === savedModel;
-                return (
-                  <Label
-                    key={m.id}
-                    htmlFor={`model-${m.id}`}
-                    className={cn(
-                      'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors',
-                      pickerId === m.id
-                        ? 'border-primary ring-2 ring-primary/20'
-                        : 'hover:bg-accent/40',
-                    )}
-                  >
-                    <RadioGroupItem value={m.id} id={`model-${m.id}`} className="mt-0.5" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">{m.name}</span>
-                        {m.badge && (
-                          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                            <Sparkles className="size-3" />
-                            {m.badge}
-                          </Badge>
-                        )}
-                        {isSaved && (
-                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                            Current
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {m.vendor} · {m.size}
-                        {m.vision ? ' · vision' : ''}
-                      </div>
-                      <div className="text-xs text-muted-foreground/90 mt-1 leading-relaxed">
-                        {m.description}
-                      </div>
-                    </div>
-                  </Label>
-                );
-              })}
-
-              {/* Custom tag */}
-              <Label
-                htmlFor={`model-${CUSTOM_MODEL_ID}`}
-                className={cn(
-                  'flex cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-sm font-normal transition-colors sm:col-span-2',
-                  pickerId === CUSTOM_MODEL_ID
-                    ? 'border-primary ring-2 ring-primary/20'
-                    : 'hover:bg-accent/40',
-                )}
-              >
-                <RadioGroupItem
-                  value={CUSTOM_MODEL_ID}
-                  id={`model-${CUSTOM_MODEL_ID}`}
-                  className="mt-0.5"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">Custom Ollama model</span>
-                    {pickerId === CUSTOM_MODEL_ID &&
-                      customTag.trim() !== '' &&
-                      customTag.trim() === savedModel && (
-                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
-                          Current
-                        </Badge>
-                      )}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    Any model tag from ollama.com/library — e.g.{' '}
-                    <span className="font-mono">qwen3:14b</span>,{' '}
-                    <span className="font-mono">mistral:7b</span>,{' '}
-                    <span className="font-mono">phi3:mini</span>.
-                  </div>
-                  <div className="mt-2">
-                    <Input
-                      value={customTag}
-                      onChange={(e) => {
-                        setCustomTag(e.currentTarget.value);
-                        if (pickerId !== CUSTOM_MODEL_ID) setPickerId(CUSTOM_MODEL_ID);
-                      }}
-                      placeholder="family:tag"
-                      autoComplete="off"
-                      spellCheck={false}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                    {pickerId === CUSTOM_MODEL_ID && customTag.trim() !== '' && !customValid && (
-                      <p className="text-xs text-destructive mt-1">
-                        That doesn't look like a valid Ollama tag. Use the{' '}
-                        <span className="font-mono">family:tag</span> format, e.g.{' '}
-                        <span className="font-mono">gemma4:e2b</span>.
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </Label>
-            </RadioGroup>
-
-            {/* Action row */}
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
-              <div className="text-sm">
-                {dirty ? (
-                  <>
-                    <span className="font-medium">Apply </span>
-                    <span className="font-mono">{targetModel}</span>
-                    <span className="text-muted-foreground"> — downloads weights if needed.</span>
-                  </>
-                ) : modelReady ? (
-                  <span className="text-muted-foreground">
-                    Selection matches what's installed. Use{' '}
-                    <span className="font-medium">Refresh weights</span> above to pick up
-                    newer weights under the same tag.
-                  </span>
-                ) : (
-                  <span className="text-muted-foreground">
-                    Selection matches your saved config but isn't installed yet — apply to
-                    download.
-                  </span>
-                )}
-              </div>
-              <Button
-                onClick={() => void applyAndPull()}
-                disabled={!canApply || (!dirty && modelReady)}
-              >
-                {phase === 'running' && intent === 'switch' ? (
-                  <>
-                    <Loader2 className="animate-spin" />
-                    Working…
-                  </>
-                ) : (
-                  <>
-                    <Download />
-                    {dirty ? 'Apply model' : 'Re-install'}
-                  </>
-                )}
-              </Button>
-            </div>
-
-            {/* Live progress */}
-            {phase === 'running' && (
-              <ModelInstallProgress
-                model={targetModel || savedModel}
-                progress={lastPullProgress}
-              />
-            )}
-
-            {phase === 'error' && errorMessage && (
-              <Alert variant="destructive">
-                <X />
-                <AlertTitle>
-                  {intent === 'refresh' ? 'Could not refresh weights' : 'Could not install model'}
-                </AlertTitle>
-                <AlertDescription>{errorMessage}</AlertDescription>
-              </Alert>
-            )}
-
-            {bootstrapEvents.length > 0 && (
-              <details className="text-xs">
-                <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
-                  Show technical log
-                </summary>
-                <pre className="mt-2 max-h-40 overflow-auto rounded-md border bg-card p-3 font-mono text-[11px] leading-snug">
-                  {bootstrapEvents.slice(-25).map(formatBootstrapLine).join('\n')}
-                </pre>
-              </details>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="flex flex-col gap-0">
-          <ToggleRow
-            title="Auto-install AI tools when needed"
-            description="Lets us set up Ollama and pull the model for you on first run."
-            typeLabel="boolean"
-            checked={ollamaAutoInstall}
-            onChange={onAutoInstallChange}
-          />
-          <Separator className="my-4" />
-          <TextField
-            label="Ollama host"
-            value={ollamaHost}
-            onChange={onHostChange}
-            typeLabel="URL"
-            hint="The URL where the local Ollama daemon listens."
-          />
-        </CardContent>
-      </Card>
-    </>
-  );
-}
-
-function ModelInstallProgress({
-  model,
-  progress,
-}: {
-  model: string;
-  progress: ModelBootstrapProgress | null;
-}) {
-  const pct = progress ? pullPercent(progress) : null;
-  const completed = typeof progress?.completed === 'number' ? progress.completed : 0;
-  const total = typeof progress?.total === 'number' ? progress.total : 0;
-  return (
-    <div className="rounded-md border bg-card p-3 flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-sm font-medium flex items-center gap-2 min-w-0">
-          <Loader2 className="size-4 animate-spin text-primary" />
-          <span className="truncate font-mono">{model}</span>
-        </div>
-        {pct != null && (
-          <span className="text-xs text-muted-foreground">
-            {pct}%
-          </span>
-        )}
-      </div>
-      {progress ? (
-        <>
-          <Progress value={pct ?? 0} />
-          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>{progress.status || 'downloading'}</span>
-            <span>
-              {formatBytes(completed)} / {formatBytes(total)}
-            </span>
-          </div>
-        </>
-      ) : (
-        <p className="text-xs text-muted-foreground">Preparing…</p>
-      )}
-    </div>
-  );
+function ThemePicker({ value, onChange }: { value: ThemePreference; onChange: (v: ThemePreference) => void }) {
+  const o = [{ id: 'auto' as const, label: 'Auto', icon: <Monitor /> }, { id: 'light' as const, label: 'Light', icon: <Sun /> }, { id: 'dark' as const, label: 'Dark', icon: <Moon /> }];
+  return <RadioGroup value={value} onValueChange={v => onChange(v as ThemePreference)} className="grid grid-cols-3 gap-2">{o.map(x => <Label key={x.id} className={cn('flex flex-col items-center gap-1.5 p-3 border rounded-lg cursor-pointer', value === x.id ? 'border-primary ring-2 ring-primary/20' : 'hover:bg-accent/40')}><RadioGroupItem value={x.id} className="sr-only" /><div className="size-8 grid place-items-center text-muted-foreground [&>svg]:size-4">{x.icon}</div><span className="font-medium">{x.label}</span></Label>)}</RadioGroup>;
 }

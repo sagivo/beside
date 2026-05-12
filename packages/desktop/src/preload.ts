@@ -58,18 +58,6 @@ const api = {
   onOverview: (callback: (overview: unknown) => void) => {
     ipcRenderer.on('cofounderos:overview', (_event, overview: unknown) => callback(overview));
   },
-  startChat: (params: {
-    turnId: string;
-    conversationId: string;
-    message: string;
-    history: Array<{ role: 'user' | 'assistant'; content: string }>;
-  }) => ipcRenderer.invoke('cofounderos:chat-start', params),
-  cancelChat: (turnId: string) => ipcRenderer.invoke('cofounderos:chat-cancel', turnId),
-  onChatEvent: (callback: (event: unknown) => void) => {
-    const listener = (_event: unknown, payload: unknown) => callback(payload);
-    ipcRenderer.on('cofounderos:chat-event', listener);
-    return () => ipcRenderer.removeListener('cofounderos:chat-event', listener);
-  },
   listMeetings: (query?: { from?: string; to?: string; limit?: number }) =>
     ipcRenderer.invoke('cofounderos:list-meetings', query),
   listDayEvents: (query?: {

@@ -111,11 +111,9 @@ export function Markdown({
 }
 
 /**
- * Renders an `<img>` from a chat-bubble markdown body. When the source
- * looks like an in-app capture asset path (relative path under the
- * storage root, e.g. `raw/2026-...`) the bytes are loaded over IPC and
- * shown inline so the local AI agent can effectively "open" a
- * screenshot in its answer the way Claude Desktop renders MCP images.
+ * Renders an `<img>` from markdown. When the source looks like an
+ * in-app capture asset path (relative path under the storage root,
+ * e.g. `raw/2026-...`) the bytes are loaded over IPC and shown inline.
  */
 function AssetImage({
   src,

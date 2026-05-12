@@ -294,36 +294,6 @@ async function handle(req: Request): Promise<unknown> {
       void pushOverview('full');
       return result;
     }
-    case 'chatStart': {
-      const params = (req.params ?? {}) as {
-        turnId?: string;
-        conversationId?: string;
-        message?: string;
-        history?: Array<{ role: 'user' | 'assistant'; content: string }>;
-      };
-      if (!params.turnId || !params.conversationId || typeof params.message !== 'string') {
-        throw new Error('chatStart requires turnId, conversationId, message');
-      }
-      const input = {
-        turnId: params.turnId,
-        conversationId: params.conversationId,
-        message: params.message,
-        history: Array.isArray(params.history) ? params.history : [],
-      };
-      const run = runtime.chat(input, (event) => {
-        // Multiplex chat-event lines onto stdout. Main forwards them to
-        // the renderer keyed by turnId so multiple chats can stream in
-        // parallel without crossing wires.
-        process.stdout.write(`${JSON.stringify({ id: 0, event: 'chat-event', payload: event })}\n`);
-      });
-      await run.done;
-      return { turnId: params.turnId, completed: true };
-    }
-    case 'chatCancel': {
-      const params = (req.params ?? {}) as { turnId?: string };
-      if (!params.turnId) throw new Error('chatCancel requires turnId');
-      return { cancelled: runtime.cancelChat(params.turnId) };
-    }
     default:
       throw new Error(`Unknown runtime method: ${req.method}`);
   }

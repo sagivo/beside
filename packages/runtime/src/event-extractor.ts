@@ -12,60 +12,16 @@ import type {
   Meeting,
 } from '@cofounderos/interfaces';
 
-/**
- * EventExtractor — materialises the cross-source "event log" surface.
- *
- * Three passes per tick:
- *
- *  1. Meeting lift (deterministic, always runs)
- *     Every captured Meeting → matching DayEvent, kind='meeting'.
- *
- *  2. Calendar / inbox / chat extraction (LLM-driven, gated on model)
- *     For each recent day, frames whose app is a calendar / mail / chat
- *     surface are grouped per app, OCR text concatenated, and the LLM
- *     is asked for the structured events visible in those screenshots.
- *     Critically: a calendar week-view shot taken on Monday shows
- *     events for the whole week — those events must land under their
- *     own day (Mon, Tue, Wed, …), NOT the capture day. We do that by
- *     trusting the LLM's `starts_at` and reading `day` from it.
- *
- *  3. Context enrichment (LLM-driven)
- *     For each non-meeting event with sparse context, gather a few
- *     non-calendar frames captured within ±90 min of the event time
- *     and ask the model for a 1-3 sentence summary explaining what the
- *     user was actually doing around that event. Skipped for meetings
- *     because those already have a Meeting record + summary.
- *
- * Idempotency: events get content-stable ids derived from
- * `(source, day, hour-bucket, normalised-title)`. Re-running with new
- * screenshots of the same calendar week is therefore a pure upsert —
- * the row gets refreshed, never duplicated.
- */
-
 export interface EventExtractorOptions {
-  /** Base data dir; used to resolve screenshot asset paths for vision. */
   dataDir?: string;
-  /** How many recent days to scan per tick. Default 7. */
   lookbackDays?: number;
-  /** Min OCR chars on a candidate frame for the LLM pass. Default 80. */
   minTextChars?: number;
-  /** Max frames per day per source the LLM sees. Default 40. */
   maxFramesPerBucket?: number;
-  /** Whether to enable the LLM extraction pass. Default true. */
   llmEnabled?: boolean;
-  /** Cap the prompt's evidence section at this many chars. Default 14000. */
   maxPromptChars?: number;
-  /** Max events to persist per LLM response. Default 25. */
   maxEventsPerResponse?: number;
-  /** Time window (ms) around an event we pull context frames from. Default ±90 min. */
   contextWindowMs?: number;
-  /** Skip context enrichment when this many frames have already been considered. */
   maxContextEventsPerTick?: number;
-  /**
-   * Number of screenshot attachments to send when the model adapter
-   * supports vision. Calendar grids are visual — a 3-shot vision pass
-   * recovers events that OCR text alone scrambles. Default 3.
-   */
   visionAttachments?: number;
 }
 
@@ -74,72 +30,42 @@ export interface EventExtractorResult {
   llmExtracted: number;
   contextEnriched: number;
   daysScanned: number;
-  /** Source buckets the extractor passed to the LLM (one per app per day). */
   bucketsScanned: number;
-  /** Capture frames fed into the LLM extraction prompts. */
   framesScanned: number;
-  /** Whether the model adapter was reachable during this tick. */
   modelAvailable: boolean;
   failed: number;
 }
 
 export interface EventExtractorTickOptions {
-  /** Override configured lookback for this tick. Used by manual scans. */
   lookbackDays?: number;
-  /** Restrict LLM/deterministic extraction to specific source surfaces. */
   sources?: DayEventSource[];
-  /** Context enrichment is slower and not needed for immediate UI refreshes. */
   enrichContexts?: boolean;
 }
 
-const EXTRACTION_SYSTEM_PROMPT = `You are looking at the user's recent screen capture for a single source app — it might be their calendar, their inbox, or a chat app. Your job is to recover the meaningful EVENTS shown on screen and emit them as structured JSON.
-
-You will be told which app surface produced the capture and given the capture frames (OCR text, plus the raw screenshots themselves when the model supports vision). Use that to identify what's on screen and extract the events visible on it.
-
-Return STRICT JSON matching this schema (no prose around it):
-
+const EXTRACTION_SYSTEM_PROMPT = `You are looking at the user's recent screen capture for a single source app. Recover meaningful EVENTS shown on screen and emit them as JSON.
+Return STRICT JSON matching:
 {
   "events": [
     {
       "title": string,
       "kind": "calendar" | "communication" | "task" | "other",
-      "starts_at": string,           // ISO-8601 with date + time when knowable
-      "ends_at":   string | null,
-      "attendees": string[],         // names/emails visible in the entry
-      "context":   string             // 1-2 sentences; what is this event about?
+      "starts_at": string,
+      "ends_at": string | null,
+      "attendees": string[],
+      "context": string
     }
   ]
 }
-
 General rules:
-- Only output *meaningful* events. Skip app chrome (sidebars, search bars, view-switcher buttons, "Today" buttons, notification badges).
-- "kind":
-    "calendar"      → scheduled item on a calendar
-    "communication" → notable message thread / email
-    "task"          → TODO / ticket / issue
-    "other"         → otherwise meaningful (e.g. a doc being actively edited)
-- "starts_at" should be a real ISO timestamp. Combine the date you read off the screen with the event's time. If you can read the date but not the time, use 00:00 (all-day) for all-day items or your best estimate for the slot it sits in. If you genuinely cannot date an event from anything visible on screen, omit "starts_at".
-- "context" must be 1-2 specific sentences grounded in what you see. No bullet points.
-- AT MOST 25 events. Empty array is fine.
-- Do not filter events based on whether the event date is in the past, today, or the future. If the event is visible and dated, include it.
+- Only output meaningful events.
+- "starts_at" should be a real ISO timestamp.
+- "context" must be 1-2 specific sentences.
+- AT MOST 25 events.
+If CALENDAR APP:
+- The dates displayed are on screen. Treat all-day items as starting at midnight.
+If EMAIL, CHAT, or TASK: surface notable threads / tickets.`;
 
-If the source is a CALENDAR APP — Apple Calendar, Google Calendar, Fantastical, Notion Calendar, Outlook, Cron, Amie, etc.:
-- The app shows ONE current view at a time. It can be a single day, a week, a multi-day strip, a month, an agenda/list, a year. Recognise the view from the layout itself.
-- Whatever the view is, the dates being displayed are always shown on screen — in the header, the title bar, the row/column labels, or as inline date dividers. Use those to date every event you extract.
-- Treat all-day items (banners at the top of a day) as events with "starts_at" at midnight of that day and "ends_at" at the start of the next day.
-- For recurring events that appear on multiple visible days, emit one event per visible occurrence with the correct date for each.
-- Holidays and birthdays count as events — include them.
-
-If the source is EMAIL, CHAT, or a TASK TRACKER: surface notable threads / tickets the user is actually engaging with; skip generic listings.
-`;
-
-const CONTEXT_SYSTEM_PROMPT = `You are filling in a missing context line for an event on the user's calendar. You have:
-  - the event title and time
-  - a few small screen captures from around that time of OTHER apps the user was on
-
-Write a SINGLE 1-3 sentence English description of what the event is about, grounded in the screenshots. If the screenshots don't actually relate to the event, output "no related context found". Never fabricate details.
-
-Return PLAIN TEXT, no JSON, no markdown.`;
+const CONTEXT_SYSTEM_PROMPT = `You are filling in a missing context line for an event. Write a SINGLE 1-3 sentence description based on screenshots. Return PLAIN TEXT.`;
 
 const LATEST_CALENDAR_CAPTURE_WINDOW_MS = 1000;
 
@@ -155,104 +81,25 @@ type SourceMatcher = {
   match: (frame: Frame) => boolean;
 };
 
-// ---------------------------------------------------------------------------
-// Calendar detection.
-//
-// Three independent signals — any one fires:
-//   (a) the foreground app IS a calendar app (Apple Calendar, Fantastical,
-//       Notion Calendar, etc.)
-//   (b) the foreground URL is a known calendar webapp or a calendar
-//       sub-route inside a known SaaS
-//   (c) OCR heuristic: the visible text reads like a calendar grid
-//       (month-year header + weekday-sequence and/or a time gutter)
-//
-// (c) is the catch-all for unknown calendars — self-hosted, embedded
-// in random pages, brand-new SaaS we haven't curated yet.
-// ---------------------------------------------------------------------------
-
-const CALENDAR_APP_NAMES = new Set([
-  'calendar',         // Apple Calendar (macOS)
-  'fantastical',
-  'notion calendar',
-  'cron',
-  'amie',
-  'busycal',
-  'mimestream',       // Gmail-style client with a calendar view
-  'outlook',          // covers some macOS Outlook variants
-]);
-
-const CALENDAR_BUNDLE_PREFIXES = [
-  'com.apple.ical',
-  'com.flexibits.fantastical',
-  'notion.id.notion-calendar',
-  'com.cron',
-  'com.busymac.busycal',
-  'co.amie',
-];
+const CALENDAR_APP_NAMES = new Set(['calendar', 'fantastical', 'notion calendar', 'cron', 'amie', 'busycal', 'mimestream', 'outlook']);
+const CALENDAR_BUNDLE_PREFIXES = ['com.apple.ical', 'com.flexibits.fantastical', 'notion.id.notion-calendar', 'com.cron', 'com.busymac.busycal', 'co.amie'];
 
 function isNativeCalendarAppFrame(frame: Frame): boolean {
   const app = (frame.app ?? '').toLowerCase();
   const bundle = (frame.app_bundle_id ?? '').toLowerCase();
-  return (
-    CALENDAR_APP_NAMES.has(app) ||
-    CALENDAR_BUNDLE_PREFIXES.some((p) => bundle.startsWith(p))
-  );
+  return CALENDAR_APP_NAMES.has(app) || CALENDAR_BUNDLE_PREFIXES.some((p) => bundle.startsWith(p));
 }
 
-/**
- * Hostname (or hostname suffix) → is-calendar-host. We match by
- * `host === entry` first, then `host.endsWith('.' + entry)` so any
- * subdomain of a tenant-style host (e.g. `mycompany.calendly.com`) is
- * covered. Keep entries lowercase and bare (no scheme, no path).
- */
-const CALENDAR_HOSTS = new Set<string>([
-  // Google / Microsoft / Apple
-  'calendar.google.com',
-  'outlook.live.com',
-  'outlook.office.com',
-  'outlook.office365.com',
-  'outlook.com',
-  'icloud.com',          // path-discriminated below
-  'www.icloud.com',
-  // Privacy / alternative providers
-  'calendar.proton.me',
-  'calendar.yahoo.com',
-  'calendar.zoho.com',
-  'app.fastmail.com',    // path-discriminated below
-  'fastmail.com',
-  'app.tuta.com',
-  // Standalone calendar apps (web)
-  'vimcal.com',
-  'app.vimcal.com',
-  'cal.com',
-  'app.cal.com',
-  'cron.com',
-  'amie.so',
-  'web.morgen.so',
-  'app.akiflow.com',
-  'app.reclaim.ai',
-  'app.usemotion.com',
-  'app.sunsama.com',
-  'calendly.com',
-  // Generic productivity surfaces that have a calendar view
-  // (path-discriminated below to avoid false positives on the rest of
-  // the app).
-  'notion.so',
-  'www.notion.so',
-  'linear.app',
-  'asana.com',
-  'app.asana.com',
-  'app.clickup.com',
-  'monday.com',
-  'github.com',
+const CALENDAR_HOSTS = new Set([
+  'calendar.google.com', 'outlook.live.com', 'outlook.office.com', 'outlook.office365.com',
+  'outlook.com', 'icloud.com', 'www.icloud.com', 'calendar.proton.me', 'calendar.yahoo.com',
+  'calendar.zoho.com', 'app.fastmail.com', 'fastmail.com', 'app.tuta.com', 'vimcal.com',
+  'app.vimcal.com', 'cal.com', 'app.cal.com', 'cron.com', 'amie.so', 'web.morgen.so',
+  'app.akiflow.com', 'app.reclaim.ai', 'app.usemotion.com', 'app.sunsama.com', 'calendly.com',
+  'notion.so', 'www.notion.so', 'linear.app', 'asana.com', 'app.asana.com', 'app.clickup.com',
+  'monday.com', 'github.com'
 ]);
 
-/**
- * Some hosts above are general-purpose apps where only specific paths
- * are actually calendars. This list keeps the host on `CALENDAR_HOSTS`
- * (so it gets pre-filtered cheaply) but additionally requires the
- * path to match. Hosts not in this map match unconditionally.
- */
 const CALENDAR_HOST_PATH_REQUIREMENT: Record<string, RegExp> = {
   'icloud.com': /\/calendar\b/i,
   'www.icloud.com': /\/calendar\b/i,
@@ -276,10 +123,7 @@ function urlPartsOf(url: string | null | undefined): { host: string; path: strin
   if (!url) return null;
   try {
     const parsed = new URL(url);
-    return {
-      host: parsed.host.toLowerCase(),
-      path: `${parsed.pathname}${parsed.search}`,
-    };
+    return { host: parsed.host.toLowerCase(), path: `${parsed.pathname}${parsed.search}` };
   } catch {
     return null;
   }
@@ -290,51 +134,19 @@ function isCalendarUrl(url: string | null | undefined): boolean {
   if (!parts) return false;
   const { host, path } = parts;
 
-  // Direct host match — handles `calendar.google.com`, `vimcal.com`, …
-  let matchedHost: string | null = null;
-  if (CALENDAR_HOSTS.has(host)) {
-    matchedHost = host;
-  } else {
-    // Suffix match for tenant-style hosts (e.g. `acme.calendly.com`
-    // → suffix matches `calendly.com`).
-    for (const entry of CALENDAR_HOSTS) {
-      if (host.endsWith('.' + entry)) {
-        matchedHost = entry;
-        break;
-      }
-    }
-  }
+  let matchedHost = CALENDAR_HOSTS.has(host) ? host : [...CALENDAR_HOSTS].find((entry) => host.endsWith('.' + entry));
   if (!matchedHost) return false;
 
   const pathReq = CALENDAR_HOST_PATH_REQUIREMENT[matchedHost];
   return pathReq ? pathReq.test(path) : true;
 }
 
-/**
- * OCR-text heuristic — fires when the captured text reads like a
- * calendar grid even though we don't recognise the app or URL.
- *
- * Three independent signals; any TWO together classify the frame:
- *   1. Month name + 4-digit year nearby ("May 2026", "May, 2026")
- *   2. ≥3 weekday abbreviations in close succession ("Mon Tue Wed",
- *      "Sun Mon Tue Wed Thu Fri Sat", "Mon 11", "Tue 12", "Wed 13")
- *   3. A time gutter — 3+ hour markers within ~200 chars
- *      (either "7 AM 8 AM 9 AM" or 24h "07:00 08:00 09:00")
- */
-const MONTH_NAME_PATTERN =
-  'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
-const MONTHS_RE = new RegExp(`\\b(?:${MONTH_NAME_PATTERN})\\b`, 'i');
-const FULL_ENGLISH_DATE_RE = new RegExp(
-  `\\b(?:${MONTH_NAME_PATTERN})\\s+\\d{1,2},\\s*\\d{4}\\b`,
-  'i',
-);
-const MONTH_YEAR_RE = new RegExp(
-  `\\b(?<month>${MONTH_NAME_PATTERN})\\s*,?\\s*(?<year>\\d{4})\\b`,
-  'i',
-);
+const MONTH_NAME_PATTERN = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const MONTHS_RE = new RegExp(`\b(?:${MONTH_NAME_PATTERN})\b`, 'i');
+const FULL_ENGLISH_DATE_RE = new RegExp(`\b(?:${MONTH_NAME_PATTERN})\s+\d{1,2},\s*\d{4}\b`, 'i');
+const MONTH_YEAR_RE = new RegExp(`\b(?<month>${MONTH_NAME_PATTERN})\s*,?\s*(?<year>\d{4})\b`, 'i');
 const WEEKDAY_ABBREV_RE = /\b(?:sun|mon|tue|wed|thu|fri|sat)\b/gi;
-const WEEKDAY_LABEL_RE =
-  /\b(?<weekday>sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)(?:\s+(?<day>\d{1,2}))?\b/i;
+const WEEKDAY_LABEL_RE = /\b(?<weekday>sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)(?:\s+(?<day>\d{1,2}))?\b/i;
 const HOUR_12H_RE = /\b(?:1[0-2]|0?[1-9])\s?(?:am|pm)\b/gi;
 const HOUR_24H_RE = /\b(?:[01]\d|2[0-3]):[0-5]\d\b/g;
 
@@ -342,128 +154,49 @@ function looksLikeCalendarText(text: string | null): boolean {
   if (!text || text.length < 60) return false;
   let signals = 0;
 
-  // Signal 1 — month name + nearby 4-digit year (e.g. "May 2026").
   const monthMatch = MONTHS_RE.exec(text);
-  if (monthMatch) {
-    const slice = text.slice(monthMatch.index, monthMatch.index + 40);
-    if (/\b(?:20\d{2}|19\d{2})\b/.test(slice)) signals += 1;
-  }
+  if (monthMatch && /\b(?:20\d{2}|19\d{2})\b/.test(text.slice(monthMatch.index, monthMatch.index + 40))) signals++;
 
-  // Signal 2 — weekday-abbrev sequence. Match all and check ≥3 of
-  // them sit within a 120-char window (i.e. a row of weekday labels
-  // rather than three random "Mon"s sprinkled across an article).
-  const dayHits: number[] = [];
-  let dm: RegExpExecArray | null;
-  WEEKDAY_ABBREV_RE.lastIndex = 0;
-  while ((dm = WEEKDAY_ABBREV_RE.exec(text))) {
-    dayHits.push(dm.index);
-    if (dayHits.length > 30) break;
-  }
-  if (dayHits.length >= 3) {
-    for (let i = 0; i <= dayHits.length - 3; i++) {
-      if (dayHits[i + 2] - dayHits[i] <= 120) {
-        signals += 1;
-        break;
-      }
-    }
-  }
+  const dayHits = [...text.matchAll(WEEKDAY_ABBREV_RE)].map((m) => m.index);
+  if (dayHits.length >= 3 && dayHits.some((hit, i) => dayHits[i + 2] - hit <= 120)) signals++;
 
-  // Signal 3 — time gutter. ≥3 hour markers in 200 chars.
-  const collectHits = (re: RegExp): number[] => {
-    const out: number[] = [];
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      out.push(m.index);
-      if (out.length > 40) break;
-    }
-    return out;
-  };
-  const hourHits = collectHits(HOUR_12H_RE).concat(collectHits(HOUR_24H_RE)).sort((a, b) => a - b);
-  if (hourHits.length >= 3) {
-    for (let i = 0; i <= hourHits.length - 3; i++) {
-      if (hourHits[i + 2] - hourHits[i] <= 200) {
-        signals += 1;
-        break;
-      }
-    }
-  }
+  const collectHits = (re: RegExp) => [...text.matchAll(re)].map((m) => m.index);
+  const hourHits = [...collectHits(HOUR_12H_RE), ...collectHits(HOUR_24H_RE)].sort((a, b) => a - b);
+  if (hourHits.length >= 3 && hourHits.some((hit, i) => hourHits[i + 2] - hit <= 200)) signals++;
 
   return signals >= 2;
 }
 
 const SOURCE_MATCHERS: SourceMatcher[] = [
   {
-    source: 'calendar_screen',
-    label: 'calendar',
-    match: (f) => {
-      // (a) Native app.
-      // macOS can report Calendar as the active app while the captured OCR
-      // belongs to the visible window underneath. Treat native calendar app
-      // metadata as a hint, but require the text itself to look calendar-like.
+    source: 'calendar_screen', label: 'calendar', match: (f) => {
       if (isNativeCalendarAppFrame(f)) return looksLikeCalendarText(f.text ?? null);
-
-      // (b) Known calendar webapp / sub-route.
       if (isCalendarUrl(f.url)) return true;
-
-      // (c) OCR heuristic — catches unknown calendars / embedded grids.
-      //     Only fires for frames that have a chance of being a web page
-      //     (URL present), to avoid sweeping in any random text editor
-      //     that happens to mention "May 2026" plus a couple of weekdays.
       if (/^https?:\/\//i.test(f.url ?? '') && looksLikeCalendarText(f.text ?? null)) return true;
-
       return false;
     },
   },
   {
-    source: 'email_screen',
-    label: 'email',
-    match: (f) => {
+    source: 'email_screen', label: 'email', match: (f) => {
       const app = (f.app ?? '').toLowerCase();
-      if (
-        app === 'mail' ||
-        app === 'outlook' ||
-        app === 'spark' ||
-        app === 'airmail' ||
-        app === 'superhuman' ||
-        app === 'hey'
-      ) {
-        return true;
-      }
+      if (['mail', 'outlook', 'spark', 'airmail', 'superhuman', 'hey'].includes(app)) return true;
       const url = (f.url ?? '').toLowerCase();
-      if (/^https?:\/\/mail\.google\.com/.test(url)) return true;
-      if (/^https?:\/\/outlook\.(live|office|office365)\.com\/(?:mail|owa)/.test(url)) return true;
-      if (/^https?:\/\/(?:.+\.)?superhuman\.com/.test(url)) return true;
-      return false;
+      return /^https?:\/\/mail\.google\.com/.test(url) || /^https?:\/\/outlook\.(live|office|office365)\.com\/(?:mail|owa)/.test(url) || /^https?:\/\/(?:.+\.)?superhuman\.com/.test(url);
     },
   },
   {
-    source: 'slack_screen',
-    label: 'chat',
-    match: (f) => {
+    source: 'slack_screen', label: 'chat', match: (f) => {
       const app = (f.app ?? '').toLowerCase();
-      if (app === 'slack' || app === 'discord' || app === 'microsoft teams' || app === 'teams') return true;
-      const url = (f.url ?? '').toLowerCase();
-      return /^https?:\/\/app\.slack\.com|^https?:\/\/.+\.slack\.com|^https?:\/\/teams\.microsoft\.com|^https?:\/\/discord\.com\/channels/.test(
-        url,
-      );
+      if (['slack', 'discord', 'microsoft teams', 'teams'].includes(app)) return true;
+      return /^https?:\/\/app\.slack\.com|^https?:\/\/.+\.slack\.com|^https?:\/\/teams\.microsoft\.com|^https?:\/\/discord\.com\/channels/.test(f.url ?? '');
     },
   },
   {
-    source: 'task_screen',
-    label: 'task',
-    match: (f) => {
-      const url = (f.url ?? '').toLowerCase();
-      return /^https?:\/\/linear\.app\/.+\/issue|^https?:\/\/github\.com\/.+\/(?:issues|pull)\/\d+|^https?:\/\/.+\.atlassian\.net\/browse|^https?:\/\/.+\.notion\.so/.test(
-        url,
-      );
+    source: 'task_screen', label: 'task', match: (f) => {
+      return /^https?:\/\/linear\.app\/.+\/issue|^https?:\/\/github\.com\/.+\/(?:issues|pull)\/\d+|^https?:\/\/.+\.atlassian\.net\/browse|^https?:\/\/.+\.notion\.so/.test(f.url ?? '');
     },
   },
 ];
-
-function haystack(frame: Frame): string {
-  return [frame.app, frame.window_title, frame.url, frame.text].filter(Boolean).join(' \n ');
-}
 
 export class EventExtractor {
   private readonly logger: Logger;
@@ -478,12 +211,7 @@ export class EventExtractor {
   private readonly visionAttachments: number;
   private readonly dataDir: string;
 
-  constructor(
-    private readonly storage: IStorage,
-    private readonly model: IModelAdapter,
-    logger: Logger,
-    opts: EventExtractorOptions = {},
-  ) {
+  constructor(private readonly storage: IStorage, private readonly model: IModelAdapter, logger: Logger, opts: EventExtractorOptions = {}) {
     this.logger = logger.child('event-extractor');
     this.dataDir = opts.dataDir ?? '';
     this.lookbackDays = Math.max(1, Math.min(opts.lookbackDays ?? 7, 30));
@@ -499,40 +227,22 @@ export class EventExtractor {
 
   async tick(opts: EventExtractorTickOptions = {}): Promise<EventExtractorResult> {
     const result: EventExtractorResult = {
-      meetingsLifted: 0,
-      llmExtracted: 0,
-      contextEnriched: 0,
-      daysScanned: 0,
-      bucketsScanned: 0,
-      framesScanned: 0,
-      modelAvailable: false,
-      failed: 0,
+      meetingsLifted: 0, llmExtracted: 0, contextEnriched: 0, daysScanned: 0, bucketsScanned: 0, framesScanned: 0, modelAvailable: false, failed: 0,
     };
 
-    // Phase 1 — deterministic meeting → DayEvent lift.
     try {
       result.meetingsLifted = await this.liftMeetings();
     } catch (err) {
-      this.logger.warn('liftMeetings failed (continuing)', { err: String(err) });
+      this.logger.warn('liftMeetings failed', { err: String(err) });
     }
 
     if (!this.llmEnabled) return result;
-    const modelOk = await this.model.isAvailable().catch(() => false);
-    result.modelAvailable = modelOk;
-    if (!modelOk) {
-      this.logger.info('skipping LLM passes — model unavailable');
-      return result;
-    }
+    result.modelAvailable = await this.model.isAvailable().catch(() => false);
+    if (!result.modelAvailable) return result;
 
-    const scanLookback = Math.max(
-      1,
-      Math.min(opts.lookbackDays ?? this.lookbackDays, 30),
-    );
-    const sourceFilter = opts.sources?.length
-      ? new Set<DayEventSource>(opts.sources)
-      : null;
+    const scanLookback = Math.max(1, Math.min(opts.lookbackDays ?? this.lookbackDays, 30));
+    const sourceFilter = opts.sources?.length ? new Set<DayEventSource>(opts.sources) : null;
 
-    // Phase 2 — calendar / mail / chat extraction per capture day.
     for (const captureDay of recentDays(scanLookback)) {
       try {
         const stats = await this.extractForCaptureDay(captureDay, sourceFilter);
@@ -542,25 +252,17 @@ export class EventExtractor {
         result.daysScanned += 1;
       } catch (err) {
         result.failed += 1;
-        this.logger.warn(`event extraction failed for ${captureDay}`, { err: String(err) });
+        this.logger.warn(`extraction failed for ${captureDay}`, { err: String(err) });
       }
     }
 
     if (opts.enrichContexts ?? true) {
-      // Phase 3 — context enrichment for non-meeting events that still
-      // have a thin context line.
       try {
         result.contextEnriched = await this.enrichContexts();
       } catch (err) {
-        this.logger.warn('context enrichment failed (continuing)', { err: String(err) });
+        this.logger.warn('context enrichment failed', { err: String(err) });
       }
     }
-
-    this.logger.info(
-      `extractor tick: lifted=${result.meetingsLifted} extracted=${result.llmExtracted} ` +
-        `enriched=${result.contextEnriched} buckets=${result.bucketsScanned} ` +
-        `frames=${result.framesScanned} days=${result.daysScanned}`,
-    );
 
     return result;
   }
@@ -569,21 +271,8 @@ export class EventExtractor {
     return await this.tick();
   }
 
-  // -------------------------------------------------------------------------
-  // Phase 1: meeting lift.
-  // -------------------------------------------------------------------------
-
   private async liftMeetings(): Promise<number> {
-    let meetings: Meeting[] = [];
-    try {
-      meetings = await this.storage.listMeetings({
-        order: 'recent',
-        limit: 500,
-      });
-    } catch {
-      return 0;
-    }
-
+    const meetings = await this.storage.listMeetings({ order: 'recent', limit: 500 }).catch(() => []);
     let liftedNow = 0;
     for (const meeting of meetings) {
       const id = `evt_mtg_${meeting.id}`;
@@ -592,183 +281,90 @@ export class EventExtractor {
       if (existing && existing.content_hash === hash) continue;
 
       const now = new Date().toISOString();
-      const tldr =
-        (meeting.summary_json?.tldr ?? '').trim() ||
-        deterministicMeetingContext(meeting);
+      const tldr = (meeting.summary_json?.tldr ?? '').trim() || deterministicMeetingContext(meeting);
 
       const event: DayEvent = {
-        id,
-        day: meeting.day,
-        starts_at: meeting.started_at,
-        ends_at: meeting.ended_at,
-        kind: 'meeting',
-        source: 'meeting_capture',
-        title:
-          (meeting.title ?? '').trim() ||
-          (meeting.summary_json?.title ?? '').trim() ||
-          `${platformLabel(meeting.platform)} meeting`,
-        source_app: platformLabel(meeting.platform),
-        context_md: tldr || null,
-        attendees: meeting.attendees,
-        links: meeting.links,
-        meeting_id: meeting.id,
-        evidence_frame_ids: [],
-        content_hash: hash,
-        status: 'ready',
-        failure_reason: null,
-        created_at: existing?.created_at ?? now,
-        updated_at: now,
+        id, day: meeting.day, starts_at: meeting.started_at, ends_at: meeting.ended_at,
+        kind: 'meeting', source: 'meeting_capture',
+        title: (meeting.title ?? '').trim() || (meeting.summary_json?.title ?? '').trim() || `${platformLabel(meeting.platform)} meeting`,
+        source_app: platformLabel(meeting.platform), context_md: tldr || null,
+        attendees: meeting.attendees, links: meeting.links, meeting_id: meeting.id,
+        evidence_frame_ids: [], content_hash: hash, status: 'ready', failure_reason: null,
+        created_at: existing?.created_at ?? now, updated_at: now,
       };
 
       try {
         await this.storage.upsertDayEvent(event);
-        liftedNow += 1;
+        liftedNow++;
       } catch (err) {
-        this.logger.warn(`upsertDayEvent failed for meeting ${meeting.id}`, {
-          err: String(err),
-        });
+        this.logger.warn(`upsert failed for meeting ${meeting.id}`, { err: String(err) });
       }
     }
     return liftedNow;
   }
 
-  // -------------------------------------------------------------------------
-  // Phase 2: LLM extraction.
-  // -------------------------------------------------------------------------
-
-  private async extractForCaptureDay(
-    captureDay: string,
-    sourceFilter: Set<DayEventSource> | null,
-  ): Promise<{ extracted: number; buckets: number; frames: number }> {
+  private async extractForCaptureDay(captureDay: string, sourceFilter: Set<DayEventSource> | null): Promise<{ extracted: number; buckets: number; frames: number }> {
     const frames = await this.storage.getJournal(captureDay).catch(() => [] as Frame[]);
-    if (frames.length === 0) return { extracted: 0, buckets: 0, frames: 0 };
+    if (!frames.length) return { extracted: 0, buckets: 0, frames: 0 };
 
     const buckets = this.bucketFrames(frames, sourceFilter);
-    if (buckets.length === 0) return { extracted: 0, buckets: 0, frames: 0 };
-
-    let extractedTotal = 0;
-    let framesTotal = 0;
+    let extractedTotal = 0, framesTotal = 0;
     for (const bucket of buckets) {
       framesTotal += bucket.frames.length;
-      const extracted = await this.runLlmExtraction(captureDay, bucket);
-      extractedTotal += extracted;
+      extractedTotal += await this.runLlmExtraction(captureDay, bucket);
     }
     return { extracted: extractedTotal, buckets: buckets.length, frames: framesTotal };
   }
 
-  private bucketFrames(
-    frames: Frame[],
-    sourceFilter: Set<DayEventSource> | null,
-  ): SourceBucket[] {
+  private bucketFrames(frames: Frame[], sourceFilter: Set<DayEventSource> | null): SourceBucket[] {
     const groups = new Map<string, SourceBucket>();
     for (const frame of frames) {
       const matcher = SOURCE_MATCHERS.find((m) => m.match(frame));
-      if (!matcher) continue;
-      if (sourceFilter && !sourceFilter.has(matcher.source)) continue;
-      const text = (frame.text ?? '').trim();
-      if (text.length < this.minTextChars) continue;
+      if (!matcher || (sourceFilter && !sourceFilter.has(matcher.source)) || (frame.text ?? '').trim().length < this.minTextChars) continue;
 
       const appKey = frame.app ?? matcher.label;
-      // Calendars all extract events the same way regardless of which
-      // calendar app is open — collapsing them into one bucket gives
-      // the LLM more dedupe signal across e.g. Fantastical + Apple
-      // Calendar mirroring the same data.
-      const groupKey =
-        matcher.source === 'calendar_screen'
-          ? `${matcher.source}|*`
-          : `${matcher.source}|${appKey}`;
-      let bucket = groups.get(groupKey);
-      if (!bucket) {
-        bucket = { source: matcher.source, app: appKey, frames: [] };
-        groups.set(groupKey, bucket);
-      }
-      bucket.frames.push(frame);
+      const groupKey = matcher.source === 'calendar_screen' ? `${matcher.source}|*` : `${matcher.source}|${appKey}`;
+      if (!groups.has(groupKey)) groups.set(groupKey, { source: matcher.source, app: appKey, frames: [] });
+      groups.get(groupKey)!.frames.push(frame);
     }
 
     for (const bucket of groups.values()) {
-      // Drop near-duplicate frames inside each bucket: identical
-      // perceptual hash, or very similar OCR. Cap to a hard max.
       const seen = new Set<string>();
-      bucket.frames = bucket.frames
-        .filter((f) => {
-          const key =
-            f.perceptual_hash ??
-            `${f.window_title ?? ''}|${(f.text ?? '').slice(0, 200)}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-        .slice(-this.maxFramesPerBucket);
+      bucket.frames = bucket.frames.filter((f) => {
+        const key = f.perceptual_hash ?? `${f.window_title ?? ''}|${(f.text ?? '').slice(0, 200)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)).slice(-this.maxFramesPerBucket);
     }
-    return Array.from(groups.values())
-      .filter((b) => b.frames.length > 0)
-      .sort((a, b) => sourcePriority(a.source) - sourcePriority(b.source));
+    return Array.from(groups.values()).filter((b) => b.frames.length > 0).sort((a, b) => sourcePriority(a.source) - sourcePriority(b.source));
   }
 
-  private async runLlmExtraction(
-    captureDay: string,
-    bucket: SourceBucket,
-  ): Promise<number> {
-    const extractionBucket =
-      bucket.source === 'calendar_screen'
-        ? latestCalendarCaptureBucket(bucket)
-        : bucket;
-    const useVision =
-      this.visionAttachments > 0 &&
-      extractionBucket.source === 'calendar_screen' &&
-      this.model.getModelInfo().supportsVision === true;
+  private async runLlmExtraction(captureDay: string, bucket: SourceBucket): Promise<number> {
+    const extractionBucket = bucket.source === 'calendar_screen' ? latestCalendarCaptureBucket(bucket) : bucket;
+    const useVision = this.visionAttachments > 0 && extractionBucket.source === 'calendar_screen' && this.model.getModelInfo().supportsVision === true;
+    const visionImages = useVision ? await this.loadVisionImages(extractionBucket) : [];
+    const prompt = buildExtractionPrompt(captureDay, extractionBucket, this.maxPromptChars, visionImages.length > 0);
 
-    const visionImages = useVision
-      ? await this.loadVisionImages(extractionBucket)
-      : [];
-
-    const prompt = buildExtractionPrompt(
-      captureDay,
-      extractionBucket,
-      this.maxPromptChars,
-      visionImages.length > 0,
-    );
-
-    let raw = '';
     let parsed: ExtractionPayload | null = null;
     let usedDeterministicFallback = false;
     let canReplaceCalendarView = false;
+
     try {
-      raw =
-        visionImages.length > 0
-          ? await this.model.completeWithVision(prompt, visionImages, {
-              systemPrompt: EXTRACTION_SYSTEM_PROMPT,
-              temperature: 0.2,
-              maxTokens: 2400,
-              responseFormat: 'json',
-            })
-          : await this.model.complete(prompt, {
-              systemPrompt: EXTRACTION_SYSTEM_PROMPT,
-              temperature: 0.2,
-              maxTokens: 2400,
-              responseFormat: 'json',
-            });
+      const raw = visionImages.length > 0
+        ? await this.model.completeWithVision(prompt, visionImages, { systemPrompt: EXTRACTION_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' })
+        : await this.model.complete(prompt, { systemPrompt: EXTRACTION_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' });
       parsed = safeParseExtraction(raw);
       canReplaceCalendarView = extractionBucket.source === 'calendar_screen' && parsed !== null;
-    } catch (err) {
-      this.logger.debug(`llm extraction failed (${extractionBucket.source} ${captureDay})`, {
-        err: String(err),
-      });
+    } catch {
       if (extractionBucket.source === 'calendar_screen') {
         parsed = { events: deterministicCalendarCandidates(captureDay, extractionBucket) };
         usedDeterministicFallback = parsed.events.length > 0;
         canReplaceCalendarView = usedDeterministicFallback;
-      } else {
-        return 0;
-      }
+      } else return 0;
     }
 
     if (!parsed) {
-      this.logger.debug(
-        `llm returned unparseable response (${extractionBucket.source} ${captureDay}); ` +
-          `preview="${raw.slice(0, 160).replace(/\s+/g, ' ')}"`,
-      );
       if (extractionBucket.source === 'calendar_screen') {
         parsed = { events: deterministicCalendarCandidates(captureDay, extractionBucket) };
         usedDeterministicFallback = parsed.events.length > 0;
@@ -780,260 +376,102 @@ export class EventExtractor {
     if (extractionBucket.source === 'calendar_screen') {
       const structured = structuredCalendarCandidates(extractionBucket);
       if (structured.length > 0) {
-        parsed = {
-          events: mergeStructuredCalendarCandidates(
-            parsed.events,
-            structured,
-            captureDay,
-          ),
-        };
+        parsed = { events: mergeStructuredCalendarCandidates(parsed.events, structured, captureDay) };
         canReplaceCalendarView = true;
       }
-    }
-
-    if (extractionBucket.source === 'calendar_screen' && parsed.events.length === 0) {
-      const fallback = deterministicCalendarCandidates(captureDay, extractionBucket);
-      if (fallback.length > 0) {
-        parsed = { events: fallback };
-        usedDeterministicFallback = true;
-        canReplaceCalendarView = true;
-      }
-    }
-
-    if (
-      extractionBucket.source === 'calendar_screen' &&
-      parsed.events.length > 0 &&
-      !usedDeterministicFallback
-    ) {
-      const grounded = parsed.events.filter((candidate) =>
-        calendarCandidateIsGrounded(candidate, extractionBucket),
-      );
-      if (grounded.length !== parsed.events.length) {
-        this.logger.debug(
-          `dropped ${parsed.events.length - grounded.length} ungrounded calendar candidate(s) for ${captureDay}`,
-        );
-      }
-      if (grounded.length > 0) {
-        parsed = { events: grounded };
-      } else {
+      if (parsed.events.length === 0) {
         const fallback = deterministicCalendarCandidates(captureDay, extractionBucket);
-        parsed = { events: fallback };
-        usedDeterministicFallback = fallback.length > 0;
-        canReplaceCalendarView = fallback.length > 0;
+        if (fallback.length > 0) {
+          parsed = { events: fallback };
+          usedDeterministicFallback = true;
+          canReplaceCalendarView = true;
+        }
+      }
+      if (parsed.events.length > 0 && !usedDeterministicFallback) {
+        const grounded = parsed.events.filter((candidate) => calendarCandidateIsGrounded(candidate, extractionBucket));
+        parsed = grounded.length > 0 ? { events: grounded } : { events: deterministicCalendarCandidates(captureDay, extractionBucket) };
+        if (grounded.length === 0) {
+          usedDeterministicFallback = parsed.events.length > 0;
+          canReplaceCalendarView = parsed.events.length > 0;
+        }
       }
     }
 
     const candidatesToPersist = parsed.events.slice(0, this.maxEventsPerResponse);
-
     if (extractionBucket.source === 'calendar_screen' && canReplaceCalendarView) {
-      await this.replaceCalendarDaysWithCandidates(
-        captureDay,
-        extractionBucket,
-        candidatesToPersist,
-      );
+      await this.replaceCalendarDaysWithCandidates(captureDay, extractionBucket, candidatesToPersist);
     }
 
-    const evidenceIds = extractionBucket.frames.map((f) => f.id);
-    const now = new Date().toISOString();
     let count = 0;
-    let droppedInvalidDate = 0;
-
+    const now = new Date().toISOString();
     for (const candidate of candidatesToPersist) {
       const title = (candidate?.title ?? '').trim();
       if (!title) continue;
 
-      // Two-step date resolution: prefer a parseable ISO; otherwise try
-      // to interpret a time-only string against the capture day; if
-      // that fails too, anchor on the capture day at noon. This used to
-      // hard-drop without a date, which on local vision-light models
-      // meant most events disappeared even when the title was correct.
-      const startsAt =
-        parseEventTimestamp(candidate?.starts_at) ??
-        coerceTimeOnCaptureDay(candidate?.starts_at, captureDay) ??
-        defaultStartOnDay(captureDay);
-
+      const startsAt = parseEventTimestamp(candidate?.starts_at) ?? coerceTimeOnCaptureDay(candidate?.starts_at, captureDay) ?? defaultStartOnDay(captureDay);
       const eventDay = localDayKey(new Date(startsAt));
-      if (!isValidEventDay(eventDay)) {
-        droppedInvalidDate += 1;
-        continue;
-      }
+      if (!isValidEventDay(eventDay)) continue;
 
-      const endsAt =
-        parseEventTimestamp(candidate?.ends_at) ??
-        coerceTimeOnCaptureDay(candidate?.ends_at, eventDay);
-      const kind = normaliseKind(candidate?.kind);
+      const endsAt = parseEventTimestamp(candidate?.ends_at) ?? coerceTimeOnCaptureDay(candidate?.ends_at, eventDay);
       const hourBucket = localHourBucket(startsAt);
       const id = deterministicEventId(bucket.source, eventDay, hourBucket, title);
-
-      // Re-use created_at on overwrite so we don't lose the "first seen"
-      // timestamp when a later capture pass refreshes the row.
-      const existing = await this.storage.getDayEvent(id).catch(() => null);
-
       const contentHash = sha1(`${eventDay}|${hourBucket}|${title}|${endsAt ?? ''}`);
-      if (existing && existing.content_hash === contentHash && existing.context_md) {
-        continue;
-      }
+
+      const existing = await this.storage.getDayEvent(id).catch(() => null);
+      if (existing && existing.content_hash === contentHash && existing.context_md) continue;
 
       const event: DayEvent = {
-        id,
-        day: eventDay,
-        starts_at: startsAt,
-        ends_at: endsAt,
-        kind,
-        source: extractionBucket.source,
-        title: title.slice(0, 200),
-        source_app: extractionBucket.app,
+        id, day: eventDay, starts_at: startsAt, ends_at: endsAt, kind: normaliseKind(candidate?.kind),
+        source: extractionBucket.source, title: title.slice(0, 200), source_app: extractionBucket.app,
         context_md: (candidate?.context ?? '').trim().slice(0, 1200) || null,
-        attendees: Array.isArray(candidate?.attendees)
-          ? candidate.attendees.filter((s): s is string => typeof s === 'string').slice(0, 20)
-          : [],
-        links: [],
-        meeting_id: null,
-        evidence_frame_ids: evidenceIds.slice(-10),
-        content_hash: contentHash,
-        status: 'ready',
-        failure_reason: null,
-        created_at: existing?.created_at ?? now,
-        updated_at: now,
+        attendees: Array.isArray(candidate?.attendees) ? candidate.attendees.filter((s): s is string => typeof s === 'string').slice(0, 20) : [],
+        links: [], meeting_id: null, evidence_frame_ids: extractionBucket.frames.map((f) => f.id).slice(-10),
+        content_hash: contentHash, status: 'ready', failure_reason: null, created_at: existing?.created_at ?? now, updated_at: now,
       };
 
       try {
         await this.storage.upsertDayEvent(event);
-        count += 1;
+        count++;
       } catch (err) {
         this.logger.debug(`upsertDayEvent failed`, { err: String(err) });
       }
     }
-
-    if (candidatesToPersist.length > 0) {
-      this.logger.info(
-        `extracted ${count}/${candidatesToPersist.length} events from ${extractionBucket.source} ` +
-          `${captureDay} (${extractionBucket.frames.length}/${bucket.frames.length} frames${useVision ? `, vision×${visionImages.length}` : ''})` +
-          (usedDeterministicFallback ? ', deterministic fallback' : '') +
-          (droppedInvalidDate > 0 ? ` — dropped ${droppedInvalidDate} invalid-date` : ''),
-      );
-    }
     return count;
   }
 
-  private async replaceCalendarDaysWithCandidates(
-    captureDay: string,
-    bucket: SourceBucket,
-    candidates: ExtractionCandidate[],
-  ): Promise<void> {
+  private async replaceCalendarDaysWithCandidates(captureDay: string, bucket: SourceBucket, candidates: ExtractionCandidate[]): Promise<void> {
     const visibleDays = visibleCalendarDays(captureDay, bucket, candidates);
-    if (visibleDays.size === 0) return;
-
-    const candidateCounts = candidateCalendarDayCounts(captureDay, candidates);
-
     for (const day of visibleDays) {
-      try {
-        await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen');
-        this.logger.debug(
-          `replaced calendar events for ${day}: ${candidateCounts.get(day) ?? 0} fresh candidate(s)`,
-        );
-      } catch (err) {
-        this.logger.debug(`failed to replace calendar events for ${day}`, {
-          err: String(err),
-        });
-      }
+      await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen').catch(() => {});
     }
   }
 
-  /**
-   * Load up to `visionAttachments` of the bucket's most recent frames as
-   * raw image buffers so the model adapter can see the calendar grid.
-   * Falls back gracefully when assets are missing (vacuumed, on a
-   * different vacuum tier, …) — vision is a bonus, not a hard
-   * requirement.
-   */
   private async loadVisionImages(bucket: SourceBucket): Promise<Buffer[]> {
     if (this.visionAttachments <= 0) return [];
-    // Most-recent frames first — they're the freshest snapshot of the
-    // user's actual calendar state.
-    const candidates = bucket.frames
-      .filter((f) => f.asset_path)
-      .slice(-this.visionAttachments * 2)
-      .reverse();
+    const candidates = bucket.frames.filter((f) => f.asset_path).slice(-this.visionAttachments * 2).reverse();
     const out: Buffer[] = [];
     for (const f of candidates) {
       if (out.length >= this.visionAttachments) break;
-      const assetPath = f.asset_path;
-      if (!assetPath) continue;
-      try {
-        const buf = await this.readAsset(assetPath);
-        if (buf) out.push(buf);
-      } catch (err) {
-        this.logger.debug(`could not load vision frame ${assetPath}`, {
-          err: String(err),
-        });
-      }
+      const buf = await this.readAsset(f.asset_path!);
+      if (buf) out.push(buf);
     }
     return out;
   }
 
-  /**
-   * Resolve a relative asset path against `dataDir` first, then via
-   * storage.readAsset() as a fallback (covers adapters that store
-   * assets elsewhere, e.g. an alternative storage root).
-   */
   private async readAsset(assetPath: string): Promise<Buffer | null> {
-    if (path.isAbsolute(assetPath)) {
-      try {
-        return await fs.readFile(assetPath);
-      } catch {
-        return null;
-      }
-    }
-    if (this.dataDir) {
-      try {
-        return await fs.readFile(path.join(this.dataDir, assetPath));
-      } catch {
-        /* fall through */
-      }
-    }
-    try {
-      return await this.storage.readAsset(assetPath);
-    } catch {
-      return null;
-    }
+    if (path.isAbsolute(assetPath)) return fs.readFile(assetPath).catch(() => null);
+    if (this.dataDir) return fs.readFile(path.join(this.dataDir, assetPath)).catch(() => this.storage.readAsset(assetPath).catch(() => null));
+    return this.storage.readAsset(assetPath).catch(() => null);
   }
 
-  // -------------------------------------------------------------------------
-  // Phase 3: context enrichment.
-  // -------------------------------------------------------------------------
-
   private async enrichContexts(): Promise<number> {
-    // Walk the last N days and pick non-meeting events whose context
-    // line is missing or too short to be useful. Meeting events are
-    // skipped — they already have the Meeting summary downstream.
-    const cutoffFrom = new Date(
-      Date.now() - this.lookbackDays * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    let events: DayEvent[] = [];
-    try {
-      events = await this.storage.listDayEvents({
-        from: cutoffFrom,
-        order: 'recent',
-        limit: 500,
-      });
-    } catch {
-      return 0;
-    }
-
-    const candidates = events
-      .filter((ev) => ev.kind !== 'meeting')
-      .filter((ev) => !ev.context_md || ev.context_md.length < 40)
-      .slice(0, this.maxContextEventsPerTick);
+    const cutoffFrom = new Date(Date.now() - this.lookbackDays * 24 * 60 * 60 * 1000).toISOString();
+    const events = await this.storage.listDayEvents({ from: cutoffFrom, order: 'recent', limit: 500 }).catch(() => []);
+    const candidates = events.filter((ev) => ev.kind !== 'meeting' && (!ev.context_md || ev.context_md.length < 40)).slice(0, this.maxContextEventsPerTick);
 
     let enriched = 0;
     for (const event of candidates) {
-      try {
-        const ok = await this.enrichOne(event);
-        if (ok) enriched += 1;
-      } catch (err) {
-        this.logger.debug(`enrichOne failed for ${event.id}`, { err: String(err) });
-      }
+      if (await this.enrichOne(event)) enriched++;
     }
     return enriched;
   }
@@ -1041,956 +479,356 @@ export class EventExtractor {
   private async enrichOne(event: DayEvent): Promise<boolean> {
     const start = Date.parse(event.starts_at);
     if (Number.isNaN(start)) return false;
-    const from = new Date(start - this.contextWindowMs).toISOString();
-    const to = new Date(start + this.contextWindowMs).toISOString();
+    const from = new Date(start - this.contextWindowMs).toISOString(), to = new Date(start + this.contextWindowMs).toISOString();
 
-    let frames: Frame[] = [];
-    try {
-      frames = await this.storage.searchFrames({ from, to, limit: 80 });
-    } catch {
-      return false;
-    }
-
-    // Only feed in frames that look unrelated to the calendar/inbox
-    // surfaces the event was already extracted from — otherwise we'd
-    // be re-reading the same OCR that produced the event.
-    const contextFrames = frames
-      .filter((f) => !SOURCE_MATCHERS.some((m) => m.match(f)))
-      .filter((f) => (f.text ?? '').trim().length >= 40);
-
+    const frames = await this.storage.searchFrames({ from, to, limit: 80 }).catch(() => []);
+    const contextFrames = frames.filter((f) => !SOURCE_MATCHERS.some((m) => m.match(f)) && (f.text ?? '').trim().length >= 40);
     if (contextFrames.length === 0) return false;
 
-    // Pick a small, diverse set: one per app, in chronological order.
     const byApp = new Map<string, Frame>();
-    for (const f of contextFrames) {
-      const key = f.app ?? 'unknown';
-      if (!byApp.has(key)) byApp.set(key, f);
-    }
-    const picks = Array.from(byApp.values())
-      .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-      .slice(0, 6);
+    for (const f of contextFrames) if (!byApp.has(f.app ?? 'unknown')) byApp.set(f.app ?? 'unknown', f);
+    const picks = Array.from(byApp.values()).sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)).slice(0, 6);
 
     const prompt = buildContextPrompt(event, picks);
-    let raw: string;
-    try {
-      raw = await this.model.complete(prompt, {
-        systemPrompt: CONTEXT_SYSTEM_PROMPT,
-        temperature: 0.2,
-        maxTokens: 240,
-      });
-    } catch {
-      return false;
-    }
-
+    const raw = await this.model.complete(prompt, { systemPrompt: CONTEXT_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 240 }).catch(() => '');
     const cleaned = (raw ?? '').trim().slice(0, 800);
-    if (!cleaned) return false;
-    if (/^no related context found$/i.test(cleaned)) return false;
+    if (!cleaned || /^no related context found$/i.test(cleaned)) return false;
 
-    const now = new Date().toISOString();
     const merged = mergeContext(event.context_md, cleaned);
-    const next: DayEvent = {
-      ...event,
-      context_md: merged,
-      evidence_frame_ids: Array.from(
-        new Set([...event.evidence_frame_ids, ...picks.map((p) => p.id)]),
-      ).slice(-12),
-      // Bump hash so future ticks see "yes, already enriched".
-      content_hash: sha1(`${event.content_hash}|enriched|${cleaned.length}`),
-      updated_at: now,
-    };
     try {
-      await this.storage.upsertDayEvent(next);
+      await this.storage.upsertDayEvent({
+        ...event, context_md: merged,
+        evidence_frame_ids: Array.from(new Set([...event.evidence_frame_ids, ...picks.map((p) => p.id)])).slice(-12),
+        content_hash: sha1(`${event.content_hash}|enriched|${cleaned.length}`), updated_at: new Date().toISOString(),
+      });
       return true;
-    } catch (err) {
-      this.logger.debug(`enrich upsert failed for ${event.id}`, { err: String(err) });
+    } catch {
       return false;
     }
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function latestCalendarCaptureBucket(bucket: SourceBucket): SourceBucket {
   if (bucket.frames.length <= 1) return bucket;
-  const frames = bucket.frames
-    .slice()
-    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  const frames = bucket.frames.slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   const latest = frames[frames.length - 1];
-  if (!latest) return bucket;
-
   const latestMs = Date.parse(latest.timestamp);
-  const latestFrames = Number.isFinite(latestMs)
-    ? frames.filter((frame) => {
-        const frameMs = Date.parse(frame.timestamp);
-        return (
-          frame.id === latest.id ||
-          (Number.isFinite(frameMs) &&
-            Math.abs(frameMs - latestMs) <= LATEST_CALENDAR_CAPTURE_WINDOW_MS)
-        );
-      })
-    : [latest];
-
-  return {
-    ...bucket,
-    frames: latestFrames.length > 0 ? latestFrames : [latest],
-  };
+  const latestFrames = Number.isFinite(latestMs) ? frames.filter((f) => f.id === latest.id || Math.abs(Date.parse(f.timestamp) - latestMs) <= LATEST_CALENDAR_CAPTURE_WINDOW_MS) : [latest];
+  return { ...bucket, frames: latestFrames.length > 0 ? latestFrames : [latest] };
 }
 
 function recentDays(lookback: number): string[] {
-  const days: string[] = [];
-  const today = new Date();
-  for (let i = 0; i < lookback; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    days.push(localDayKey(d));
-  }
-  return days;
+  return Array.from({ length: lookback }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - i); return localDayKey(d);
+  });
 }
 
 function localDayKey(d: Date): string {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function meetingContentHash(meeting: Meeting): string {
-  const parts = [
-    meeting.id,
-    meeting.title ?? '',
-    meeting.summary_json?.title ?? '',
-    meeting.summary_json?.tldr ?? '',
-    meeting.started_at,
-    meeting.ended_at,
-    meeting.duration_ms,
-    meeting.attendees.join(','),
-    meeting.summary_status,
-    meeting.content_hash,
-  ].join('|');
-  return sha1(parts).slice(0, 16);
+  return sha1([meeting.id, meeting.title ?? '', meeting.summary_json?.title ?? '', meeting.summary_json?.tldr ?? '', meeting.started_at, meeting.ended_at, meeting.duration_ms, meeting.attendees.join(','), meeting.summary_status, meeting.content_hash].join('|')).slice(0, 16);
 }
 
 function deterministicMeetingContext(meeting: Meeting): string {
-  const minutes = Math.max(1, Math.round(meeting.duration_ms / 60_000));
-  const pieces = [`${minutes}-min ${platformLabel(meeting.platform)} meeting`];
-  if (meeting.attendees.length > 0) {
-    pieces.push(`with ${meeting.attendees.slice(0, 6).join(', ')}`);
-  }
-  if (meeting.transcript_chars > 0) {
-    pieces.push(`(${(meeting.transcript_chars / 1000).toFixed(1)}k chars of transcript captured)`);
-  } else {
-    pieces.push('(no audio transcript captured)');
-  }
-  return pieces.join(' ') + '.';
+  const mins = Math.max(1, Math.round(meeting.duration_ms / 60_000));
+  const att = meeting.attendees.length > 0 ? ` with ${meeting.attendees.slice(0, 6).join(', ')}` : '';
+  const trans = meeting.transcript_chars > 0 ? ` (${(meeting.transcript_chars / 1000).toFixed(1)}k chars)` : ' (no audio)';
+  return `${mins}-min ${platformLabel(meeting.platform)} meeting${att}${trans}.`;
 }
 
 function platformLabel(platform: Meeting['platform']): string {
-  switch (platform) {
-    case 'zoom':
-      return 'Zoom';
-    case 'meet':
-      return 'Google Meet';
-    case 'teams':
-      return 'Microsoft Teams';
-    case 'webex':
-      return 'Webex';
-    case 'whereby':
-      return 'Whereby';
-    case 'around':
-      return 'Around';
-    default:
-      return 'Meeting';
-  }
+  return { zoom: 'Zoom', meet: 'Google Meet', teams: 'Microsoft Teams', webex: 'Webex', whereby: 'Whereby', around: 'Around', other: 'Meeting' }[platform] || 'Meeting';
 }
 
-function deterministicEventId(
-  source: DayEventSource,
-  eventDay: string,
-  hourBucket: string,
-  title: string,
-): string {
-  const tag = sha1(
-    [source, eventDay, hourBucket, normaliseTitleForKey(title)].join('|'),
-  ).slice(0, 12);
-  return `evt_${source.split('_')[0]}_${eventDay.replace(/-/g, '')}_${tag}`;
+function deterministicEventId(source: DayEventSource, eventDay: string, hourBucket: string, title: string): string {
+  return `evt_${source.split('_')[0]}_${eventDay.replace(/-/g, '')}_${sha1([source, eventDay, hourBucket, normaliseTitleForKey(title)].join('|')).slice(0, 12)}`;
 }
 
 function sourcePriority(source: DayEventSource): number {
-  switch (source) {
-    case 'calendar_screen':
-      return 0;
-    case 'meeting_capture':
-      return 1;
-    case 'email_screen':
-      return 2;
-    case 'slack_screen':
-      return 3;
-    case 'task_screen':
-      return 4;
-    default:
-      return 9;
-  }
+  return { calendar_screen: 0 as const, meeting_capture: 1 as const, email_screen: 2 as const, slack_screen: 3 as const, task_screen: 4 as const, other_screen: 9 as const }[source] ?? 9;
 }
 
 function normaliseTitleForKey(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[^\w\s]/g, '');
 }
 
-function buildExtractionPrompt(
-  captureDay: string,
-  bucket: SourceBucket,
-  maxChars: number,
-  vision: boolean,
-): string {
-  const sourceHint = (() => {
-    switch (bucket.source) {
-      case 'calendar_screen':
-        return [
-          `These captures come from the user's calendar app (${bucket.app}).`,
-          vision
-            ? 'Use the attached screenshots as the primary signal — look at the layout, identify the view (day / week / multi-day / month / agenda / year), find the dates being displayed, and read every event off the surface.'
-            : 'The OCR text scrambles the layout, so reconstruct events conservatively. Any dates you can recover from the text (month headers, day labels, "Today" markers, inline date dividers) anchor the events.',
-          'Date each event using whatever the screen tells you about the period it covers, including past and future days; if the layout is implicit, fall back to the user-local capture day.',
-        ].join(' ');
-      case 'email_screen':
-        return 'These screenshots are from the user’s email app. Surface meaningful threads — messages the user is actually reading or writing — as kind="communication" events. Skip generic inbox lists.';
-      case 'slack_screen':
-        return 'These screenshots are from a chat app (Slack / Discord). Surface notable conversations or threads as kind="communication" events. Skip channel-list chrome.';
-      case 'task_screen':
-        return 'These screenshots are from a task tracker (Linear / Jira / GitHub / Notion). Surface tickets the user appears to be working on as kind="task" events.';
-      default:
-        return '';
-    }
-  })();
-
-  const header = [
-    `Day the screenshots were captured on (user's local timezone): ${captureDay}`,
-    `Source app: ${bucket.app}`,
-    `Surface: ${bucket.source}`,
-    '',
-    sourceHint,
-    '',
-    vision
-      ? 'OCR text from those screenshots is also included below for cross-reference. Trust the image first.'
-      : 'Captured frames (oldest first):',
-  ].join('\n');
-
-  const blocks: string[] = [];
-  let used = header.length;
+function buildExtractionPrompt(captureDay: string, bucket: SourceBucket, maxChars: number, vision: boolean): string {
+  const hints = {
+    calendar_screen: `These captures come from the user's calendar app (${bucket.app}). ${vision ? 'Use attached screenshots.' : 'OCR text is primary.'}`,
+    email_screen: 'These screenshots are from the user’s email app. Surface meaningful threads.',
+    slack_screen: 'These screenshots are from a chat app. Surface notable conversations.',
+    task_screen: 'These screenshots are from a task tracker. Surface tickets.',
+  };
+  const header = [`Day: ${captureDay}`, `App: ${bucket.app}`, `Surface: ${bucket.source}`, '', hints[bucket.source as keyof typeof hints] || '', ''].join('\n');
+  let used = header.length, blocks = [];
   for (const frame of bucket.frames) {
-    const text = (frame.text ?? '').trim();
-    if (!text) continue;
-    const block = `\n[FRAME ${frame.id} @ ${frame.timestamp}] title="${frame.window_title ?? ''}" url="${frame.url ?? ''}"\n${text.slice(0, 2200)}\n`;
+    const block = `\n[FRAME ${frame.id}] "${frame.window_title ?? ''}"\n${(frame.text ?? '').trim().slice(0, 2200)}\n`;
     if (used + block.length > maxChars) break;
-    blocks.push(block);
-    used += block.length;
+    blocks.push(block); used += block.length;
   }
-
-  return `${header}${blocks.join('')}\n\nExtract every meaningful event you can see. Remember: STRICT JSON only.`;
+  return `${header}${blocks.join('')}\n\nExtract every meaningful event.`;
 }
 
 function buildContextPrompt(event: DayEvent, frames: Frame[]): string {
-  const blocks: string[] = [];
-  for (const frame of frames) {
-    const text = (frame.text ?? '').trim();
-    if (!text) continue;
-    blocks.push(
-      `\n[${frame.app ?? 'unknown'} @ ${frame.timestamp}] "${frame.window_title ?? ''}"\n${text.slice(0, 900)}\n`,
-    );
-  }
-  return [
-    `Event: ${event.title}`,
-    `Scheduled at: ${event.starts_at}${event.ends_at ? ` – ${event.ends_at}` : ''}`,
-    `Source: ${event.source_app ?? event.source}`,
-    '',
-    'Screen captures from around that time (other apps the user was on):',
-    blocks.join(''),
-    '',
-    'Write a 1-3 sentence English context based STRICTLY on what those captures show. If nothing in the captures is related to this event, output exactly: no related context found',
-  ].join('\n');
+  return [`Event: ${event.title}`, `At: ${event.starts_at}`, `Source: ${event.source_app ?? event.source}`, '',
+    ...frames.map((f) => `\n[${f.app ?? 'unknown'}] "${f.window_title ?? ''}"\n${(f.text ?? '').trim().slice(0, 900)}\n`),
+    '', 'Write context description.'].join('\n');
 }
 
-interface ExtractionCandidate {
-  title?: string;
-  kind?: string;
-  starts_at?: string | null;
-  ends_at?: string | null;
-  attendees?: unknown;
-  context?: string;
-}
-
-interface ExtractionPayload {
-  events: ExtractionCandidate[];
-}
+interface ExtractionCandidate { title?: string; kind?: string; starts_at?: string | null; ends_at?: string | null; attendees?: unknown; context?: string; }
+interface ExtractionPayload { events: ExtractionCandidate[]; }
 
 function safeParseExtraction(raw: string): ExtractionPayload | null {
   const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const candidates = [trimmed];
-  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenceMatch?.[1]) candidates.push(fenceMatch[1].trim());
-  const firstBrace = trimmed.indexOf('{');
-  const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
-  }
-  for (const c of candidates) {
+  const cands = [trimmed, trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim(), trimmed.slice(trimmed.indexOf('{'), trimmed.lastIndexOf('}') + 1)].filter(Boolean) as string[];
+  for (const c of cands) {
     try {
-      const parsed = JSON.parse(c) as ExtractionPayload | ExtractionCandidate[];
+      const parsed = JSON.parse(c);
       if (Array.isArray(parsed)) return { events: parsed };
       if (parsed && Array.isArray(parsed.events)) return parsed;
-    } catch {
-      // try the next candidate
-    }
+    } catch {}
   }
   return null;
 }
 
 function normaliseKind(kind: string | undefined): DayEventKind {
-  switch ((kind ?? '').toLowerCase()) {
-    case 'calendar':
-      return 'calendar';
-    case 'communication':
-    case 'message':
-    case 'chat':
-    case 'email':
-      return 'communication';
-    case 'task':
-    case 'todo':
-    case 'ticket':
-      return 'task';
-    default:
-      return 'other';
-  }
+  const k = (kind ?? '').toLowerCase();
+  return ['calendar', 'communication', 'task'].includes(k) ? k as DayEventKind : ['message', 'chat', 'email'].includes(k) ? 'communication' : ['todo', 'ticket'].includes(k) ? 'task' : 'other';
 }
 
-/**
- * The model often emits a time-only string ("10:30", "2 PM") when the
- * date is implicit from the screenshot context. Glue it onto the given
- * day so the event still lands somewhere useful instead of being
- * dropped. Returns null when even the time portion is unparseable.
- */
-function coerceTimeOnCaptureDay(
-  raw: string | null | undefined,
-  day: string,
-): string | null {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (!s || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
-  const m = s.match(/^(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?$/i);
+function coerceTimeOnCaptureDay(raw: string | null | undefined, day: string): string | null {
+  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const m = String(raw).trim().match(/^(\d{1,2})[:.]?(\d{2})?\s*(am|pm)?$/i);
   if (!m) return null;
-  let hour = parseInt(m[1], 10);
-  const minute = m[2] ? parseInt(m[2], 10) : 0;
-  const ampm = m[3]?.toLowerCase();
-  if (ampm === 'pm' && hour < 12) hour += 12;
-  if (ampm === 'am' && hour === 12) hour = 0;
+  let [_, h, min, ampm] = m, hour = parseInt(h, 10), minute = min ? parseInt(min, 10) : 0;
+  if (ampm?.toLowerCase() === 'pm' && hour < 12) hour += 12;
+  if (ampm?.toLowerCase() === 'am' && hour === 12) hour = 0;
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  const synth = new Date(`${day}T${pad2(hour)}:${pad2(minute)}:00`);
+  const synth = new Date(`${day}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`);
   return Number.isNaN(synth.getTime()) ? null : synth.toISOString();
 }
 
-function pad2(n: number): string {
-  return n.toString().padStart(2, '0');
-}
-
-function deterministicCalendarCandidates(
-  captureDay: string,
-  bucket: SourceBucket,
-): ExtractionCandidate[] {
+function deterministicCalendarCandidates(captureDay: string, bucket: SourceBucket): ExtractionCandidate[] {
   const structured = structuredCalendarCandidates(bucket);
   if (structured.length > 0) return structured;
 
   const out: ExtractionCandidate[] = [];
   const seen = new Set<string>();
-  const frames = bucket.frames
-    .slice()
-    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-
-  for (const frame of frames) {
+  for (const frame of bucket.frames.slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))) {
     if (out.length >= 25) break;
     const text = (frame.text ?? '').trim();
-    if (!text || !looksLikeCalendarText(text)) continue;
+    if (!looksLikeCalendarText(text)) continue;
 
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) => line.replace(/\s+/g, ' ').trim())
-      .filter(Boolean);
-
-    let currentHour: { hour: number; minute: number } | null = null;
-    let minuteOffset = 0;
-    let inAllDay = false;
-
-    for (const line of lines) {
-      if (/^all[-\s]?day$/i.test(line)) {
-        inAllDay = true;
-        currentHour = null;
-        minuteOffset = 0;
-        continue;
-      }
-
+    let currentHour = null, minuteOffset = 0, inAllDay = false;
+    for (const line of text.split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean)) {
+      if (/^all[-\s]?day$/i.test(line)) { inAllDay = true; currentHour = null; minuteOffset = 0; continue; }
       const time = parseCalendarTimeLabel(line);
-      if (time) {
-        currentHour = time;
-        minuteOffset = 0;
-        inAllDay = false;
-        continue;
-      }
+      if (time) { currentHour = time; minuteOffset = 0; inAllDay = false; continue; }
 
       const title = cleanCalendarFallbackTitle(line);
       if (!title) continue;
 
-      const startsAt = inAllDay
-        ? defaultStartOnDay(captureDay)
-        : currentHour
-          ? coerceTimeOnCaptureDay(
-              `${pad2(currentHour.hour)}:${pad2(Math.min(55, currentHour.minute + minuteOffset))}`,
-              captureDay,
-            )
-          : null;
+      const startsAt = inAllDay ? defaultStartOnDay(captureDay) : currentHour ? coerceTimeOnCaptureDay(`${String(currentHour.hour).padStart(2, '0')}:${String(Math.min(55, currentHour.minute + minuteOffset)).padStart(2, '0')}`, captureDay) : null;
       if (!startsAt) continue;
 
-      const eventDay = localDayKey(new Date(startsAt));
-      const key = `${eventDay}|${localHourBucket(startsAt)}|${normaliseTitleForKey(title)}`;
+      const key = `${localDayKey(new Date(startsAt))}|${localHourBucket(startsAt)}|${normaliseTitleForKey(title)}`;
       if (seen.has(key)) continue;
       seen.add(key);
 
       const startMs = Date.parse(startsAt);
-      const endsAt = Number.isNaN(startMs)
-        ? null
-        : new Date(startMs + (inAllDay ? 24 * 60 : 30) * 60_000).toISOString();
-      out.push({
-        title,
-        kind: 'calendar',
-        starts_at: startsAt,
-        ends_at: endsAt,
-        attendees: [],
-        context: `Visible in ${frame.app || 'calendar'} screenshot OCR.`,
-      });
+      out.push({ title, kind: 'calendar', starts_at: startsAt, ends_at: Number.isNaN(startMs) ? null : new Date(startMs + (inAllDay ? 24 * 60 : 30) * 60_000).toISOString(), attendees: [], context: 'Visible in OCR.' });
       if (!inAllDay) minuteOffset += 15;
       if (out.length >= 25) break;
     }
   }
-
   return out;
 }
 
 function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate[] {
   const out: ExtractionCandidate[] = [];
   const seen = new Set<string>();
-  const frames = bucket.frames
-    .slice()
-    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp));
-
-  for (const frame of frames) {
+  for (const frame of bucket.frames.slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))) {
     if (out.length >= 25) break;
-    const text = (frame.text ?? '').trim();
-    if (!text || !looksLikeCalendarText(text)) continue;
-
-    for (const candidate of structuredCalendarCandidatesFromText(text, frame)) {
+    if (!looksLikeCalendarText((frame.text ?? '').trim())) continue;
+    for (const candidate of structuredCalendarCandidatesFromText(frame.text ?? '', frame)) {
       const startsAt = parseEventTimestamp(candidate.starts_at);
       if (!startsAt) continue;
-      const eventDay = localDayKey(new Date(startsAt));
-      const key = `${eventDay}|${localHourBucket(startsAt)}|${normaliseTitleForKey(candidate.title ?? '')}`;
+      const key = `${localDayKey(new Date(startsAt))}|${localHourBucket(startsAt)}|${normaliseTitleForKey(candidate.title ?? '')}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(candidate);
       if (out.length >= 25) break;
     }
   }
-
   return out;
 }
 
-function mergeStructuredCalendarCandidates(
-  candidates: ExtractionCandidate[],
-  structured: ExtractionCandidate[],
-  captureDay: string,
-): ExtractionCandidate[] {
-  if (structured.length === 0) return candidates;
+function mergeStructuredCalendarCandidates(candidates: ExtractionCandidate[], structured: ExtractionCandidate[], captureDay: string): ExtractionCandidate[] {
+  if (!structured.length) return candidates;
+  const out: ExtractionCandidate[] = [], used = new Set<number>();
 
-  const out: ExtractionCandidate[] = [];
-  const usedStructured = new Set<number>();
-
-  for (const candidate of candidates) {
-    const matchIndex = structured.findIndex(
-      (structuredCandidate, index) =>
-        !usedStructured.has(index) &&
-        calendarCandidatesLikelySame(candidate, structuredCandidate, captureDay),
-    );
-
-    if (matchIndex >= 0) {
-      const structuredCandidate = structured[matchIndex]!;
-      usedStructured.add(matchIndex);
-      out.push({
-        ...candidate,
-        kind: 'calendar',
-        starts_at: structuredCandidate.starts_at,
-        ends_at: structuredCandidate.ends_at,
-        title: (candidate.title ?? '').trim() || structuredCandidate.title,
-        context: (candidate.context ?? '').trim() || structuredCandidate.context,
-      });
-    } else {
-      out.push(candidate);
-    }
+  for (const s of structured) {
+    const matchIdx = candidates.findIndex((c, i) => !used.has(i) && calendarCandidatesLikelySame(c, s, captureDay));
+    if (matchIdx >= 0) {
+      used.add(matchIdx);
+      out.push({ ...candidates[matchIdx]!, kind: 'calendar', starts_at: s.starts_at, ends_at: s.ends_at, title: (candidates[matchIdx]!.title ?? '').trim() || s.title, context: (candidates[matchIdx]!.context ?? '').trim() || s.context });
+    } else out.push(s);
   }
-
-  for (let i = 0; i < structured.length; i++) {
-    if (!usedStructured.has(i)) out.push(structured[i]!);
-  }
-
+  candidates.forEach((c, i) => !used.has(i) && out.push(c));
   return dedupeExtractionCandidates(out, captureDay);
 }
 
-function dedupeExtractionCandidates(
-  candidates: ExtractionCandidate[],
-  captureDay: string,
-): ExtractionCandidate[] {
-  const out: ExtractionCandidate[] = [];
-  const seen = new Set<string>();
-
-  for (const candidate of candidates) {
-    const titleKey = normaliseTitleForKey(candidate.title ?? '');
+function dedupeExtractionCandidates(candidates: ExtractionCandidate[], captureDay: string): ExtractionCandidate[] {
+  const out: ExtractionCandidate[] = [], seen = new Set<string>();
+  for (const c of candidates) {
+    const titleKey = normaliseTitleForKey(c.title ?? '');
     if (!titleKey) continue;
-    const startsAt =
-      parseEventTimestamp(candidate.starts_at) ??
-      coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
-    const day = startsAt ? localDayKey(new Date(startsAt)) : captureDay;
-    const hour = startsAt ? localHourBucket(startsAt) : '00';
-    const key = `${day}|${hour}|${titleKey}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(candidate);
+    const startsAt = parseEventTimestamp(c.starts_at) ?? coerceTimeOnCaptureDay(c.starts_at, captureDay);
+    const key = `${startsAt ? localDayKey(new Date(startsAt)) : captureDay}|${startsAt ? localHourBucket(startsAt) : '00'}|${titleKey}`;
+    if (!seen.has(key)) { seen.add(key); out.push(c); }
   }
-
   return out;
 }
 
-function calendarCandidatesLikelySame(
-  a: ExtractionCandidate,
-  b: ExtractionCandidate,
-  captureDay: string,
-): boolean {
-  if (!calendarCandidateDatesOverlap(a, b, captureDay)) return false;
-  return calendarTitlesLikelySame(a.title ?? '', b.title ?? '');
+function calendarCandidatesLikelySame(a: ExtractionCandidate, b: ExtractionCandidate, captureDay: string): boolean {
+  return calendarCandidateDatesOverlap(a, b, captureDay) && calendarTitlesLikelySame(a.title ?? '', b.title ?? '');
 }
 
-function calendarCandidateDatesOverlap(
-  a: ExtractionCandidate,
-  b: ExtractionCandidate,
-  captureDay: string,
-): boolean {
-  const aKeys = calendarCandidateDateKeys(a, captureDay);
-  const bKeys = calendarCandidateDateKeys(b, captureDay);
-  if (aKeys.size === 0 || bKeys.size === 0) return true;
-  for (const key of aKeys) {
-    if (bKeys.has(key)) return true;
-  }
-  return false;
+function calendarCandidateDatesOverlap(a: ExtractionCandidate, b: ExtractionCandidate, captureDay: string): boolean {
+  const aKeys = calendarCandidateDateKeys(a, captureDay), bKeys = calendarCandidateDateKeys(b, captureDay);
+  return !aKeys.size || !bKeys.size || [...aKeys].some((k) => bKeys.has(k));
 }
 
-function calendarCandidateDateKeys(
-  candidate: ExtractionCandidate,
-  captureDay: string,
-): Set<string> {
-  const startsAt =
-    parseEventTimestamp(candidate.starts_at) ??
-    coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
-  if (!startsAt) return new Set();
-  const d = new Date(startsAt);
-  if (Number.isNaN(d.getTime())) return new Set();
-  return new Set([`local:${localDayKey(d)}`, `iso:${startsAt.slice(0, 10)}`]);
+function calendarCandidateDateKeys(candidate: ExtractionCandidate, captureDay: string): Set<string> {
+  const startsAt = parseEventTimestamp(candidate.starts_at) ?? coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+  if (!startsAt || Number.isNaN(Date.parse(startsAt))) return new Set();
+  return new Set([`local:${localDayKey(new Date(startsAt))}`, `iso:${startsAt.slice(0, 10)}`]);
 }
 
 function calendarTitlesLikelySame(a: string, b: string): boolean {
-  const aNorm = normaliseTitleForKey(a);
-  const bNorm = normaliseTitleForKey(b);
+  const aNorm = normaliseTitleForKey(a), bNorm = normaliseTitleForKey(b);
   if (!aNorm || !bNorm) return false;
-  if (aNorm === bNorm) return true;
-  if (aNorm.length >= 8 && bNorm.includes(aNorm)) return true;
-  if (bNorm.length >= 8 && aNorm.includes(bNorm)) return true;
-
-  const aTokens = aNorm.split(/\s+/).filter((token) => token.length >= 3);
-  const bTokens = new Set(bNorm.split(/\s+/).filter((token) => token.length >= 3));
-  if (aTokens.length < 2 || bTokens.size < 2) return false;
-  const hits = aTokens.filter((token) => bTokens.has(token)).length;
-  return hits >= Math.max(2, Math.ceil(Math.min(aTokens.length, bTokens.size) * 0.7));
+  if (aNorm === bNorm || (aNorm.length >= 8 && bNorm.includes(aNorm)) || (bNorm.length >= 8 && aNorm.includes(bNorm))) return true;
+  const aTokens = aNorm.split(/\s+/).filter((t) => t.length >= 3), bTokens = new Set(bNorm.split(/\s+/).filter((t) => t.length >= 3));
+  return aTokens.length >= 2 && bTokens.size >= 2 && aTokens.filter((t) => bTokens.has(t)).length >= Math.max(2, Math.ceil(Math.min(aTokens.length, bTokens.size) * 0.7));
 }
 
-function visibleCalendarDays(
-  captureDay: string,
-  bucket: SourceBucket,
-  candidates: ExtractionCandidate[],
-): Set<string> {
+function visibleCalendarDays(captureDay: string, bucket: SourceBucket, candidates: ExtractionCandidate[]): Set<string> {
   const days = new Set<string>();
-
-  for (const candidate of candidates) {
-    const startsAt =
-      parseEventTimestamp(candidate.starts_at) ??
-      coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
-    if (!startsAt) continue;
-    const day = localDayKey(new Date(startsAt));
-    if (isValidEventDay(day)) days.add(day);
-  }
-
-  let sawCalendarText = false;
-  for (const frame of bucket.frames) {
-    const text = (frame.text ?? '').trim();
-    if (!looksLikeCalendarText(text)) continue;
-    sawCalendarText = true;
-    for (const day of calendarVisibleDaysFromText(text)) {
-      days.add(day);
+  candidates.forEach((c) => {
+    const startsAt = parseEventTimestamp(c.starts_at) ?? coerceTimeOnCaptureDay(c.starts_at, captureDay);
+    if (startsAt && isValidEventDay(localDayKey(new Date(startsAt)))) days.add(localDayKey(new Date(startsAt)));
+  });
+  let sawText = false;
+  bucket.frames.forEach((f) => {
+    if (looksLikeCalendarText(f.text ?? '')) {
+      sawText = true;
+      calendarVisibleDaysFromText(f.text ?? '').forEach((d) => days.add(d));
     }
-  }
-
-  if (days.size === 0 && sawCalendarText && isValidEventDay(captureDay)) {
-    days.add(captureDay);
-  }
-
+  });
+  if (!days.size && sawText && isValidEventDay(captureDay)) days.add(captureDay);
   return days;
-}
-
-function candidateCalendarDayCounts(
-  captureDay: string,
-  candidates: ExtractionCandidate[],
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const candidate of candidates) {
-    const title = (candidate?.title ?? '').trim();
-    if (!title) continue;
-    const startsAt =
-      parseEventTimestamp(candidate.starts_at) ??
-      coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
-    if (!startsAt) continue;
-    const day = localDayKey(new Date(startsAt));
-    if (!isValidEventDay(day)) continue;
-    counts.set(day, (counts.get(day) ?? 0) + 1);
-  }
-  return counts;
 }
 
 function calendarVisibleDaysFromText(text: string): Set<string> {
   const days = new Set<string>();
-  const fullDateRe = new RegExp(FULL_ENGLISH_DATE_RE.source, 'gi');
-  let dateMatch: RegExpExecArray | null;
-  while ((dateMatch = fullDateRe.exec(text))) {
-    const day = parseEnglishDateDay(dateMatch[0]);
-    if (day) days.add(day);
-  }
-
+  [...text.matchAll(new RegExp(FULL_ENGLISH_DATE_RE.source, 'gi'))].forEach((m) => {
+    const d = parseEnglishDateDay(m[0]); if (d) days.add(d);
+  });
   const monthYear = parseCalendarMonthYear(text);
-  if (!monthYear) return days;
-
-  for (const day of calendarWeekdayLabelDays(text, monthYear.year, monthYear.monthIndex)) {
-    days.add(day);
-  }
-
+  if (monthYear) calendarWeekdayLabelDays(text, monthYear.year, monthYear.monthIndex).forEach((d) => days.add(d));
   return days;
 }
 
-function parseCalendarMonthYear(
-  text: string,
-): { monthIndex: number; year: number } | null {
+function parseCalendarMonthYear(text: string): { monthIndex: number; year: number } | null {
   const m = MONTH_YEAR_RE.exec(text);
   if (!m?.groups) return null;
-  const monthIndex = monthIndexFromName(m.groups.month);
-  const year = Number(m.groups.year);
-  if (monthIndex === null || !Number.isInteger(year) || year < 1000 || year > 9999) {
-    return null;
-  }
-  return { monthIndex, year };
+  const monthIndex = monthIndexFromName(m.groups.month), year = Number(m.groups.year);
+  return monthIndex !== null && Number.isInteger(year) && year >= 1000 && year <= 9999 ? { monthIndex, year } : null;
 }
 
-type WeekdayLabel = {
-  index: number;
-  weekday: number;
-  dayNumber: number | null;
-};
-
-function calendarWeekdayLabelDays(
-  text: string,
-  year: number,
-  monthIndex: number,
-): Set<string> {
+function calendarWeekdayLabelDays(text: string, year: number, monthIndex: number): Set<string> {
   const days = new Set<string>();
-  const labels = collectWeekdayLabels(text);
-  const headerLabels = calendarHeaderWeekdayLabels(labels);
-  const numbered = headerLabels.filter(
-    (label): label is WeekdayLabel & { dayNumber: number } =>
-      label.dayNumber !== null,
-  );
+  const labels = [...text.matchAll(new RegExp(WEEKDAY_LABEL_RE.source, 'gi'))].map((m) => ({ index: m.index, weekday: weekdayIndexFromName(m.groups?.weekday ?? ''), dayNumber: Number(m.groups?.day) || null })).filter((l) => l.weekday !== null).slice(0, 40) as { index: number; weekday: number; dayNumber: number | null }[];
+  const header = labels.length < 3 ? labels.filter((l) => l.dayNumber).slice(0, 7) : labels.slice(0, 7); // Simplified header detection
+  const numbered = header.filter((l) => l.dayNumber !== null);
 
-  for (const label of numbered) {
-    const day = localDayFromCalendarParts(year, monthIndex, label.dayNumber, true);
-    if (day) days.add(day);
-  }
-
-  for (const label of headerLabels) {
-    if (label.dayNumber !== null || numbered.length === 0) continue;
-    const nearest = numbered
-      .slice()
-      .sort((a, b) => Math.abs(a.index - label.index) - Math.abs(b.index - label.index))[0];
-    if (!nearest) continue;
-    let offset = label.weekday - nearest.weekday;
-    if (label.index > nearest.index && offset < 0) offset += 7;
-    if (label.index < nearest.index && offset > 0) offset -= 7;
-    const day = localDayFromCalendarParts(
-      year,
-      monthIndex,
-      nearest.dayNumber + offset,
-      false,
-    );
-    if (day) days.add(day);
-  }
-
+  numbered.forEach((l) => { const d = localDayFromCalendarParts(year, monthIndex, l.dayNumber!, true); if (d) days.add(d); });
+  header.filter((l) => !l.dayNumber).forEach((l) => {
+    const nearest = numbered.sort((a, b) => Math.abs(a.index - l.index) - Math.abs(b.index - l.index))[0];
+    if (nearest) {
+      let offset = l.weekday - nearest.weekday;
+      if (l.index > nearest.index && offset < 0) offset += 7;
+      if (l.index < nearest.index && offset > 0) offset -= 7;
+      const d = localDayFromCalendarParts(year, monthIndex, nearest.dayNumber! + offset, false);
+      if (d) days.add(d);
+    }
+  });
   return days;
 }
 
-function collectWeekdayLabels(text: string): WeekdayLabel[] {
-  const labels: WeekdayLabel[] = [];
-  const weekdayRe = new RegExp(WEEKDAY_LABEL_RE.source, 'gi');
-  let m: RegExpExecArray | null;
-  while ((m = weekdayRe.exec(text))) {
-    const groups = m.groups ?? {};
-    const weekday = weekdayIndexFromName(groups.weekday ?? '');
-    if (weekday === null) continue;
-    const dayNumber = groups.day ? Number(groups.day) : null;
-    labels.push({
-      index: m.index,
-      weekday,
-      dayNumber:
-        dayNumber !== null && Number.isInteger(dayNumber) && dayNumber >= 1 && dayNumber <= 31
-          ? dayNumber
-          : null,
-    });
-    if (labels.length >= 40) break;
-  }
-  return labels;
-}
-
-function calendarHeaderWeekdayLabels(labels: WeekdayLabel[]): WeekdayLabel[] {
-  if (labels.length < 3) {
-    return labels.filter((label) => label.dayNumber !== null).slice(0, 7);
-  }
-
-  for (let i = 0; i <= labels.length - 3; i++) {
-    if (labels[i + 2].index - labels[i].index > 160) continue;
-    const cluster: WeekdayLabel[] = [labels[i], labels[i + 1], labels[i + 2]];
-    for (let j = i + 3; j < labels.length && cluster.length < 7; j++) {
-      const previous = cluster[cluster.length - 1];
-      if (labels[j].index - previous.index > 80) break;
-      cluster.push(labels[j]);
-    }
-    return cluster;
-  }
-
-  return labels.filter((label) => label.dayNumber !== null).slice(0, 7);
-}
-
-function localDayFromCalendarParts(
-  year: number,
-  monthIndex: number,
-  dayNumber: number,
-  requireSameMonth: boolean,
-): string | null {
+function localDayFromCalendarParts(year: number, monthIndex: number, dayNumber: number, requireSameMonth: boolean): string | null {
   const d = new Date(year, monthIndex, dayNumber, 12, 0, 0);
-  if (Number.isNaN(d.getTime())) return null;
-  if (requireSameMonth && d.getMonth() !== monthIndex) return null;
-  const day = localDayKey(d);
-  return isValidEventDay(day) ? day : null;
+  if (Number.isNaN(d.getTime()) || (requireSameMonth && d.getMonth() !== monthIndex)) return null;
+  return isValidEventDay(localDayKey(d)) ? localDayKey(d) : null;
 }
 
-function structuredCalendarCandidatesFromText(
-  text: string,
-  frame: Frame,
-): ExtractionCandidate[] {
+function structuredCalendarCandidatesFromText(text: string, frame: Frame): ExtractionCandidate[] {
   const out: ExtractionCandidate[] = [];
-  const timed =
-    /(?<title>[A-Za-z0-9][^.\n]{2,140}?)\.\s*Starts on (?<startDate>[A-Za-z]+ \d{1,2}, \d{4}) at (?<startTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM)) and ends (?:on (?<endDate>[A-Za-z]+ \d{1,2}, \d{4}) at |at )(?<endTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM))/gi;
-  let m: RegExpExecArray | null;
-  while ((m = timed.exec(text)) && out.length < 25) {
-    const groups = m.groups ?? {};
-    const title = cleanCalendarFallbackTitle(groups.title ?? '');
-    if (!title) continue;
-    const startsAt = parseEnglishDateTime(groups.startDate, groups.startTime);
-    const endsAt = parseEnglishDateTime(groups.endDate || groups.startDate, groups.endTime);
-    if (!startsAt) continue;
-    out.push({
-      title,
-      kind: 'calendar',
-      starts_at: startsAt,
-      ends_at: endsAt,
-      attendees: [],
-      context: `Visible in ${frame.app || 'calendar'} accessibility text.`,
-    });
-  }
-
-  const allDay =
-    /(?<title>[A-Za-z0-9][^.\n]{2,140}?)\.\s*(?<date>[A-Za-z]+ \d{1,2}, \d{4}),\s*All-Day/gi;
-  while ((m = allDay.exec(text)) && out.length < 25) {
-    const groups = m.groups ?? {};
-    const title = cleanCalendarFallbackTitle(groups.title ?? '');
-    if (!title) continue;
-    const startsAt = parseEnglishDateTime(groups.date, '12:00 AM');
-    if (!startsAt) continue;
-    const startMs = Date.parse(startsAt);
-    out.push({
-      title,
-      kind: 'calendar',
-      starts_at: startsAt,
-      ends_at: Number.isNaN(startMs)
-        ? null
-        : new Date(startMs + 24 * 60 * 60_000).toISOString(),
-      attendees: [],
-      context: `Visible in ${frame.app || 'calendar'} accessibility text.`,
-    });
-  }
-
-  return out;
+  [...text.matchAll(/(?<title>[A-Za-z0-9][^.\n]{2,140}?)\.\s*Starts on (?<startDate>[A-Za-z]+ \d{1,2}, \d{4}) at (?<startTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM)) and ends (?:on (?<endDate>[A-Za-z]+ \d{1,2}, \d{4}) at |at )(?<endTime>\d{1,2}(?::\d{2})?\s*(?:AM|PM))/gi)].forEach((m) => {
+    const startsAt = parseEnglishDateTime(m.groups?.startDate, m.groups?.startTime);
+    if (startsAt && cleanCalendarFallbackTitle(m.groups?.title ?? '')) out.push({ title: cleanCalendarFallbackTitle(m.groups!.title)!, kind: 'calendar', starts_at: startsAt, ends_at: parseEnglishDateTime(m.groups?.endDate || m.groups?.startDate, m.groups?.endTime), attendees: [], context: 'Visible in accessibility text.' });
+  });
+  [...text.matchAll(/(?<title>[A-Za-z0-9][^.\n]{2,140}?)\.\s*(?<date>[A-Za-z]+ \d{1,2}, \d{4}),\s*All-Day/gi)].forEach((m) => {
+    const startsAt = parseEnglishDateTime(m.groups?.date, '12:00 AM');
+    if (startsAt && cleanCalendarFallbackTitle(m.groups?.title ?? '')) out.push({ title: cleanCalendarFallbackTitle(m.groups!.title)!, kind: 'calendar', starts_at: startsAt, ends_at: new Date(Date.parse(startsAt) + 24 * 60 * 60_000).toISOString(), attendees: [], context: 'Visible in accessibility text.' });
+  });
+  return out.slice(0, 25);
 }
 
-function parseEnglishDateTime(
-  date: string | undefined,
-  time: string | undefined,
-): string | null {
-  if (!date || !time) return null;
-  const parsed = Date.parse(`${date} ${time}`);
-  if (Number.isNaN(parsed)) return null;
-  return new Date(parsed).toISOString();
+function parseEnglishDateTime(date?: string, time?: string): string | null {
+  return date && time && !Number.isNaN(Date.parse(`${date} ${time}`)) ? new Date(Date.parse(`${date} ${time}`)).toISOString() : null;
 }
 
-function parseEnglishDateDay(date: string | undefined): string | null {
-  if (!date) return null;
-  const parsed = Date.parse(`${date} 12:00 PM`);
-  if (Number.isNaN(parsed)) return null;
-  const day = localDayKey(new Date(parsed));
-  return isValidEventDay(day) ? day : null;
+function parseEnglishDateDay(date?: string): string | null {
+  const d = date ? localDayKey(new Date(Date.parse(`${date} 12:00 PM`))) : null;
+  return d && isValidEventDay(d) ? d : null;
 }
 
 function monthIndexFromName(raw: string): number | null {
-  switch (raw.trim().toLowerCase().slice(0, 3)) {
-    case 'jan':
-      return 0;
-    case 'feb':
-      return 1;
-    case 'mar':
-      return 2;
-    case 'apr':
-      return 3;
-    case 'may':
-      return 4;
-    case 'jun':
-      return 5;
-    case 'jul':
-      return 6;
-    case 'aug':
-      return 7;
-    case 'sep':
-      return 8;
-    case 'oct':
-      return 9;
-    case 'nov':
-      return 10;
-    case 'dec':
-      return 11;
-    default:
-      return null;
-  }
+  const idx = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(raw.trim().toLowerCase().slice(0, 3));
+  return idx >= 0 ? idx : null;
 }
 
 function weekdayIndexFromName(raw: string): number | null {
-  switch (raw.trim().toLowerCase().slice(0, 3)) {
-    case 'sun':
-      return 0;
-    case 'mon':
-      return 1;
-    case 'tue':
-      return 2;
-    case 'wed':
-      return 3;
-    case 'thu':
-      return 4;
-    case 'fri':
-      return 5;
-    case 'sat':
-      return 6;
-    default:
-      return null;
-  }
+  const idx = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(raw.trim().toLowerCase().slice(0, 3));
+  return idx >= 0 ? idx : null;
 }
 
-function calendarCandidateIsGrounded(
-  candidate: ExtractionCandidate,
-  bucket: SourceBucket,
-): boolean {
-  const title = (candidate.title ?? '').trim();
-  if (!title) return false;
-  const titleNorm = normaliseForGrounding(title);
+function calendarCandidateIsGrounded(candidate: ExtractionCandidate, bucket: SourceBucket): boolean {
+  const titleNorm = (candidate.title ?? '').trim().toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (titleNorm.length < 3) return false;
-
-  const evidence = normaliseForGrounding(
-    bucket.frames
-      .filter((frame) => looksLikeCalendarText(frame.text ?? null))
-      .map((frame) => frame.text ?? '')
-      .join('\n'),
-  );
-  if (!evidence) return false;
-  if (evidence.includes(titleNorm)) return true;
-
-  const tokens = titleNorm
-    .split(' ')
-    .filter((token) => token.length >= 3 && !GROUNDING_STOPWORDS.has(token));
-  if (tokens.length < 2) return false;
-  const hits = tokens.filter((token) => evidence.includes(token)).length;
-  return hits >= Math.max(2, Math.ceil(tokens.length * 0.65));
-}
-
-const GROUNDING_STOPWORDS = new Set([
-  'and',
-  'the',
-  'with',
-  'for',
-  'from',
-  'meeting',
-  'sync',
-  'call',
-]);
-
-function normaliseForGrounding(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const ev = bucket.frames.filter((f) => looksLikeCalendarText(f.text ?? null)).map((f) => f.text ?? '').join('\n').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  if (!ev) return false;
+  if (ev.includes(titleNorm)) return true;
+  const tokens = titleNorm.split(' ').filter((t) => t.length >= 3 && !new Set(['and', 'the', 'with', 'for', 'from', 'meeting', 'sync', 'call']).has(t));
+  return tokens.length >= 2 && tokens.filter((t) => ev.includes(t)).length >= Math.max(2, Math.ceil(tokens.length * 0.65));
 }
 
 function parseCalendarTimeLabel(line: string): { hour: number; minute: number } | null {
   const m = line.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
   if (!m) return null;
-  let hour = Number(m[1]);
-  const minute = m[2] ? Number(m[2]) : 0;
-  const ampm = m[3]!.toLowerCase();
+  let hour = Number(m[1]), minute = m[2] ? Number(m[2]) : 0, ampm = m[3]!.toLowerCase();
   if (ampm === 'pm' && hour < 12) hour += 12;
   if (ampm === 'am' && hour === 12) hour = 0;
-  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
-  return { hour, minute };
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 ? { hour, minute } : null;
 }
 
 function cleanCalendarFallbackTitle(line: string): string | null {
-  const s = line
-    .replace(/^[•*·\-\u2022]\s*/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (s.length < 3 || s.length > 120) return null;
-  if (/^(calendar|file|edit|view|window|help|today|week|month|day|inbox)$/i.test(s)) return null;
-  if (/^(sun|mon|tue|wed|thu|fri|sat)(?:day)?$/i.test(s)) return null;
-  if (/^(meeting|join|notes?|add|search|settings)$/i.test(s)) return null;
-  if (/^(?:\/\s*)?(?:AM|PM)$/i.test(s)) return null;
-  if (/^\d{1,2}(?::\d{2})?\s*(?:AM|PM)$/i.test(s)) return null;
-  if (/^https?:\/\//i.test(s) || /\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(s)) return null;
-  if (/^[+<>()[\]{}|/\\]+$/.test(s)) return null;
+  const s = line.replace(/^[•*·\-\\u2022]\s*/, '').replace(/\s+/g, ' ').trim();
+  if (s.length < 3 || s.length > 120 || /^(calendar|file|edit|view|window|help|today|week|month|day|inbox|meeting|join|notes?|add|search|settings)$/i.test(s) || /^(sun|mon|tue|wed|thu|fri|sat)(?:day)?$/i.test(s) || /^(?:\/\s*)?(?:AM|PM)$/i.test(s) || /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)$/i.test(s) || /^https?:\/\//i.test(s) || /\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(s) || /^[+<>()[\]{}|/\\]+$/.test(s)) return null;
   return s;
 }
 
@@ -1999,41 +837,22 @@ function defaultStartOnDay(day: string): string {
 }
 
 function localHourBucket(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '00';
-  return pad2(d.getHours());
+  return Number.isNaN(Date.parse(iso)) ? '00' : String(new Date(iso).getHours()).padStart(2, '0');
 }
 
 function parseEventTimestamp(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  const parsed = Date.parse(s);
-  if (Number.isNaN(parsed)) return null;
-  const d = new Date(parsed);
-  const year = d.getFullYear();
-  // Accept any ordinary calendar date, regardless of whether it is in
-  // the past, today, or the future. This only rejects impossible /
-  // wildly malformed model output.
-  if (year < 1000 || year > 9999) return null;
-  return d.toISOString();
+  const d = raw ? new Date(Date.parse(String(raw).trim())) : null;
+  return d && !Number.isNaN(d.getTime()) && d.getFullYear() >= 1000 && d.getFullYear() <= 9999 ? d.toISOString() : null;
 }
 
 function isValidEventDay(day: string): boolean {
   const m = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return false;
-  const year = Number(m[1]);
-  if (year < 1000 || year > 9999) return false;
-  const d = new Date(`${day}T12:00:00`);
-  return !Number.isNaN(d.getTime()) && localDayKey(d) === day;
+  return !!m && Number(m[1]) >= 1000 && Number(m[1]) <= 9999 && localDayKey(new Date(`${day}T12:00:00`)) === day;
 }
 
 function mergeContext(existing: string | null, addition: string): string {
-  const a = (existing ?? '').trim();
-  const b = addition.trim();
-  if (!a) return b;
-  if (a.toLowerCase().includes(b.toLowerCase())) return a;
-  return `${a}\n\n${b}`.slice(0, 1500);
+  const a = (existing ?? '').trim(), b = addition.trim();
+  return !a ? b : a.toLowerCase().includes(b.toLowerCase()) ? a : `${a}\n\n${b}`.slice(0, 1500);
 }
 
 function sha1(input: string): string {
