@@ -4,30 +4,29 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ────────────────────────────────────────────────────────────────────────
-   Design system v2 — deep-ink dark palette, vibrant brand gradient, real
-   glass surfaces, display-grade type scale. The light palette is kept as
-   a fallback for users who flip the theme, but the app is designed
-   dark-first now: gradients, screenshots, and translucent surfaces all
-   read more strongly against an ink background.
+   Beside design system — "lamplight + linen". An ambient AI sitting
+   beside you should feel warm, lived-in, paper-soft. Brand is a honey →
+   coral → rose gradient (think morning sun on linen, or a desk lamp in
+   the evening), surfaces are warm cream / cocoa-ink rather than the
+   cold blue-grey of a typical product UI. A slow ambient breathing
+   layer drifts behind everything to give the room a quiet pulse.
    ──────────────────────────────────────────────────────────────────── */
 :root {
   --radius: 0.875rem;
 
   /* Tell Chromium / WebKit to theme native controls (date pickers,
      scrollbars, form widgets) in light mode by default. Overridden to
-     "dark" inside `.dark` below. Without this the OS-native calendar
-     popover Electron uses for <input type="date"> reads white-on-white
-     in dark mode. */
+     "dark" inside `.dark` below. */
   color-scheme: light;
 
-  /* Light surfaces (kept available for users who flip the toggle) */
-  --background: oklch(0.985 0.005 285);
-  --foreground: oklch(0.16 0.018 285);
+  /* Light surfaces — warm linen / sunlit paper */
+  --background: oklch(0.985 0.010 75);
+  --foreground: oklch(0.20 0.022 45);
 
-  --surface-1: oklch(1 0 0);
-  --surface-2: oklch(0.972 0.006 285);
-  --surface-raised: oklch(1 0 0);
-  --surface-glass: oklch(1 0 0 / 0.7);
+  --surface-1: oklch(0.998 0.006 75);
+  --surface-2: oklch(0.965 0.014 70);
+  --surface-raised: oklch(1 0.004 75);
+  --surface-glass: oklch(1 0.004 75 / 0.72);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -35,83 +34,92 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  --primary: oklch(0.55 0.22 290);
-  --primary-foreground: oklch(0.99 0 0);
-  --primary-soft: oklch(0.55 0.22 290 / 0.12);
+  /* Warm amber-coral primary — the lamp itself */
+  --primary: oklch(0.64 0.15 45);
+  --primary-foreground: oklch(0.99 0.004 75);
+  --primary-soft: oklch(0.64 0.15 45 / 0.12);
 
-  --secondary: oklch(0.96 0.006 285);
-  --secondary-foreground: oklch(0.22 0.015 285);
+  --secondary: oklch(0.955 0.020 60);
+  --secondary-foreground: oklch(0.24 0.025 45);
 
-  --muted: oklch(0.965 0.006 285);
-  --muted-foreground: oklch(0.5 0.014 285);
+  --muted: oklch(0.955 0.014 70);
+  --muted-foreground: oklch(0.51 0.024 55);
 
-  --accent: oklch(0.957 0.012 290);
-  --accent-foreground: oklch(0.27 0.04 285);
+  --accent: oklch(0.94 0.038 50);
+  --accent-foreground: oklch(0.30 0.05 45);
 
   --destructive: oklch(0.6 0.22 25);
   --destructive-foreground: oklch(0.99 0 0);
 
-  --success: oklch(0.65 0.16 155);
+  --success: oklch(0.66 0.13 145);
   --success-foreground: oklch(0.99 0 0);
 
-  --warning: oklch(0.74 0.17 65);
-  --warning-foreground: oklch(0.22 0.015 285);
+  --warning: oklch(0.74 0.17 75);
+  --warning-foreground: oklch(0.22 0.03 45);
 
-  --border: oklch(0.92 0.005 285);
-  --input: oklch(0.92 0.005 285);
-  --ring: oklch(0.55 0.22 290);
+  --border: oklch(0.905 0.015 70);
+  --input: oklch(0.92 0.015 70);
+  --ring: oklch(0.64 0.15 45);
 
-  --sidebar: oklch(0.985 0.004 285);
+  --sidebar: oklch(0.975 0.014 72);
   --sidebar-foreground: var(--foreground);
   --sidebar-primary: var(--primary);
   --sidebar-primary-foreground: var(--primary-foreground);
-  --sidebar-accent: oklch(0.948 0.018 290);
-  --sidebar-accent-foreground: oklch(0.28 0.05 285);
-  --sidebar-border: oklch(0.93 0.005 285);
+  --sidebar-accent: oklch(0.94 0.036 50);
+  --sidebar-accent-foreground: oklch(0.30 0.06 45);
+  --sidebar-border: oklch(0.92 0.013 70);
   --sidebar-ring: var(--ring);
 
-  --chart-1: oklch(0.55 0.22 290);
-  --chart-2: oklch(0.65 0.16 155);
-  --chart-3: oklch(0.74 0.17 65);
-  --chart-4: oklch(0.6 0.22 25);
-  --chart-5: oklch(0.6 0.22 320);
+  --chart-1: oklch(0.64 0.15 45);   /* amber-coral */
+  --chart-2: oklch(0.66 0.13 145);  /* sage */
+  --chart-3: oklch(0.74 0.17 75);   /* honey */
+  --chart-4: oklch(0.6 0.22 25);    /* tomato */
+  --chart-5: oklch(0.66 0.15 320);  /* warm mauve */
 
   --gradient-brand: linear-gradient(
     135deg,
-    oklch(0.65 0.23 295) 0%,
-    oklch(0.5 0.22 270) 60%,
-    oklch(0.45 0.2 250) 100%
+    oklch(0.80 0.14 78) 0%,    /* honey */
+    oklch(0.68 0.18 42) 55%,   /* coral */
+    oklch(0.58 0.18 15) 100%   /* rose */
   );
   --gradient-brand-soft: linear-gradient(
     135deg,
-    oklch(0.97 0.04 290) 0%,
-    oklch(0.97 0.03 235) 100%
+    oklch(0.975 0.04 75) 0%,
+    oklch(0.96 0.045 30) 100%
   );
-  --gradient-page: radial-gradient(
+  --gradient-page:
+    radial-gradient(
       ellipse 1100px 600px at 100% 0%,
-      oklch(0.55 0.22 290 / 0.06) 0%,
+      oklch(0.74 0.16 55 / 0.10) 0%,
       transparent 60%
     ),
     radial-gradient(
       ellipse 800px 500px at 0% 100%,
-      oklch(0.55 0.2 220 / 0.04) 0%,
+      oklch(0.66 0.18 20 / 0.06) 0%,
       transparent 60%
     );
   --gradient-hero-live: linear-gradient(
     135deg,
-    oklch(0.97 0.04 290) 0%,
-    oklch(0.96 0.04 240) 100%
+    oklch(0.97 0.04 65) 0%,
+    oklch(0.96 0.045 30) 100%
+  );
+  /* Ambient lamp — a soft warm halo that breathes behind the canvas. */
+  --gradient-ambient: radial-gradient(
+    ellipse 1200px 700px at 80% -10%,
+    oklch(0.78 0.16 55 / 0.10) 0%,
+    transparent 65%
   );
 
-  --shadow-xs: 0 1px 1px oklch(0.18 0.015 285 / 0.04);
-  --shadow-card: 0 1px 2px oklch(0.18 0.015 285 / 0.04),
-    0 1px 3px oklch(0.18 0.015 285 / 0.05);
-  --shadow-raised: 0 4px 14px oklch(0.18 0.015 285 / 0.07),
-    0 2px 4px oklch(0.18 0.015 285 / 0.05);
-  --shadow-pop: 0 14px 34px oklch(0.18 0.015 285 / 0.14),
-    0 4px 10px oklch(0.18 0.015 285 / 0.08);
-  --shadow-glow: 0 0 0 1px oklch(0.55 0.22 290 / 0.18),
-    0 8px 28px oklch(0.55 0.22 290 / 0.18);
+  /* Softer, more atmospheric shadows — warm-tinted rather than pure black */
+  --shadow-xs: 0 1px 1px oklch(0.25 0.04 45 / 0.05);
+  --shadow-card: 0 1px 2px oklch(0.25 0.04 45 / 0.05),
+    0 1px 3px oklch(0.25 0.04 45 / 0.06);
+  --shadow-raised: 0 4px 14px oklch(0.25 0.04 45 / 0.08),
+    0 2px 4px oklch(0.25 0.04 45 / 0.06);
+  --shadow-pop: 0 14px 34px oklch(0.25 0.04 45 / 0.14),
+    0 4px 10px oklch(0.25 0.04 45 / 0.08);
+  --shadow-glow: 0 0 0 1px oklch(0.68 0.16 45 / 0.22),
+    0 10px 32px oklch(0.68 0.16 45 / 0.22);
 
   /* Type scale — display headlines for hero, normal flow for body */
   --text-display: clamp(40px, 5.6vw, 64px);
@@ -122,14 +130,14 @@
   /* Flip native controls (date pickers, scrollbars, etc.) to dark. */
   color-scheme: dark;
 
-  /* Deep ink, near-black base. Single-most-impactful change to feel modern. */
-  --background: oklch(0.135 0.012 285);
-  --foreground: oklch(0.97 0.005 285);
+  /* Warm cocoa-ink rather than blue-black — feels like an evening room */
+  --background: oklch(0.165 0.014 50);
+  --foreground: oklch(0.96 0.012 75);
 
-  --surface-1: oklch(0.185 0.014 287);
-  --surface-2: oklch(0.215 0.016 290);
-  --surface-raised: oklch(0.235 0.018 290);
-  --surface-glass: oklch(0.185 0.014 287 / 0.6);
+  --surface-1: oklch(0.215 0.018 50);
+  --surface-2: oklch(0.245 0.020 50);
+  --surface-raised: oklch(0.275 0.022 52);
+  --surface-glass: oklch(0.215 0.018 50 / 0.62);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -137,70 +145,76 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  /* More vibrant brand on dark — pops off the ink background */
-  --primary: oklch(0.78 0.18 295);
-  --primary-foreground: oklch(0.135 0.012 285);
-  --primary-soft: oklch(0.78 0.18 295 / 0.16);
+  /* Glowing honey-amber on warm ink — like a lantern */
+  --primary: oklch(0.82 0.14 70);
+  --primary-foreground: oklch(0.165 0.014 50);
+  --primary-soft: oklch(0.82 0.14 70 / 0.16);
 
-  --secondary: oklch(0.255 0.014 285);
-  --secondary-foreground: oklch(0.97 0.005 285);
+  --secondary: oklch(0.28 0.018 50);
+  --secondary-foreground: oklch(0.96 0.012 75);
 
-  --muted: oklch(0.235 0.014 285);
-  --muted-foreground: oklch(0.7 0.014 285);
+  --muted: oklch(0.255 0.016 50);
+  --muted-foreground: oklch(0.72 0.020 60);
 
-  --accent: oklch(0.28 0.025 290);
-  --accent-foreground: oklch(0.97 0.005 285);
+  --accent: oklch(0.30 0.04 50);
+  --accent-foreground: oklch(0.96 0.012 75);
 
-  --destructive: oklch(0.7 0.19 22);
+  --destructive: oklch(0.72 0.18 22);
   --destructive-foreground: oklch(0.99 0 0);
 
-  --success: oklch(0.74 0.17 155);
-  --success-foreground: oklch(0.135 0.012 285);
+  --success: oklch(0.76 0.15 145);
+  --success-foreground: oklch(0.165 0.014 50);
 
-  --warning: oklch(0.82 0.17 75);
-  --warning-foreground: oklch(0.135 0.012 285);
+  --warning: oklch(0.83 0.16 75);
+  --warning-foreground: oklch(0.165 0.014 50);
 
-  --border: oklch(1 0 0 / 0.08);
-  --input: oklch(1 0 0 / 0.12);
-  --ring: oklch(0.78 0.18 295);
+  --border: oklch(1 0.01 75 / 0.08);
+  --input: oklch(1 0.01 75 / 0.12);
+  --ring: oklch(0.82 0.14 70);
 
-  /* Sidebar is intentionally darker than the canvas, with a glass
-     overlay (see .glass-pane utility) so the page gradient bleeds through. */
-  --sidebar: oklch(0.115 0.011 285);
-  --sidebar-foreground: oklch(0.97 0.005 285);
-  --sidebar-primary: oklch(0.78 0.18 295);
-  --sidebar-primary-foreground: oklch(0.135 0.012 285);
-  --sidebar-accent: oklch(0.27 0.04 295);
-  --sidebar-accent-foreground: oklch(0.97 0.005 285);
-  --sidebar-border: oklch(1 0 0 / 0.06);
-  --sidebar-ring: oklch(0.78 0.18 295);
+  /* Sidebar sits a touch deeper than the canvas so the ambient glow
+     bleeds through the glass-pane overlay. */
+  --sidebar: oklch(0.135 0.014 48);
+  --sidebar-foreground: oklch(0.96 0.012 75);
+  --sidebar-primary: oklch(0.82 0.14 70);
+  --sidebar-primary-foreground: oklch(0.165 0.014 50);
+  --sidebar-accent: oklch(0.30 0.06 55);
+  --sidebar-accent-foreground: oklch(0.96 0.012 75);
+  --sidebar-border: oklch(1 0.01 75 / 0.06);
+  --sidebar-ring: oklch(0.82 0.14 70);
 
   --gradient-brand: linear-gradient(
     135deg,
-    oklch(0.82 0.2 305) 0%,
-    oklch(0.62 0.22 280) 55%,
-    oklch(0.52 0.22 250) 100%
+    oklch(0.86 0.16 78) 0%,    /* honey-glow */
+    oklch(0.72 0.20 40) 55%,   /* coral */
+    oklch(0.58 0.20 12) 100%   /* deep rose */
   );
   --gradient-brand-soft: linear-gradient(
     135deg,
-    oklch(0.32 0.06 295) 0%,
-    oklch(0.27 0.05 250) 100%
+    oklch(0.32 0.07 55) 0%,
+    oklch(0.27 0.06 22) 100%
   );
-  --gradient-page: radial-gradient(
+  --gradient-page:
+    radial-gradient(
       ellipse 1200px 700px at 100% -10%,
-      oklch(0.78 0.18 300 / 0.13) 0%,
+      oklch(0.84 0.16 65 / 0.14) 0%,
       transparent 55%
     ),
     radial-gradient(
       ellipse 900px 600px at -5% 110%,
-      oklch(0.55 0.22 220 / 0.1) 0%,
+      oklch(0.65 0.20 20 / 0.10) 0%,
       transparent 60%
     );
   --gradient-hero-live: linear-gradient(
     135deg,
-    oklch(0.78 0.18 300 / 0.22) 0%,
-    oklch(0.5 0.22 240 / 0.15) 60%,
+    oklch(0.82 0.18 65 / 0.22) 0%,
+    oklch(0.6 0.22 20 / 0.15) 60%,
     transparent 100%
+  );
+  --gradient-ambient: radial-gradient(
+    ellipse 1300px 800px at 80% -10%,
+    oklch(0.86 0.18 65 / 0.18) 0%,
+    transparent 65%
   );
 
   --shadow-xs: 0 1px 1px oklch(0 0 0 / 0.4);
@@ -210,8 +224,8 @@
     0 2px 6px oklch(0 0 0 / 0.3);
   --shadow-pop: 0 18px 40px oklch(0 0 0 / 0.55),
     0 6px 14px oklch(0 0 0 / 0.4);
-  --shadow-glow: 0 0 0 1px oklch(0.78 0.18 295 / 0.3),
-    0 12px 36px oklch(0.78 0.18 295 / 0.25);
+  --shadow-glow: 0 0 0 1px oklch(0.82 0.14 70 / 0.30),
+    0 12px 36px oklch(0.82 0.14 70 / 0.25);
 }
 
 @theme inline {
@@ -305,21 +319,49 @@
     background-attachment: fixed;
     background-repeat: no-repeat;
     background-size: 100% 100%;
+    position: relative;
   }
-  /* Subtle grain layer for tactile depth — barely visible but kills the
-     "flat shadcn template" feel. SVG noise inlined to avoid an http hit. */
+  /* Paper grain — warmer, slightly more present than the old version
+     so surfaces feel tactile rather than digital. */
   body::before {
     content: "";
     position: fixed;
     inset: 0;
     pointer-events: none;
     z-index: 0;
-    opacity: 0.025;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    background-size: 180px 180px;
+    opacity: 0.03;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0.96 0 0 0 0 0.82 0 0 0 0 0.62 0 0 0 0.55 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    background-size: 200px 200px;
   }
   .dark body::before {
-    opacity: 0.05;
+    opacity: 0.06;
+  }
+  /* Ambient lamp — a slow warm halo that breathes behind the UI.
+     `transform` + `opacity` only so it stays on the compositor.
+     `prefers-reduced-motion` users get a static glow. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background-image: var(--gradient-ambient);
+    background-repeat: no-repeat;
+    background-size: 140% 140%;
+    background-position: 50% 0%;
+    will-change: opacity, transform;
+    animation: ambient-breathe 22s ease-in-out infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body::after {
+      animation: none;
+    }
+  }
+  /* Keep app content above the ambient/grain layers. */
+  body > #root,
+  body > main {
+    position: relative;
+    z-index: 1;
   }
   h1, h2, h3, h4 {
     letter-spacing: -0.018em;
@@ -353,6 +395,9 @@
 .bg-gradient-hero-live {
   background-image: var(--gradient-hero-live);
 }
+.bg-gradient-ambient {
+  background-image: var(--gradient-ambient);
+}
 .text-gradient-brand {
   background-image: var(--gradient-brand);
   -webkit-background-clip: text;
@@ -365,10 +410,10 @@
   background-image: var(--gradient-brand);
   color: white;
   box-shadow: var(--shadow-card);
-  transition: box-shadow 150ms ease, transform 150ms ease, filter 150ms ease;
+  transition: box-shadow 180ms ease, transform 150ms ease, filter 180ms ease;
 }
 .btn-brand:hover {
-  filter: brightness(1.06) saturate(1.05);
+  filter: brightness(1.05) saturate(1.06);
   box-shadow: var(--shadow-glow);
 }
 .btn-brand:active {
@@ -419,7 +464,7 @@
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: content-box;
-  transition: background 120ms ease;
+  transition: background 140ms ease;
 }
 *::-webkit-scrollbar-thumb:hover {
   background: var(--muted-foreground);
@@ -456,4 +501,17 @@
   );
   background-size: 200% 100%;
   animation: shimmer 1.8s linear infinite;
+}
+
+/* Ambient lamp breathing — slow, never distracting. The drift gives
+   the impression that the room around the UI is alive. */
+@keyframes ambient-breathe {
+  0%, 100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    opacity: 0.78;
+    transform: translate3d(-1.5%, -2%, 0) scale(1.04);
+  }
 }

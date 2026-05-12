@@ -8,3 +8,4 @@ packages:
   - "packages/runtime"
   - "packages/cli"
   - "packages/desktop"
+  - "website"

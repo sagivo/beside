@@ -1571,7 +1571,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     recorder.isMeteringEnabled = false
     guard recorder.prepareToRecord(), recorder.record() else {
       throw NSError(
-        domain: "cofounderos.audio",
+        domain: "beside.audio",
         code: 1,
         userInfo: [NSLocalizedDescriptionKey: "AVAudioRecorder failed to start"]
       )
@@ -1783,7 +1783,7 @@ final class CoreAudioSystemAudioChunker {
   private let chunkSeconds: TimeInterval
   private let pollInterval: TimeInterval
   private let inputDetector = OtherProcessAudioInputDetector()
-  private let q = DispatchQueue(label: "cofounderos.sysaudio.coreaudio", qos: .utility)
+  private let q = DispatchQueue(label: "beside.sysaudio.coreaudio", qos: .utility)
 
   private var processTapID = AudioObjectID(kAudioObjectUnknown)
   private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
@@ -2103,7 +2103,7 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
   private var stream: SCStream?
   // Serial queue owns all chunk state — SCStream audio callbacks are also
   // dispatched here so no extra locking is needed.
-  private let q = DispatchQueue(label: "cofounderos.sysaudio", qos: .utility)
+  private let q = DispatchQueue(label: "beside.sysaudio", qos: .utility)
 
   private var chunkIndex = 0
   private var capturing = false
@@ -2359,7 +2359,7 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
 
 func audioError(_ operation: String, status: OSStatus) -> NSError {
   NSError(
-    domain: "cofounderos.audio.coreaudio",
+    domain: "beside.audio.coreaudio",
     code: Int(status),
     userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
   )
@@ -2367,7 +2367,7 @@ func audioError(_ operation: String, status: OSStatus) -> NSError {
 
 func coreAudioError(_ operation: String, status: OSStatus) -> NSError {
   NSError(
-    domain: "cofounderos.audio.coreaudio.tap",
+    domain: "beside.audio.coreaudio.tap",
     code: Int(status),
     userInfo: [NSLocalizedDescriptionKey: "\(operation) failed with OSStatus \(status)"]
   )
@@ -2375,7 +2375,7 @@ func coreAudioError(_ operation: String, status: OSStatus) -> NSError {
 
 func coreAudioMessage(_ message: String) -> NSError {
   NSError(
-    domain: "cofounderos.audio.coreaudio.tap",
+    domain: "beside.audio.coreaudio.tap",
     code: 1,
     userInfo: [NSLocalizedDescriptionKey: message]
   )

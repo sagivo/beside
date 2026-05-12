@@ -59,7 +59,7 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background bg-[radial-gradient(circle_at_top,_rgba(96,165,250,0.16),_transparent_32rem)]">
+    <div className="flex h-screen flex-col bg-background bg-gradient-ambient">
       <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur"><BrandMark className="size-7" /><span className="font-semibold text-sm">Beside</span>
         <div className="flex-1 mx-6 flex flex-col gap-1.5"><div className="flex items-center justify-between text-[11px] font-medium uppercase text-muted-foreground"><span>{STEP_LABELS[step]}</span><span>{stepIndex + 1} / {STEPS.length}</span></div><Progress value={progressPct} /></div>
         {step !== 'done' && <Button variant="ghost" size="sm" onClick={onComplete} disabled={!allGatesMet} title={allGatesMet ? 'Skip setup' : !gateMet.screen ? 'Grant Screen Recording first.' : 'Install local AI first.'} className="app-no-drag">Skip setup</Button>}
@@ -94,12 +94,12 @@ function StepCard({ eyebrow, title, lede, children, back, next, footerHint }: an
 function WelcomeStep({ onContinue }: any) {
   return (
     <Card className="relative overflow-hidden border-primary/15 py-0">
-      <div aria-hidden className="pointer-events-none absolute inset-0" style={{ background: 'radial-gradient(circle at 20% 0%, rgba(96,165,250,0.22), transparent 45%), radial-gradient(circle at 90% 100%, rgba(168,85,247,0.18), transparent 55%)' }} />
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-ambient opacity-90" />
       <CardContent className="relative p-0"><div className="flex flex-col items-center px-6 pb-10 pt-14 text-center sm:px-12 sm:pt-20 sm:pb-14">
-        <div className="relative grid place-items-center"><div className="absolute size-40 rounded-full bg-primary/20 blur-3xl" /><div className="relative flex size-20 items-center justify-center rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/30 to-violet-500/20 shadow-[0_0_40px_-10px_rgba(96,165,250,0.55)]"><Brain className="size-10 text-primary" /></div></div>
+        <div className="relative grid place-items-center"><div className="absolute size-40 rounded-full bg-primary/25 blur-3xl" /><div className="relative flex size-20 items-center justify-center rounded-2xl border border-primary/30 bg-gradient-brand text-primary-foreground shadow-glow"><Brain className="size-10" /></div></div>
         <Badge variant="outline" className="mt-7 gap-1.5 border-primary/30 bg-primary/10 px-3 py-1 text-[11px] font-medium uppercase text-primary"><Sparkles className="size-3" />Private memory</Badge>
-        <h1 className="mt-5 max-w-3xl text-balance text-4xl font-semibold sm:text-6xl">Your work, <span className="bg-gradient-to-r from-primary via-sky-400 to-violet-400 bg-clip-text text-transparent">perfectly remembered.</span></h1>
-        <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">A second brain that quietly captures what you do. Local, encrypted, and private.</p>
+        <h1 className="mt-5 max-w-3xl text-balance text-4xl font-semibold sm:text-6xl">Your work, <span className="text-gradient-brand">perfectly remembered.</span></h1>
+        <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">An ambient second brain that sits quietly beside you — capturing what you do, so you can focus on doing it. Local, encrypted, and private.</p>
         <div className="mt-8 flex flex-col items-center gap-3"><Button size="xl" onClick={onContinue} className="px-8">Get started<ArrowRight /></Button><p className="text-xs text-muted-foreground">Takes ~5 minutes. Runs entirely on your computer.</p></div>
       </div></CardContent>
     </Card>
