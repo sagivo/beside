@@ -56,6 +56,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
+import { StatusPill } from '@/components/StatusPill';
 import { formatBytes } from '@/lib/format';
 import { formatBootstrapLine, pullPercent } from '@/lib/bootstrap-phases';
 import {
@@ -3076,7 +3077,7 @@ function ModelSettings({
             <div className="flex-1 min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="font-semibold">Local AI model</h3>
-                <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
+                <StatusPill tone={statusTone} size="compact">{statusLabel}</StatusPill>
               </div>
               <p className="text-sm text-muted-foreground mt-0.5 break-all">
                 <span className="font-mono">{savedModel || '(none)'}</span>
@@ -3362,35 +3363,6 @@ function ModelInstallProgress({
         <p className="text-xs text-muted-foreground">Preparing…</p>
       )}
     </div>
-  );
-}
-
-function StatusPill({
-  tone,
-  children,
-}: {
-  tone: 'success' | 'warning' | 'muted';
-  children: React.ReactNode;
-}) {
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
-        tone === 'success' && 'bg-success/15 text-success',
-        tone === 'warning' && 'bg-warning/15 text-warning',
-        tone === 'muted' && 'bg-muted text-muted-foreground',
-      )}
-    >
-      <span
-        className={cn(
-          'size-1.5 rounded-full',
-          tone === 'success' && 'bg-success',
-          tone === 'warning' && 'bg-warning',
-          tone === 'muted' && 'bg-muted-foreground/60',
-        )}
-      />
-      {children}
-    </span>
   );
 }
 

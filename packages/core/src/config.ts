@@ -201,12 +201,11 @@ const StorageSchema = z.object({
       // embeddings + occasional vision recall". OCR/AX text is
       // extracted within ~60-90s; embeddings within minutes; the
       // information value of the original-quality WebP drops sharply
-      // after that. Compressing within 4h instead of 24h saves
-      // gigabytes/month on a continuously-captured machine without
-      // affecting any indexing path. Thumbnailing after 3 days (vs 7)
-      // matches typical search/recall horizons; older frames are
-      // overwhelmingly accessed via the markdown export which already
-      // serves at 480px.
+      // after that. Compressing within 1h saves gigabytes/month on a
+      // continuously-captured machine without affecting any indexing
+      // path. Keeping full-size compressed images for 30 days preserves
+      // useful recent visual recall, then 480px thumbnails carry older
+      // screenshot links until the delete window.
       // NOTE: per-field defaults intentionally preserve legacy
       // semantics (`compress_after_days: 1`, no `compress_after_minutes`)
       // for users who already have a partial `vacuum:` block in their
@@ -216,10 +215,10 @@ const StorageSchema = z.object({
       compress_after_days: z.number().int().nonnegative().default(1),
       compress_after_minutes: z.number().int().nonnegative().optional(),
       compress_quality: z.number().int().min(1).max(100).default(40),
-      thumbnail_after_days: z.number().int().nonnegative().default(7),
+      thumbnail_after_days: z.number().int().nonnegative().default(30),
       thumbnail_after_minutes: z.number().int().nonnegative().optional(),
       thumbnail_max_dim: z.number().int().min(64).max(2048).default(480),
-      delete_after_days: z.number().int().nonnegative().default(30),
+      delete_after_days: z.number().int().nonnegative().default(180),
       delete_after_minutes: z.number().int().nonnegative().optional(),
       // How often the vacuum scheduler ticks. Cheap when there's no work.
       tick_interval_min: z.number().int().positive().default(15),
@@ -236,9 +235,9 @@ const StorageSchema = z.object({
       compress_after_days: 0,
       compress_after_minutes: 60,
       compress_quality: 40,
-      thumbnail_after_days: 3,
+      thumbnail_after_days: 30,
       thumbnail_max_dim: 480,
-      delete_after_days: 30,
+      delete_after_days: 180,
       tick_interval_min: 15,
       batch_size: 50,
     }),
@@ -250,9 +249,9 @@ const StorageSchema = z.object({
       compress_after_days: 0,
       compress_after_minutes: 60,
       compress_quality: 40,
-      thumbnail_after_days: 3,
+      thumbnail_after_days: 30,
       thumbnail_max_dim: 480,
-      delete_after_days: 30,
+      delete_after_days: 180,
       tick_interval_min: 15,
       batch_size: 50,
     },
@@ -608,13 +607,13 @@ storage:
       # information value after a few hours. Compressing at 1h saves
       # the most gigabytes/month — by then OCR, AX-merge and embeddings
       # have finished with the original-quality WebP — without affecting
-      # any indexing path; thumbnailing at 3 days matches typical
-      # search/recall horizons.
+      # any indexing path; thumbnailing at 30 days keeps recent visual
+      # recall full-size before compacting older screenshots.
       compress_after_minutes: 60   # re-encode older originals at lower quality (~1h)
       compress_quality: 40
-      thumbnail_after_days: 3      # downscale once an asset is this old
+      thumbnail_after_days: 30     # downscale once an asset is this old
       thumbnail_max_dim: 480
-      delete_after_days: 30        # 0 = keep image forever
+      delete_after_days: 180       # 0 = keep image forever
       tick_interval_min: 15
       batch_size: 50
 

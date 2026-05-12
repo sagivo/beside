@@ -1,11 +1,14 @@
 import * as React from 'react';
 import {
   AlertCircle,
+  ArrowRight,
   ChevronDown,
+  CheckSquare,
   CircleStop,
   ExternalLink,
   FolderOpen,
   ImageOff,
+  Inbox,
   Loader2,
   Mic,
   Pause,
@@ -25,6 +28,7 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { PageHeader } from '@/components/PageHeader';
+import { dayEventSourceShortLabel } from '@/lib/day-events';
 import {
   bootstrapMessage,
   formatBytes,
@@ -39,12 +43,15 @@ import {
   resolveAssetUrl,
   thumbnailCache,
 } from '@/lib/thumbnail-cache';
+import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
 import { cn } from '@/lib/utils';
 import type {
   ActivitySession,
+  DayEvent,
   DoctorCheck,
   Frame,
   JournalDay,
+  Meeting,
   ModelBootstrapProgress,
   RuntimeOverview,
 } from '@/global';
@@ -69,6 +76,7 @@ export function Dashboard({
   onBootstrap,
   onOpenMarkdownExport,
   onGoTimeline,
+  onGoMeetings,
 }: {
   overview: RuntimeOverview | null;
   doctor: DoctorCheck[] | null;
@@ -84,12 +92,14 @@ export function Dashboard({
   onBootstrap: () => Promise<void>;
   onOpenMarkdownExport: (category?: string) => Promise<void>;
   onGoTimeline: () => void;
+  onGoMeetings: () => void;
 }) {
   const [bootstrapping, setBootstrapping] = React.useState(false);
 
   // Single fetch of today's journal — used by both the timeline viz and the
   // bento tiles, so we don't double-poll the runtime.
   const { journal, loading } = useTodayJournal(overview);
+  const founderBrief = useFounderBrief(overview);
 
   if (!overview) {
     return (
@@ -134,6 +144,14 @@ export function Dashboard({
         onStop={onStop}
         onPause={onPause}
         onResume={onResume}
+      />
+
+      <FounderDashboard
+        journal={journal}
+        loading={loading || founderBrief.loading}
+        events={founderBrief.events}
+        meetings={founderBrief.meetings}
+        onGoMeetings={onGoMeetings}
       />
 
       {overview.indexing.running && (
@@ -285,6 +303,292 @@ function useTodayJournal(overview: RuntimeOverview | null) {
   }, [captureRunning, eventsToday]);
 
   return { journal, loading };
+}
+
+function useFounderBrief(overview: RuntimeOverview | null): {
+  events: DayEvent[];
+  meetings: Meeting[];
+  loading: boolean;
+} {
+  const today = localDayKey();
+  const hasOverview = overview !== null;
+  const eventsToday = overview?.capture.eventsToday ?? 0;
+  const refreshKey = React.useMemo(() => {
+    if (!overview) return '';
+    return (overview.backgroundJobs ?? [])
+      .filter((job) =>
+        ['event-extractor', 'meeting-builder', 'meeting-summarizer'].includes(job.name),
+      )
+      .map((job) => `${job.name}:${job.lastCompletedAt ?? ''}:${job.runCount}`)
+      .join('|');
+  }, [overview]);
+  const [events, setEvents] = React.useState<DayEvent[]>([]);
+  const [meetings, setMeetings] = React.useState<Meeting[]>([]);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!hasOverview) {
+      setEvents([]);
+      setMeetings([]);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      const start = new Date(`${today}T00:00:00`);
+      const end = new Date(`${today}T23:59:59.999`);
+      try {
+        const [nextEvents, nextMeetings] = await Promise.all([
+          window.cofounderos.listDayEvents({ day: today, limit: 200 }).catch(() => []),
+          window.cofounderos
+            .listMeetings({
+              from: start.toISOString(),
+              to: end.toISOString(),
+              limit: 100,
+            })
+            .catch(() => []),
+        ]);
+        if (cancelled) return;
+        setEvents(nextEvents.filter((event) => event.title !== '__merged__'));
+        setMeetings(
+          nextMeetings
+            .filter((meeting) => meeting.day === today)
+            .sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at)),
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasOverview, today, eventsToday, refreshKey]);
+
+  return { events, meetings, loading };
+}
+
+function FounderDashboard({
+  journal,
+  loading,
+  events,
+  meetings,
+  onGoMeetings,
+}: {
+  journal: JournalDay | null;
+  loading: boolean;
+  events: DayEvent[];
+  meetings: Meeting[];
+  onGoMeetings: () => void;
+}) {
+  const cards = React.useMemo(
+    () => buildFounderCards(journal, events, meetings),
+    [journal, events, meetings],
+  );
+  const hasMaterial = cards.some((card) => card.items.length > 0);
+
+  if (loading && !hasMaterial) {
+    return (
+      <section className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Founder brief</h3>
+            <p className="text-xs text-muted-foreground">Loading today’s signals…</p>
+          </div>
+          <Skeleton className="h-8 w-24 rounded-md" />
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="flex flex-col gap-3 py-1">
+                <Skeleton className="h-8 w-8 rounded-lg" />
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-16 w-full" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Founder brief</h3>
+          <p className="text-xs text-muted-foreground">
+            Replies, promises, changes, and follow-ups from today.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={onGoMeetings}>
+          Agenda <ArrowRight className="size-3.5" />
+        </Button>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {cards.map((card) => (
+          <FounderBriefCard key={card.title} card={card} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type FounderCard = {
+  title: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  accent: string;
+  empty: string;
+  items: Array<{ title: string; meta?: string }>;
+};
+
+function FounderBriefCard({ card }: { card: FounderCard }) {
+  const Icon = card.icon;
+  return (
+    <Card>
+      <CardContent className="flex min-h-[190px] flex-col gap-3 py-1">
+        <div className="flex items-start justify-between gap-2">
+          <span
+            className={cn(
+              'grid size-8 place-items-center rounded-lg bg-muted',
+              card.accent,
+            )}
+          >
+            <Icon className="size-4" />
+          </span>
+          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
+            {card.label}
+          </span>
+        </div>
+        <div>
+          <h4 className="text-sm font-semibold">{card.title}</h4>
+        </div>
+        {card.items.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{card.empty}</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {card.items.slice(0, 3).map((item, i) => (
+              <div key={`${item.title}-${i}`} className="min-w-0">
+                <div className="line-clamp-2 text-sm leading-snug">{item.title}</div>
+                {item.meta ? (
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                    {item.meta}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function buildFounderCards(
+  journal: JournalDay | null,
+  events: DayEvent[],
+  meetings: Meeting[],
+): FounderCard[] {
+  const now = Date.now();
+  const chronological = events
+    .slice()
+    .sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
+  const summarySignals = collectMeetingSummarySignals(meetings);
+  const actions = summarySignals.actionItems.map((item) => ({
+    title: actionItemLabel(item),
+    meta: item.due ? `Due ${item.due}` : 'From meeting summary',
+  }));
+  const openQuestions = summarySignals.openQuestions.map((question) => ({
+    title: question.text,
+    meta: 'Open question',
+  }));
+  const decisions = summarySignals.decisions.map((decision) => ({
+    title: decision.text,
+    meta: 'Decision',
+  }));
+  const replyEvents = chronological
+    .filter((event) =>
+      event.kind === 'communication' ||
+      event.source === 'email_screen' ||
+      event.source === 'slack_screen',
+    )
+    .map((event) => ({
+      title: event.title,
+      meta: eventMeta(event),
+    }));
+  const taskEvents = chronological
+    .filter((event) => event.kind === 'task')
+    .map((event) => ({
+      title: event.title,
+      meta: eventMeta(event),
+    }));
+  const futureEvents = chronological
+    .filter((event) => Date.parse(event.starts_at) >= now)
+    .map((event) => ({
+      title: event.title,
+      meta: eventMeta(event),
+    }));
+  const recentChanges = chronological
+    .filter((event) => event.kind !== 'meeting')
+    .slice(-4)
+    .reverse()
+    .map((event) => ({
+      title: event.title,
+      meta: eventMeta(event),
+    }));
+  const topApps =
+    journal && journal.frames.length > 0
+      ? countByApp(journal.frames)
+          .slice(0, 3)
+          .map((row) => ({
+            title: row.app,
+            meta: `${formatNumber(row.count)} moment${row.count === 1 ? '' : 's'}`,
+          }))
+      : [];
+
+  return [
+    {
+      title: 'What changed',
+      label: `${recentChanges.length || topApps.length}`,
+      icon: Zap,
+      accent: 'text-primary',
+      empty: 'Nothing notable has surfaced yet today.',
+      items: recentChanges.length > 0 ? recentChanges : topApps,
+    },
+    {
+      title: 'Replies',
+      label: `${replyEvents.length}`,
+      icon: Inbox,
+      accent: 'text-blue-500 dark:text-blue-300',
+      empty: 'No inbox or Slack replies detected yet.',
+      items: replyEvents,
+    },
+    {
+      title: 'Promises',
+      label: `${actions.length + taskEvents.length}`,
+      icon: CheckSquare,
+      accent: 'text-emerald-500 dark:text-emerald-300',
+      empty: 'No tasks or meeting action items found yet.',
+      items: [...actions, ...taskEvents],
+    },
+    {
+      title: 'Follow up',
+      label: `${openQuestions.length + decisions.length + futureEvents.length}`,
+      icon: AlertCircle,
+      accent: 'text-amber-500 dark:text-amber-300',
+      empty: 'No open questions or upcoming events to chase.',
+      items: [...openQuestions, ...futureEvents, ...decisions],
+    },
+  ];
+}
+
+function eventMeta(event: DayEvent): string {
+  const time = formatLocalTime(event.starts_at);
+  const source = event.source_app || dayEventSourceShortLabel(event.source);
+  return [time, source].filter(Boolean).join(' · ');
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

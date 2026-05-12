@@ -9,6 +9,7 @@ import type {
   StorageQuery,
   StorageStats,
   Frame,
+  FrameDeleteQuery,
   FrameQuery,
   FrameEmbeddingTask,
   FrameSemanticMatch,
@@ -142,14 +143,6 @@ function memoryChunkFromRow(row: MemoryChunkRow): MemoryChunk {
 }
 
 function dayEventFromRow(row: DayEventRow): DayEvent {
-  const parseJsonArr = (raw: string): string[] => {
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
-    } catch {
-      return [];
-    }
-  };
   return {
     id: row.id,
     day: row.day,
@@ -160,16 +153,28 @@ function dayEventFromRow(row: DayEventRow): DayEvent {
     title: row.title,
     source_app: row.source_app,
     context_md: row.context_md,
-    attendees: parseJsonArr(row.attendees_json),
-    links: parseJsonArr(row.links_json),
+    attendees: parseJsonStringArray(row.attendees_json),
+    links: parseJsonStringArray(row.links_json),
     meeting_id: row.meeting_id,
-    evidence_frame_ids: parseJsonArr(row.evidence_frame_ids_json),
+    evidence_frame_ids: parseJsonStringArray(row.evidence_frame_ids_json),
     content_hash: row.content_hash,
     status: row.status as DayEventStatus,
     failure_reason: row.failure_reason,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+function parseJsonStringArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v): v is string => typeof v === 'string')
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 class LocalStorage implements IStorage {
@@ -2842,6 +2847,113 @@ class LocalStorage implements IStorage {
     return { frames: ids.length, assetPaths };
   }
 
+  async deleteFrames(
+    query: FrameDeleteQuery,
+  ): Promise<{ frames: number; assetPaths: string[] }> {
+    const where: string[] = [];
+    const params: Record<string, unknown> = {};
+
+    const app = query.app?.trim();
+    if (app) {
+      where.push('app = @app');
+      params.app = app;
+    }
+
+    const domain = query.urlDomain?.trim();
+    if (domain) {
+      const host = normaliseHostFilter(domain);
+      if (host) {
+        where.push('(url_host = @url_host OR url_host LIKE @url_host_sub)');
+        params.url_host = host;
+        params.url_host_sub = `%.${host}`;
+      }
+    }
+
+    if (where.length === 0) {
+      throw new Error('deleteFrames requires app or urlDomain');
+    }
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, asset_path, meeting_id, source_event_ids
+         FROM frames
+         WHERE ${where.join(' AND ')}`,
+      )
+      .all(params) as Array<{
+        id: string;
+        asset_path: string | null;
+        meeting_id: string | null;
+        source_event_ids: string;
+      }>;
+
+    if (rows.length === 0) return { frames: 0, assetPaths: [] };
+
+    const ids = rows.map((r) => r.id);
+    const assetPaths = rows
+      .map((r) => r.asset_path)
+      .filter((p): p is string => Boolean(p));
+    const meetingIds = Array.from(
+      new Set(rows.map((r) => r.meeting_id).filter((id): id is string => Boolean(id))),
+    );
+    const eventIds = Array.from(
+      new Set(
+        rows.flatMap((r) => parseJsonStringArray(r.source_event_ids)),
+      ),
+    );
+
+    const tx = this.db.transaction(() => {
+      const framePlaceholders = ids.map(() => '?').join(',');
+      this.db
+        .prepare(`DELETE FROM frame_text WHERE frame_id IN (${framePlaceholders})`)
+        .run(...ids);
+      this.db
+        .prepare(`DELETE FROM frame_embeddings WHERE frame_id IN (${framePlaceholders})`)
+        .run(...ids);
+
+      const dayEventIds = this.dayEventIdsForFrameIds(ids);
+      this.deleteMemoryChunksForFrameIds(ids);
+      this.deleteDayEventsAndChunks(dayEventIds);
+
+      if (meetingIds.length > 0) {
+        this.deleteMeetingsAndChunks(meetingIds);
+      }
+
+      this.db
+        .prepare(`DELETE FROM frames WHERE id IN (${framePlaceholders})`)
+        .run(...ids);
+
+      if (eventIds.length > 0) {
+        const eventPlaceholders = eventIds.map(() => '?').join(',');
+        this.db
+          .prepare(`DELETE FROM events WHERE id IN (${eventPlaceholders})`)
+          .run(...eventIds);
+      }
+
+      this.db.exec(`
+        DELETE FROM sessions
+        WHERE id NOT IN (
+          SELECT DISTINCT activity_session_id
+          FROM frames
+          WHERE activity_session_id IS NOT NULL
+        );
+        DELETE FROM entities
+        WHERE path NOT IN (
+          SELECT DISTINCT entity_path
+          FROM frames
+          WHERE entity_path IS NOT NULL
+        );
+      `);
+    });
+    tx();
+
+    for (const p of assetPaths) {
+      await this.unlinkAsset(p);
+    }
+    this.invalidateAssetBytesCache();
+
+    return { frames: ids.length, assetPaths };
+  }
+
   async deleteOldData(retentionDays: number): Promise<{
     frames: number;
     events: number;
@@ -3028,6 +3140,90 @@ class LocalStorage implements IStorage {
       events,
       assetBytes,
     };
+  }
+
+  private dayEventIdsForFrameIds(frameIds: string[]): string[] {
+    if (frameIds.length === 0) return [];
+    const stmt = this.db.prepare(
+      'SELECT id FROM day_events WHERE evidence_frame_ids_json LIKE ?',
+    );
+    const ids = new Set<string>();
+    for (const frameId of frameIds) {
+      const rows = stmt.all(`%"${frameId}"%`) as Array<{ id: string }>;
+      for (const row of rows) ids.add(row.id);
+    }
+    return Array.from(ids);
+  }
+
+  private deleteMemoryChunksForFrameIds(frameIds: string[]): void {
+    const selectSql = 'SELECT id FROM memory_chunks WHERE source_refs_json LIKE ?';
+    for (const frameId of frameIds) {
+      const ref = `%frame:${frameId}%`;
+      this.db.prepare(`
+        DELETE FROM memory_chunk_text WHERE chunk_id IN (${selectSql})
+      `).run(ref);
+      this.db.prepare(`
+        DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (${selectSql})
+      `).run(ref);
+      this.db.prepare('DELETE FROM memory_chunks WHERE source_refs_json LIKE ?').run(ref);
+    }
+  }
+
+  private deleteDayEventsAndChunks(dayEventIds: string[]): void {
+    if (dayEventIds.length === 0) return;
+    const placeholders = dayEventIds.map(() => '?').join(',');
+    this.db.prepare(`
+      DELETE FROM memory_chunk_text WHERE chunk_id IN (
+        SELECT id FROM memory_chunks
+        WHERE kind = 'day_event' AND source_id IN (${placeholders})
+      )
+    `).run(...dayEventIds);
+    this.db.prepare(`
+      DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+        SELECT id FROM memory_chunks
+        WHERE kind = 'day_event' AND source_id IN (${placeholders})
+      )
+    `).run(...dayEventIds);
+    this.db
+      .prepare(`DELETE FROM memory_chunks WHERE kind = 'day_event' AND source_id IN (${placeholders})`)
+      .run(...dayEventIds);
+    this.db
+      .prepare(`DELETE FROM day_events WHERE id IN (${placeholders})`)
+      .run(...dayEventIds);
+  }
+
+  private deleteMeetingsAndChunks(meetingIds: string[]): void {
+    if (meetingIds.length === 0) return;
+    const placeholders = meetingIds.map(() => '?').join(',');
+    const dayEventIds = (
+      this.db
+        .prepare(`SELECT id FROM day_events WHERE meeting_id IN (${placeholders})`)
+        .all(...meetingIds) as Array<{ id: string }>
+    ).map((row) => row.id);
+    this.deleteDayEventsAndChunks(dayEventIds);
+
+    this.db.prepare(`
+      DELETE FROM memory_chunk_text WHERE chunk_id IN (
+        SELECT id FROM memory_chunks
+        WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})
+      )
+    `).run(...meetingIds);
+    this.db.prepare(`
+      DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (
+        SELECT id FROM memory_chunks
+        WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})
+      )
+    `).run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM memory_chunks WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})`)
+      .run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM meeting_turns WHERE meeting_id IN (${placeholders})`)
+      .run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM meetings WHERE id IN (${placeholders})`)
+      .run(...meetingIds);
+    this.meetingParseCache.clear();
   }
 
   private async unlinkAsset(assetPath: string): Promise<void> {

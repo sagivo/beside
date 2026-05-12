@@ -27,8 +27,11 @@ const api = {
   setStartAtLogin: (enabled: boolean) => ipcRenderer.invoke('cofounderos:set-start-at-login', enabled),
   openPath: (target: 'config' | 'data' | 'markdown' | { target: 'markdown'; category?: string }) => ipcRenderer.invoke('cofounderos:open-path', target),
   copyText: (text: string) => ipcRenderer.invoke('cofounderos:copy-text', text),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('cofounderos:open-external-url', url),
   deleteFrame: (frameId: string) => ipcRenderer.invoke('cofounderos:delete-frame', frameId),
   deleteFramesByDay: (day: string) => ipcRenderer.invoke('cofounderos:delete-frames-by-day', day),
+  deleteFrames: (query: { app?: string; urlDomain?: string }) =>
+    ipcRenderer.invoke('cofounderos:delete-frames', query),
   deleteAllMemory: () => ipcRenderer.invoke('cofounderos:delete-all-memory'),
   probeWhisper: () => ipcRenderer.invoke('cofounderos:probe-whisper'),
   detectWhisperInstaller: () => ipcRenderer.invoke('cofounderos:detect-whisper-installer'),

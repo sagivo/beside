@@ -351,7 +351,7 @@ self-bounded footprint by combining four levers — tweak any of them in
 | `capture.screenshot_diff_threshold` | capture | `0.15` | Soft-trigger floor on perceptual-hash distance. Higher = fewer near-duplicate frames. |
 | `capture.focus_settle_delay_ms` | capture | `900` | Delay after a focus change before taking the screenshot, so transient switcher UI such as Cmd+Tab is not captured. |
 | `capture.content_change_min_interval_ms` | capture | `60000` | Minimum delay between two soft-trigger captures of the same display. Hard triggers (window focus, URL change, idle end) bypass this. |
-| `storage.local.vacuum.*` | storage | tiered | Sliding-window retention: re-encode at lower quality after `compress_after_days`, downscale after `thumbnail_after_days`, delete after `delete_after_days`. Each accepts `*_minutes` for finer-grained tuning (e.g. `compress_after_minutes: 30` for testing). SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
+| `storage.local.vacuum.*` | storage | 1 h / 30 d / 180 d | Sliding-window retention: re-encode at lower quality after `compress_after_days`, downscale after `thumbnail_after_days`, delete after `delete_after_days`. Each accepts `*_minutes` for finer-grained tuning (e.g. `compress_after_minutes: 30` for testing). SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
 
 For tight retention while testing scale:
 

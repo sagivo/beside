@@ -32,8 +32,13 @@ declare global {
       setStartAtLogin: (enabled: boolean) => Promise<boolean>;
       openPath: (target: OpenPathTarget) => Promise<{ opened: string }>;
       copyText: (text: string) => Promise<{ copied: true }>;
+      openExternalUrl: (url: string) => Promise<{ opened: string }>;
       deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
       deleteFramesByDay: (day: string) => Promise<{ frames: number; assetPaths: string[] }>;
+      deleteFrames: (query: {
+        app?: string;
+        urlDomain?: string;
+      }) => Promise<{ frames: number; assetPaths: string[] }>;
       deleteAllMemory: () => Promise<{ frames: number; events: number; assetBytes: number }>;
       probeWhisper: () => Promise<WhisperProbe>;
       detectWhisperInstaller: () => Promise<{ installer: WhisperInstaller | null }>;

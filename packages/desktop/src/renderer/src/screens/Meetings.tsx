@@ -25,40 +25,21 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { Markdown } from '@/components/Markdown';
-import { formatLocalTime, prettyDay } from '@/lib/format';
+import { formatLocalTime, localDayKey, prettyDay, shiftDay } from '@/lib/format';
+import { uniqueStrings } from '@/lib/collections';
+import {
+  DAY_EVENT_KIND_COLORS as KIND_COLOR,
+  DAY_EVENT_KIND_LABELS as KIND_LABELS,
+  DAY_EVENT_SOURCE_LABELS as SOURCE_LABELS,
+} from '@/lib/day-events';
+import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
 import { cn } from '@/lib/utils';
 import type {
   DayEvent,
   DayEventKind,
-  DayEventSource,
   Meeting,
   MeetingPlatform,
 } from '@/global';
-
-// ---------------------------------------------------------------------------
-// Day-key helpers. The runtime stamps events with `day = YYYY-MM-DD`
-// keyed to *local* time (see `dayKey` in @cofounderos/core), so the UI
-// must match — using UTC slicing would drift by a day on either side of
-// midnight depending on the user's timezone.
-// ---------------------------------------------------------------------------
-
-function localDayKey(date: Date = new Date()): string {
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function dayKeyToDate(day: string): Date {
-  // Anchor at noon to dodge DST edge cases when we add/subtract days.
-  return new Date(`${day}T12:00:00`);
-}
-
-function shiftDay(day: string, deltaDays: number): string {
-  const d = dayKeyToDate(day);
-  d.setDate(d.getDate() + deltaDays);
-  return localDayKey(d);
-}
 
 function compareDays(a: string, b: string): number {
   return a.localeCompare(b);
@@ -88,35 +69,6 @@ function platformLabel(platform: MeetingPlatform): string {
   };
   return map[platform] ?? 'Meeting';
 }
-
-// ---------------------------------------------------------------------------
-// DayEvent presentation tables.
-// ---------------------------------------------------------------------------
-
-const KIND_LABELS: Record<DayEventKind, string> = {
-  meeting: 'Meeting',
-  calendar: 'Calendar',
-  communication: 'Communication',
-  task: 'Task',
-  other: 'Event',
-};
-
-const SOURCE_LABELS: Record<DayEventSource, string> = {
-  meeting_capture: 'Captured call',
-  calendar_screen: 'Seen on calendar',
-  email_screen: 'Seen in inbox',
-  slack_screen: 'Seen in Slack',
-  task_screen: 'Seen in tasks',
-  other_screen: 'Seen on screen',
-};
-
-const KIND_COLOR: Record<DayEventKind, string> = {
-  meeting: 'text-red-500 dark:text-red-300',
-  calendar: 'text-amber-500 dark:text-amber-300',
-  communication: 'text-blue-500 dark:text-blue-300',
-  task: 'text-emerald-500 dark:text-emerald-300',
-  other: 'text-muted-foreground',
-};
 
 function KindIcon({
   kind,
@@ -261,6 +213,125 @@ function titlesLikelySame(a: string, b: string): boolean {
   if (!left || !right) return false;
   if (left === right) return true;
   return left.length >= 6 && right.length >= 6 && (left.includes(right) || right.includes(left));
+}
+
+const SOLO_ACTIVITY_TITLE_RE =
+  /\b(focus|deep work|heads down|busy|hold|blocked|personal|lunch|break|commute|ooo|out of office)\b/i;
+const COLLABORATIVE_MEETING_TITLE_RE =
+  /\b(1\s*:\s*1|1-on-1|one[-\s]?on[-\s]?one|stand[-\s]?up|sync|office hours?|all hands|planning|retro|demo|interview|review|check[-\s]?in|kickoff)\b/i;
+const REMOTE_MEETING_SIGNAL_RE =
+  /\b(zoom(?:\.us)?|google meet|meet\.google|teams\.microsoft|microsoft teams|webex|whereby|around)\b/i;
+const PARTICIPANT_NOISE_WORDS = new Set([
+  'calendar',
+  'call',
+  'conference',
+  'event',
+  'google',
+  'meet',
+  'meeting',
+  'room',
+  'teams',
+  'webex',
+  'whereby',
+  'zoom',
+  'zoom room',
+]);
+const TITLE_TOKEN_STOP_WORDS = new Set([
+  'calendar',
+  'call',
+  'conference',
+  'cupertino',
+  'event',
+  'google',
+  'meet',
+  'meeting',
+  'office',
+  'hour',
+  'hours',
+  'palaven',
+  'room',
+  'session',
+  'teams',
+  'today',
+  'tomorrow',
+  'vimire',
+  'webex',
+  'whereby',
+  'zoom',
+]);
+
+function isBeforeEventStart(event: DayEvent, now: Date): boolean {
+  const start = Date.parse(event.starts_at);
+  return Number.isFinite(start) && now.getTime() < start;
+}
+
+function cleanParticipantName(name: string): string {
+  return name
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/[^a-z0-9@.' -]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isMeaningfulParticipantName(name: string): boolean {
+  const cleaned = cleanParticipantName(name);
+  const key = cleaned.toLowerCase();
+  if (cleaned.length < 2 || cleaned.length > 60) return false;
+  if (/^\d+$/.test(cleaned)) return false;
+  if (PARTICIPANT_NOISE_WORDS.has(key)) return false;
+  if (/\b(?:meeting|room|zoom room|calendar)\b/i.test(cleaned)) return false;
+  return /[a-z]/i.test(cleaned);
+}
+
+function extractTitleParticipantNames(title: string): string[] {
+  const head = title.split(/\s+-\s+/)[0] ?? title;
+  if (!/[\/&]|\b(?:and|with)\b/i.test(head)) return [];
+  return uniqueStrings(
+    head
+      .split(/\s*(?:\/|&|\band\b|\bwith\b)\s*/i)
+      .map(cleanParticipantName)
+      .filter(isMeaningfulParticipantName),
+  ).slice(0, 8);
+}
+
+function participantNamesForEvent(event: DayEvent, meeting: Meeting | null): string[] {
+  return uniqueStrings([
+    ...event.attendees,
+    ...(meeting?.attendees ?? []),
+    ...(meeting?.summary_json?.attendees_seen ?? []),
+    ...extractTitleParticipantNames(meeting?.summary_json?.title ?? meeting?.title ?? event.title),
+  ]).filter(isMeaningfulParticipantName);
+}
+
+function hasRemoteMeetingSignal(event: DayEvent, meeting: Meeting | null): boolean {
+  const haystack = [
+    event.title,
+    event.source_app ?? '',
+    ...event.links,
+    meeting?.title ?? '',
+    ...(meeting?.links ?? []),
+    ...(meeting?.summary_json?.links_shared ?? []),
+  ].join(' ');
+  return REMOTE_MEETING_SIGNAL_RE.test(haystack);
+}
+
+function isCollaborativeMeetingEvent(event: DayEvent, meeting: Meeting | null): boolean {
+  if (SOLO_ACTIVITY_TITLE_RE.test(event.title)) return false;
+  if (event.kind !== 'meeting' && event.kind !== 'calendar' && !meeting) return false;
+
+  const participantCount = participantNamesForEvent(event, meeting).length;
+  if (participantCount > 0) return true;
+
+  const titleParticipantCount = extractTitleParticipantNames(event.title).length;
+  if (titleParticipantCount >= 2) return true;
+
+  if (COLLABORATIVE_MEETING_TITLE_RE.test(event.title)) return true;
+  return hasRemoteMeetingSignal(event, meeting) && event.kind === 'meeting';
+}
+
+function shouldShowPrepBrief(event: DayEvent, meeting: Meeting | null, now: Date): boolean {
+  return isBeforeEventStart(event, now) && isCollaborativeMeetingEvent(event, meeting);
 }
 
 function meetingQualityScore(event: DayEvent, meeting: Meeting | null): number {
@@ -611,6 +682,15 @@ export function Meetings({
         onPick={setSelectedDay}
       />
 
+      <DayBriefRecap
+        events={visibleEvents}
+        meetingsById={meetingsById}
+        selectedDay={selectedDay}
+        today={today}
+        now={currentTime}
+        onSelectEvent={setSelectedId}
+      />
+
       {loading && visibleEvents.length === 0 && dayOverrides.size === 0 ? (
         <div className="grid min-h-[30vh] place-items-center text-muted-foreground text-sm gap-2">
           <Loader2 className="size-5 animate-spin" />
@@ -680,6 +760,8 @@ export function Meetings({
                       ? meetingsById.get(selected.meeting_id) ?? null
                       : null
                   }
+                  allMeetings={meetings}
+                  now={currentTime}
                 />
               );
             })()}
@@ -808,6 +890,119 @@ function DayPicker({
         <span className="ml-1 text-xs text-muted-foreground">
           {eventCount} {eventCount === 1 ? 'event' : 'events'}
         </span>
+      )}
+    </div>
+  );
+}
+
+function DayBriefRecap({
+  events,
+  meetingsById,
+  selectedDay,
+  today,
+  now,
+  onSelectEvent,
+}: {
+  events: DayEvent[];
+  meetingsById: Map<string, Meeting>;
+  selectedDay: string;
+  today: string;
+  now: Date;
+  onSelectEvent: (eventId: string) => void;
+}) {
+  if (events.length === 0) return null;
+
+  const nowMs = now.getTime();
+  const upcoming =
+    selectedDay === today
+      ? events.find((event) => {
+          const start = Date.parse(event.starts_at);
+          const end = event.ends_at ? Date.parse(event.ends_at) : start;
+          return Number.isFinite(start) && Math.max(start, end) >= nowMs;
+        }) ?? events[events.length - 1]!
+      : events[0]!;
+
+  const meetings = events
+    .map((event) => (event.meeting_id ? meetingsById.get(event.meeting_id) ?? null : null))
+    .filter((meeting): meeting is Meeting => Boolean(meeting));
+  const { actionItems, decisions, openQuestions } = collectMeetingSummarySignals(meetings);
+  const links = uniqueStrings(events.flatMap((event) => event.links));
+
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <button
+        type="button"
+        onClick={() => onSelectEvent(upcoming.id)}
+        className="rounded-lg border bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/30"
+      >
+        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <CalendarClock className="size-3.5" />
+          {selectedDay === today ? 'Next up' : 'First event'}
+        </div>
+        <div className="mt-2 text-sm font-medium line-clamp-2">{upcoming.title}</div>
+        <div className="mt-1 text-xs text-muted-foreground">
+          {formatLocalTime(upcoming.starts_at)}
+          {upcoming.attendees.length > 0 && ` · ${upcoming.attendees.slice(0, 3).join(', ')}`}
+        </div>
+      </button>
+
+      <BriefMetric
+        icon={<CheckSquare />}
+        label="Follow-ups"
+        count={actionItems.length}
+        empty="No action items captured"
+        items={actionItems.slice(0, 3).map((item) => item.task)}
+      />
+
+      <BriefMetric
+        icon={<Sparkles />}
+        label="Recap"
+        count={decisions.length + openQuestions.length + links.length}
+        empty="No recap yet"
+        items={[
+          ...decisions.slice(0, 2).map((item) => item.text),
+          ...openQuestions.slice(0, 1).map((item) => item.text),
+          ...(decisions.length === 0 && openQuestions.length === 0 && links.length > 0
+            ? [`${links.length} link${links.length === 1 ? '' : 's'} seen`]
+            : []),
+        ]}
+      />
+    </div>
+  );
+}
+
+function BriefMetric({
+  icon,
+  label,
+  count,
+  empty,
+  items,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count: number;
+  empty: string;
+  items: string[];
+}) {
+  return (
+    <div className="rounded-lg border bg-card p-4">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground [&>svg]:size-3.5">
+          {icon}
+          {label}
+        </div>
+        <Badge variant={count > 0 ? 'outline' : 'muted'}>{count}</Badge>
+      </div>
+      {items.length > 0 ? (
+        <ul className="mt-2 flex flex-col gap-1 text-xs text-muted-foreground">
+          {items.map((item, i) => (
+            <li key={`${item}-${i}`} className="line-clamp-1">
+              {item}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">{empty}</p>
       )}
     </div>
   );
@@ -982,9 +1177,13 @@ function EventRow({
 function EventDetail({
   event,
   meeting,
+  allMeetings,
+  now,
 }: {
   event: DayEvent;
   meeting: Meeting | null;
+  allMeetings: Meeting[];
+  now: Date;
 }) {
   return (
     <ScrollArea className="h-[calc(100vh-17rem)]">
@@ -992,9 +1191,9 @@ function EventDetail({
         <EventDetailHeader event={event} meeting={meeting} />
         <Separator />
         {meeting ? (
-          <MeetingBody event={event} meeting={meeting} />
+          <MeetingBody event={event} meeting={meeting} allMeetings={allMeetings} now={now} />
         ) : (
-          <NonMeetingBody event={event} />
+          <NonMeetingBody event={event} allMeetings={allMeetings} now={now} />
         )}
       </div>
     </ScrollArea>
@@ -1065,15 +1264,22 @@ function EventDetailHeader({
 function MeetingBody({
   event,
   meeting,
+  allMeetings,
+  now,
 }: {
   event: DayEvent;
   meeting: Meeting;
+  allMeetings: Meeting[];
+  now: Date;
 }) {
   const summary = meeting.summary_json;
   const hasMarkdown = !!meeting.summary_md;
+  const prep = buildPrepBrief(event, meeting, allMeetings, now);
 
   return (
     <div className="flex flex-col gap-5">
+      <PrepBrief prep={prep} />
+
       {/* Meeting-specific status row */}
       <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
         {meeting.transcript_chars > 0 ? (
@@ -1145,6 +1351,20 @@ function MeetingBody({
               </ul>
             </div>
           )}
+          {summary && summary.open_questions.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Open Questions
+              </h3>
+              <ul className="flex flex-col gap-1.5">
+                {summary.open_questions.map((q, i) => (
+                  <li key={i} className="text-sm text-muted-foreground">
+                    • {q.text}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
               Full Summary
@@ -1185,34 +1405,25 @@ function MeetingBody({
         </div>
       )}
 
-      {meeting.links.length > 0 && (
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-            Links shared
-          </h3>
-          <ul className="flex flex-col gap-1 text-sm">
-            {meeting.links.map((link) => (
-              <li key={link}>
-                <a
-                  href={link}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary underline-offset-2 hover:underline break-all"
-                >
-                  {link}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <LinkList title="Links shared" links={meeting.links} />
     </div>
   );
 }
 
-function NonMeetingBody({ event }: { event: DayEvent }) {
+function NonMeetingBody({
+  event,
+  allMeetings,
+  now,
+}: {
+  event: DayEvent;
+  allMeetings: Meeting[];
+  now: Date;
+}) {
+  const prep = buildPrepBrief(event, null, allMeetings, now);
   return (
     <div className="flex flex-col gap-5">
+      <PrepBrief prep={prep} />
+
       <div className="text-xs text-muted-foreground/80 italic">
         Extracted from {event.evidence_frame_ids.length || 'recent'} screen capture
         {event.evidence_frame_ids.length === 1 ? '' : 's'} of {event.source_app ?? 'your screen'}.
@@ -1250,27 +1461,7 @@ function NonMeetingBody({ event }: { event: DayEvent }) {
         </div>
       )}
 
-      {event.links.length > 0 && (
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-            Links seen
-          </h3>
-          <ul className="flex flex-col gap-1 text-sm">
-            {event.links.map((link) => (
-              <li key={link}>
-                <a
-                  href={link}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary underline-offset-2 hover:underline break-all"
-                >
-                  {link}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <LinkList title="Links seen" links={event.links} />
 
       <div className="text-[11px] text-muted-foreground/70 flex flex-wrap gap-3">
         <span>id {event.id}</span>
@@ -1278,6 +1469,254 @@ function NonMeetingBody({ event }: { event: DayEvent }) {
       </div>
     </div>
   );
+}
+
+interface PrepBriefData {
+  related: Meeting[];
+  context: string[];
+  openQuestions: string[];
+  decisions: string[];
+  actions: string[];
+  links: string[];
+}
+
+function PrepBrief({ prep }: { prep: PrepBriefData | null }) {
+  if (!prep || prep.related.length === 0) return null;
+  const hasUsefulContext =
+    prep.context.length > 0 ||
+    prep.openQuestions.length > 0 ||
+    prep.actions.length > 0 ||
+    prep.decisions.length > 0 ||
+    prep.links.length > 0;
+  if (!hasUsefulContext) return null;
+
+  return (
+    <Card className="border-primary/20 bg-primary/5">
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Sparkles className="size-4 text-primary" />
+              Prep brief
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Based on {prep.related.length} related earlier meeting
+              {prep.related.length === 1 ? '' : 's'}.
+            </p>
+          </div>
+          <Badge variant="outline">{prep.related.length}</Badge>
+        </div>
+
+        {prep.context.length > 0 && (
+          <BriefList title="Recent Context" items={prep.context.slice(0, 3)} />
+        )}
+        {prep.openQuestions.length > 0 && (
+          <BriefList title="Open Questions" items={prep.openQuestions.slice(0, 4)} />
+        )}
+        {prep.actions.length > 0 && (
+          <BriefList title="Follow-ups" items={prep.actions.slice(0, 4)} />
+        )}
+        {prep.decisions.length > 0 && (
+          <BriefList title="Last Decisions" items={prep.decisions.slice(0, 3)} />
+        )}
+        <LinkChipList title="Links To Revisit" links={prep.links.slice(0, 5)} />
+      </CardContent>
+    </Card>
+  );
+}
+
+function LinkList({ title, links }: { title: string; links: string[] }) {
+  if (links.length === 0) return null;
+  return (
+    <div>
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+        {title}
+      </h3>
+      <ul className="flex flex-col gap-1 text-sm">
+        {links.map((link) => (
+          <li key={link}>
+            <a
+              href={link}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline-offset-2 hover:underline break-all"
+            >
+              {link}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function LinkChipList({ title, links }: { title: string; links: string[] }) {
+  if (links.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </h3>
+      <div className="flex flex-wrap gap-1.5">
+        {links.map((link) => (
+          <a
+            key={link}
+            href={link}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md border bg-background/70 px-2 py-1 text-xs text-primary hover:underline break-all"
+          >
+            {link}
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BriefList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </h3>
+      <ul className="flex flex-col gap-1 text-sm">
+        {items.map((item, i) => (
+          <li key={`${title}-${i}`} className="text-muted-foreground">
+            • {item}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function buildPrepBrief(
+  event: DayEvent,
+  meeting: Meeting | null,
+  allMeetings: Meeting[],
+  now: Date,
+): PrepBriefData | null {
+  if (!shouldShowPrepBrief(event, meeting, now)) return null;
+  const related = findRelatedPriorMeetings(event, meeting, allMeetings);
+  if (related.length === 0) return null;
+  const summarySignals = collectMeetingSummarySignals(related);
+
+  return {
+    related,
+    context: related
+      .flatMap((m) => {
+        if (!m.summary_json?.tldr) return [];
+        const title = m.summary_json?.title ?? m.title ?? platformLabel(m.platform);
+        return [`${formatLocalTime(m.started_at)} · ${title}: ${m.summary_json.tldr}`];
+      })
+      .filter(Boolean),
+    openQuestions: uniqueStrings(
+      summarySignals.openQuestions.map((q) => q.text),
+    ),
+    decisions: uniqueStrings(
+      summarySignals.decisions.map((d) => d.text),
+    ),
+    actions: uniqueStrings(
+      summarySignals.actionItems.map(actionItemLabel),
+    ),
+    links: uniqueStrings([
+      ...related.flatMap((m) => m.links),
+      ...summarySignals.links,
+    ]),
+  };
+}
+
+function findRelatedPriorMeetings(
+  event: DayEvent,
+  meeting: Meeting | null,
+  allMeetings: Meeting[],
+): Meeting[] {
+  const eventStart = Date.parse(event.starts_at);
+  if (!Number.isFinite(eventStart)) return [];
+  const targetTitle = meeting?.summary_json?.title ?? meeting?.title ?? event.title;
+  const targetAttendees = uniqueStrings([
+    ...event.attendees,
+    ...(meeting?.attendees ?? []),
+    ...(meeting?.summary_json?.attendees_seen ?? []),
+    ...extractTitleParticipantNames(targetTitle),
+  ]);
+
+  return allMeetings
+    .filter((candidate) => candidate.id !== meeting?.id && candidate.summary_json)
+    .map((candidate) => ({
+      meeting: candidate,
+      score: relatedMeetingScore(targetTitle, targetAttendees, eventStart, candidate),
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.meeting.started_at.localeCompare(a.meeting.started_at);
+    })
+    .slice(0, 3)
+    .map((item) => item.meeting);
+}
+
+function relatedMeetingScore(
+  targetTitle: string,
+  targetAttendees: string[],
+  eventStart: number,
+  candidate: Meeting,
+): number {
+  const candidateStart = Date.parse(candidate.started_at);
+  if (!Number.isFinite(candidateStart) || candidateStart >= eventStart) return 0;
+
+  const candidateTitle = candidate.summary_json?.title ?? candidate.title ?? '';
+  const candidateAttendees = uniqueStrings([
+    ...candidate.attendees,
+    ...(candidate.summary_json?.attendees_seen ?? []),
+    ...extractTitleParticipantNames(candidateTitle),
+  ]).filter(isMeaningfulParticipantName);
+  const attendeeOverlap = targetAttendees.filter((name) =>
+    candidateAttendees.some((candidateName) => samePersonName(name, candidateName)),
+  ).length;
+  const sameTitle = titlesLikelySame(targetTitle, candidateTitle);
+  const tokenOverlap = titleTokenOverlap(targetTitle, candidateTitle);
+  const hasStrongTitleMatch = sameTitle || tokenOverlap >= 2;
+  const hasStrongAttendeeMatch =
+    attendeeOverlap >= 2 || (attendeeOverlap >= 1 && hasStrongTitleMatch);
+  if (!hasStrongTitleMatch && !hasStrongAttendeeMatch) return 0;
+
+  let score = 0;
+  if (sameTitle) score += 20;
+  if (tokenOverlap >= 2) score += tokenOverlap * 4;
+  score += attendeeOverlap * 6;
+  if (candidate.summary_json?.open_questions.length) score += 1;
+  if (candidate.summary_json?.action_items.length) score += 1;
+  if (candidate.summary_json?.tldr) score += 1;
+  return score;
+}
+
+function titleTokenOverlap(a: string, b: string): number {
+  const left = new Set(titleTokens(a));
+  const right = new Set(titleTokens(b));
+  let count = 0;
+  for (const token of left) {
+    if (right.has(token)) count += 1;
+  }
+  return count;
+}
+
+function titleTokens(title: string): string[] {
+  return normaliseAgendaTitle(title)
+    .split(' ')
+    .filter(
+      (token) =>
+        token.length > 2 &&
+        !/^\d+$/.test(token) &&
+        !TITLE_TOKEN_STOP_WORDS.has(token),
+    );
+}
+
+function samePersonName(a: string, b: string): boolean {
+  const left = a.toLowerCase().trim();
+  const right = b.toLowerCase().trim();
+  return Boolean(left && right && (left === right || left.includes(right) || right.includes(left)));
 }
 
 function MeetingStatusBadge({ status }: { status: Meeting['summary_status'] }) {

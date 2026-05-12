@@ -34,6 +34,9 @@ const Chat = React.lazy(() => import('@/screens/Chat').then((mod) => ({ default:
 const Meetings = React.lazy(() =>
   import('@/screens/Meetings').then((mod) => ({ default: mod.Meetings })),
 );
+const Privacy = React.lazy(() =>
+  import('@/screens/Privacy').then((mod) => ({ default: mod.Privacy })),
+);
 
 // Onboarding is a sizeable flow (~33KB source, ~6 step components)
 // that 99% of the time only runs once per install. Lazy-loading it keeps
@@ -184,6 +187,14 @@ function AppInner() {
         } finally {
           setMeetingsLoading(false);
         }
+      }
+      if (next === 'privacy') {
+        const [nextOverview, nextConfig] = await Promise.all([
+          window.cofounderos.getOverview(),
+          window.cofounderos.readConfig(),
+        ]);
+        setOverview(nextOverview);
+        setConfig(nextConfig);
       }
       if (next === 'settings') setConfig(await window.cofounderos.readConfig());
       setError(null);
@@ -399,6 +410,7 @@ function AppInner() {
       onBootstrap={actions.onBootstrap}
       onOpenMarkdownExport={actions.onOpenMarkdownExport}
       onGoTimeline={() => setScreen('timeline')}
+      onGoMeetings={() => setScreen('meetings')}
     />
   ) : screen === 'timeline' ? (
     <Timeline
@@ -414,6 +426,17 @@ function AppInner() {
       meetings={meetings}
       loading={meetingsLoading}
       onRefresh={() => loadScreen('meetings')}
+    />
+  ) : screen === 'privacy' ? (
+    <Privacy
+      config={config}
+      overview={overview}
+      onRefresh={() => loadScreen('privacy')}
+      onSaved={setConfig}
+      onOverview={setOverview}
+      onStart={actions.onStart}
+      onPause={actions.onPause}
+      onResume={actions.onResume}
     />
   ) : screen === 'search' ? (
     <Search days={days} searchRequest={searchRequest} />

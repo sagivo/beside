@@ -1,5 +1,16 @@
 import * as React from 'react';
-import { Clock, ImageOff, Search as SearchIcon, Sparkles, X } from 'lucide-react';
+import {
+  CalendarDays,
+  Clock,
+  ExternalLink,
+  Globe2,
+  ImageOff,
+  Layers3,
+  Mic,
+  Search as SearchIcon,
+  Sparkles,
+  X,
+} from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -13,10 +24,11 @@ import {
 } from '@/components/ui/select';
 import { PageHeader } from '@/components/PageHeader';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
-import { formatLocalDateTime } from '@/lib/format';
+import { formatLocalDateTime, prettyDay } from '@/lib/format';
 import { listItemProps, useListKeyboardNav } from '@/lib/list-keys';
 import { buildFrameSearchContext } from '@/lib/search-context';
 import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
+import { domainFromUrl, isHttpUrl } from '@/lib/url';
 import { cn } from '@/lib/utils';
 import type { Frame } from '@/global';
 
@@ -65,12 +77,15 @@ export function Search({
   const [query, setQuery] = React.useState('');
   const [appFilter, setAppFilter] = React.useState<string>('__all__');
   const [dayFilter, setDayFilter] = React.useState<string>('__all__');
+  const [domainFilter, setDomainFilter] = React.useState<string>('__all__');
+  const [textSourceFilter, setTextSourceFilter] = React.useState<string>('__all__');
   const [results, setResults] = React.useState<Frame[] | null>(null);
   const [activeSearchQuery, setActiveSearchQuery] = React.useState('');
   const [explanations, setExplanations] = React.useState<Record<string, string>>({});
   const [loading, setLoading] = React.useState(false);
   const [searched, setSearched] = React.useState(false);
   const [knownApps, setKnownApps] = React.useState<string[]>([]);
+  const [knownDomains, setKnownDomains] = React.useState<string[]>([]);
   const [recent, setRecent] = React.useState<string[]>(() => readRecent());
   const handledSearchRequestRef = React.useRef<number | null>(null);
   const searchRunRef = React.useRef(0);
@@ -90,6 +105,15 @@ export function Search({
         if (cancelled) return;
         setKnownApps(
           Array.from(new Set(frames.map((f) => f.app).filter(Boolean) as string[])).sort(),
+        );
+        setKnownDomains(
+          Array.from(
+            new Set(
+              frames
+                .map((f) => domainFromUrl(f.url))
+                .filter((v): v is string => Boolean(v)),
+            ),
+          ).sort(),
         );
       } catch {
         /* ignore */
@@ -122,6 +146,8 @@ export function Search({
         text: q,
         day: dayFilter !== '__all__' ? dayFilter : undefined,
         apps: appFilter !== '__all__' ? [appFilter] : undefined,
+        urlDomain: domainFilter !== '__all__' ? domainFilter : undefined,
+        textSource: textSourceFilter !== '__all__' ? textSourceFilter : undefined,
         limit: 80,
       });
       if (searchRunRef.current !== runId) return;
@@ -176,7 +202,7 @@ export function Search({
     } finally {
       if (searchRunRef.current === runId) setLoading(false);
     }
-  }, [appFilter, dayFilter, query]);
+  }, [appFilter, dayFilter, domainFilter, query, textSourceFilter]);
 
   React.useEffect(() => {
     if (!searchRequest || handledSearchRequestRef.current === searchRequest.id) return;
@@ -189,6 +215,17 @@ export function Search({
     writeRecent([]);
   }
 
+  const resultGroups = React.useMemo(
+    () => (results ? groupResultsByDay(results) : []),
+    [results],
+  );
+  const activeFilters = [
+    dayFilter !== '__all__' ? dayFilter : null,
+    appFilter !== '__all__' ? appFilter : null,
+    domainFilter !== '__all__' ? domainFilter : null,
+    textSourceFilter !== '__all__' ? textSourceLabel(textSourceFilter) : null,
+  ].filter((v): v is string => Boolean(v));
+
   return (
     <div className="flex flex-col gap-6 pt-6">
       <PageHeader
@@ -197,8 +234,9 @@ export function Search({
       />
 
       <Card>
-        <CardContent className="flex flex-wrap items-center gap-3">
-          <div className="relative flex-1 min-w-[280px]">
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative flex-1 min-w-[280px]">
             <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
             <Input
               autoFocus
@@ -210,8 +248,34 @@ export function Search({
               }}
               className="pl-9"
             />
+            </div>
+
+            <Button onClick={() => void runSearch()} disabled={loading || !query.trim()}>
+              <SearchIcon />
+              {loading ? 'Searching…' : 'Search'}
+            </Button>
+            {(results || query || activeFilters.length > 0) && (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  searchRunRef.current += 1;
+                  setQuery('');
+                  setResults(null);
+                  setActiveSearchQuery('');
+                  setExplanations({});
+                  setSearched(false);
+                  setAppFilter('__all__');
+                  setDayFilter('__all__');
+                  setDomainFilter('__all__');
+                  setTextSourceFilter('__all__');
+                }}
+              >
+                Clear
+              </Button>
+            )}
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
           <Select value={dayFilter} onValueChange={setDayFilter}>
             <SelectTrigger className="w-[160px]">
               <SelectValue placeholder="Any day" />
@@ -246,25 +310,45 @@ export function Search({
             </Select>
           )}
 
-          <Button onClick={() => void runSearch()} disabled={loading || !query.trim()}>
-            <SearchIcon />
-            {loading ? 'Searching…' : 'Search'}
-          </Button>
-          {(results || query) && (
-            <Button
-              variant="ghost"
-              onClick={() => {
-                searchRunRef.current += 1;
-                setQuery('');
-                setResults(null);
-                setActiveSearchQuery('');
-                setExplanations({});
-                setSearched(false);
-              }}
-            >
-              Clear
-            </Button>
+          {knownDomains.length > 0 && (
+            <Select value={domainFilter} onValueChange={setDomainFilter}>
+              <SelectTrigger className="w-[180px]">
+                <SelectValue placeholder="Any website" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">Any website</SelectItem>
+                {knownDomains.map((domain) => (
+                  <SelectItem key={domain} value={domain}>
+                    {domain}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
+
+          <Select value={textSourceFilter} onValueChange={setTextSourceFilter}>
+            <SelectTrigger className="w-[150px]">
+              <SelectValue placeholder="Any source" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">Any source</SelectItem>
+              <SelectItem value="ocr">Screen text</SelectItem>
+              <SelectItem value="accessibility">App text</SelectItem>
+              <SelectItem value="ocr_accessibility">Screen + app</SelectItem>
+              <SelectItem value="audio">Audio</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {activeFilters.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {activeFilters.map((filter) => (
+                <Badge key={filter} variant="muted">
+                  {filter}
+                </Badge>
+              ))}
+            </div>
+          )}
+          </div>
         </CardContent>
       </Card>
 
@@ -272,20 +356,40 @@ export function Search({
         <section>
           {results && results.length > 0 ? (
             <>
-              <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide mb-3">
-                {results.length} result{results.length === 1 ? '' : 's'}
-              </h3>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {results.map((frame, i) => (
-                  <ResultCard
-                    key={i}
-                    frame={frame}
-                    searchQuery={activeSearchQuery}
-                    explanation={frame.id ? explanations[frame.id] : undefined}
-                    onDeleted={(deleted) =>
-                      setResults((prev) => (prev ? prev.filter((f) => f.id !== deleted.id) : prev))
-                    }
-                  />
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
+                  {results.length} result{results.length === 1 ? '' : 's'}
+                </h3>
+                <span className="text-xs text-muted-foreground">
+                  Grouped by captured day
+                </span>
+              </div>
+              <div className="flex flex-col gap-5">
+                {resultGroups.map((group) => (
+                  <section key={group.day} className="flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      <CalendarDays className="size-3.5" />
+                      <span>{group.label}</span>
+                      <span className="font-normal normal-case tracking-normal">
+                        {group.frames.length} result{group.frames.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {group.frames.map((frame) => (
+                        <ResultCard
+                          key={frame.id ?? `${frame.timestamp}-${frame.app}-${frame.url}`}
+                          frame={frame}
+                          searchQuery={activeSearchQuery}
+                          explanation={frame.id ? explanations[frame.id] : undefined}
+                          onDeleted={(deleted) =>
+                            setResults((prev) =>
+                              prev ? prev.filter((f) => f.id !== deleted.id) : prev,
+                            )
+                          }
+                        />
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
             </>
@@ -408,6 +512,8 @@ function ResultCard({
   const [thumbUrl, setThumbUrl] = React.useState<string | null>(null);
   const detail = useFrameDetail();
   const context = explanation ?? buildFrameSearchContext(searchQuery, frame);
+  const domain = domainFromUrl(frame.url);
+  const source = textSourceLabel(frame.text_source);
   React.useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -433,8 +539,9 @@ function ResultCard({
   }, [frame.asset_path]);
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() =>
         detail.open(frame, {
           onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
@@ -446,6 +553,19 @@ function ResultCard({
             : undefined,
         })
       }
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        detail.open(frame, {
+          onDeleted: onDeleted ? (deleted) => onDeleted(deleted) : undefined,
+          searchContext: searchQuery
+            ? {
+                query: searchQuery,
+                explanation,
+              }
+            : undefined,
+        });
+      }}
       {...listItemProps}
       className="group rounded-xl border bg-card overflow-hidden text-left transition-all hover:border-primary/40 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
     >
@@ -469,6 +589,7 @@ function ResultCard({
             {formatLocalDateTime(frame.timestamp)}
           </span>
           <Badge variant="muted">{frame.app || 'Unknown app'}</Badge>
+          {source && <Badge variant="outline">{source}</Badge>}
         </div>
         <div className="text-sm line-clamp-2">
           {frame.window_title ||
@@ -483,7 +604,85 @@ function ResultCard({
             </span>
           </div>
         )}
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {domain && (
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <Globe2 className="size-3" />
+              <span className="truncate">{domain}</span>
+            </span>
+          )}
+          {frame.entity_path && (
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <Layers3 className="size-3" />
+              <span className="truncate">{frame.entity_path}</span>
+            </span>
+          )}
+          {frame.text_source === 'audio' && (
+            <span className="inline-flex items-center gap-1">
+              <Mic className="size-3" />
+              transcript
+            </span>
+          )}
+        </div>
+        {isHttpUrl(frame.url) && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                void window.cofounderos.openExternalUrl(frame.url!);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                event.stopPropagation();
+                void window.cofounderos.openExternalUrl(frame.url!);
+              }}
+              className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            >
+              <ExternalLink className="size-3" />
+              Open source
+            </button>
+          </div>
+        )}
       </div>
-    </button>
+    </div>
   );
+}
+
+function groupResultsByDay(frames: Frame[]): Array<{ day: string; label: string; frames: Frame[] }> {
+  const groups = new Map<string, Frame[]>();
+  for (const frame of frames) {
+    const day = frame.day || frame.timestamp?.slice(0, 10) || 'unknown';
+    const existing = groups.get(day) ?? [];
+    existing.push(frame);
+    groups.set(day, existing);
+  }
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => b.localeCompare(a))
+    .map(([day, groupFrames]) => ({
+      day,
+      label: dayLabel(day),
+      frames: groupFrames,
+    }));
+}
+
+function dayLabel(day: string): string {
+  if (day === 'unknown') return 'Unknown day';
+  return prettyDay(day);
+}
+
+function textSourceLabel(source?: string | null): string | null {
+  switch (source) {
+    case 'ocr':
+      return 'Screen text';
+    case 'accessibility':
+      return 'App text';
+    case 'ocr_accessibility':
+      return 'Screen + app';
+    case 'audio':
+      return 'Audio';
+    default:
+      return null;
+  }
 }

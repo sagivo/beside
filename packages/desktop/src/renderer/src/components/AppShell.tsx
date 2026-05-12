@@ -63,11 +63,12 @@ export function AppShell({
       '1': 'dashboard',
       '2': 'timeline',
       '3': 'meetings',
-      '4': 'search',
-      '5': 'chat',
-      '6': 'connect',
-      '7': 'settings',
-      '8': 'help',
+      '4': 'privacy',
+      '5': 'search',
+      '6': 'chat',
+      '7': 'connect',
+      '8': 'settings',
+      '9': 'help',
     };
 
     function onKey(e: KeyboardEvent) {

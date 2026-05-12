@@ -792,6 +792,24 @@ export class CofounderRuntime {
     return await this.withHandles((handles) => handles.storage.deleteFramesByDay(day));
   }
 
+  async deleteFrames(query: { app?: string; urlDomain?: string }): Promise<{
+    frames: number;
+    assetPaths: string[];
+  }> {
+    const app = typeof query.app === 'string' ? query.app.trim() : undefined;
+    const urlDomain =
+      typeof query.urlDomain === 'string' ? query.urlDomain.trim() : undefined;
+    if (!app && !urlDomain) {
+      throw new Error('deleteFrames requires app or urlDomain');
+    }
+    return await this.withHandles((handles) =>
+      handles.storage.deleteFrames({
+        ...(app ? { app } : {}),
+        ...(urlDomain ? { urlDomain } : {}),
+      }),
+    );
+  }
+
   async deleteAllMemory(): Promise<{
     frames: number;
     events: number;

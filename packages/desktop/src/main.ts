@@ -1496,11 +1496,22 @@ function registerRuntimeIpc(): void {
     clipboard.writeText(text);
     return { copied: true };
   });
+  ipcMain.handle('cofounderos:open-external-url', async (_event, url: string) => {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('Only http(s) URLs can be opened.');
+    }
+    await shell.openExternal(parsed.toString());
+    return { opened: parsed.toString() };
+  });
   ipcMain.handle('cofounderos:delete-frame', async (_event, frameId: string) => {
     return await (await getRuntimeForRequest()).call('deleteFrame', frameId);
   });
   ipcMain.handle('cofounderos:delete-frames-by-day', async (_event, day: string) => {
     return await (await getRuntimeForRequest()).call('deleteFramesByDay', day);
+  });
+  ipcMain.handle('cofounderos:delete-frames', async (_event, query: unknown) => {
+    return await (await getRuntimeForRequest()).call('deleteFrames', query);
   });
   ipcMain.handle('cofounderos:delete-all-memory', async () => {
     return await (await getRuntimeForRequest()).call('deleteAllMemory');

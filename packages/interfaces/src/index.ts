@@ -225,6 +225,13 @@ export interface FrameQuery {
   offset?: number;
 }
 
+export interface FrameDeleteQuery {
+  /** Delete frames captured in this foreground app name. */
+  app?: string;
+  /** Delete frames captured from this exact host or any subdomain. */
+  urlDomain?: string;
+}
+
 export interface FrameEmbeddingTask {
   id: string;
   /**
@@ -1221,6 +1228,13 @@ export interface IStorage {
    * UI feedback.
    */
   deleteFramesByDay(day: string): Promise<{ frames: number; assetPaths: string[] }>;
+
+  /**
+   * Permanently delete every frame matching a privacy scope, along with
+   * raw events, derived search/memory rows, meetings, and assets tied to
+   * those frames. At least one filter must be present.
+   */
+  deleteFrames(query: FrameDeleteQuery): Promise<{ frames: number; assetPaths: string[] }>;
 
   /**
    * Wipe ALL memory — every frame, event, session, entity, embedding,

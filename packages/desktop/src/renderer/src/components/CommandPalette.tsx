@@ -12,6 +12,7 @@ import {
   RefreshCcw,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Video,
   Wand2,
@@ -92,6 +93,9 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('meetings'))}>
             <Video /> Agenda
+          </CommandItem>
+          <CommandItem onSelect={() => run(() => onJump('privacy'))}>
+            <ShieldCheck /> Privacy
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search

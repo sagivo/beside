@@ -280,6 +280,18 @@ async function handle(req: Request): Promise<unknown> {
       void pushOverview('full');
       return result;
     }
+    case 'deleteFrames': {
+      const params =
+        req.params && typeof req.params === 'object'
+          ? (req.params as { app?: unknown; urlDomain?: unknown })
+          : {};
+      const result = await runtime.deleteFrames({
+        app: typeof params.app === 'string' ? params.app : undefined,
+        urlDomain: typeof params.urlDomain === 'string' ? params.urlDomain : undefined,
+      });
+      void pushOverview('full');
+      return result;
+    }
     case 'deleteAllMemory': {
       const result = await runtime.deleteAllMemory();
       void pushOverview('full');

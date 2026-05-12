@@ -49,6 +49,16 @@ export function localDayKey(d: Date = new Date()): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+export function dayKeyToDate(day: string): Date {
+  return new Date(`${day}T12:00:00`);
+}
+
+export function shiftDay(day: string, deltaDays: number): string {
+  const d = dayKeyToDate(day);
+  d.setDate(d.getDate() + deltaDays);
+  return localDayKey(d);
+}
+
 export function prettyDay(day: string): string {
   const today = localDayKey();
   const yesterday = localDayKey(new Date(Date.now() - 86400000));
