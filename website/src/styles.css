@@ -243,30 +243,14 @@ p {
 }
 .brand:hover { color: var(--ink); }
 .brand-mark {
-  position: relative;
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent) 0%, var(--lavender) 100%);
-  box-shadow: 0 8px 20px -8px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.5);
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-}
-.brand-mark::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.55), transparent 60%);
-}
-.brand-mark::after {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.9);
-  animation: pulse-soft 4.2s ease-in-out infinite;
+  display: block;
+  object-fit: contain;
+  padding: 2px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 8px 20px -8px var(--accent-glow);
 }
 @keyframes pulse-soft {
   0%, 100% { opacity: 0.55; transform: scale(0.9); }
@@ -2632,7 +2616,6 @@ footer {
 
 @media (prefers-reduced-motion: reduce) {
   .aurora,
-  .brand-mark::after,
   .eyebrow .dot,
   .eyebrow .ai-mark,
   .hero-status .live-dot::after,

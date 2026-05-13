@@ -34,7 +34,7 @@ function meetingMetadataHaystack(f: Frame): string { return [f.app, f.window_tit
 
 const TITLE_STRIP_RE = [ /\s*[-|–—]\s*(zoom\s*meeting|zoom|google\s*meet|meet|microsoft\s*teams|teams|webex|whereby|around)\s*$/i, /^(zoom\s*meeting|zoom|google\s*meet|meet|microsoft\s*teams|teams|webex|whereby|around)\s*[-|–—]\s*/i, /\s*[-|–—]\s*(video\s*call|audio\s*call|screen\s*share)\s*$/i ];
 const GENERIC_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s*meet|meet|microsoft\s*teams|teams|webex|whereby|around|video\s*call|audio\s*call|meeting|untitled\s*meeting|you have ended the meeting|google chrome|chrome|profile)$/i;
-const TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
+const TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|you \(your chrome\)|profile)$/i;
 
 function extractTopicFromTitle(raw: string): string | null {
   let s = raw.replace(/\s+/g, ' ').trim();

@@ -10,7 +10,7 @@ export default function App() {
       <header className="nav">
         <div className="container nav-inner">
           <a href="/" className="brand" aria-label="Beside home">
-            <span className="brand-mark" aria-hidden />
+            <img className="brand-mark" src="/images/logo.png" alt="" aria-hidden="true" />
             <span>Beside</span>
           </a>
           <nav className="nav-links" aria-label="Primary">

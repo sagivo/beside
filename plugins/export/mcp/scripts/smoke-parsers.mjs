@@ -150,7 +150,7 @@ const slackFrame = frame({
   text: [
     '#sdk-warn-alerts-prod',
     'Maya 9:01 AM',
-    'Hey @sagiv any thoughts on the new alert routing?',
+    'Hey @alex any thoughts on the new alert routing?',
     '3 replies',
   ].join('\n'),
 });
@@ -168,15 +168,15 @@ expect(
 expect(
   'extractChat: mentions',
   chatSnippet?.mentions,
-  (v) => Array.isArray(v) && v.includes('@sagiv'),
+  (v) => Array.isArray(v) && v.includes('@alex'),
 );
 
 // 5. extractReviewItemFromFrame
 const prFrame = frame({
   app: 'Chrome',
   url: 'https://github.com/beside/core/pull/123',
-  window_title: 'Add daily summary endpoint by sagiv · Pull Request #123 · beside/core',
-  text: 'Open · sagiv wants to merge 3 commits into main from feature/daily-summary',
+  window_title: 'Add daily summary endpoint by Alex · Pull Request #123 · beside/core',
+  text: 'Open · Alex wants to merge 3 commits into main from feature/daily-summary',
 });
 const prItem = extractReviewItemFromFrame(prFrame);
 expect(

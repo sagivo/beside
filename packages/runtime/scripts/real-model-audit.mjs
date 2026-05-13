@@ -90,7 +90,7 @@ const FRAMES = [
     window_title: 'Slack — #sdk-warn-alerts-prod',
     entity_path: 'channels/sdk-warn-alerts-prod',
     entity_kind: 'channel',
-    text: '#sdk-warn-alerts-prod\nMaya 9:01 AM\nHey @sagiv any thoughts on the new alert routing? reply needed\n3 replies',
+    text: '#sdk-warn-alerts-prod\nMaya 9:01 AM\nHey @alex any thoughts on the new alert routing? reply needed\n3 replies',
   }),
   frame({
     id: 'f_slack_tanya',
@@ -100,7 +100,7 @@ const FRAMES = [
     window_title: 'Slack — Tanya Reyes (DM)',
     entity_path: 'contacts/tanya-reyes',
     entity_kind: 'contact',
-    text: 'Tanya Reyes 11:10 AM\nI will push the migration script EOW. Doing today: review your draft. Not blocking.\nsagiv 11:11 AM\nsounds good, ping me when ready',
+    text: 'Tanya Reyes 11:10 AM\nI will push the migration script EOW. Doing today: review your draft. Not blocking.\nAlex 11:11 AM\nsounds good, ping me when ready',
   }),
   frame({
     id: 'f_pr_1',
@@ -108,7 +108,7 @@ const FRAMES = [
     app: 'Chrome',
     url: 'https://github.com/beside/core/pull/123',
     window_title: 'Pull Request #123 · beside/core — Review requested',
-    text: 'Review requested · sagiv wants to merge 3 commits into main. @you',
+    text: 'Review requested · Alex wants to merge 3 commits into main. @you',
   }),
   frame({
     id: 'f_paris_1',

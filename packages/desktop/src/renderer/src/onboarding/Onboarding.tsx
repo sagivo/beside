@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowLeft, ArrowRight, Brain, Check, CheckCircle2, Cpu, Eye, ExternalLink, Keyboard, Layers, Loader2, Lock, Mic, Monitor, RefreshCw, Rocket, Search, Shield, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, CheckCircle2, Cpu, Eye, ExternalLink, Keyboard, Layers, Loader2, Lock, Mic, Monitor, RefreshCw, Rocket, Search, Shield, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { BrandMark } from '@/components/BrandMark';
@@ -96,7 +96,7 @@ function WelcomeStep({ onContinue }: any) {
     <Card className="relative overflow-hidden border-primary/15 py-0">
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-ambient opacity-90" />
       <CardContent className="relative p-0"><div className="flex flex-col items-center px-6 pb-10 pt-14 text-center sm:px-12 sm:pt-20 sm:pb-14">
-        <div className="relative grid place-items-center"><div className="absolute size-40 rounded-full bg-primary/25 blur-3xl" /><div className="relative flex size-20 items-center justify-center rounded-2xl border border-primary/30 bg-gradient-brand text-primary-foreground shadow-glow"><Brain className="size-10" /></div></div>
+        <div className="relative grid place-items-center"><div className="absolute size-40 rounded-full bg-primary/25 blur-3xl" /><BrandMark className="size-20 rounded-2xl shadow-glow" /></div>
         <Badge variant="outline" className="mt-7 gap-1.5 border-primary/30 bg-primary/10 px-3 py-1 text-[11px] font-medium uppercase text-primary"><Sparkles className="size-3" />Private memory</Badge>
         <h1 className="mt-5 max-w-3xl text-balance text-4xl font-semibold sm:text-6xl">Your work, <span className="text-gradient-brand">perfectly remembered.</span></h1>
         <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">An ambient second brain that sits quietly beside you — capturing what you do, so you can focus on doing it. Local, encrypted, and private.</p>

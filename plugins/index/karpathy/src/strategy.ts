@@ -1165,7 +1165,7 @@ function cleanMeetingTitle(title: string): string {
 }
 
 function isMeetingTitleNoiseSegment(segment: string): boolean {
-  return /^(camera and microphone recording|microphone recording|audio playing|screen share|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i.test(segment);
+  return /^(camera and microphone recording|microphone recording|audio playing|screen share|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|you \(your chrome\)|profile)$/i.test(segment);
 }
 
 function firstMarkdownParagraph(markdown: string | null): string | null {

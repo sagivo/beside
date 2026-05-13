@@ -133,7 +133,7 @@ function scoreOpenLoopFrame(frame: Frame): number {
 function looksLikeUserRepliedLast(rawText: string): boolean {
   for (const line of rawText.toLowerCase().split(/\n+/).map((l) => l.trim()).filter(Boolean).reverse()) {
     const m = line.match(/^([a-z][a-z0-9._-]{1,30})\s+\d{1,2}:\d{2}\s?(am|pm)?$/);
-    if (m && ['sagiv', 'me', 'you'].includes(m[1]!)) return true;
+    if (m && ['alex', 'me', 'you'].includes(m[1]!)) return true;
   }
   return false;
 }

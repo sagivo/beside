@@ -98,7 +98,7 @@ const FRAMES = [
     text: [
       '#sdk-warn-alerts-prod',
       'Maya 9:01 AM',
-      'Hey @sagiv any thoughts on the new alert routing? reply needed',
+      'Hey @alex any thoughts on the new alert routing? reply needed',
       '3 replies',
     ].join('\n'),
   }),
@@ -114,7 +114,7 @@ const FRAMES = [
     text: [
       'Tanya Reyes 11:10 AM',
       'I will push the migration script EOW. Doing today: review your draft. Not blocking.',
-      'sagiv 11:11 AM',
+      'Alex 11:11 AM',
       'sounds good, ping me when ready',
     ].join('\n'),
   }),
@@ -125,7 +125,7 @@ const FRAMES = [
     app: 'Chrome',
     url: 'https://github.com/beside/core/pull/123',
     window_title: 'Pull Request #123 · beside/core — Review requested',
-    text: 'Review requested · sagiv wants to merge 3 commits into main. @you',
+    text: 'Review requested · Alex wants to merge 3 commits into main. @you',
   }),
   // Recall_event target
   frame({

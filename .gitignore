@@ -16,8 +16,18 @@ coverage/
 # Logs
 *.log
 
-# Local data dirs (devs may set COFOUNDEROS_DATA_DIR somewhere inside the repo)
-.cofounderOS/
+# Local editor/agent state
+.claude/
+.cursor/
+
+# Local capture/export dumps
+*capture*.txt
+*captures*.txt
+*ocr*.txt
+*-ocr.txt
+
+# Local data dirs (devs may set BESIDE_DATA_DIR somewhere inside the repo)
+.beside/
 data/
 
 # OS-specific cruft

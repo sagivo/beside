@@ -163,8 +163,8 @@ function isLowInformationSummary(candidate: MeetingSummaryJson, fallback: Meetin
 }
 
 export function renderSummaryMarkdown(m: Meeting, s: MeetingSummaryJson, turns: MeetingTurn[], screens: Frame[]): string {
-  const l = ['## Summary'];
-  if (s.tldr) l.push(s.tldr, '');
+  const l = [`# ${s.title || humanTitle(m)}`, '', `_Meeting: \`${m.entity_path}\`_`, '', '## Summary'];
+  if (s.tldr) l.push(`**TL;DR.** ${s.tldr}`, '');
   else l.push(`${Math.round(m.duration_ms / 60000)}-min ${labelPlatform(m.platform)} meeting.`, '');
 
   const momentsByHeading = matchMomentsToAgenda(s.agenda, s.key_moments);

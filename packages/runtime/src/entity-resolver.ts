@@ -104,7 +104,7 @@ function deriveProjectName(t: string, a: string, it: boolean): string | null {
   return null;
 }
 
-const MEETING_TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|sagiv \(your chrome\)|profile)$/i;
+const MEETING_TITLE_NOISE_SEGMENT_RE = /^(camera and microphone recording|microphone recording|audio playing|screen share|presenting|high memory usage\b.*|\d+(?:\.\d+)?\s*(?:kb|mb|gb)|google chrome|chrome|you \(your chrome\)|profile)$/i;
 const GENERIC_MEETING_TITLE_RE = /^(zoom(\s+(meeting|workplace|us))?(\s+40\s+minutes)?|google\s+meet|meet|microsoft\s+teams|teams|webex|whereby|around|you have ended the meeting|camera and microphone recording|microphone recording|audio playing|google chrome|chrome|profile)$/i;
 
 function cleanMeetingEntityTitle(r: string, f: Frame, fb?: string): string {

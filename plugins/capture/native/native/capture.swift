@@ -180,7 +180,7 @@ func runFixture(config: HelperConfig) {
     "session_id": sessionId,
     "type": "screenshot",
     "app": "Native Fixture",
-    "app_bundle_id": "os.cofounder.capture.native.fixture",
+    "app_bundle_id": "so.beside.capture.native.fixture",
     "window_title": "Native capture fixture",
     "url": NSNull(),
     "content": NSNull(),
@@ -269,8 +269,8 @@ func runMacCapture(config: HelperConfig) {
   emitEvent(
     type: "app_launch",
     sessionId: sessionId,
-    app: "CofounderOS",
-    bundleId: "os.cofounder.capture.native",
+    app: "Beside",
+    bundleId: "so.beside.capture.native",
     title: "capture-native started",
     url: nil,
     content: nil,
@@ -1055,7 +1055,7 @@ func captureScreenshot(display: DisplayInfo, appName: String, config: HelperConf
   // when multi_screen is on), capping the steady-state RSS instead of
   // letting it grow with uptime.
   return autoreleasepool {
-    let root = NSString(string: config.raw_root ?? NSHomeDirectory() + "/.cofounderOS").expandingTildeInPath
+    let root = NSString(string: config.raw_root ?? NSHomeDirectory() + "/.beside").expandingTildeInPath
     let now = Date()
     let day = dayString(now)
     let time = timeString(now)
@@ -1364,7 +1364,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     self.enabled = (config.capture_audio == true) && (live?.enabled == true)
     self.activation = live?.activation ?? "other_process_input"
     self.inboxPath = NSString(
-      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+      string: config.audio?.inbox_path ?? "~/.beside/raw/audio/inbox"
     ).expandingTildeInPath
     self.partialPath = (self.inboxPath as NSString).appendingPathComponent(".partial")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
@@ -1806,7 +1806,7 @@ final class CoreAudioSystemAudioChunker {
     self.enabled = (config.capture_audio == true) && (live?.enabled == true)
     self.activation = live?.activation ?? "other_process_input"
     self.inboxPath = NSString(
-      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+      string: config.audio?.inbox_path ?? "~/.beside/raw/audio/inbox"
     ).expandingTildeInPath
     self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-coreaudio")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
@@ -1951,7 +1951,7 @@ final class CoreAudioSystemAudioChunker {
     let outputUID = try readDeviceUID(outputDevice)
     let aggregateUID = UUID().uuidString
     let aggregateDescription: [String: Any] = [
-      kAudioAggregateDeviceNameKey: "CofounderOS Core Audio Tap",
+      kAudioAggregateDeviceNameKey: "Beside Core Audio Tap",
       kAudioAggregateDeviceUIDKey: aggregateUID,
       kAudioAggregateDeviceMainSubDeviceKey: outputUID,
       kAudioAggregateDeviceIsPrivateKey: true,
@@ -2121,7 +2121,7 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
     self.enabled = (config.capture_audio == true) && (live?.enabled == true)
     self.activation = live?.activation ?? "other_process_input"
     self.inboxPath = NSString(
-      string: config.audio?.inbox_path ?? "~/.cofounderOS/raw/audio/inbox"
+      string: config.audio?.inbox_path ?? "~/.beside/raw/audio/inbox"
     ).expandingTildeInPath
     self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-sys")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))

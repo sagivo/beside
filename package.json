@@ -4,6 +4,15 @@
   "private": true,
   "description": "AI-powered device capture, knowledge indexing, and agent memory system.",
   "license": "MIT",
+  "author": "Beside",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sagivo/beside.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sagivo/beside/issues"
+  },
+  "homepage": "https://github.com/sagivo/beside#readme",
   "packageManager": "pnpm@10.30.0",
   "engines": {
     "node": ">=20"

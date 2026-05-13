@@ -50,6 +50,11 @@ function eventBelongsBeforeNowIndicator(e: DayEvent, nowMs: number): boolean {
   return Number.isFinite(s) && s <= nowMs;
 }
 
+function eventStartsAfterNow(e: DayEvent, nowMs: number): boolean {
+  const s = Date.parse(e.starts_at);
+  return Number.isFinite(s) && s > nowMs;
+}
+
 function nowIndicatorIndex(es: DayEvent[], now: Date): number { const idx = es.findIndex(e => !eventBelongsBeforeNowIndicator(e, now.getTime())); return idx === -1 ? es.length : idx; }
 
 function dedupeEvents(es: DayEvent[]): DayEvent[] {
@@ -252,7 +257,7 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
   if (!events.length) return null;
   const nMs = now.getTime();
   const upc = selectedDay === today
-    ? events.find((e: DayEvent) => { const s = Date.parse(e.starts_at), en = e.ends_at ? Date.parse(e.ends_at) : s; return Number.isFinite(s) && Math.max(s, en) >= nMs; }) ?? null
+    ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
     : events[0];
   const mtgs = events.map((e: DayEvent) => e.meeting_id ? meetingsById.get(e.meeting_id) ?? null : null).filter(Boolean);
   const sigs = collectMeetingSummarySignals(mtgs);

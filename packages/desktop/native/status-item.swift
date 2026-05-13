@@ -9,11 +9,11 @@ private enum CaptureState: String {
   var statusTitle: String {
     switch self {
     case .capturing:
-      return "CofounderOS - capturing"
+      return "Beside - capturing"
     case .paused:
-      return "CofounderOS - capture paused"
+      return "Beside - capture paused"
     case .stopped:
-      return "CofounderOS - stopped"
+      return "Beside - stopped"
     }
   }
 }

@@ -4,7 +4,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 
 const root = path.resolve(import.meta.dirname, '..');
-const src = path.join(root, 'assets', 'icon.svg');
+const src = path.join(root, 'assets', 'icon.png');
 const buildDir = path.join(root, 'build');
 const iconPng = path.join(buildDir, 'icon.png');
 const iconset = path.join(buildDir, 'icon.iconset');

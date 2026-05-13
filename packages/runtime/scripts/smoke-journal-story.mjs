@@ -24,7 +24,7 @@ const frames = [
     app: 'Slack',
     window_title: 'adam.perea-kane (DM) - Postman - Slack',
     entity_path: 'contacts/adam-perea-kane',
-    text: 'sagiv.ofek 11:01 AM can you post today the status of the feature parity work? feature matrix and status of each sdk adam.perea-kane 11:01 AM yup, will do',
+    text: 'maya.chen 11:01 AM can you post today the status of the feature parity work? feature matrix and status of each sdk adam.perea-kane 11:01 AM yup, will do',
   }),
   frame({
     id: 'frm_news_1',
