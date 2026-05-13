@@ -1,0 +1,8 @@
+{
+  "name": "calendar",
+  "version": "0.1.0",
+  "layer": "hook",
+  "interface": "IHookPlugin",
+  "entrypoint": "dist/index.js",
+  "description": "Extract calendar events from captured Apple Calendar, Google Calendar, Outlook, and iCloud Calendar screenshots."
+}

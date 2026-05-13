@@ -26,6 +26,7 @@ const api = {
   setStartAtLogin: (enabled) => ipcRenderer.invoke('beside:set-start-at-login', enabled),
   openPath: (target) => ipcRenderer.invoke('beside:open-path', target),
   copyText: (text) => ipcRenderer.invoke('beside:copy-text', text),
+  openAssetPath: (assetPath) => ipcRenderer.invoke('beside:open-asset-path', assetPath),
   deleteFrame: (frameId) => ipcRenderer.invoke('beside:delete-frame', frameId),
   deleteAllMemory: () => ipcRenderer.invoke('beside:delete-all-memory'),
   probeWhisper: () => ipcRenderer.invoke('beside:probe-whisper'),
@@ -59,6 +60,15 @@ const api = {
   listDayEvents: (query) => ipcRenderer.invoke('beside:list-day-events', query),
   getActionCenter: (query) => ipcRenderer.invoke('beside:get-action-center', query),
   triggerEventExtractor: () => ipcRenderer.invoke('beside:trigger-event-extractor'),
+  listCaptureHookDefinitions: () => ipcRenderer.invoke('beside:list-capture-hook-definitions'),
+  listCaptureHookWidgetManifests: () => ipcRenderer.invoke('beside:list-capture-hook-widget-manifests'),
+  getCaptureHookDiagnostics: () => ipcRenderer.invoke('beside:get-capture-hook-diagnostics'),
+  queryCaptureHookStorage: (params) => ipcRenderer.invoke('beside:query-capture-hook-storage', params),
+  mutateCaptureHookStorage: (params) => ipcRenderer.invoke('beside:mutate-capture-hook-storage', params),
+  readCaptureHookWidgetBundle: (params) => ipcRenderer.invoke('beside:read-capture-hook-widget-bundle', params),
+  onCaptureHookUpdate: (callback) => {
+    ipcRenderer.on('beside:capture-hook-update', (_event, payload) => callback(payload));
+  },
 };
 
 contextBridge.exposeInMainWorld('beside', api);

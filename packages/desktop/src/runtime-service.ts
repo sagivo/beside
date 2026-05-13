@@ -149,6 +149,13 @@ async function handle(req: Request): Promise<unknown> {
   switch (req.method) {
     case 'start': {
       await runtime.start({ bootstrap: false });
+      try {
+        runtime.onCaptureHookUpdate((hookId) => {
+          sendEvent('capture-hook-update', { hookId });
+        });
+      } catch {
+        // Hook engine may not be available in all configurations.
+      }
       const ov = await runtime.getOverview();
       sendOverview(ov);
       return ov;
@@ -260,6 +267,45 @@ async function handle(req: Request): Promise<unknown> {
       );
     case 'triggerEventExtractor':
       return await runtime.triggerEventExtractor();
+    case 'listCaptureHookDefinitions':
+      return await runtime.listCaptureHookDefinitions();
+    case 'listCaptureHookWidgetManifests':
+      return await runtime.listCaptureHookWidgetManifests();
+    case 'getCaptureHookDiagnostics':
+      return await runtime.getCaptureHookDiagnostics();
+    case 'queryCaptureHookStorage': {
+      const params = (req.params ?? {}) as { hookId?: string; query?: unknown };
+      if (!params.hookId) throw new Error('hookId required');
+      return await runtime.queryCaptureHookStorage(
+        params.hookId,
+        (params.query as Record<string, unknown>) ?? {},
+      );
+    }
+    case 'mutateCaptureHookStorage': {
+      const params = (req.params ?? {}) as {
+        hookId?: string;
+        mutation?: {
+          collection?: string;
+          id?: string;
+          data?: unknown;
+          evidenceEventIds?: string[];
+          contentHash?: string | null;
+        };
+      };
+      const mutation = params.mutation;
+      if (!params.hookId || !mutation?.collection || !mutation.id) {
+        throw new Error('hookId, mutation.collection, mutation.id required');
+      }
+      const result = await runtime.mutateCaptureHookStorage(params.hookId, {
+        collection: mutation.collection,
+        id: mutation.id,
+        data: mutation.data ?? null,
+        evidenceEventIds: mutation.evidenceEventIds,
+        contentHash: mutation.contentHash ?? null,
+      });
+      sendEvent('capture-hook-update', { hookId: params.hookId });
+      return result;
+    }
     case 'searchFrames':
       return await runtime.searchFrames(req.params as never);
     case 'explainSearchResults':

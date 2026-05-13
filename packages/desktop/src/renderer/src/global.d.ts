@@ -32,6 +32,8 @@ declare global {
       openPath: (target: OpenPathTarget) => Promise<{ opened: string }>;
       copyText: (text: string) => Promise<{ copied: true }>;
       openExternalUrl: (url: string) => Promise<{ opened: string }>;
+      /** Opens a capture file (relative to storage root) in the default system app, e.g. Preview. */
+      openAssetPath: (assetPath: string) => Promise<{ opened: string }>;
       deleteFrame: (frameId: string) => Promise<{ assetPath: string | null }>;
       deleteFrames: (query: {
         app?: string;
@@ -71,6 +73,13 @@ declare global {
         limit?: number;
       }) => Promise<DayEvent[]>;
       getActionCenter: (query?: { day?: string }) => Promise<RuntimeActionCenter>;
+      listCaptureHookDefinitions: () => Promise<CaptureHookDefinition[]>;
+      listCaptureHookWidgetManifests: () => Promise<CaptureHookWidgetManifestRuntime[]>;
+      getCaptureHookDiagnostics: () => Promise<CaptureHookDiagnostics[]>;
+      queryCaptureHookStorage: (params: { hookId: string; query?: CaptureHookStorageQuery }) => Promise<CaptureHookRecord[]>;
+      mutateCaptureHookStorage: (params: { hookId: string; mutation: CaptureHookStorageMutation }) => Promise<CaptureHookRecord | null>;
+      readCaptureHookWidgetBundle: (params: { resolvedBundlePath: string }) => Promise<{ source: string }>;
+      onCaptureHookUpdate?: (callback: (payload: { hookId: string }) => void) => void;
       triggerEventExtractor: () => Promise<{
         meetingsLifted: number;
         llmExtracted: number;
@@ -442,6 +451,15 @@ export interface BesideConfig {
       max_consecutive_skips: number;
     };
   };
+  hooks?: {
+    enabled?: boolean;
+    plugins?: Array<{ name: string; enabled?: boolean; [key: string]: unknown }>;
+    definitions?: CaptureHookDefinition[];
+    throttle_ms_default?: number;
+    max_image_bytes?: number;
+    max_prompt_chars?: number;
+    max_records_per_hook?: number;
+  };
 }
 
 export interface JournalDay {
@@ -608,4 +626,99 @@ export interface RuntimeActionCenter {
     at?: string;
   }>;
   signature: string;
+}
+
+// ---------------------------------------------------------------------------
+// Capture hook widgets
+// ---------------------------------------------------------------------------
+
+export type CaptureHookInputKind = 'screen' | 'audio';
+
+export interface CaptureHookMatcher {
+  inputKinds?: CaptureHookInputKind[];
+  apps?: string[];
+  appBundleIds?: string[];
+  windowTitles?: string[];
+  urlHosts?: string[];
+  urlPatterns?: string[];
+  textIncludes?: string[];
+}
+
+export interface CaptureHookWidgetManifest {
+  id: string;
+  title: string;
+  bundlePath?: string;
+  builtin?: 'calendar' | 'followups' | 'list' | 'json';
+  defaultCollection?: string;
+  placement?: 'dashboard-main' | 'dashboard-aside';
+  description?: string;
+}
+
+export interface CaptureHookDefinition {
+  id: string;
+  title: string;
+  description?: string;
+  match: CaptureHookMatcher;
+  throttleMs?: number;
+  needsVision?: boolean;
+  promptTemplate?: string;
+  systemPrompt?: string;
+  outputCollection?: string;
+  widget?: CaptureHookWidgetManifest;
+}
+
+export interface CaptureHookWidgetManifestRuntime {
+  hookId: string;
+  pluginName: string | null;
+  widget: CaptureHookWidgetManifest;
+  resolvedBundlePath: string | null;
+}
+
+export interface CaptureHookRecord<T = unknown> {
+  hookId: string;
+  collection: string;
+  id: string;
+  data: T;
+  evidenceEventIds: string[];
+  contentHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CaptureHookStorageQuery {
+  collection?: string;
+  id?: string;
+  evidenceEventId?: string;
+  updatedAfter?: string;
+  limit?: number;
+  offset?: number;
+  order?: 'recent' | 'chronological';
+}
+
+export interface CaptureHookDiagnostics {
+  hookId: string;
+  pluginName: string;
+  hasHandler: boolean;
+  matched: number;
+  throttled: number;
+  ran: number;
+  stored: number;
+  failed: number;
+  skipped: number;
+  lastMatchedAt: string | null;
+  lastStoredAt: string | null;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  lastSkipReason: string | null;
+  lastSkipAt: string | null;
+  enabled: boolean;
+}
+
+export interface CaptureHookStorageMutation {
+  collection: string;
+  id: string;
+  /** Pass null to delete. */
+  data: unknown;
+  evidenceEventIds?: string[];
+  contentHash?: string | null;
 }

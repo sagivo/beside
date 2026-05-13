@@ -64,6 +64,7 @@ class RuntimeServiceClient {
     this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow(); });
     this.on('bootstrap-progress', (p) => statusWindow?.webContents.send('beside:bootstrap-progress', p));
     this.on('overview', (p) => { lastOverview = p; applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); statusWindow?.webContents.send('beside:overview', p); });
+    this.on('capture-hook-update', (p) => statusWindow?.webContents.send('beside:capture-hook-update', p));
     readline.createInterface({ input: this.child.stdout!, crlfDelay: Infinity }).on('line', (line) => this.handleLine(line));
   }
 
@@ -306,7 +307,7 @@ async function showStatusWindow(opts: { focus?: 'doctor' } = {}) {
     statusWindow.on('closed', () => { statusWindow = null; enterMacAccessoryMode(); setRuntimeHeartbeat('idle'); });
     ['show', 'restore', 'focus'].forEach((e) => statusWindow!.on(e as any, () => setRuntimeHeartbeat('active')));
     ['hide', 'minimize'].forEach((e) => statusWindow!.on(e as any, () => setRuntimeHeartbeat('idle')));
-    statusWindow.webContents.on('console-message', (e, level, m) => appendLog(`[renderer:${level}] ${m}`));
+    statusWindow.webContents.on('console-message', ({ level, message }) => appendLog(`[renderer:${level}] ${message}`));
     statusWindow.webContents.setWindowOpenHandler(({ url }) => { openExternalHttpUrl(url).catch(e => appendLog(`Nav block: ${e}`)); return { action: 'deny' }; });
     statusWindow.webContents.on('will-navigate', (e, url) => { if (!isStatusWindowNavigation(url)) { e.preventDefault(); openExternalHttpUrl(url).catch(e => appendLog(`Nav block: ${e}`)); } });
   }
@@ -446,6 +447,12 @@ function registerRuntimeIpc() {
   h('beside:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
   h('beside:get-action-center', async (e, q) => (await getRuntimeForRequest()).call('getActionCenter', q));
   h('beside:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));
+  h('beside:list-capture-hook-definitions', async () => (await getRuntimeForRequest()).call('listCaptureHookDefinitions'));
+  h('beside:list-capture-hook-widget-manifests', async () => (await getRuntimeForRequest()).call('listCaptureHookWidgetManifests'));
+  h('beside:get-capture-hook-diagnostics', async () => (await getRuntimeForRequest()).call('getCaptureHookDiagnostics'));
+  h('beside:query-capture-hook-storage', async (e, params) => (await getRuntimeForRequest()).call('queryCaptureHookStorage', params));
+  h('beside:mutate-capture-hook-storage', async (e, params) => (await getRuntimeForRequest()).call('mutateCaptureHookStorage', params));
+  h('beside:read-capture-hook-widget-bundle', async (e, params: any) => readCaptureHookWidgetBundle(params));
   h('beside:search-frames', async (e, q) => (await getRuntimeForRequest()).call('searchFrames', q));
   h('beside:explain-search-results', async (e, q) => (await getRuntimeForRequest()).call('explainSearchResults', q));
   h('beside:get-frame-index-details', async (e, f) => (await getRuntimeForRequest()).call('getFrameIndexDetails', f));
@@ -463,6 +470,12 @@ function registerRuntimeIpc() {
   h('beside:get-start-at-login', () => app.getLoginItemSettings().openAtLogin);
   h('beside:set-start-at-login', (e, en) => { app.setLoginItemSettings({ openAtLogin: en, openAsHidden: true }); return en; });
   h('beside:open-path', async (e, t: any) => { const p = t === 'config' ? configPath : t === 'data' ? dataDir : await getMarkdownExportDir(); const err = await shell.openPath(p); if (err) throw new Error(err); return { opened: p }; });
+  h('beside:open-asset-path', async (e, rel: string) => {
+    const abs = await resolveAssetPath(rel);
+    const err = await shell.openPath(abs);
+    if (err) throw new Error(err);
+    return { opened: abs };
+  });
   h('beside:copy-text', (e, t) => { clipboard.writeText(t); return { copied: true }; });
   h('beside:open-external-url', async (e, u) => ({ opened: await openExternalHttpUrl(u) }));
   h('beside:delete-frame', async (e, id) => (await getRuntimeForRequest()).call('deleteFrame', id));
@@ -483,6 +496,14 @@ function registerRuntimeIpc() {
 }
 
 async function getOverviewForRequest() { try { return await (await getRuntimeForRequest()).call<any>('overview'); } catch (err) { if (/closed|exited/.test(String(err))) return lastOverview; throw err; } }
+
+async function readCaptureHookWidgetBundle(params: { resolvedBundlePath?: string }): Promise<{ source: string }> {
+  if (!params?.resolvedBundlePath) throw new Error('resolvedBundlePath required');
+  const abs = path.resolve(params.resolvedBundlePath);
+  if (!isPathInside(abs, workspaceRoot)) throw new Error('widget bundle outside workspace');
+  const source = await fs.promises.readFile(abs, 'utf8');
+  return { source };
+}
 async function getMarkdownExportDir() { try { const c = (await loadConfig(configPath)).config.export.plugins.find((p) => p.name === 'markdown'); if (typeof c?.path === 'string') return expandPath(c.path); } catch {} return markdownExportDir; }
 async function getRuntimeForRequest() { if (!managedRuntime) managedRuntime = new RuntimeServiceClient(); return managedRuntime; }
 function setRuntimeHeartbeat(mode: string) { managedRuntime?.call('setHeartbeat', { mode }).catch(() => {}); }

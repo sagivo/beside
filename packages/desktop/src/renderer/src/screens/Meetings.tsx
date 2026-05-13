@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, Inbox, Loader2, MessageSquare, Mic, RefreshCcw, ScanLine, Sparkles, Users, Video } from 'lucide-react';
+import { Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, ImageOff, Inbox, Loader2, MessageSquare, Mic, RefreshCcw, ScanLine, Sparkles, Users, Video } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -8,12 +8,14 @@ import { Separator } from '@/components/ui/separator';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { Markdown } from '@/components/Markdown';
+import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { formatLocalTime, localDayKey, prettyDay, shiftDay } from '@/lib/format';
 import { uniqueStrings } from '@/lib/collections';
 import { DAY_EVENT_KIND_COLORS as KIND_COLOR, DAY_EVENT_KIND_LABELS as KIND_LABELS, DAY_EVENT_SOURCE_LABELS as SOURCE_LABELS } from '@/lib/day-events';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
+import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
-import type { DayEvent, DayEventKind, Meeting, MeetingPlatform } from '@/global';
+import type { DayEvent, DayEventKind, Frame, Meeting, MeetingPlatform } from '@/global';
 
 function compareDays(a: string, b: string): number { return a.localeCompare(b); }
 function formatDuration(ms: number): string {
@@ -44,9 +46,8 @@ function useMinuteClock(): Date {
 }
 
 function eventBelongsBeforeNowIndicator(e: DayEvent, nowMs: number): boolean {
-  const s = Date.parse(e.starts_at), en = e.ends_at ? Date.parse(e.ends_at) : Number.NaN, d = Number.isFinite(en) && Number.isFinite(s) ? en - s : null;
-  if (d !== null && d >= 72000000) return s <= nowMs;
-  return Number.isFinite(en) ? en <= nowMs : Number.isFinite(s) && s <= nowMs;
+  const s = Date.parse(e.starts_at);
+  return Number.isFinite(s) && s <= nowMs;
 }
 
 function nowIndicatorIndex(es: DayEvent[], now: Date): number { const idx = es.findIndex(e => !eventBelongsBeforeNowIndicator(e, now.getTime())); return idx === -1 ? es.length : idx; }
@@ -81,6 +82,8 @@ const COLLABORATIVE_MEETING_TITLE_RE = /\b(1\s*:\s*1|1-on-1|one[-\s]?on[-\s]?one
 const REMOTE_MEETING_SIGNAL_RE = /\b(zoom(?:\.us)?|google meet|meet\.google|teams\.microsoft|microsoft teams|webex|whereby|around)\b/i;
 const TITLE_TOKEN_STOP_WORDS = new Set(['calendar', 'call', 'conference', 'cupertino', 'event', 'google', 'meet', 'meeting', 'office', 'hour', 'hours', 'palaven', 'room', 'session', 'teams', 'today', 'tomorrow', 'vimire', 'webex', 'whereby', 'zoom']);
 const PARTICIPANT_NOISE_WORDS = new Set([...TITLE_TOKEN_STOP_WORDS, 'zoom room']);
+const LOW_SIGNAL_COMMUNICATION_RE = /\b(newsletter|morning brew|unsubscribe|digest|roundup|promotion|promotional|marketing|sale|discount|coupon|receipt|statement|notification|alert|password reset|security code|verification code|recruit(?:er|ing|s)?|talent on demand|sponsored)\b/i;
+const IMPORTANT_COMMUNICATION_RE = /\b(action item|assigned|blocked|decision|deadline|due|follow[-\s]?up|need(?:s|ed)?|please|proposal|question|request(?:ed|s)?|review|schedule(?:d|ing)?|sync|meeting|call|interview|intro|asks?|asked|reply|respond|waiting on|approval|approved|urgent|customer|client|contract|pricing|invoice dispute|bug|incident|outage|launch|ship|hiring loop)\b/i;
 
 function cleanParticipantName(n: string) { return n.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9@.' -]+/gi, ' ').replace(/\s+/g, ' ').trim(); }
 function isMeaningfulParticipantName(n: string) { const c = cleanParticipantName(n), k = c.toLowerCase(); return c.length >= 2 && c.length <= 60 && !/^\d+$/.test(c) && !PARTICIPANT_NOISE_WORDS.has(k) && !/\b(?:meeting|room|zoom room|calendar)\b/i.test(c) && /[a-z]/i.test(c); }
@@ -91,6 +94,21 @@ function isCollaborativeMeetingEvent(e: DayEvent, m: Meeting | null) {
   if (e.kind !== 'meeting' && e.kind !== 'calendar' && !m) return false;
   if (participantNamesForEvent(e, m).length > 0 || extractTitleParticipantNames(e.title).length >= 2 || COLLABORATIVE_MEETING_TITLE_RE.test(e.title)) return true;
   return REMOTE_MEETING_SIGNAL_RE.test([e.title, e.source_app ?? '', ...e.links, m?.title ?? '', ...(m?.links ?? []), ...(m?.summary_json?.links_shared ?? [])].join(' ')) && e.kind === 'meeting';
+}
+
+function isAgendaWorthyEvent(e: DayEvent): boolean {
+  if (e.title === '__merged__') return false;
+  if (e.kind === 'meeting' || e.kind === 'calendar' || e.kind === 'task') return true;
+  if (e.source === 'meeting_capture' || e.source === 'calendar_screen' || e.source === 'task_screen') return true;
+  if (e.meeting_id) return true;
+
+  if (e.kind === 'communication' && (e.source === 'email_screen' || e.source === 'slack_screen')) {
+    const text = [e.title, e.context_md, e.source_app, ...e.attendees].filter(Boolean).join(' ');
+    if (LOW_SIGNAL_COMMUNICATION_RE.test(text)) return false;
+    return IMPORTANT_COMMUNICATION_RE.test(text);
+  }
+
+  return false;
 }
 
 function calendarMatchScore(c: DayEvent, e: DayEvent): number {
@@ -145,7 +163,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0), ajRef = React.useRef(false);
   React.useEffect(() => { if (!ajRef.current && !pfRef.current && daysFromProps.length) { ajRef.current = true; if (!events.some((e: DayEvent) => e.day === today)) setSelectedDay(daysFromProps[0]!); } }, [daysFromProps, events, today]);
 
-  const visibleEvents = React.useMemo(() => reconcileCalendarMeetingItems(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
+  const visibleEvents = React.useMemo(() => reconcileCalendarMeetingItems(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).filter(isAgendaWorthyEvent).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -232,45 +250,61 @@ function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, on
 
 function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelectEvent }: any) {
   if (!events.length) return null;
-  const nMs = now.getTime(), upc = selectedDay === today ? events.find((e: DayEvent) => { const s = Date.parse(e.starts_at), en = e.ends_at ? Date.parse(e.ends_at) : s; return Number.isFinite(s) && Math.max(s, en) >= nMs; }) ?? events[events.length - 1] : events[0];
+  const nMs = now.getTime();
+  const upc = selectedDay === today
+    ? events.find((e: DayEvent) => { const s = Date.parse(e.starts_at), en = e.ends_at ? Date.parse(e.ends_at) : s; return Number.isFinite(s) && Math.max(s, en) >= nMs; }) ?? null
+    : events[0];
   const mtgs = events.map((e: DayEvent) => e.meeting_id ? meetingsById.get(e.meeting_id) ?? null : null).filter(Boolean);
-  const sigs = collectMeetingSummarySignals(mtgs), links = uniqueStrings(events.flatMap((e: DayEvent) => e.links));
+  const sigs = collectMeetingSummarySignals(mtgs);
+  const followups = sigs.actionItems.slice(0, 4);
+  if (!upc && followups.length === 0) return null;
+
+  const meetingIdForAction = (task: string): string | null => {
+    for (const m of mtgs as Meeting[]) {
+      if (m.summary_json?.action_items?.some((a: any) => a.task === task)) {
+        const ev = events.find((e: DayEvent) => e.meeting_id === m.id);
+        return ev?.id ?? null;
+      }
+    }
+    return null;
+  };
 
   return (
-    <div className="grid gap-4 md:grid-cols-3 flex-none">
-      <button type="button" onClick={() => onSelectEvent(upc.id)} className="rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-3">
-        <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />{selectedDay === today ? 'Next up' : 'First event'}</div>
-        <div>
-          <div className="text-base font-semibold leading-tight line-clamp-1">{upc.title}</div>
-          <div className="mt-1.5 text-sm text-muted-foreground font-medium">{formatLocalTime(upc.starts_at)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? ', ...' : ''}</span>}</div>
-        </div>
-      </button>
-      
-      <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3">
+    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] flex-none">
+      {upc ? (
+        <button type="button" onClick={() => onSelectEvent(upc.id)} className="rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-2 min-w-0">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />{selectedDay === today ? 'Next up' : 'First event'}</div>
+          <div className="min-w-0">
+            <div className="text-base font-semibold leading-tight truncate">{upc.title}</div>
+            <div className="mt-1 text-sm text-muted-foreground font-medium truncate">{formatLocalTime(upc.starts_at)}{upc.ends_at ? <> – {formatLocalTime(upc.ends_at)}</> : null}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
+          </div>
+        </button>
+      ) : <div className="rounded-xl border border-dashed border-border/50 bg-card/50 p-5 flex items-center justify-center text-sm text-muted-foreground">Nothing else scheduled today</div>}
+
+      <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><CheckSquare className="size-4" />Follow-ups</div>
-          <Badge variant={sigs.actionItems.length > 0 ? 'default' : 'secondary'} className="px-2">{sigs.actionItems.length}</Badge>
+          {followups.length > 0 && <Badge variant="default" className="px-2">{sigs.actionItems.length}</Badge>}
         </div>
-        {sigs.actionItems.length > 0 ? (
-          <ul className="flex flex-col gap-2 text-sm text-foreground/90">
-            {sigs.actionItems.slice(0, 2).map((item: any, i: number) => <li key={i} className="line-clamp-1 flex gap-2 items-start"><span className="text-primary mt-0.5">•</span><span className="font-medium">{item.task}</span></li>)}
+        {followups.length > 0 ? (
+          <ul className="flex flex-col gap-1.5 text-sm text-foreground/90">
+            {followups.map((item: any, i: number) => {
+              const evId = meetingIdForAction(item.task);
+              const content = (
+                <>
+                  <span className="text-primary mt-0.5 shrink-0">•</span>
+                  <span className="min-w-0 line-clamp-1"><span className="font-medium">{item.task}</span>{item.owner && <span className="text-muted-foreground"> — {item.owner}</span>}</span>
+                </>
+              );
+              return evId ? (
+                <li key={i}><button type="button" onClick={() => onSelectEvent(evId)} className="flex gap-2 items-start text-left w-full rounded-md px-1.5 py-1 -mx-1.5 hover:bg-muted/60 transition-colors">{content}</button></li>
+              ) : (
+                <li key={i} className="flex gap-2 items-start px-1.5 py-1">{content}</li>
+              );
+            })}
           </ul>
         ) : (
-          <p className="text-sm text-muted-foreground mt-auto">No action items captured</p>
-        )}
-      </div>
-
-      <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><Sparkles className="size-4" />Recap</div>
-          <Badge variant={sigs.decisions.length + sigs.openQuestions.length + links.length > 0 ? 'default' : 'secondary'} className="px-2">{sigs.decisions.length + sigs.openQuestions.length + links.length}</Badge>
-        </div>
-        {(sigs.decisions.length + sigs.openQuestions.length + links.length) > 0 ? (
-          <ul className="flex flex-col gap-2 text-sm text-foreground/90">
-            {[...sigs.decisions.slice(0, 2).map((d: any) => d.text), ...sigs.openQuestions.slice(0, 1).map((q: any) => q.text), ...(sigs.decisions.length === 0 && sigs.openQuestions.length === 0 && links.length > 0 ? [`${links.length} link${links.length === 1 ? '' : 's'} seen`] : [])].map((item: any, i: number) => <li key={i} className="line-clamp-1 flex gap-2 items-start"><span className="text-primary mt-0.5">•</span><span className="font-medium">{item}</span></li>)}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground mt-auto">No recap yet</p>
+          <p className="text-sm text-muted-foreground">No action items captured for this day.</p>
         )}
       </div>
     </div>
@@ -287,17 +321,21 @@ function NowIndicator({ now }: { now: Date }) {
 }
 
 function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active: boolean; onClick: () => void; meeting: Meeting | null }) {
-  const dur = eventDuration(event), sl = SOURCE_LABELS[event.source] ?? event.source, ha = (meeting?.audio_chunk_count ?? 0) > 0, ht = (meeting?.transcript_chars ?? 0) > 0;
+  const dur = eventDuration(event), ht = (meeting?.transcript_chars ?? 0) > 0;
   return (
-    <button type="button" onClick={onClick} className={cn('group w-full text-left rounded-lg px-3 py-3 transition-all border', active ? 'border-primary/30 bg-primary/5 shadow-sm' : 'border-transparent hover:bg-muted/50')}>
+    <button type="button" onClick={onClick} className={cn('group w-full text-left rounded-xl px-3 py-3.5 transition-all border', active ? 'border-primary/30 bg-primary/5 shadow-sm' : 'border-transparent hover:bg-muted/50')}>
       <div className="flex items-start gap-3">
         <div className="flex flex-col items-start min-w-[3.5rem] pt-0.5"><span className={cn("text-xs font-bold tabular-nums", active ? "text-primary" : "text-foreground")}>{formatLocalTime(event.starts_at)}</span>{dur != null && <span className="text-[10px] text-muted-foreground tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}</div>
         <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2 mb-1"><span className="text-sm font-semibold leading-tight line-clamp-2">{event.title}</span></div>
-          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground"><span className={cn('inline-flex items-center gap-1 font-medium', active ? KIND_COLOR[event.kind] : '')}><KindIcon kind={event.kind} className="size-3" />{KIND_LABELS[event.kind]}</span>{event.source_app && <span className="opacity-80">· {event.source_app}</span>}{ha && <span className="inline-flex items-center gap-0.5 opacity-80"><Mic className="size-3" />audio</span>}{!ha && event.kind !== 'meeting' && <span className="opacity-60">{sl}</span>}</div>
-          {event.kind !== 'meeting' && event.context_md && <p className="mt-1.5 text-[11px] text-muted-foreground/80 line-clamp-2 leading-relaxed">{event.context_md}</p>}
-          {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && <p className="mt-1.5 text-[11px] text-muted-foreground/80 line-clamp-2 leading-relaxed">{meeting.summary_json.tldr}</p>}
-          {event.kind === 'meeting' && ht && !meeting?.summary_json?.tldr && <p className="mt-1.5 text-[11px] text-muted-foreground/60 italic line-clamp-2">Summary pending — transcript captured.</p>}
+          <div className="flex items-start gap-2">
+            <span className={cn('mt-0.5 shrink-0 text-muted-foreground/50 transition-colors', active ? KIND_COLOR[event.kind] : 'group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold leading-tight line-clamp-2">{event.title}</div>
+              {event.kind !== 'meeting' && event.context_md && <p className="mt-1.5 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{event.context_md}</p>}
+              {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && <p className="mt-1.5 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{meeting.summary_json.tldr}</p>}
+              {event.kind === 'meeting' && ht && !meeting?.summary_json?.tldr && <p className="mt-1.5 text-xs text-muted-foreground/60 italic line-clamp-2">Summary pending.</p>}
+            </div>
+          </div>
         </div>
       </div>
     </button>
@@ -339,10 +377,8 @@ function MeetingBody({ event, meeting, allMeetings, now }: any) {
   return (
     <div className="flex flex-col gap-8">
       <PrepBrief prep={pb} />
-      <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground font-medium">
-        {meeting.transcript_chars > 0 ? <span className="inline-flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-md border border-border/50"><Mic className="size-4 text-primary" />Transcript captured ({(meeting.transcript_chars / 1000).toFixed(1)}k chars)</span> : <span className="inline-flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-md border border-border/50"><Mic className="size-4 opacity-50" />No audio captured</span>}
-        <span className="inline-flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-md border border-border/50">{meeting.screenshot_count} screenshots</span>
-        {meeting.audio_chunk_count > 0 && <span className="inline-flex items-center gap-2 bg-muted/50 px-3 py-1.5 rounded-md border border-border/50">{meeting.audio_chunk_count} audio chunks</span>}
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        {meeting.transcript_chars === 0 && <span className="inline-flex items-center gap-1.5"><Mic className="size-3.5 opacity-50" />No audio captured</span>}
         <MeetingStatusBadge status={meeting.summary_status} />
       </div>
       {meeting.summary_status === 'ready' && hm ? (
@@ -360,7 +396,7 @@ function MeetingBody({ event, meeting, allMeetings, now }: any) {
       ) : meeting.summary_status === 'skipped_short' ? (
         <div className="flex flex-col items-center justify-center gap-3 py-16 bg-muted/20 rounded-xl border border-dashed border-border/50 text-muted-foreground"><p className="text-base font-medium">This meeting was too short to summarize.</p>{event.context_md && <p className="text-sm italic max-w-md text-center">{event.context_md}</p>}</div>
       ) : <div className="py-16 text-center text-base font-medium text-muted-foreground bg-muted/10 rounded-xl border border-dashed border-border/50">{event.context_md ?? 'No summary available yet.'}</div>}
-      <LinkList title="Links shared" links={meeting.links} />
+      <MeetingScreenshots meeting={meeting} />
     </div>
   );
 }
@@ -401,6 +437,78 @@ function PrepBrief({ prep }: any) {
 function LinkList({ title, links }: any) {
   if (!links.length) return null;
   return <div><h3 className="text-sm font-bold uppercase tracking-wider text-foreground border-b border-border/50 pb-2 mb-4">{title}</h3><ul className="flex flex-col gap-2.5 text-base">{links.map((l: string) => <li key={l} className="flex"><a href={l} target="_blank" rel="noreferrer" className="text-primary font-medium underline-offset-4 hover:underline break-all">{l}</a></li>)}</ul></div>;
+}
+
+function MeetingScreenshots({ meeting }: { meeting: Meeting }) {
+  const [frames, setFrames] = React.useState<Frame[]>([]);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!meeting.entity_path || meeting.screenshot_count <= 0) { setFrames([]); return; }
+      setLoading(true);
+      try {
+        const from = new Date(Date.parse(meeting.started_at) - 10 * 60_000).toISOString();
+        const to = new Date(Date.parse(meeting.ended_at) + 2 * 60_000).toISOString();
+        const all = await window.beside.searchFrames({ entityPath: meeting.entity_path, entityKind: 'meeting', from, to, limit: 80 }) as Frame[];
+        if (!cancelled) setFrames(all.filter(f => f.asset_path && f.timestamp).sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? '')).slice(0, 12));
+      } catch {
+        if (!cancelled) setFrames([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [meeting.entity_path, meeting.ended_at, meeting.screenshot_count, meeting.started_at]);
+
+  if (!loading && frames.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-4">
+      <h3 className="text-sm font-bold uppercase tracking-wider text-foreground border-b border-border/50 pb-2">Screenshots</h3>
+      {loading && frames.length === 0 ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Loading screenshots…</div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {frames.map(frame => <MeetingScreenshotThumb key={frame.id} frame={frame} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MeetingScreenshotThumb({ frame }: { frame: Frame }) {
+  const [thumb, setThumb] = React.useState<string | null>(null);
+  const detail = useFrameDetail();
+  React.useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!frame.asset_path) return;
+      const cached = thumbnailCache.get(frame.asset_path);
+      if (cached) { setThumb(cached); return; }
+      try {
+        const url = await resolveAssetUrl(frame.asset_path);
+        if (!cancelled) { cacheThumbnail(frame.asset_path, url); setThumb(url); }
+      } catch {
+        if (!cancelled) setThumb(null);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [frame.asset_path]);
+
+  return (
+    <button type="button" onClick={() => detail.open(frame)} className="group overflow-hidden rounded-xl border border-border/50 bg-muted/30 text-left transition-colors hover:border-primary/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <div className="aspect-video grid place-items-center overflow-hidden bg-muted/50">
+        {thumb ? <img src={thumb} alt="" className="h-full w-full object-cover transition-transform group-hover:scale-[1.02]" /> : <div className="flex flex-col items-center gap-1 text-muted-foreground"><ImageOff className="size-5" /><span className="text-xs">No preview</span></div>}
+      </div>
+      <div className="flex flex-col gap-1 p-2.5">
+        <span className="font-mono text-[11px] text-muted-foreground">{formatLocalTime(frame.timestamp)}</span>
+        <span className="line-clamp-1 text-xs font-medium text-foreground">{frame.window_title || frame.app || 'Meeting screenshot'}</span>
+      </div>
+    </button>
+  );
 }
 
 function BriefList({ title, items }: any) {

@@ -7,13 +7,14 @@ computer, and continuously organises that data into a living, self-reorganising
 knowledge base. It is the persistent memory layer your AI agents have been
 missing.
 
-The system has five pluggable layers:
+The system has six pluggable layers:
 
 1. **Capture** — records raw inputs (screenshots, window focus, URL changes, idle).
 2. **Storage** — persists raw data locally as JSONL + SQLite (immutable).
 3. **Model** — the LLM adapter used by the index layer (Ollama, OpenAI, …).
 4. **Index** — turns raw data into a structured, self-reorganising wiki.
 5. **Export** — surfaces indexed knowledge to humans and AI agents (Markdown, MCP).
+6. **Hook** — post-capture extensibility: runs custom logic on each screenshot + OCR or audio + transcript and powers dashboard widgets ([see below](#capture-hooks--widgets)).
 
 Every layer is a defined interface; defaults ship out of the box; everything is
 swappable via `config.yaml`. Plugins are **drop-in folders**, not workspace
@@ -544,6 +545,219 @@ transcribed too. If system output capture is disabled or unavailable,
 only your microphone is captured and the summary is built from your half
 of the conversation plus the visible slides.
 
+---
+
+## Capture hooks & widgets
+
+Capture hooks are the **post-capture extensibility layer**. A hook
+receives one of two raw inputs for every interesting capture, runs custom
+logic (typically an LLM call), persists structured records into its own
+isolated storage namespace, and can ship a React widget that the desktop
+dashboard renders on top of those records.
+
+Two input envelopes:
+
+- **`screen`** — raw screenshot bytes + OCR / accessibility text + app /
+  window / URL metadata.
+- **`audio`** — transcribed text + audio metadata (and audio bytes when
+  the file is still on disk).
+
+Two built-in example hooks ship in `plugins/hook/`:
+
+| Hook | Triggers on | Output |
+|---|---|---|
+| `calendar` | Apple Calendar, Fantastical, Google Calendar, Outlook web/desktop, iCloud, Notion Calendar, Cal.com, Cron, Amie, BusyCal. | `events` collection: `{ title, starts_at, ends_at, attendees, location, context }` rows. Rendered with the built-in `calendar` widget. |
+| `followups` | Slack, Discord, Microsoft Teams, Apple Mail, Gmail, Outlook, Spark, Superhuman, plus meeting transcripts (`audio`). | `followups` collection: `{ title, body, urgency, category }` rows. Rendered with the built-in `followups` widget. |
+
+Hooks are enabled by default. Disable a single hook, or all of them, in
+`config.yaml`:
+
+```yaml
+hooks:
+  enabled: true
+  plugins:
+    - name: calendar
+      enabled: true
+    - name: followups
+      enabled: true
+```
+
+### Writing a config-only hook
+
+The fastest way to add a hook is to declare it in `config.yaml`. No
+plugin code required — the engine runs an LLM call with your prompt and
+stores the JSON result in the chosen collection. Pick one of the built-in
+widgets (`calendar`, `followups`, `list`, `json`) to render the records:
+
+```yaml
+hooks:
+  definitions:
+    - id: pr-queue
+      title: PR Review Queue
+      match:
+        inputKinds: [screen]
+        apps: [google chrome, safari, arc, firefox]
+        urlHosts: [github.com]
+        urlPatterns: ["github\\.com/.+/pull/\\d+"]
+      throttleMs: 120000
+      needsVision: true
+      systemPrompt: |
+        You see a single GitHub pull-request page. Return STRICT JSON:
+        { "items": [ { "title": string, "body": string, "urgency": "high"|"medium"|"low" } ] }
+      outputCollection: items
+      widget:
+        title: PR Queue
+        builtin: list
+        defaultCollection: items
+```
+
+Matchers are AND-combined; each populated array is OR-combined. App
+substrings, URL hosts, regex, window-title substrings, and `textIncludes`
+checks against OCR/transcript text all run **before** any LLM call, so
+hooks stay cheap. Throttling is keyed per surface
+(`app | window | url | text-hash`) so the same screen never re-prompts
+the model twice within `throttleMs`.
+
+### Writing a hook plugin
+
+Plugins use the same drop-in plugin shape as the other layers
+(see [Adding a plugin](#adding-a-plugin)) — just set `layer: "hook"` and
+`interface: "IHookPlugin"`:
+
+```
+plugins/hook/<name>/
+├── plugin.json     { "layer": "hook", "interface": "IHookPlugin", "entrypoint": "dist/index.js", ... }
+└── src/
+    └── index.ts    exports `default` PluginFactory<IHookPlugin>
+```
+
+`IHookPlugin` returns `CaptureHookDefinition[]` (the matchers + widget
+metadata) and an optional async `handle(input, ctx)` method. Inside
+`handle`, the plugin gets:
+
+- `input` — `CaptureHookScreenInput` or `CaptureHookAudioInput` with
+  raw bytes, OCR / transcript text, app, URL, window title, and frame id.
+- `ctx.model` — the configured `IModelAdapter` (call `complete` or
+  `completeWithVision`).
+- `ctx.storage` — an **isolated** `IHookStorageNamespace`:
+  `put / get / list / delete / clear`, scoped by the host to this hook
+  id, so plugins cannot read or mutate other hooks' records.
+- `ctx.logger`, `ctx.readAsset(path)` for reading other assets from the
+  storage root.
+
+Minimal example:
+
+```ts
+import type { IHookPlugin, PluginFactory } from '@beside/interfaces';
+
+const factory: PluginFactory<IHookPlugin> = () => ({
+  name: 'todos',
+  definitions: () => [{
+    id: 'todos',
+    title: 'Todos',
+    match: { inputKinds: ['screen'], apps: ['notion', 'linear'] },
+    needsVision: true,
+    widget: { title: 'Todos', builtin: 'list', defaultCollection: 'todos' },
+  }],
+  async handle(input, ctx) {
+    if (input.kind !== 'screen') return;
+    const raw = await ctx.model.completeWithVision(
+      `Extract open todos. JSON: { "items": [{ "title": string }] }`,
+      input.imageBytes ? [input.imageBytes] : [],
+      { responseFormat: 'json' },
+    );
+    const data = JSON.parse(raw);
+    await ctx.storage.put({
+      collection: 'todos',
+      id: input.event.id,
+      data,
+      evidenceEventIds: [input.event.id],
+    });
+  },
+});
+
+export default factory;
+```
+
+If `handle` is omitted, the engine falls back to a generic
+"send everything to the model, parse JSON, store result in
+`outputCollection`" flow — the same path used by config-only hooks.
+
+Run `pnpm build:plugins` after editing plugin sources; plugins load from
+their compiled `dist/` output.
+
+### Custom React widgets
+
+Each hook can opt into a built-in widget by setting
+`widget.builtin = "calendar" | "followups" | "list" | "json"`, or ship a
+fully custom React component by pointing `widget.bundlePath` at a
+compiled JS file inside the plugin folder. The bundle is loaded by the
+desktop renderer and must register itself via `defineWidget`:
+
+```js
+// plugins/hook/mythings/widget.js
+defineWidget((api) => {
+  const { React, useHookRecords } = api;
+  return function MyThingsWidget() {
+    const { records, loading } = useHookRecords({ collection: 'items' });
+    if (loading) return React.createElement('div', null, 'Loading…');
+    return React.createElement(
+      'ul',
+      null,
+      records.map((r) =>
+        React.createElement('li', { key: r.id }, r.data?.title ?? r.id),
+      ),
+    );
+  };
+});
+```
+
+Widget bundles run in the renderer with `nodeIntegration` disabled. They
+only see the `HookWidgetApi` the host passes in: `React`, `jsx`,
+`queryStorage`, `mutateStorage`, `useHookRecords(query)`, `assetUrl`, and
+the hook id / widget manifest. All storage reads and writes go through
+the hook's own namespace — no shared DB access.
+
+### Hook data model
+
+Every record a hook writes lives in a single `hook_records` SQLite table
+keyed by `(hook_id, collection, id)`:
+
+| Column | Purpose |
+|---|---|
+| `hook_id` | The hook that owns the record. Enforced by the host on every read/write. |
+| `collection` | Logical "table name" the hook chose (e.g. `events`, `followups`). |
+| `id` | Stable id; same `(hook_id, collection, id)` upserts instead of inserting twice. |
+| `data_json` | JSON payload the hook produced. |
+| `evidence_ids_json` | Source event / frame ids — used by the host when frames are deleted (privacy / retention) to prune the hook's records. |
+| `content_hash` | Hook-supplied hash for dedupe. |
+| `created_at`, `updated_at` | Set by the host. |
+
+Hooks **never create their own SQL tables**. They get their own logical
+collection inside the host-owned `hook_records` table, which keeps
+migrations, retention, and privacy cleanup under host control.
+
+### Runtime knobs
+
+Top-level limits live under `hooks` in `config.yaml`:
+
+```yaml
+hooks:
+  enabled: true
+  throttle_ms_default: 60000      # per-surface debounce when a hook doesn't set throttleMs
+  max_image_bytes: 2097152        # skip vision attachment if the raw asset is bigger
+  max_prompt_chars: 14000         # truncates the default-prompt body for config-only hooks
+  max_records_per_hook: 2000      # soft cap per hook namespace
+```
+
+Hooks subscribe to the in-process raw-event bus *after* `storage.write`
+and `RawEventBus.publish`, so they see the same canonical `RawEvent`
+the existing workers see, and run on a small async worker queue —
+a slow LLM call never blocks capture or the downstream frame / OCR /
+session pipeline.
+
+---
+
 ### Two transports
 
 The MCP server runs over **HTTP by default** (alongside `beside start`),
@@ -678,9 +892,12 @@ beside/
     │   └── ollama/             Default model adapter (Ollama / Gemma).
     ├── index/
     │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
-    └── export/
-        ├── markdown/           Default export — mirror to ~/.beside/export/markdown.
-        └── mcp/                Built-in MCP server on 127.0.0.1:3456.
+    ├── export/
+    │   ├── markdown/           Default export — mirror to ~/.beside/export/markdown.
+    │   └── mcp/                Built-in MCP server on 127.0.0.1:3456.
+    └── hook/
+        ├── calendar/           Extract calendar events from calendar surfaces.
+        └── followups/          Extract follow-ups from chat / email / transcripts.
 ```
 
 ### Adding a plugin

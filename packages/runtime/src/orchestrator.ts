@@ -1,8 +1,8 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type {
-  ICapture, IStorage, IModelAdapter, IIndexStrategy, IExport, Logger, RawEvent,
-  PluginHostContext, ModelBootstrapHandler, ExportServices
+  ICapture, IStorage, IModelAdapter, IIndexStrategy, IExport, IHookPlugin, Logger, RawEvent,
+  PluginHostContext, ModelBootstrapHandler, ExportServices, CaptureHookDefinition,
 } from '@beside/interfaces';
 import {
   RawEventBus, Scheduler, PluginRegistry, discoverPlugins, findWorkspaceRoot, loadConfig,
@@ -19,6 +19,7 @@ import { OcrWorker } from './ocr-worker.js';
 import { EntityResolverWorker } from './entity-resolver.js';
 import { StorageVacuum } from './storage-vacuum.js';
 import { OfflineFallbackAdapter } from './offline-model.js';
+import { CaptureHookEngine } from './capture-hooks.js';
 
 export interface OrchestratorOptions { configPath?: string; workspaceRoot?: string; }
 export interface OrchestratorHandles {
@@ -29,6 +30,16 @@ export interface OrchestratorHandles {
   entityResolver: EntityResolverWorker; sessionBuilder: SessionBuilder; meetingBuilder: MeetingBuilder;
   meetingSummarizer: MeetingSummarizer; eventExtractor: EventExtractor; embeddingWorker: EmbeddingWorker;
   vacuum: StorageVacuum; loadGuard: LoadGuard; activityCoalescer: ActivityCoalescer; idlePowerCatchup: IdlePowerCatchup;
+  captureHooks: CaptureHookEngine;
+  hookWidgetManifests: HookWidgetManifestRuntime[];
+}
+
+export interface HookWidgetManifestRuntime {
+  hookId: string;
+  pluginName: string | null;
+  widget: NonNullable<CaptureHookDefinition['widget']>;
+  /** Absolute path on disk to the React bundle entrypoint, when present. */
+  resolvedBundlePath: string | null;
 }
 
 const JOBS = {
@@ -189,8 +200,72 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
     if (handlesRef) await runIdlePowerCatchup(handlesRef);
   });
 
-  handlesRef = { capture, storage, model, indexerModel, strategy, exports, scheduler, bus, config, logger, loaded, registry, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, eventExtractor, embeddingWorker, vacuum, loadGuard, activityCoalescer, idlePowerCatchup };
+  const captureHooks = new CaptureHookEngine({ bus, storage, model, logger, config, dataDir });
+  const hookWidgetManifests: HookWidgetManifestRuntime[] = [];
+
+  if (config.hooks?.enabled !== false) {
+    for (const ref of config.hooks?.plugins ?? []) {
+      if (ref.enabled === false) continue;
+      try {
+        const plugin = await registry.loadHook(ref.name, baseCtx({ ...ref }));
+        await captureHooks.register(plugin);
+        const defs = await Promise.resolve(plugin.definitions()).catch(() => [] as CaptureHookDefinition[]);
+        for (const def of defs) {
+          if (!def.widget) continue;
+          const resolved = await resolveHookWidgetBundle(registry, ref.name, def.widget.bundlePath);
+          hookWidgetManifests.push({
+            hookId: def.id,
+            pluginName: plugin.name,
+            widget: { ...def.widget, id: def.widget.id ?? def.id, title: def.widget.title ?? def.title },
+            resolvedBundlePath: resolved,
+          });
+        }
+      } catch (err) {
+        logger.warn(`hook plugin "${ref.name}" failed to load`, { err: String(err) });
+      }
+    }
+    for (const def of config.hooks?.definitions ?? []) {
+      try {
+        captureHooks.registerDefinition(def as CaptureHookDefinition);
+        if (def.widget) {
+          hookWidgetManifests.push({
+            hookId: def.id,
+            pluginName: null,
+            widget: {
+              ...(def.widget as NonNullable<CaptureHookDefinition['widget']>),
+              id: def.widget.id ?? def.id,
+              title: def.widget.title ?? def.title,
+            },
+            resolvedBundlePath: null,
+          });
+        }
+      } catch (err) {
+        logger.warn(`config hook "${def.id}" failed to register`, { err: String(err) });
+      }
+    }
+  }
+
+  handlesRef = { capture, storage, model, indexerModel, strategy, exports, scheduler, bus, config, logger, loaded, registry, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, eventExtractor, embeddingWorker, vacuum, loadGuard, activityCoalescer, idlePowerCatchup, captureHooks, hookWidgetManifests };
   return handlesRef;
+}
+
+async function resolveHookWidgetBundle(
+  registry: PluginRegistry,
+  pluginName: string,
+  bundlePath: string | undefined,
+): Promise<string | null> {
+  if (!bundlePath) return null;
+  try {
+    const entry = registry.byLayer('hook').find(
+      (e) => e.manifest.name === pluginName || e.packageName.endsWith(`/hook-${pluginName}`) || e.packageName.endsWith(`/${pluginName}`),
+    );
+    if (!entry) return null;
+    const abs = path.isAbsolute(bundlePath) ? bundlePath : path.resolve(entry.rootDir, bundlePath);
+    await fsp.access(abs);
+    return abs;
+  } catch {
+    return null;
+  }
 }
 
 export async function runIncremental(h: OrchestratorHandles) {
@@ -355,9 +430,10 @@ export function scheduleAll(h: OrchestratorHandles) {
   h.activityCoalescer.start(); h.idlePowerCatchup.start();
 }
 
-export async function startAll(h: OrchestratorHandles) { await h.capture.start(); for (const e of h.exports) await e.start(); scheduleAll(h); }
+export async function startAll(h: OrchestratorHandles) { await h.capture.start(); for (const e of h.exports) await e.start(); h.captureHooks.start(); scheduleAll(h); }
 export async function stopAll(h: OrchestratorHandles) {
   h.idlePowerCatchup.stop(); h.activityCoalescer.stop(); h.scheduler.stop();
+  h.captureHooks.stop();
   for (const e of h.exports) await e.stop(); await h.capture.stop(); await h.ocrWorker.stop();
   await h.model.unload?.().catch(() => {}); if (h.indexerModel !== h.model) await h.indexerModel.unload?.().catch(() => {});
 }

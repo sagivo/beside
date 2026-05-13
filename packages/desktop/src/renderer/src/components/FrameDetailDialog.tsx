@@ -63,10 +63,25 @@ function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
   const mdE = Object.entries(idxDet?.metadata ?? {}).filter(([k]) => !new Set(['ai_caption', 'caption', 'image_caption', 'screenshot_caption', 'vision_caption', 'visual_caption', 'description', 'summary']).has(k));
   const scTxt = searchContext ? exp ?? buildFrameSearchContext(searchContext.query, frame) : null;
 
+  const openScreenshotFile = React.useCallback(async () => {
+    if (!frame.asset_path) return;
+    try {
+      await window.beside.openAssetPath(frame.asset_path);
+    } catch (err: any) {
+      toast.error('Could not open file', { description: err?.message || String(err) });
+    }
+  }, [frame.asset_path]);
+
   return (
     <div className="grid h-[80vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[1.4fr_1fr]">
       <div className="bg-muted/40 flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
-        {thumbUrl ? <img src={thumbUrl} alt="Screenshot" onError={() => setThumbUrl(null)} className="block max-h-full max-w-full object-contain rounded-md border border-border bg-black shadow-sm" /> : <div className="flex flex-col items-center gap-2 text-muted-foreground p-8"><ImageOff className="size-10" /><span className="text-sm">No screenshot available</span></div>}
+        {thumbUrl ? (
+          <button type="button" onClick={openScreenshotFile} disabled={!frame.asset_path} title={frame.asset_path ? 'Open full screenshot in default app' : undefined} className="group/img relative flex max-h-full max-w-full cursor-pointer disabled:cursor-default outline-offset-2 focus-visible:ring-2 focus-visible:ring-ring rounded-md">
+            <img src={thumbUrl} alt="Screenshot" onError={() => setThumbUrl(null)} className="block max-h-[calc(80vh-1.5rem)] max-w-full object-contain rounded-md border border-border bg-black shadow-sm transition-opacity group-hover/img:opacity-95" />
+          </button>
+        ) : (
+          <div className="flex flex-col items-center gap-2 text-muted-foreground p-8"><ImageOff className="size-10" /><span className="text-sm">No screenshot available</span></div>
+        )}
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-col border-l border-border">

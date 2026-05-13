@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 
-const LAYERS = ['capture', 'storage', 'model', 'index', 'export'];
+const LAYERS = ['capture', 'storage', 'model', 'index', 'export', 'hook'];
 const ROOTS = ['plugins'];
 
 // On Windows, executables installed by package managers are usually

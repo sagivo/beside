@@ -8,6 +8,7 @@ import type {
   IModelAdapter,
   IIndexStrategy,
   IExport,
+  IHookPlugin,
   PluginManifest,
   PluginLayer,
   PluginInterfaceName,
@@ -31,6 +32,7 @@ const INTERFACE_BY_LAYER: Record<PluginLayer, PluginInterfaceName> = {
   model: 'IModelAdapter',
   index: 'IIndexStrategy',
   export: 'IExport',
+  hook: 'IHookPlugin',
 };
 
 /**
@@ -270,6 +272,10 @@ export class PluginRegistry {
 
   async loadExport(name: string, ctx: PluginHostContext): Promise<IExport> {
     return this.instantiate<IExport>(this.resolve('export', name), ctx);
+  }
+
+  async loadHook(name: string, ctx: PluginHostContext): Promise<IHookPlugin> {
+    return this.instantiate<IHookPlugin>(this.resolve('hook', name), ctx);
   }
 }
 

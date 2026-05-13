@@ -1,0 +1,8 @@
+{
+  "name": "followups",
+  "version": "0.1.0",
+  "layer": "hook",
+  "interface": "IHookPlugin",
+  "entrypoint": "dist/index.js",
+  "description": "Detect open follow-ups from captures of Slack, Microsoft Teams, Gmail, Outlook, Apple Mail, and meeting transcripts."
+}

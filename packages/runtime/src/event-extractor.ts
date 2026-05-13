@@ -58,12 +58,17 @@ Return STRICT JSON matching:
 }
 General rules:
 - Only output meaningful events.
-- "starts_at" should be a real ISO timestamp.
+- For email/chat/task apps, output only actionable or decision-worthy items: scheduling, replies needed, asks/requests, follow-ups, deadlines, customer/client issues, incidents, launches, or tickets.
+- Do NOT output newsletters, promos, recruiting spam, receipts, automated notifications, FYI-only threads, or generic inbox/chat items.
+- "title" MUST be the EXACT title as it appears on screen, verbatim. Do NOT paraphrase, summarize, translate, shorten, expand, or invent a new title. Copy it character-for-character (including punctuation, casing, emoji). If you cannot read it reliably, omit the event entirely.
+- "starts_at" MUST be a full ISO timestamp INCLUDING the date (YYYY-MM-DDTHH:MM:SS). NEVER emit a bare time of day. If you cannot determine the calendar date of an event, omit it.
+- NEVER use a clock label, hour label, time range, "Noon", "Midnight", "All day", or any column/row header as a title. Those are UI chrome, not events.
 - "context" must be 1-2 specific sentences.
 - AT MOST 25 events.
 If CALENDAR APP:
-- The dates displayed are on screen. Treat all-day items as starting at midnight.
-If EMAIL, CHAT, or TASK: surface notable threads / tickets.`;
+- ONLY emit events whose date matches the target capture day specified in the user prompt. Even if a week/month view shows other days, IGNORE them — they will be captured separately on their own day.
+- Treat all-day items as starting at midnight of that day.
+If EMAIL, CHAT, or TASK: surface only important threads / tickets with clear user relevance.`;
 
 const CONTEXT_SYSTEM_PROMPT = `You are filling in a missing context line for an event. Write a SINGLE 1-3 sentence description based on screenshots. Return PLAIN TEXT.`;
 
@@ -167,11 +172,22 @@ function looksLikeCalendarText(text: string | null): boolean {
   return signals >= 2;
 }
 
+function looksLikeCalendarChrome(text: string | null): boolean {
+  return !!text && /\bCalendar\s+File\s+Edit\s+View\s+Window\s+Help\b/i.test(text.replace(/\s+/g, ' '));
+}
+
+function isCalendarViewFrame(frame: Frame): boolean {
+  if (isNativeCalendarAppFrame(frame) || isCalendarUrl(frame.url)) return true;
+  const text = frame.text ?? '';
+  return looksLikeCalendarChrome(text) && looksLikeCalendarText(text);
+}
+
 const SOURCE_MATCHERS: SourceMatcher[] = [
   {
     source: 'calendar_screen', label: 'calendar', match: (f) => {
       if (isNativeCalendarAppFrame(f)) return looksLikeCalendarText(f.text ?? null);
       if (isCalendarUrl(f.url)) return true;
+      if (looksLikeCalendarChrome(f.text ?? null) && looksLikeCalendarText(f.text ?? null)) return true;
       if (/^https?:\/\//i.test(f.url ?? '') && looksLikeCalendarText(f.text ?? null)) return true;
       return false;
     },
@@ -210,6 +226,7 @@ export class EventExtractor {
   private readonly maxContextEventsPerTick: number;
   private readonly visionAttachments: number;
   private readonly dataDir: string;
+  private chromeTitlePurgeDone = false;
 
   constructor(private readonly storage: IStorage, private readonly model: IModelAdapter, logger: Logger, opts: EventExtractorOptions = {}) {
     this.logger = logger.child('event-extractor');
@@ -229,6 +246,16 @@ export class EventExtractor {
     const result: EventExtractorResult = {
       meetingsLifted: 0, llmExtracted: 0, contextEnriched: 0, daysScanned: 0, bucketsScanned: 0, framesScanned: 0, modelAvailable: false, failed: 0,
     };
+
+    if (!this.chromeTitlePurgeDone) {
+      this.chromeTitlePurgeDone = true;
+      try {
+        const purged = await this.purgeChromeTitleCalendarEvents();
+        if (purged > 0) this.logger.info(`purged ${purged} chrome-title calendar event(s)`);
+      } catch (err) {
+        this.logger.warn('chrome-title purge failed', { err: String(err) });
+      }
+    }
 
     try {
       result.meetingsLifted = await this.liftMeetings();
@@ -264,11 +291,40 @@ export class EventExtractor {
       }
     }
 
+    try {
+      result.meetingsLifted += await this.liftMeetings();
+    } catch (err) {
+      this.logger.warn('post-extraction liftMeetings failed', { err: String(err) });
+    }
+
     return result;
   }
 
   async drain(): Promise<EventExtractorResult> {
     return await this.tick();
+  }
+
+  /**
+   * One-time cleanup of legacy pollution from the old deterministic OCR-line fallback. That
+   * fallback used to walk every visible column of a week/month calendar view and stamp the
+   * current capture day onto every line it found, including UI chrome like clock labels
+   * ("10:58"), "Noon", "Midnight", and time ranges ("11:30AM-12:45PM"). It also produced cross-
+   * day pollution (Monday events appearing under Wednesday). We now reject these at extraction
+   * time, but pre-existing rows are still sitting in storage. Wipe them on first tick.
+   */
+  private async purgeChromeTitleCalendarEvents(): Promise<number> {
+    const horizonMs = 60 * 24 * 60 * 60 * 1000;
+    const from = new Date(Date.now() - horizonMs).toISOString();
+    const events = await this.storage.listDayEvents({ from, limit: 5000, order: 'recent' }).catch(() => [] as DayEvent[]);
+    let purged = 0;
+    for (const event of events) {
+      if (event.source !== 'calendar_screen') continue;
+      if (event.meeting_id) continue;
+      if (!isCalendarChromeTitle(event.title)) continue;
+      await this.storage.deleteDayEvent(event.id).catch(() => {});
+      purged++;
+    }
+    return purged;
   }
 
   private async liftMeetings(): Promise<number> {
@@ -278,10 +334,22 @@ export class EventExtractor {
       const id = `evt_mtg_${meeting.id}`;
       const existing = await this.storage.getDayEvent(id).catch(() => null);
       const hash = meetingContentHash(meeting);
-      if (existing && existing.content_hash === hash) continue;
 
       const now = new Date().toISOString();
       const tldr = (meeting.summary_json?.tldr ?? '').trim() || deterministicMeetingContext(meeting);
+      const linkedCalendarEvent = await this.upsertCalendarAgendaItemForMeeting(meeting, tldr, hash, now);
+      if (linkedCalendarEvent) {
+        await this.storage.upsertDayEvent({
+          id, day: meeting.day, starts_at: meeting.started_at, ends_at: meeting.ended_at,
+          kind: 'meeting', source: 'meeting_capture', title: '__merged__', source_app: platformLabel(meeting.platform),
+          context_md: tldr || null, attendees: meeting.attendees, links: meeting.links, meeting_id: meeting.id,
+          evidence_frame_ids: [], content_hash: hash, status: 'ready', failure_reason: null,
+          created_at: existing?.created_at ?? now, updated_at: now,
+        });
+        liftedNow++;
+        continue;
+      }
+      if (existing && existing.content_hash === hash) continue;
 
       const event: DayEvent = {
         id, day: meeting.day, starts_at: meeting.started_at, ends_at: meeting.ended_at,
@@ -301,6 +369,92 @@ export class EventExtractor {
       }
     }
     return liftedNow;
+  }
+
+  private async upsertCalendarAgendaItemForMeeting(
+    meeting: Meeting,
+    context: string,
+    meetingHash: string,
+    now: string,
+  ): Promise<DayEvent | null> {
+    const candidates = await this.storage.listDayEvents({ day: meeting.day, kind: 'calendar', limit: 500, order: 'chronological' }).catch(() => []);
+    let best: { event: DayEvent; score: number } | null = null;
+    for (const event of candidates.filter((e) => e.source === 'calendar_screen')) {
+      const score = scoreCalendarEventForMeeting(event, meeting);
+      if (score > 0 && (!best || score > best.score)) best = { event, score };
+    }
+
+    const source = best?.event ?? await this.syntheticCalendarEventForMeeting(meeting, context, meetingHash, now);
+    if (!source) return null;
+
+    // The meeting capture (started_at/ended_at) is ground truth — it comes from the actual
+    // process/window lifecycle, not from OCR. The calendar event's title is what we want to keep,
+    // but its OCR-derived starts_at/ends_at can be wrong by hours, so overwrite them.
+    const event: DayEvent = {
+      ...source,
+      starts_at: roundMeetingStartForAgenda(meeting.started_at),
+      ends_at: meeting.ended_at,
+      meeting_id: meeting.id,
+      context_md: context || source.context_md,
+      attendees: uniqueStrings([...source.attendees, ...meeting.attendees, ...(meeting.summary_json?.attendees_seen ?? [])]).slice(0, 30),
+      links: uniqueStrings([...source.links, ...meeting.links, ...(meeting.summary_json?.links_shared ?? [])]).slice(0, 50),
+      evidence_frame_ids: uniqueStrings([...source.evidence_frame_ids, ...(await this.representativeMeetingFrameIds(meeting.id))]).slice(0, 20),
+      content_hash: sha1(['calendar-meeting-link', source.content_hash, meetingHash, meeting.content_hash, meeting.summary_status].join('|')).slice(0, 16),
+      status: 'ready',
+      failure_reason: null,
+      updated_at: now,
+    };
+    await this.storage.upsertDayEvent(event);
+    return event;
+  }
+
+  private async syntheticCalendarEventForMeeting(
+    meeting: Meeting,
+    context: string,
+    meetingHash: string,
+    now: string,
+  ): Promise<DayEvent | null> {
+    const startMs = Date.parse(meeting.started_at);
+    if (!Number.isFinite(startMs)) return null;
+    const frames = await this.storage.searchFrames({
+      from: new Date(startMs - 15 * 60_000).toISOString(),
+      to: new Date(startMs + 15 * 60_000).toISOString(),
+      limit: 120,
+    }).catch(() => [] as Frame[]);
+    const calendarFrames = frames.filter(isCalendarViewFrame);
+    if (!calendarFrames.length) return null;
+
+    const meetingFrames = await this.storage.getMeetingFrames(meeting.id).catch(() => [] as Frame[]);
+    const sameDayCalendarEvents = await this.storage
+      .listDayEvents({ day: meeting.day, kind: 'calendar', limit: 500, order: 'chronological' })
+      .catch(() => [] as DayEvent[]);
+    const title = inferLinkedAgendaTitle(meeting, calendarFrames, meetingFrames, sameDayCalendarEvents);
+    const id = `evt_cal_mtg_${meeting.id}`;
+    return {
+      id,
+      day: meeting.day,
+      starts_at: roundMeetingStartForAgenda(meeting.started_at),
+      ends_at: meeting.ended_at,
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title,
+      source_app: 'Calendar',
+      context_md: context || null,
+      attendees: uniqueStrings([...meeting.attendees, ...(meeting.summary_json?.attendees_seen ?? [])]).slice(0, 30),
+      links: uniqueStrings([...meeting.links, ...(meeting.summary_json?.links_shared ?? [])]).slice(0, 50),
+      meeting_id: meeting.id,
+      evidence_frame_ids: calendarFrames.map((f) => f.id).slice(-8),
+      content_hash: sha1(['synthetic-calendar-meeting', meeting.id, title, meetingHash].join('|')).slice(0, 16),
+      status: 'ready',
+      failure_reason: null,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  private async representativeMeetingFrameIds(meetingId: string): Promise<string[]> {
+    const frames = await this.storage.getMeetingFrames(meetingId).catch(() => [] as Frame[]);
+    return frames.filter((f) => f.entity_kind === 'meeting' && f.asset_path).map((f) => f.id).slice(0, 12);
   }
 
   private async extractForCaptureDay(captureDay: string, sourceFilter: Set<DayEventSource> | null): Promise<{ extracted: number; buckets: number; frames: number }> {
@@ -407,12 +561,17 @@ export class EventExtractor {
     for (const candidate of candidatesToPersist) {
       const title = (candidate?.title ?? '').trim();
       if (!title) continue;
+      if (extractionBucket.source === 'calendar_screen' && isCalendarChromeTitle(title)) continue;
 
-      const startsAt = parseEventTimestamp(candidate?.starts_at) ?? coerceTimeOnCaptureDay(candidate?.starts_at, captureDay) ?? defaultStartOnDay(captureDay);
+      const startsAt = parseCandidateStart(candidate, extractionBucket.source, captureDay);
+      if (!startsAt) continue;
       const eventDay = localDayKey(new Date(startsAt));
       if (!isValidEventDay(eventDay)) continue;
+      // Calendar week/month captures show other days too. Trust only events whose explicit date
+      // matches the capture day — other days will be captured on their own day naturally.
+      if (extractionBucket.source === 'calendar_screen' && eventDay !== captureDay) continue;
 
-      const endsAt = parseEventTimestamp(candidate?.ends_at) ?? coerceTimeOnCaptureDay(candidate?.ends_at, eventDay);
+      const endsAt = parseCandidateEnd(candidate, extractionBucket.source, eventDay);
       const hourBucket = localHourBucket(startsAt);
       const id = deterministicEventId(bucket.source, eventDay, hourBucket, title);
       const contentHash = sha1(`${eventDay}|${hourBucket}|${title}|${endsAt ?? ''}`);
@@ -439,11 +598,11 @@ export class EventExtractor {
     return count;
   }
 
-  private async replaceCalendarDaysWithCandidates(captureDay: string, bucket: SourceBucket, candidates: ExtractionCandidate[]): Promise<void> {
-    const visibleDays = visibleCalendarDays(captureDay, bucket, candidates);
-    for (const day of visibleDays) {
-      await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen').catch(() => {});
-    }
+  private async replaceCalendarDaysWithCandidates(captureDay: string, _bucket: SourceBucket, _candidates: ExtractionCandidate[]): Promise<void> {
+    // We only persist events whose date == captureDay (see runLlmExtraction). Wiping other
+    // visible days would orphan their previously-captured events without replacement, since the
+    // week-view extraction tick deliberately ignores non-target-day events now.
+    await this.storage.deleteDayEventsBySourceForDay(captureDay, 'calendar_screen').catch(() => {});
   }
 
   private async loadVisionImages(bucket: SourceBucket): Promise<Buffer[]> {
@@ -542,6 +701,148 @@ function platformLabel(platform: Meeting['platform']): string {
   return { zoom: 'Zoom', meet: 'Google Meet', teams: 'Microsoft Teams', webex: 'Webex', whereby: 'Whereby', around: 'Around', other: 'Meeting' }[platform] || 'Meeting';
 }
 
+function scoreCalendarEventForMeeting(event: DayEvent, meeting: Meeting): number {
+  const es = Date.parse(event.starts_at), ee = event.ends_at ? Date.parse(event.ends_at) : es + 30 * 60_000;
+  const ms = Date.parse(meeting.started_at), me = Date.parse(meeting.ended_at);
+  if (![es, ee, ms, me].every(Number.isFinite)) return 0;
+  const overlap = Math.min(ee, me) - Math.max(es, ms);
+  const startDelta = Math.abs(es - ms);
+  // OCR/LLM-extracted calendar event times are unreliable: a screenshot can place the same event
+  // an hour or two off from where it actually lives in the grid. Use a wide same-day tolerance
+  // and lean on the title match (or the lack of any other plausible candidate) when times disagree.
+  const SAME_DAY_TOLERANCE_MS = 4 * 60 * 60_000;
+  const withinSameDay = startDelta <= SAME_DAY_TOLERANCE_MS;
+  const timeScore = overlap > 0
+    ? Math.max(1, overlap / 60_000) + Math.max(0, 30 - startDelta / 60_000)
+    : startDelta <= 15 * 60_000
+      ? Math.max(0, 30 - startDelta / 60_000)
+      : withinSameDay
+        ? Math.max(0, 10 - startDelta / (30 * 60_000))
+        : 0;
+  if (timeScore <= 0 && !withinSameDay) return 0;
+  const haystack = [event.title, event.source_app, event.context_md, ...event.links].join(' ');
+  const remoteSignal = meeting.platform !== 'other'
+    && new RegExp(platformLabel(meeting.platform).replace(/\s+/g, '\\s+'), 'i').test(haystack);
+  const titleScore = agendaTitlesLikelySame(event.title, meeting.title ?? meeting.summary_json?.title ?? '') ? 40 : 0;
+  // Allow a same-day fallback even when title doesn't match and there's no remote-signal evidence:
+  // the only signal left is "this calendar event sits near the meeting in time". That's still a
+  // better answer than fabricating a synthetic title from the meeting summary heuristic.
+  if (!titleScore && !remoteSignal && event.meeting_id !== meeting.id && !withinSameDay) return 0;
+  const sameDayFallbackBonus = !titleScore && !remoteSignal && event.meeting_id !== meeting.id ? 0.1 : 0;
+  return timeScore + titleScore + (remoteSignal ? 20 : 0) + (event.meeting_id === meeting.id ? 100 : 0) + sameDayFallbackBonus;
+}
+
+function agendaTitlesLikelySame(a: string | null | undefined, b: string | null | undefined): boolean {
+  const clean = (value: string | null | undefined) => (value ?? '')
+    .toLowerCase()
+    .replace(/\b(?:google\s+meet|zoom|teams|meeting|call|workplace)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const left = clean(a), right = clean(b);
+  return !!(left && right && (left === right || (left.length >= 6 && right.length >= 6 && (left.includes(right) || right.includes(left)))));
+}
+
+function roundMeetingStartForAgenda(startedAt: string): string {
+  const d = new Date(startedAt);
+  if (Number.isNaN(d.getTime())) return startedAt;
+  const rounded = Math.round(d.getTime() / (5 * 60_000)) * 5 * 60_000;
+  return new Date(rounded).toISOString();
+}
+
+function inferLinkedAgendaTitle(
+  meeting: Meeting,
+  calendarFrames: Frame[],
+  meetingFrames: Frame[],
+  sameDayCalendarEvents: DayEvent[] = [],
+): string {
+  // A previously-extracted calendar_screen DayEvent for this day is the highest-fidelity title we
+  // have: it was extracted by the LLM directly from the calendar UI with an explicit "preserve the
+  // exact title verbatim" instruction. Always prefer it over heuristic title inference or, worse,
+  // the meeting summarizer's fallback title.
+  const fromDayEvent = pickClosestCalendarTitle(sameDayCalendarEvents, meeting);
+  if (fromDayEvent) return fromDayEvent;
+  const fromZoom = inferTitleFromMeetingScreens(meetingFrames);
+  if (fromZoom) return fromZoom;
+  const fromCalendar = inferTitleFromCalendarFrames(calendarFrames, meeting.started_at);
+  if (fromCalendar) return fromCalendar;
+  const existing = (meeting.title ?? '').trim();
+  return existing && !/^zoom(?:\s+meeting|\s+workplace)?$/i.test(existing) ? existing : `${platformLabel(meeting.platform)} meeting`;
+}
+
+function pickClosestCalendarTitle(events: DayEvent[], meeting: Meeting): string | null {
+  const candidates = events.filter((e) => e.source === 'calendar_screen' && (e.title ?? '').trim() && e.title !== '__merged__');
+  if (!candidates.length) return null;
+  const ms = Date.parse(meeting.started_at);
+  if (!Number.isFinite(ms)) return candidates[0]!.title;
+  const ranked = candidates
+    .map((e) => ({ event: e, delta: Math.abs(Date.parse(e.starts_at) - ms) }))
+    .filter((x) => Number.isFinite(x.delta))
+    .sort((a, b) => a.delta - b.delta);
+  return ranked[0]?.event.title ?? candidates[0]!.title;
+}
+
+function inferTitleFromMeetingScreens(frames: Frame[]): string | null {
+  for (const frame of frames.filter((f) => f.entity_kind === 'meeting')) {
+    const text = [frame.window_title, frame.text].filter(Boolean).join('\n');
+    const candidates = [
+      ...[...text.matchAll(/\b([A-Z][A-Za-z0-9][A-Za-z0-9'&:/. -]{2,80}?)\s+\+\s+Improve\b/g)].map((m) => m[1]),
+      ...[...text.matchAll(/\b([A-Z][A-Za-z0-9][A-Za-z0-9'&:/. -]{2,80}?)\s+&\s+REC\b/g)].map((m) => m[1]),
+    ];
+    for (const candidate of candidates) {
+      const title = cleanAgendaTitle(candidate);
+      if (title) return title;
+    }
+  }
+  return null;
+}
+
+function inferTitleFromCalendarFrames(frames: Frame[], startedAt: string): string | null {
+  const d = new Date(startedAt);
+  const localHour = Number.isNaN(d.getTime()) ? null : d.getHours();
+  for (const frame of frames) {
+    const text = (frame.text ?? '').replace(/\s+/g, ' ');
+    if (localHour !== null) {
+      const hourLabel = localHour === 0 ? 'Midnight' : localHour === 12 ? 'Noon' : `${localHour % 12 || 12}\\s*(?:AM|PM)?`;
+      const nextHour = (localHour + 1) % 24;
+      const nextLabel = nextHour === 0 ? 'Midnight' : nextHour === 12 ? 'Noon' : `${nextHour % 12 || 12}\\s*(?:AM|PM)?`;
+      const body = text.match(new RegExp(`${hourLabel}\\s+(?<body>.{3,160}?)(?:\\s+${nextLabel}\\b|$)`, 'i'))?.groups?.body;
+      const title = cleanAgendaTitle(body);
+      if (title) return title;
+    }
+    for (const phrase of ['standup', 'demo', 'sync', 'review', 'planning', 'kickoff']) {
+      const title = cleanAgendaTitle(text.match(new RegExp(`([^.!?]{0,70}\\b${phrase}\\b[^.!?]{0,70})`, 'i'))?.[1]);
+      if (title) return title;
+    }
+  }
+  return null;
+}
+
+function cleanAgendaTitle(value: string | null | undefined): string | null {
+  const cleaned = (value ?? '')
+    .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b.*$/i, '')
+    .replace(/\b(?:\d{1,2}:\d{2}|\d{1,2})\s*(?:AM|PM)\b.*$/i, '')
+    .replace(/\b(?:REC|Improve|Zoom Workplace|Meeting View Edit Window Help)\b.*$/i, '')
+    .replace(/^[\s+*•·|,-]+|[\s+*•·|,-]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length < 3 || cleaned.length > 100) return null;
+  if (/^(zoom|zoom meeting|zoom workplace|calendar|meeting|view|window|help|noon|midnight)$/i.test(cleaned)) return null;
+  return cleaned;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>(), out: string[] = [];
+  for (const value of values) {
+    const cleaned = (value ?? '').trim();
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
 function deterministicEventId(source: DayEventSource, eventDay: string, hourBucket: string, title: string): string {
   return `evt_${source.split('_')[0]}_${eventDay.replace(/-/g, '')}_${sha1([source, eventDay, hourBucket, normaliseTitleForKey(title)].join('|')).slice(0, 12)}`;
 }
@@ -556,7 +857,7 @@ function normaliseTitleForKey(title: string): string {
 
 function buildExtractionPrompt(captureDay: string, bucket: SourceBucket, maxChars: number, vision: boolean): string {
   const hints = {
-    calendar_screen: `These captures come from the user's calendar app (${bucket.app}). ${vision ? 'Use attached screenshots.' : 'OCR text is primary.'}`,
+    calendar_screen: `These captures come from the user's calendar app (${bucket.app}). ${vision ? 'Use attached screenshots.' : 'OCR text is primary.'} TARGET DAY: ${captureDay}. Output ONLY events whose date is ${captureDay}. Skip events from other days/columns.`,
     email_screen: 'These screenshots are from the user’s email app. Surface meaningful threads.',
     slack_screen: 'These screenshots are from a chat app. Surface notable conversations.',
     task_screen: 'These screenshots are from a task tracker. Surface tickets.',
@@ -610,40 +911,14 @@ function coerceTimeOnCaptureDay(raw: string | null | undefined, day: string): st
   return Number.isNaN(synth.getTime()) ? null : synth.toISOString();
 }
 
-function deterministicCalendarCandidates(captureDay: string, bucket: SourceBucket): ExtractionCandidate[] {
-  const structured = structuredCalendarCandidates(bucket);
-  if (structured.length > 0) return structured;
-
-  const out: ExtractionCandidate[] = [];
-  const seen = new Set<string>();
-  for (const frame of bucket.frames.slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))) {
-    if (out.length >= 25) break;
-    const text = (frame.text ?? '').trim();
-    if (!looksLikeCalendarText(text)) continue;
-
-    let currentHour = null, minuteOffset = 0, inAllDay = false;
-    for (const line of text.split(/\r?\n/).map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean)) {
-      if (/^all[-\s]?day$/i.test(line)) { inAllDay = true; currentHour = null; minuteOffset = 0; continue; }
-      const time = parseCalendarTimeLabel(line);
-      if (time) { currentHour = time; minuteOffset = 0; inAllDay = false; continue; }
-
-      const title = cleanCalendarFallbackTitle(line);
-      if (!title) continue;
-
-      const startsAt = inAllDay ? defaultStartOnDay(captureDay) : currentHour ? coerceTimeOnCaptureDay(`${String(currentHour.hour).padStart(2, '0')}:${String(Math.min(55, currentHour.minute + minuteOffset)).padStart(2, '0')}`, captureDay) : null;
-      if (!startsAt) continue;
-
-      const key = `${localDayKey(new Date(startsAt))}|${localHourBucket(startsAt)}|${normaliseTitleForKey(title)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const startMs = Date.parse(startsAt);
-      out.push({ title, kind: 'calendar', starts_at: startsAt, ends_at: Number.isNaN(startMs) ? null : new Date(startMs + (inAllDay ? 24 * 60 : 30) * 60_000).toISOString(), attendees: [], context: 'Visible in OCR.' });
-      if (!inAllDay) minuteOffset += 15;
-      if (out.length >= 25) break;
-    }
-  }
-  return out;
+function deterministicCalendarCandidates(_captureDay: string, bucket: SourceBucket): ExtractionCandidate[] {
+  // The OCR-line walker that used to live here has been removed. It scanned calendar text
+  // line-by-line and stamped `captureDay` onto every event it found — which silently dumped
+  // every other-day column from a week/month view onto today's agenda. We now rely on:
+  //   1. structured accessibility-text candidates (have explicit ISO dates), and
+  //   2. the vision LLM (instructed to emit only the target day's events).
+  // If both are empty we'd rather have no agenda than a polluted one.
+  return structuredCalendarCandidates(bucket);
 }
 
 function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate[] {
@@ -718,8 +993,13 @@ function calendarTitlesLikelySame(a: string, b: string): boolean {
 function visibleCalendarDays(captureDay: string, bucket: SourceBucket, candidates: ExtractionCandidate[]): Set<string> {
   const days = new Set<string>();
   candidates.forEach((c) => {
-    const startsAt = parseEventTimestamp(c.starts_at) ?? coerceTimeOnCaptureDay(c.starts_at, captureDay);
-    if (startsAt && isValidEventDay(localDayKey(new Date(startsAt)))) days.add(localDayKey(new Date(startsAt)));
+    const startsAt = parseCandidateStart(c, 'calendar_screen', captureDay);
+    if (startsAt && isValidEventDay(localDayKey(new Date(startsAt)))) {
+      const day = localDayKey(new Date(startsAt));
+      days.add(day);
+      const previousUtcMidnightDay = localDayKey(new Date(`${day}T00:00:00.000Z`));
+      if (previousUtcMidnightDay !== day) days.add(previousUtcMidnightDay);
+    }
   });
   let sawText = false;
   bucket.frames.forEach((f) => {
@@ -789,11 +1069,16 @@ function structuredCalendarCandidatesFromText(text: string, frame: Frame): Extra
 }
 
 function parseEnglishDateTime(date?: string, time?: string): string | null {
-  return date && time && !Number.isNaN(Date.parse(`${date} ${time}`)) ? new Date(Date.parse(`${date} ${time}`)).toISOString() : null;
+  if (!date || !time) return null;
+  const parts = parseEnglishDateParts(date), clock = parseTimeParts(time);
+  if (!parts || !clock) return null;
+  const d = new Date(parts.year, parts.monthIndex, parts.day, clock.hour, clock.minute, 0, 0);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function parseEnglishDateDay(date?: string): string | null {
-  const d = date ? localDayKey(new Date(Date.parse(`${date} 12:00 PM`))) : null;
+  const parts = date ? parseEnglishDateParts(date) : null;
+  const d = parts ? localDayKey(new Date(parts.year, parts.monthIndex, parts.day, 12, 0, 0, 0)) : null;
   return d && isValidEventDay(d) ? d : null;
 }
 
@@ -805,6 +1090,69 @@ function monthIndexFromName(raw: string): number | null {
 function weekdayIndexFromName(raw: string): number | null {
   const idx = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(raw.trim().toLowerCase().slice(0, 3));
   return idx >= 0 ? idx : null;
+}
+
+function parseEnglishDateParts(raw: string): { year: number; monthIndex: number; day: number } | null {
+  const m = raw.trim().match(new RegExp(`^(?<month>${MONTH_NAME_PATTERN})\\s+(?<day>\\d{1,2}),\\s*(?<year>\\d{4})$`, 'i'));
+  if (!m?.groups) return null;
+  const monthIndex = monthIndexFromName(m.groups.month), day = Number(m.groups.day), year = Number(m.groups.year);
+  return monthIndex !== null && Number.isInteger(day) && day >= 1 && day <= 31 && Number.isInteger(year) && year >= 1000 && year <= 9999
+    ? { year, monthIndex, day }
+    : null;
+}
+
+function parseTimeParts(raw: string): { hour: number; minute: number } | null {
+  const m = raw.trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!m) return null;
+  let hour = Number(m[1]), minute = m[2] ? Number(m[2]) : 0;
+  const ampm = m[3]!.toLowerCase();
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 ? { hour, minute } : null;
+}
+
+function parseCandidateStart(candidate: ExtractionCandidate, source: DayEventSource, captureDay: string): string {
+  if (source === 'calendar_screen') {
+    const local = parseLocalCalendarTimestamp(candidate.starts_at);
+    if (local) return normaliseAllDayUtcTimestamp(local, candidate.starts_at, candidate.ends_at);
+    // For calendar_screen we REFUSE to silently coerce a bare time like "10:15 AM" onto the
+    // capture day — that's how week/month-view captures end up dumping every column's events
+    // onto today. The caller filters out empty starts.
+    return '';
+  }
+  return parseEventTimestamp(candidate.starts_at) ?? coerceTimeOnCaptureDay(candidate.starts_at, captureDay) ?? defaultStartOnDay(captureDay);
+}
+
+function parseCandidateEnd(candidate: ExtractionCandidate, source: DayEventSource, eventDay: string): string | null {
+  if (source === 'calendar_screen') {
+    const local = parseLocalCalendarTimestamp(candidate.ends_at);
+    if (local) return normaliseAllDayUtcTimestamp(local, candidate.ends_at, undefined);
+  }
+  return parseEventTimestamp(candidate.ends_at) ?? coerceTimeOnCaptureDay(candidate.ends_at, eventDay);
+}
+
+function parseLocalCalendarTimestamp(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const value = String(raw).trim();
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) return localIso(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]), 0, 0);
+
+  const english = value.match(new RegExp(`^(?<date>${MONTH_NAME_PATTERN}\\s+\\d{1,2},\\s*\\d{4})(?:\\s+(?:at\\s+)?)?(?<time>\\d{1,2}(?::\\d{2})?\\s*(?:AM|PM))?$`, 'i'));
+  if (english?.groups) return parseEnglishDateTime(english.groups.date, english.groups.time ?? '12:00 AM');
+
+  return parseEventTimestamp(value);
+}
+
+function normaliseAllDayUtcTimestamp(parsedIso: string, rawStart: string | null | undefined, rawEnd: string | null | undefined): string {
+  const raw = String(rawStart ?? '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}T00:00(?::00(?:\.000)?)?Z$/i.test(raw)) return parsedIso;
+  if (rawEnd && !/^\d{4}-\d{2}-\d{2}T00:00(?::00(?:\.000)?)?Z$/i.test(String(rawEnd).trim())) return parsedIso;
+  return localIso(Number(raw.slice(0, 4)), Number(raw.slice(5, 7)) - 1, Number(raw.slice(8, 10)), 0, 0) ?? parsedIso;
+}
+
+function localIso(year: number, monthIndex: number, day: number, hour: number, minute: number): string | null {
+  const d = new Date(year, monthIndex, day, hour, minute, 0, 0);
+  return Number.isNaN(d.getTime()) || d.getFullYear() !== year || d.getMonth() !== monthIndex || d.getDate() !== day ? null : d.toISOString();
 }
 
 function calendarCandidateIsGrounded(candidate: ExtractionCandidate, bucket: SourceBucket): boolean {
@@ -828,8 +1176,27 @@ function parseCalendarTimeLabel(line: string): { hour: number; minute: number } 
 
 function cleanCalendarFallbackTitle(line: string): string | null {
   const s = line.replace(/^[•*·\-\\u2022]\s*/, '').replace(/\s+/g, ' ').trim();
-  if (s.length < 3 || s.length > 120 || /^(calendar|file|edit|view|window|help|today|week|month|day|inbox|meeting|join|notes?|add|search|settings)$/i.test(s) || /^(sun|mon|tue|wed|thu|fri|sat)(?:day)?$/i.test(s) || /^(?:\/\s*)?(?:AM|PM)$/i.test(s) || /^\d{1,2}(?::\d{2})?\s*(?:AM|PM)$/i.test(s) || /^https?:\/\//i.test(s) || /\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(s) || /^[+<>()[\]{}|/\\]+$/.test(s)) return null;
+  if (s.length < 3 || s.length > 120) return null;
+  if (isCalendarChromeTitle(s)) return null;
+  if (/^https?:\/\//i.test(s) || /\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(s)) return null;
+  if (/^[+<>()[\]{}|/\\]+$/.test(s)) return null;
   return s;
+}
+
+// Strings that should never become an agenda title — UI chrome, clock labels, weekday/month
+// headers, all-day banners, time ranges, etc. Used both for the deterministic fallback and as a
+// post-filter on LLM output so a hallucinated "Noon" or "10:58" doesn't slip through.
+function isCalendarChromeTitle(value: string): boolean {
+  const s = value.trim();
+  if (!s) return true;
+  if (/^(calendar|file|edit|view|window|help|today|week|month|day|year|inbox|meeting|join|notes?|add|search|settings|unable to connect to account\.?)$/i.test(s)) return true;
+  if (/^(sun|mon|tue|wed|thu|fri|sat)(?:day)?$/i.test(s)) return true;
+  if (/^(?:january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+\d{4})?$/i.test(s)) return true;
+  if (/^(noon|midnight|all[-\s]?day)$/i.test(s)) return true;
+  if (/^(?:\/\s*)?(?:AM|PM)$/i.test(s)) return true;
+  if (/^\d{1,2}(?::\d{2})?\s*(?:AM|PM)?$/i.test(s)) return true;
+  if (/^\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[-–—]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)?$/i.test(s)) return true;
+  return false;
 }
 
 function defaultStartOnDay(day: string): string {

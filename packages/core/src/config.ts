@@ -159,12 +159,64 @@ const ExportSchema = z.object({
   plugins: z.array(ExportPluginSchema).default([{ name: 'markdown', enabled: true }, { name: 'mcp', enabled: true }]),
 }).passthrough();
 
+const HookMatcherSchema = z.object({
+  inputKinds: z.array(z.enum(['screen', 'audio'])).optional(),
+  apps: z.array(z.string()).optional(),
+  appBundleIds: z.array(z.string()).optional(),
+  windowTitles: z.array(z.string()).optional(),
+  urlHosts: z.array(z.string()).optional(),
+  urlPatterns: z.array(z.string()).optional(),
+  textIncludes: z.array(z.string()).optional(),
+}).passthrough();
+
+const HookWidgetSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().optional(),
+  bundlePath: z.string().optional(),
+  builtin: z.enum(['calendar', 'followups', 'list', 'json']).optional(),
+  defaultCollection: z.string().optional(),
+  placement: z.enum(['dashboard-main', 'dashboard-aside']).optional(),
+  description: z.string().optional(),
+}).passthrough();
+
+const HookDefinitionSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  description: z.string().optional(),
+  match: HookMatcherSchema.default({}),
+  throttleMs: z.number().int().nonnegative().optional(),
+  needsVision: z.boolean().optional(),
+  promptTemplate: z.string().optional(),
+  systemPrompt: z.string().optional(),
+  outputCollection: z.string().optional(),
+  widget: HookWidgetSchema.optional(),
+}).passthrough();
+
+const HookPluginRefSchema = z.object({
+  name: z.string(),
+  enabled: z.boolean().optional().default(true),
+}).passthrough();
+
+const HooksSchema = z.object({
+  enabled: z.boolean().default(true),
+  plugins: z.array(HookPluginRefSchema).default([
+    { name: 'calendar', enabled: true },
+    { name: 'followups', enabled: true },
+  ]),
+  definitions: z.array(HookDefinitionSchema).default([]),
+  throttle_ms_default: z.number().int().nonnegative().default(60_000),
+  max_image_bytes: z.number().int().positive().default(2 * 1024 * 1024),
+  max_prompt_chars: z.number().int().positive().default(14_000),
+  max_records_per_hook: z.number().int().positive().default(2000),
+}).passthrough();
+
 export const ConfigSchema = z.object({
   app: AppSchema.default({}),
   capture: CaptureSchema.default({}),
   storage: StorageSchema.default({}),
   index: IndexSchema.default({}),
   export: ExportSchema.default({}),
+  hooks: HooksSchema.default({}),
   system: SystemSchema,
 });
 
@@ -296,6 +348,33 @@ export:
       port: 3456
       host: 127.0.0.1
       text_excerpt_chars: 5000
+
+hooks:
+  enabled: true
+  plugins:
+    - name: calendar
+      enabled: true
+    - name: followups
+      enabled: true
+  # Custom user-defined text hooks. Each entry runs the captured
+  # screenshot+OCR (or audio+transcript) through the LLM with the prompt
+  # below, and stores the JSON result in its own collection. The result
+  # is shown with the chosen built-in widget.
+  #
+  # definitions:
+  #   - id: meeting-notes
+  #     title: Meeting Notes
+  #     match:
+  #       inputKinds: [audio]
+  #     systemPrompt: |
+  #       Extract action items from this meeting transcript.
+  #       Return JSON: {"items": [{"text": string, "owner": string|null}]}
+  #     widget:
+  #       builtin: list
+  #       title: Meeting Notes
+  #       defaultCollection: items
+  definitions: []
+  throttle_ms_default: 60000
 `;
 
 export interface LoadedConfig {

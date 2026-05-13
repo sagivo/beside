@@ -21,6 +21,7 @@ import { MODEL_CHOICES, findModelChoice, isPlausibleOllamaTag } from '@/lib/mode
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
 import { NumberField, OptionalNumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
+import { HookSettings } from '@/screens/settings/HookSettings';
 import { configPatchFromDraft, settingsDraftFromConfig, type BackgroundModelJobs, type CaptureMode, type LiveRecordingFormat, type LogLevel, type McpTransport, type ScreenshotFormat, type SettingsDraft, type SystemAudioBackend } from '@/screens/settings/settings-draft';
 import type { AccessibilityPermission, LoadedConfig, MicPermission, ModelBootstrapProgress, RuntimeOverview, ScreenPermission, WhisperProbe } from '@/global';
 
@@ -59,7 +60,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
       
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="h-auto flex-wrap justify-start self-start">
-          {['general', 'permissions', 'capture', 'privacy', 'storage', 'ai', 'audio', 'index', 'export', 'system'].map((v: any) => <TabsTrigger key={v} value={v}>{v.charAt(0).toUpperCase() + v.slice(1)}</TabsTrigger>)}
+          {['general', 'permissions', 'capture', 'privacy', 'storage', 'ai', 'audio', 'hooks', 'index', 'export', 'system'].map((v: any) => <TabsTrigger key={v} value={v}>{v.charAt(0).toUpperCase() + v.slice(1)}</TabsTrigger>)}
         </TabsList>
 
         <TabsContent value="general" className="flex flex-col gap-4">
@@ -177,6 +178,10 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
         <TabsContent value="audio">
           <AudioSettings d={draft} set={set} />
+        </TabsContent>
+
+        <TabsContent value="hooks">
+          <HookSettings config={config} onSaved={onSaved} />
         </TabsContent>
 
         <TabsContent value="index" className="flex flex-col gap-4">

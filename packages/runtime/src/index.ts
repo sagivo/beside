@@ -16,3 +16,6 @@ export type {
   EventExtractorOptions,
   EventExtractorResult,
 } from './event-extractor.js';
+export { CaptureHookEngine } from './capture-hooks.js';
+export type { CaptureHookEngineOptions, CaptureHookDiagnostics } from './capture-hooks.js';
+export type { HookWidgetManifestRuntime } from './orchestrator.js';

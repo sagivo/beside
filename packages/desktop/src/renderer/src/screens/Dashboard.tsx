@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader } from '@/components/PageHeader';
+import { CaptureHookWidgets } from '@/components/CaptureHookWidgets';
 import { dayEventSourceShortLabel } from '@/lib/day-events';
 import { bootstrapMessage, formatBytes, formatLocalDateTime, formatLocalTime, formatNumber, indexingStatusText, localDayKey } from '@/lib/format';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
@@ -156,7 +157,8 @@ function TodayHome({ overview, captureLive, capturePaused, running, journal, loa
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
       <div className="flex min-w-0 flex-col gap-4">
         <QuickSearchPanel onSearch={onSearch} />
-        <ActionCenterPanel center={actionCenter} loading={actionLoading} onSearch={onSearch} />
+        <ActionCenterPanel center={actionCenter} loading={actionLoading} onSearch={onSearch} onOpenMeeting={onGoMeetings} />
+        <CaptureHookWidgets />
         <InsightsPanel items={React.useMemo(() => buildInsights(meetings, fCards), [meetings, fCards])} onOpenItem={(i: any) => i.eventId && i.day && onGoMeetings({ eventId: i.eventId, day: i.day })} />
         <ActivityTimeline items={React.useMemo(() => buildTimelineItems(journal, events), [journal, events])} loading={loading} onOpenEvent={(e: any) => onGoMeetings({ eventId: e.id, day: e.day })} />
       </div>
@@ -182,19 +184,23 @@ function QuickSearchPanel({ onSearch }: { onSearch: (q: string) => void }) {
   );
 }
 
-function ActionCenterPanel({ center, loading, onSearch }: { center: RuntimeActionCenter | null; loading: boolean; onSearch: (q: string) => void }) {
+function ActionCenterPanel({ center, loading, onSearch, onOpenMeeting }: { center: RuntimeActionCenter | null; loading: boolean; onSearch: (q: string) => void; onOpenMeeting: (target: { eventId: string; day: string }) => void }) {
   if (loading && !center) return <section className="rounded-lg border bg-card p-4 shadow-card"><div className="flex items-center gap-3"><Loader2 className="size-4 animate-spin text-primary" /><div className="text-sm text-muted-foreground">Loading action center...</div></div></section>;
   if (!center) return null;
   const fols = [...center.followups].sort((a, b) => urgencyWeight(b.urgency) - urgencyWeight(a.urgency)).slice(0, 5);
   const brdgs = center.meetingBridges.slice(0, 4);
   if (!fols.length && !brdgs.length) return null;
+  const day = center.day;
 
   return (
-    <section className="rounded-lg border bg-card p-5 shadow-card">
-      <div className="mb-5 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Wand2 className="size-4 text-primary" /><h3 className="text-base font-semibold">Action center</h3></div><span className={cn('rounded-md px-1.5 py-0.5 text-[10px] font-medium uppercase', center.source === 'llm' ? 'bg-primary/10 text-primary' : 'bg-amber-500/10 text-amber-700')}>{center.source}</span></div>
-      <div className={cn('grid gap-5', (fols.length && brdgs.length) ? 'lg:grid-cols-2' : '')}>
-        {fols.length > 0 && <ActionColumn title="Follow-ups" icon={Inbox} accent="text-emerald-500" count={fols.length}>{fols.map((i, idx) => <FollowupRow key={idx} item={i} onOpen={() => onSearch(i.title)} />)}</ActionColumn>}
-        {brdgs.length > 0 && <ActionColumn title="Meeting → work" icon={MessageSquare} accent="text-amber-500" count={brdgs.length}>{brdgs.map(b => <BridgeRow key={b.meetingId} bridge={b} onOpen={() => onSearch(b.title)} />)}</ActionColumn>}
+    <section className="rounded-lg border bg-card p-4 shadow-card">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2"><Wand2 className="size-4 text-primary" /><h3 className="text-base font-semibold">Action center</h3></div>
+        {center.source === 'fallback' && <span title="Heuristic results — local model isn't ready yet" className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase text-amber-600 dark:text-amber-400">Fallback</span>}
+      </div>
+      <div className={cn('grid gap-5', (fols.length && brdgs.length) ? 'xl:grid-cols-2' : '')}>
+        {fols.length > 0 && <ActionColumn title="Follow-ups" icon={Inbox} accent="text-emerald-500" count={fols.length}>{fols.map((i, idx) => <FollowupRow key={idx} item={i} onOpen={() => onSearch(cleanActionText(i.title) || i.category)} />)}</ActionColumn>}
+        {brdgs.length > 0 && <ActionColumn title="Meeting → work" icon={MessageSquare} accent="text-amber-500" count={brdgs.length}>{brdgs.map(b => <BridgeRow key={b.meetingId} bridge={b} onOpen={() => onOpenMeeting({ eventId: b.meetingId, day })} />)}</ActionColumn>}
       </div>
     </section>
   );
@@ -203,20 +209,51 @@ function ActionCenterPanel({ center, loading, onSearch }: { center: RuntimeActio
 function urgencyWeight(u: RuntimeActionCenterUrgency) { return u === 'high' ? 3 : u === 'medium' ? 2 : u === 'low' ? 1 : 0; }
 
 function ActionColumn({ title, icon: Icon, accent, count, children }: any) {
-  return <div className="min-w-0"><div className="mb-2.5 flex items-center gap-2"><Icon className={cn('size-3.5 shrink-0', accent)} /><div className="text-xs font-semibold uppercase text-muted-foreground">{title}</div><span className="ml-auto rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium">{count}</span></div><div className="flex flex-col gap-2">{children}</div></div>;
+  return <div className="min-w-0"><div className="mb-2 flex items-center gap-2"><Icon className={cn('size-3.5 shrink-0', accent)} /><div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</div><span className="ml-auto rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums">{count}</span></div><div className="flex flex-col gap-2">{children}</div></div>;
 }
 
-function ActionRowChrome({ children, onOpen, active }: any) {
-  return <button type="button" onClick={onOpen} className={cn('group relative w-full rounded-md border px-3 py-2.5 text-left transition-colors', active ? 'border-primary/40 bg-primary/5 hover:bg-primary/10' : 'border-border/70 bg-background/55 hover:border-border hover:bg-accent/30')}>{children}<ChevronRight className="absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" /></button>;
+function ActionRowChrome({ children, onOpen }: any) {
+  return <button type="button" onClick={onOpen} className="group relative block w-full rounded-md border border-border/70 bg-background/55 px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"><div className="pr-4">{children}</div><ChevronRight className="absolute right-2 top-3 size-3.5 text-muted-foreground/60 opacity-0 transition-opacity group-hover:opacity-100" /></button>;
 }
 
 function FollowupRow({ item, onOpen }: any) {
-  return <ActionRowChrome onOpen={onOpen}><div className="flex items-start gap-2 pr-5"><span className={cn('mt-1.5 size-2 shrink-0 rounded-full', item.urgency === 'high' ? 'bg-red-500' : item.urgency === 'medium' ? 'bg-amber-500' : 'bg-muted-foreground/40')} /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-2"><span className="text-sm font-medium">{cleanActionText(item.title) || item.category}</span><span className="shrink-0 mt-0.5 text-[10px] uppercase text-muted-foreground">{item.app || item.category}</span></div>{item.body && <p className="mt-1 text-xs text-muted-foreground">{cleanActionText(item.body)}</p>}</div></div></ActionRowChrome>;
+  const title = cleanActionText(item.title) || labelFollowupCategory(item.category);
+  const body = cleanActionText(item.body);
+  const tag = item.app || labelFollowupCategory(item.category);
+  return (
+    <ActionRowChrome onOpen={onOpen}>
+      <div className="flex items-start gap-2.5 min-w-0">
+        <span className={cn('mt-[7px] size-2 shrink-0 rounded-full', item.urgency === 'high' ? 'bg-red-500' : item.urgency === 'medium' ? 'bg-amber-500' : 'bg-muted-foreground/40')} title={`${item.urgency} urgency`} />
+        <div className="min-w-0 flex-1">
+          <div className="line-clamp-2 break-words text-sm font-medium leading-snug">{title}</div>
+          {body && body !== title && <p className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">{body}</p>}
+          {tag && <div className="mt-1.5 truncate text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">{tag}</div>}
+        </div>
+      </div>
+    </ActionRowChrome>
+  );
 }
 
+function labelFollowupCategory(c?: string) { return c ? c.charAt(0).toUpperCase() + c.slice(1) : ''; }
+
 function BridgeRow({ bridge, onOpen }: any) {
-  const f = bridge.followups[0] ? `Follow-up: ${cleanActionText(bridge.followups[0])}` : bridge.workAfter[0] ? `After: ${cleanActionText(bridge.workAfter[0])}` : null;
-  return <ActionRowChrome onOpen={onOpen}><div className="pr-5"><div className="flex justify-between gap-2"><span className="line-clamp-1 text-sm font-medium">{cleanActionText(bridge.title) || 'Meeting'}</span><span className="text-[11px] text-muted-foreground">{formatLocalTime(bridge.startedAt)}</span></div>{bridge.summary && <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{cleanActionText(bridge.summary)}</p>}{f && <p className="mt-1 line-clamp-1 text-xs">{f}</p>}</div></ActionRowChrome>;
+  const title = cleanActionText(bridge.title) || 'Meeting';
+  const summary = cleanActionText(bridge.summary);
+  const followup = bridge.followups?.[0] ? cleanActionText(bridge.followups[0]) : '';
+  const after = bridge.workAfter?.[0] ? cleanActionText(bridge.workAfter[0]) : '';
+  return (
+    <ActionRowChrome onOpen={onOpen}>
+      <div className="min-w-0">
+        <div className="flex items-start justify-between gap-2">
+          <span className="line-clamp-2 break-words text-sm font-medium leading-snug">{title}</span>
+          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">{formatLocalTime(bridge.startedAt)}</span>
+        </div>
+        {summary && <p className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">{summary}</p>}
+        {followup && <p className="mt-1.5 line-clamp-2 break-words text-xs"><span className="font-medium text-emerald-600 dark:text-emerald-400">Follow-up · </span><span className="text-foreground/80">{followup}</span></p>}
+        {!followup && after && <p className="mt-1.5 line-clamp-2 break-words text-xs"><span className="font-medium text-primary">After · </span><span className="text-foreground/80">{after}</span></p>}
+      </div>
+    </ActionRowChrome>
+  );
 }
 
 function cleanActionText(v?: string | null) { return stripMarkdown(v).replace(/\s+/g, ' ').trim(); }

@@ -9,12 +9,12 @@ import {
   writeDefaultConfigIfMissing,
 } from '@beside/core';
 import type {
-  ActivitySession, CaptureStatus, DayEvent, DayEventKind, ExportStatus, Frame,
-  FrameQuery, IndexState, Logger, Meeting, RawEvent, StorageStats,
+  ActivitySession, CaptureStatus, CaptureHookDefinition, DayEvent, DayEventKind, ExportStatus, Frame,
+  FrameQuery, HookRecord, HookRecordQuery, IndexState, Logger, Meeting, RawEvent, StorageStats,
 } from '@beside/interfaces';
 import {
   bootstrapModel, buildOrchestrator, assertHeavyWorkAllowed, runFullReindex,
-  runIncremental, runReorganisation, startAll, stopAll, type OrchestratorHandles, type OrchestratorOptions,
+  runIncremental, runReorganisation, startAll, stopAll, type HookWidgetManifestRuntime, type OrchestratorHandles, type OrchestratorOptions,
 } from './orchestrator.js';
 import {
   buildRuntimeActionCenter, type RuntimeActionCenter, type RuntimeActionCenterQuery,
@@ -387,6 +387,44 @@ export class BesideRuntime {
 
   async listJournalDays(): Promise<string[]> {
     return await this.withHandles((handles) => handles.storage.listDays());
+  }
+
+  // -----------------------------------------------------------------------
+  // Capture hooks
+  // -----------------------------------------------------------------------
+
+  async listCaptureHookDefinitions(): Promise<CaptureHookDefinition[]> {
+    return await this.withHandles(async (handles) => handles.captureHooks.listDefinitions());
+  }
+
+  async getCaptureHookDiagnostics() {
+    return await this.withHandles(async (handles) => handles.captureHooks.getDiagnostics());
+  }
+
+  async listCaptureHookWidgetManifests(): Promise<HookWidgetManifestRuntime[]> {
+    return await this.withHandles(async (handles) => [...handles.hookWidgetManifests]);
+  }
+
+  async queryCaptureHookStorage(hookId: string, query: HookRecordQuery = {}): Promise<HookRecord[]> {
+    return await this.withHandles(async (handles) => handles.captureHooks.queryRecords(hookId, query));
+  }
+
+  async mutateCaptureHookStorage(
+    hookId: string,
+    mutation: {
+      collection: string;
+      id: string;
+      data: unknown;
+      evidenceEventIds?: string[];
+      contentHash?: string | null;
+    },
+  ): Promise<HookRecord | null> {
+    return await this.withHandles(async (handles) => handles.captureHooks.mutateRecord(hookId, mutation));
+  }
+
+  onCaptureHookUpdate(listener: (hookId: string) => void): () => void {
+    if (!this.handles) return () => {};
+    return this.handles.captureHooks.onUpdate(listener);
   }
 
   async getJournalDay(day: string): Promise<RuntimeJournalDay> {

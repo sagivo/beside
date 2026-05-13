@@ -74,8 +74,15 @@ export interface IStorage {
   listFramesForVacuum(currentTier: FrameAssetTier, olderThanIso: string, limit: number): Promise<FrameAsset[]>; updateFrameAsset(frameId: string, update: { assetPath?: string | null; tier: FrameAssetTier }): Promise<void>; deleteAssetIfUnreferenced(assetPath: string): Promise<void>; countFramesByTier(): Promise<Record<FrameAssetTier, number>>;
   upsertSession(session: ActivitySession): Promise<void>; getSession(id: string): Promise<ActivitySession | null>; listSessions(query?: ListSessionsQuery): Promise<ActivitySession[]>; listFramesNeedingSessionAssignment(limit: number): Promise<Frame[]>; assignFramesToSession(frameIds: string[], sessionId: string): Promise<void>; getSessionFrames(sessionId: string): Promise<Frame[]>; clearAllSessions(): Promise<void>;
   upsertMeeting(meeting: Meeting): Promise<void>; getMeeting(id: string): Promise<Meeting | null>; listMeetings(query?: ListMeetingsQuery): Promise<Meeting[]>; listFramesNeedingMeetingAssignment(limit: number): Promise<Frame[]>; assignFramesToMeeting(frameIds: string[], meetingId: string): Promise<void>; getMeetingFrames(meetingId: string): Promise<Frame[]>; listAudioFramesInRange(fromIso: string, toIso: string): Promise<Frame[]>; setMeetingTurns(meetingId: string, turns: Array<Omit<MeetingTurn, 'id' | 'meeting_id'>>): Promise<MeetingTurn[]>; getMeetingTurns(meetingId: string): Promise<MeetingTurn[]>; setMeetingSummary(meetingId: string, update: MeetingSummaryUpdate): Promise<void>; clearAllMeetings(): Promise<void>;
-  upsertDayEvent(event: DayEvent): Promise<void>; getDayEvent(id: string): Promise<DayEvent | null>; listDayEvents(query?: ListDayEventsQuery): Promise<DayEvent[]>; deleteDayEventsBySourceForDay(day: string, source: DayEventSource): Promise<void>; clearAllDayEvents(): Promise<void>;
+  upsertDayEvent(event: DayEvent): Promise<void>; getDayEvent(id: string): Promise<DayEvent | null>; listDayEvents(query?: ListDayEventsQuery): Promise<DayEvent[]>; deleteDayEvent(id: string): Promise<void>; deleteDayEventsBySourceForDay(day: string, source: DayEventSource): Promise<void>; clearAllDayEvents(): Promise<void>;
   deleteFrame(frameId: string): Promise<{ assetPath: string | null }>; deleteFrames(query: FrameDeleteQuery): Promise<{ frames: number; assetPaths: string[] }>; deleteAllMemory(): Promise<{ frames: number; events: number; assetBytes: number }>; runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }>; checkpointWal?(mode?: 'PASSIVE' | 'TRUNCATE'): Promise<void>; deleteOldData(retentionDays: number): Promise<{ frames: number; events: number; sessions: number; meetings: number; entities: number; assetPaths: string[] }>;
+
+  // Capture hooks: per-hook isolated record storage.
+  hookPut?(hookId: string, record: { collection: string; id: string; data: unknown; evidenceEventIds?: string[]; contentHash?: string | null; }): Promise<HookRecord>;
+  hookGet?(hookId: string, collection: string, id: string): Promise<HookRecord | null>;
+  hookDelete?(hookId: string, collection: string, id: string): Promise<void>;
+  hookList?(hookId: string, query?: HookRecordQuery): Promise<HookRecord[]>;
+  hookClear?(hookId: string, collection?: string): Promise<{ removed: number }>;
 }
 
 export interface ModelInfo { name: string; contextWindowTokens: number; isLocal: boolean; supportsVision: boolean; costPerMillionTokens: number; }
@@ -96,11 +103,205 @@ export interface ExportStatus { name: string; running: boolean; lastSync: string
 export interface ExportServices { storage: IStorage; strategy: IIndexStrategy; model: IModelAdapter; embeddingModelName?: string; embeddingSearchWeight?: number; dataDir: string; triggerReindex: (full?: boolean) => Promise<void>; summarizeMeeting?: (meetingId: string, opts?: { force?: boolean }) => Promise<{ status: 'ok' | 'failed' | 'not_found' | 'deferred'; message?: string; }>; }
 export interface IExport { readonly name: string; start(): Promise<void>; stop(): Promise<void>; onPageUpdate(page: IndexPage): Promise<void>; onPageDelete(pagePath: string): Promise<void>; onReorganisation(summary: ReorganisationSummary): Promise<void>; fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>; getStatus(): ExportStatus; bindServices?(services: ExportServices): void; }
 
-export type PluginLayer = 'capture' | 'storage' | 'model' | 'index' | 'export';
-export type PluginInterfaceName = 'ICapture' | 'IStorage' | 'IModelAdapter' | 'IIndexStrategy' | 'IExport';
+export type PluginLayer = 'capture' | 'storage' | 'model' | 'index' | 'export' | 'hook';
+export type PluginInterfaceName = 'ICapture' | 'IStorage' | 'IModelAdapter' | 'IIndexStrategy' | 'IExport' | 'IHookPlugin';
 export interface PluginManifest { name: string; version: string; layer: PluginLayer; interface: PluginInterfaceName; entrypoint: string; description?: string; config_schema?: Record<string, unknown>; }
 export interface PluginHostContext { dataDir: string; logger: Logger; config: Record<string, unknown>; }
 export type PluginFactory<T> = (context: PluginHostContext) => T | Promise<T>;
+
+// ---------------------------------------------------------------------------
+// Capture hooks
+//
+// Post-capture extensibility. Hooks receive raw screen or audio capture
+// envelopes (image bytes + OCR text, or audio bytes + transcript), run
+// custom logic — typically an LLM call against `IModelAdapter` — and
+// persist structured records into their own isolated storage namespace.
+// A hook can ship a React widget bundle that the desktop renderer mounts
+// and feeds with the hook's storage records.
+// ---------------------------------------------------------------------------
+
+export type CaptureHookInputKind = 'screen' | 'audio';
+
+export interface CaptureHookScreenInput {
+  kind: 'screen';
+  event: RawEvent;
+  /** Raw screenshot bytes, when an asset is still on disk. */
+  imageBytes: Buffer | null;
+  /** Asset path inside storage root, when present (lets hooks re-read later). */
+  assetPath: string | null;
+  /** Best-effort OCR / accessibility text. May be empty when none is available yet. */
+  ocrText: string;
+  /** When the text comes from OCR vs accessibility vs both. */
+  textSource: FrameTextSource | null;
+  app: string;
+  appBundleId: string;
+  windowTitle: string;
+  url: string | null;
+  /** Frame id, if the frame builder has produced one for this event. */
+  frameId: string | null;
+}
+
+export interface CaptureHookAudioInput {
+  kind: 'audio';
+  event: RawEvent;
+  /** Raw audio bytes when the file is still on disk; null when only the transcript survives. */
+  audioBytes: Buffer | null;
+  audioAssetPath: string | null;
+  /** Transcribed text; may be empty for silent or unsupported clips. */
+  transcript: string;
+  startedAt: string;
+  endedAt: string | null;
+  durationMs: number | null;
+  app: string;
+  windowTitle: string;
+  url: string | null;
+  frameId: string | null;
+}
+
+export type CaptureHookInput = CaptureHookScreenInput | CaptureHookAudioInput;
+
+/** Matchers a hook uses to decide whether a capture is interesting BEFORE any LLM call. */
+export interface CaptureHookMatcher {
+  /** Match capture inputs of these kinds. Defaults to ['screen']. */
+  inputKinds?: CaptureHookInputKind[];
+  /** Substring or regex (forward-slash delimited) against the frontmost app name. */
+  apps?: string[];
+  /** Substring match against macOS bundle id / equivalent. */
+  appBundleIds?: string[];
+  /** Substring match against window title. */
+  windowTitles?: string[];
+  /** Host-only matchers, e.g. ["calendar.google.com"]. */
+  urlHosts?: string[];
+  /** Free-form regex strings tested against the full URL. */
+  urlPatterns?: string[];
+  /** OCR / transcript must include at least one of these substrings (lower-cased compare). */
+  textIncludes?: string[];
+}
+
+/** Where the host should mount this hook's widget on the dashboard. */
+export type CaptureHookWidgetPlacement = 'dashboard-main' | 'dashboard-aside';
+
+export interface CaptureHookWidgetManifest {
+  /** Stable widget id, defaults to the hook id. */
+  id: string;
+  title: string;
+  /** Absolute path (or path relative to the plugin root) to the compiled React bundle. */
+  bundlePath?: string;
+  /** Renderer-defined built-in widget kind, when no React bundle is shipped. */
+  builtin?: 'calendar' | 'followups' | 'list' | 'json';
+  /** Default collection to fetch records from when the widget loads. */
+  defaultCollection?: string;
+  placement?: CaptureHookWidgetPlacement;
+  /** Optional UI description, shown in settings. */
+  description?: string;
+}
+
+export interface CaptureHookDefinition {
+  id: string;
+  title: string;
+  description?: string;
+  match: CaptureHookMatcher;
+  /** Minimum interval between LLM invocations for the same surface (app+window+url+text-hash). */
+  throttleMs?: number;
+  /** Whether this hook needs vision; lets the engine skip image loading if false. */
+  needsVision?: boolean;
+  /** Optional model parameters. */
+  promptTemplate?: string;
+  systemPrompt?: string;
+  /** When the plugin handler is absent, the engine falls back to LLM + JSON parse. */
+  outputCollection?: string;
+  /** Optional widget metadata (a hook can store data without exposing a widget). */
+  widget?: CaptureHookWidgetManifest;
+}
+
+export interface HookRecord<T = unknown> {
+  hookId: string;
+  collection: string;
+  id: string;
+  data: T;
+  evidenceEventIds: string[];
+  contentHash: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HookRecordQuery {
+  collection?: string;
+  /** Match against record id. */
+  id?: string;
+  /** Match against any evidence event id (frame/event ids). */
+  evidenceEventId?: string;
+  /** Inclusive lower bound on updatedAt (ISO). */
+  updatedAfter?: string;
+  limit?: number;
+  offset?: number;
+  order?: 'recent' | 'chronological';
+}
+
+export interface HookRecordMutation {
+  collection: string;
+  id: string;
+  /** Pass null to delete the record. */
+  data: unknown;
+  evidenceEventIds?: string[];
+  contentHash?: string | null;
+}
+
+/**
+ * Per-hook storage namespace. Each hook gets its own logical table inside
+ * the host's storage; the host enforces hook-id scoping so plugins can
+ * neither read nor write other hooks' records.
+ */
+export interface IHookStorageNamespace {
+  readonly hookId: string;
+  put(record: { collection: string; id: string; data: unknown; evidenceEventIds?: string[]; contentHash?: string | null; }): Promise<HookRecord>;
+  get(collection: string, id: string): Promise<HookRecord | null>;
+  delete(collection: string, id: string): Promise<void>;
+  list(query?: HookRecordQuery): Promise<HookRecord[]>;
+  clear(collection?: string): Promise<{ removed: number }>;
+}
+
+export interface CaptureHookContext {
+  hookId: string;
+  storage: IHookStorageNamespace;
+  model: IModelAdapter;
+  logger: Logger;
+  config: Record<string, unknown>;
+  /** Read another asset from the storage root, e.g. an audio file referenced from a screenshot event. */
+  readAsset?: (assetPath: string) => Promise<Buffer>;
+  /**
+   * Record a non-fatal reason a run produced no stored output (e.g. model
+   * returned an empty list, response wasn't parseable). The engine surfaces
+   * the most recent reason in diagnostics so the UI can explain *why* a hook
+   * keeps running but never stores anything.
+   */
+  skip?(reason: string): void;
+}
+
+export type CaptureHookHandler = (input: CaptureHookInput, ctx: CaptureHookContext) => Promise<void>;
+
+export interface IHookPlugin {
+  readonly name: string;
+  /** Hook definitions this plugin contributes. */
+  definitions(): CaptureHookDefinition[] | Promise<CaptureHookDefinition[]>;
+  /**
+   * Optional handler. When provided, it owns the LLM/storage logic for
+   * its hook ids. When absent, the engine runs the built-in
+   * prompt + JSON parsing fallback against `definition.promptTemplate`.
+   */
+  handle?(input: CaptureHookInput, ctx: CaptureHookContext): Promise<void>;
+}
+
+/** Storage hook-output surface — extends `IStorage` (see below). */
+export interface IHookStorage {
+  hookPut(hookId: string, record: { collection: string; id: string; data: unknown; evidenceEventIds?: string[]; contentHash?: string | null; }): Promise<HookRecord>;
+  hookGet(hookId: string, collection: string, id: string): Promise<HookRecord | null>;
+  hookDelete(hookId: string, collection: string, id: string): Promise<void>;
+  hookList(hookId: string, query?: HookRecordQuery): Promise<HookRecord[]>;
+  hookClear(hookId: string, collection?: string): Promise<{ removed: number }>;
+  /** Drop records whose evidence references any of these event ids. */
+  hookPruneByEvidence(eventIds: string[]): Promise<{ removed: number }>;
+}
 
 export interface Logger { debug(msg: string, ...rest: unknown[]): void; info(msg: string, ...rest: unknown[]): void; warn(msg: string, ...rest: unknown[]): void; error(msg: string, ...rest: unknown[]): void; child(scope: string): Logger; }
 

@@ -45,6 +45,8 @@ import type {
   DayEventSource,
   DayEventStatus,
   ListDayEventsQuery,
+  HookRecord,
+  HookRecordQuery,
   PluginFactory,
   Logger,
 } from '@beside/interfaces';
@@ -76,6 +78,45 @@ interface FrameFtsFrameRow {
   app: string | null;
   entity_path: string | null;
   entity_kind: string | null;
+}
+
+interface HookRecordRow {
+  hook_id: string;
+  collection: string;
+  id: string;
+  data_json: string;
+  evidence_ids_json: string;
+  content_hash: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function hookRecordFromRow(row: HookRecordRow): HookRecord {
+  let data: unknown = null;
+  try {
+    data = JSON.parse(row.data_json);
+  } catch {
+    data = null;
+  }
+  let evidenceEventIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.evidence_ids_json);
+    if (Array.isArray(parsed)) {
+      evidenceEventIds = parsed.filter((v) => typeof v === 'string');
+    }
+  } catch {
+    evidenceEventIds = [];
+  }
+  return {
+    hookId: row.hook_id,
+    collection: row.collection,
+    id: row.id,
+    data,
+    evidenceEventIds,
+    contentHash: row.content_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 interface DayEventRow {
@@ -2720,6 +2761,10 @@ class LocalStorage implements IStorage {
     return rows.map(dayEventFromRow);
   }
 
+  async deleteDayEvent(id: string): Promise<void> {
+    this.deleteDayEventsAndChunks([id]);
+  }
+
   async deleteDayEventsBySourceForDay(
     day: string,
     source: DayEventSource,
@@ -2743,6 +2788,121 @@ class LocalStorage implements IStorage {
       );
       DELETE FROM memory_chunks WHERE kind = 'day_event';
     `);
+  }
+
+  // -------------------------------------------------------------------------
+  // Hook records (per-hook isolated storage)
+  // -------------------------------------------------------------------------
+
+  async hookPut(
+    hookId: string,
+    record: {
+      collection: string;
+      id: string;
+      data: unknown;
+      evidenceEventIds?: string[];
+      contentHash?: string | null;
+    },
+  ): Promise<HookRecord> {
+    const now = new Date().toISOString();
+    const evidence = JSON.stringify(record.evidenceEventIds ?? []);
+    const dataJson = JSON.stringify(record.data ?? null);
+    const contentHash = record.contentHash ?? null;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO hook_records (hook_id, collection, id, data_json, evidence_ids_json, content_hash, created_at, updated_at)
+      VALUES (@hook_id, @collection, @id, @data_json, @evidence_ids_json, @content_hash, @created_at, @updated_at)
+      ON CONFLICT(hook_id, collection, id) DO UPDATE SET
+        data_json = excluded.data_json,
+        evidence_ids_json = excluded.evidence_ids_json,
+        content_hash = excluded.content_hash,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run({
+      hook_id: hookId,
+      collection: record.collection,
+      id: record.id,
+      data_json: dataJson,
+      evidence_ids_json: evidence,
+      content_hash: contentHash,
+      created_at: now,
+      updated_at: now,
+    });
+
+    const row = this.db
+      .prepare(
+        `SELECT * FROM hook_records WHERE hook_id = ? AND collection = ? AND id = ?`,
+      )
+      .get(hookId, record.collection, record.id) as HookRecordRow;
+    return hookRecordFromRow(row);
+  }
+
+  async hookGet(
+    hookId: string,
+    collection: string,
+    id: string,
+  ): Promise<HookRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM hook_records WHERE hook_id = ? AND collection = ? AND id = ?`,
+      )
+      .get(hookId, collection, id) as HookRecordRow | undefined;
+    return row ? hookRecordFromRow(row) : null;
+  }
+
+  async hookDelete(hookId: string, collection: string, id: string): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM hook_records WHERE hook_id = ? AND collection = ? AND id = ?`,
+      )
+      .run(hookId, collection, id);
+  }
+
+  async hookList(
+    hookId: string,
+    query: HookRecordQuery = {},
+  ): Promise<HookRecord[]> {
+    const where: string[] = ['hook_id = ?'];
+    const params: unknown[] = [hookId];
+    if (query.collection) {
+      where.push('collection = ?');
+      params.push(query.collection);
+    }
+    if (query.id) {
+      where.push('id = ?');
+      params.push(query.id);
+    }
+    if (query.evidenceEventId) {
+      where.push('evidence_ids_json LIKE ?');
+      params.push(`%"${query.evidenceEventId}"%`);
+    }
+    if (query.updatedAfter) {
+      where.push('updated_at >= ?');
+      params.push(query.updatedAfter);
+    }
+    const orderSql =
+      query.order === 'chronological' ? 'ORDER BY created_at ASC' : 'ORDER BY updated_at DESC';
+    const limit = Math.max(1, Math.min(query.limit ?? 200, 5000));
+    const offset = Math.max(0, query.offset ?? 0);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM hook_records WHERE ${where.join(' AND ')} ${orderSql} LIMIT ? OFFSET ?`,
+      )
+      .all(...params, limit, offset) as HookRecordRow[];
+    return rows.map(hookRecordFromRow);
+  }
+
+  async hookClear(hookId: string, collection?: string): Promise<{ removed: number }> {
+    if (collection) {
+      const res = this.db
+        .prepare(`DELETE FROM hook_records WHERE hook_id = ? AND collection = ?`)
+        .run(hookId, collection);
+      return { removed: res.changes };
+    }
+    const res = this.db
+      .prepare(`DELETE FROM hook_records WHERE hook_id = ?`)
+      .run(hookId);
+    return { removed: res.changes };
   }
 
   // -------------------------------------------------------------------------
@@ -3684,6 +3844,30 @@ class LocalStorage implements IStorage {
         ON day_events(source, day);
       CREATE INDEX IF NOT EXISTS idx_day_events_meeting
         ON day_events(meeting_id) WHERE meeting_id IS NOT NULL;
+
+      -- Capture-hook records: per-hook isolated storage. Each row belongs
+      -- to a single hook id and a logical "collection" name the hook
+      -- chooses. The host is responsible for hook-id scoping; plugins
+      -- never see other hooks' rows. Records are deterministic by
+      -- (hook_id, collection, id) so a hook can upsert idempotently
+      -- across re-runs of the same evidence.
+      CREATE TABLE IF NOT EXISTS hook_records (
+        hook_id              TEXT NOT NULL,
+        collection           TEXT NOT NULL,
+        id                   TEXT NOT NULL,
+        data_json            TEXT NOT NULL,
+        evidence_ids_json    TEXT NOT NULL DEFAULT '[]',
+        content_hash         TEXT,
+        created_at           TEXT NOT NULL,
+        updated_at           TEXT NOT NULL,
+        PRIMARY KEY (hook_id, collection, id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_hook_records_hook_updated
+        ON hook_records(hook_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hook_records_hook_collection_updated
+        ON hook_records(hook_id, collection, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hook_records_evidence
+        ON hook_records(evidence_ids_json);
     `);
 
     this.runSchemaMigrations();

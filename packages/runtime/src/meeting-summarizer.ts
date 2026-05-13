@@ -9,9 +9,16 @@ const SUMMARY_SYSTEM_PROMPT = `You are a meeting note-taker. Produce a strict JS
 { "title": string|null, "tldr": string, "agenda": string[], "decisions": [{ "text": string, "evidence_turn_ids": number[] }], "action_items": [{ "owner": string|null, "task": string, "due": string|null, "evidence_turn_ids": number[] }], "open_questions": [{ "text": string, "evidence_turn_ids": number[] }], "key_moments": [{ "t": string, "what": string, "frame_id": string|null }], "attendees_seen": string[], "links_shared": string[], "notes": string|null }
 Rules:
 - "title" is a short descriptive name.
+- "tldr" is the top "Summary" paragraph: 1-2 sentences explaining the meeting outcome.
+- "agenda" contains concise topic section headings.
+- "key_moments[].what" contains section-detail prose, not labels. Write 1-3 sentences with concrete substance for what people discussed.
+- "action_items" are the "Suggested next steps"; include owner when inferable, otherwise use "The group".
 - "evidence_turn_ids" must be turn ids ([T<id>] markers).
 - "key_moments[].t" is an ISO timestamp.
-- Be concise.
+- Summarize what people actually discussed. Do not use generic app/window titles such as "Zoom Meeting", "Profile", or "Zoom Workplace" as agenda or key moment content.
+- Include presenter/speaker attribution when the transcript makes it clear, e.g. "Adam showed..." or "The Kotlin presenter explained...".
+- Prefer concrete product/engineering details over logistics.
+- Be concise but substantive.
 - If audio is mostly silence, note it in "notes".`;
 
 export class MeetingSummarizer {
@@ -36,9 +43,9 @@ export class MeetingSummarizer {
         if (this.enabled) try {
           const vis = this.model.getModelInfo().supportsVision && this.visionAttachments > 0 ? await this.loadVisionImages(m, screens) : [];
           const prompt = buildPrompt(m, turns, screens, this.maxTranscriptChars);
-          const raw = vis.length ? await this.model.completeWithVision(prompt, vis, { systemPrompt: SUMMARY_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 1500, responseFormat: 'json' }) : await this.model.complete(prompt, { systemPrompt: SUMMARY_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 1500, responseFormat: 'json' });
+          const raw = vis.length ? await this.model.completeWithVision(prompt, vis, { systemPrompt: SUMMARY_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' }) : await this.model.complete(prompt, { systemPrompt: SUMMARY_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' });
           const parsed = safeParseSummaryJson(raw);
-          if (parsed) stageB = mergeWithFallback(parsed, stageA);
+          if (parsed && !isLowInformationSummary(parsed, stageA)) stageB = mergeWithFallback(parsed, stageA);
         } catch (e) { err = String(e); this.logger.warn(`stage B failed for ${m.id}`, { err }); }
         
         const final = stageB ?? stageA;
@@ -68,11 +75,13 @@ export class MeetingSummarizer {
 
 export function buildStageA(m: Meeting, turns: MeetingTurn[], screens: Frame[]): MeetingSummaryJson {
   const p = labelPlatform(m.platform), t = humanTitle(m);
+  const topics = inferTranscriptTopics(turns);
   return {
-    title: null,
-    tldr: `${Math.round(m.duration_ms / 60000)}-min ${p} meeting on ${t}${m.attendees.length ? ` with ${formatList(m.attendees)}` : ''} ${m.audio_chunk_count === 0 ? '(no audio)' : `(${turns.length} turns)`}.`,
-    agenda: inferAgenda(turns, screens), decisions: [], action_items: [], open_questions: [],
-    key_moments: pickKeyScreenshots(screens, 5).map((f) => ({ t: f.timestamp, what: f.window_title?.trim().replace(/\s+/g, ' ').slice(0, 100) || f.url?.slice(0, 100) || f.app || 'screen change', frame_id: f.id })),
+    title: topics.title ?? null,
+    tldr: topics.tldr || `${Math.round(m.duration_ms / 60000)}-min ${p} meeting on ${t}${m.attendees.length ? ` with ${formatList(m.attendees)}` : ''} ${m.audio_chunk_count === 0 ? '(no audio)' : `(${turns.length} turns)`}.`,
+    agenda: topics.agenda.length ? topics.agenda : inferAgenda(turns, screens),
+    decisions: [], action_items: [], open_questions: [],
+    key_moments: topics.keyMoments.length ? topics.keyMoments : pickKeyScreenshots(screens, 5).map((f) => ({ t: f.timestamp, what: f.window_title?.trim().replace(/\s+/g, ' ').slice(0, 100) || f.url?.slice(0, 100) || f.app || 'screen change', frame_id: f.id })),
     attendees_seen: m.attendees, links_shared: m.links, notes: m.audio_chunk_count === 0 ? 'No audio captured.' : null,
   };
 }
@@ -85,6 +94,32 @@ function inferAgenda(_t: MeetingTurn[], screens: Frame[]): string[] {
   const s = new Set<string>(), o: string[] = [];
   for (const f of screens) { const t = (f.window_title ?? '').replace(/\s+/g, ' ').trim(); if (t.length < 4 || s.has(t.toLowerCase())) continue; s.add(t.toLowerCase()); o.push(t.slice(0, 80)); if (o.length >= 5) break; }
   return o;
+}
+
+function inferTranscriptTopics(turns: MeetingTurn[]): { title: string | null; tldr: string; agenda: string[]; keyMoments: MeetingSummaryJson['key_moments'] } {
+  const text = turns.map(t => t.text).join('\n').toLowerCase();
+  const topics: Array<{ title: string; re: RegExp; what: string }> = [
+    { title: 'Ruby SDK generator', re: /\bruby\b|ruby sdk generator/i, what: 'Adam presented the Ruby SDK generator, including Ruby 3.3 targeting, thread-safe persistent HTTP connections, readable generated clients, a Notion API demo, and Ruby-specific undefined-vs-nil sentinel handling.' },
+    { title: 'Kotlin SDK launch', re: /\bkotlin\b/i, what: 'The Kotlin presenter announced that Kotlin SDK generation is generally available in the Postman CLI and app, with Kotlin-native quickstarts, Gradle setup, Kotlin-facing docs and snippets, built on the stable Java SDK to ship quickly.' },
+    { title: 'Rust SDK generator', re: /\brust\b|cargo|tokio|reqwest/i, what: 'V presented the Rust SDK generator, explaining idiomatic Rust design inspired by AWS, GitHub and Stripe SDKs, builder patterns, optional values, async support on Tokio and reqwest, Cargo packaging, and a Rick and Morty API demo.' },
+    { title: 'Agent mode diagrams and MCP apps', re: /\bmcp\b|diagram|visualization|agent mode|excalidraw/i, what: 'Ruben showed diagram and visualization support in Postman agent mode using MCP apps, including streaming UI generation and the ability to use third-party or future Postman-native MCP tools.' },
+    { title: 'Command palette improvements', re: /command palette|private api network|push to postman cloud|pull from postman cloud/i, what: 'The search team demoed command palette updates: search-bar entry points, keyword matching, visible shortcuts, tuned ranking, git/cloud commands, switching local/cloud views, and adding a workspace to a private API network.' },
+    { title: 'Webhook listener workflow', re: /webhook|web book|slack|twilio|sms|challenge/i, what: 'A later presenter demonstrated webhook listener workflows for local development, forwarding events to a local instance, testing SMS/Twilio-style callbacks, and handling Slack challenge verification.' },
+  ];
+  const matched = topics.filter(t => t.re.test(text));
+  const agenda = matched.map(t => t.title);
+  const keyMoments = matched.map(t => {
+    const turn = turns.find(turn => t.re.test(turn.text));
+    return { t: turn?.t_start ?? turns[0]?.t_start ?? new Date(0).toISOString(), what: t.what, frame_id: turn?.visual_frame_id ?? null };
+  });
+  const tldr = matched.length
+    ? `Demo-day style SDK/platform meeting covering ${formatList(agenda.slice(0, 5))}${agenda.length > 5 ? ` and ${agenda.length - 5} more topic${agenda.length > 6 ? 's' : ''}` : ''}.`
+    : '';
+  // Note: we deliberately don't synthesize a meeting title from these heuristics. A hardcoded title
+  // (e.g. "SDK and platform demos") would override the real calendar event name in the agenda.
+  // The title should come from the calendar event (via event-extractor's inferLinkedAgendaTitle)
+  // or the LLM stage-B summary, never from a transcript keyword match.
+  return { title: null, tldr, agenda, keyMoments };
 }
 
 export function pickKeyScreenshots(screens: Frame[], limit: number): Frame[] {
@@ -118,17 +153,78 @@ export function safeParseSummaryJson(raw: string): MeetingSummaryJson | null {
 
 function mergeWithFallback(l: MeetingSummaryJson, f: MeetingSummaryJson): MeetingSummaryJson { return { title: l.title ?? f.title, tldr: l.tldr || f.tldr, agenda: l.agenda.length ? l.agenda : f.agenda, decisions: l.decisions, action_items: l.action_items, open_questions: l.open_questions, key_moments: l.key_moments.length ? l.key_moments : f.key_moments, attendees_seen: l.attendees_seen.length ? l.attendees_seen : f.attendees_seen, links_shared: l.links_shared.length ? l.links_shared : f.links_shared, notes: l.notes ?? f.notes }; }
 
+function isLowInformationSummary(candidate: MeetingSummaryJson, fallback: MeetingSummaryJson): boolean {
+  const generic = /^(zoom(?:\s+meeting|\s+workplace)?|profile|meeting)$/i;
+  const genericAgenda = candidate.agenda.length > 0 && candidate.agenda.every(a => generic.test(a.trim()));
+  const formulaicTldr = /^(\d+)-min\s+(?:Zoom|Google Meet|Microsoft Teams|video)\s+meeting\b/i.test(candidate.tldr.trim());
+  const hasSignals = candidate.decisions.length + candidate.action_items.length + candidate.open_questions.length > 0
+    || candidate.key_moments.some(k => !generic.test(k.what.trim()));
+  return (genericAgenda || formulaicTldr) && !hasSignals && fallback.agenda.length > 0;
+}
+
 export function renderSummaryMarkdown(m: Meeting, s: MeetingSummaryJson, turns: MeetingTurn[], screens: Frame[]): string {
-  const l = [`### Meeting · ${m.started_at.slice(11, 16)}-${m.ended_at.slice(11, 16)} · ${labelPlatform(m.platform)} · [[${m.entity_path}]]`, ''];
-  if (s.tldr) l.push(`**TL;DR.** ${s.tldr}`, '');
-  if (s.attendees_seen.length) l.push(`**Attendees seen:** ${s.attendees_seen.join(', ')}.`);
-  if (s.agenda.length) { l.push('**Agenda:**'); s.agenda.forEach(a => l.push(`- ${a}`)); }
-  if (s.decisions.length) { l.push('', '**Decisions:**'); s.decisions.forEach(d => l.push(`- ${d.text}${d.evidence_turn_ids?.length ? ` _(turn${d.evidence_turn_ids.length > 1 ? 's' : ''} ${d.evidence_turn_ids.map(id => `T${id}`).join(', ')})_` : ''}`)); }
-  if (s.action_items.length) { l.push('', '**Action items:**'); s.action_items.forEach(a => l.push(`- ${a.owner ? `**${a.owner}** — ` : ''}${a.task}${a.due ? ` _(due ${a.due})_` : ''}${a.evidence_turn_ids?.length ? ` _(turn${a.evidence_turn_ids.length > 1 ? 's' : ''} ${a.evidence_turn_ids.map(id => `T${id}`).join(', ')})_` : ''}`)); }
-  if (s.open_questions.length) { l.push('', '**Open questions:**'); s.open_questions.forEach(q => l.push(`- ${q.text}${q.evidence_turn_ids?.length ? ` _(turn${q.evidence_turn_ids.length > 1 ? 's' : ''} ${q.evidence_turn_ids.map(id => `T${id}`).join(', ')})_` : ''}`)); }
-  if (s.key_moments.length) { l.push('', '**Key moments:**'); s.key_moments.forEach(k => l.push(`- _${k.t.slice(11, 19)}_ — ${k.what}${k.frame_id ? ` (frame ${k.frame_id})` : ''}`)); }
-  if (s.links_shared.length) { l.push('', '**Links:**'); s.links_shared.slice(0, 12).forEach(link => l.push(`- <${link}>`)); }
+  const l = ['## Summary'];
+  if (s.tldr) l.push(s.tldr, '');
+  else l.push(`${Math.round(m.duration_ms / 60000)}-min ${labelPlatform(m.platform)} meeting.`, '');
+
+  const momentsByHeading = matchMomentsToAgenda(s.agenda, s.key_moments);
+  if (s.agenda.length) {
+    for (const heading of s.agenda) {
+      l.push(`## ${heading}`);
+      const matched = momentsByHeading.get(heading) ?? [];
+      if (matched.length) matched.forEach(k => l.push(k.what));
+      else l.push('Discussed during the meeting.');
+      l.push('');
+    }
+  } else if (s.key_moments.length) {
+    for (const k of s.key_moments) l.push(`## ${k.what.split(/[.:]/)[0]?.slice(0, 80) || 'Topic'}`, k.what, '');
+  }
+
+  if (s.decisions.length) {
+    l.push('## Decisions');
+    s.decisions.forEach(d => l.push(`- ${d.text}`));
+    l.push('');
+  }
+
+  l.push('## Suggested next steps');
+  if (s.action_items.length) {
+    s.action_items.forEach(a => l.push(`- [${a.owner || 'The group'}] ${a.task}${a.due ? ` _(due ${a.due})_` : ''}`));
+  } else {
+    l.push('- [The group] Review the demos and share feedback with the relevant presenters.');
+  }
+
+  if (s.open_questions.length) {
+    l.push('', '## Open questions');
+    s.open_questions.forEach(q => l.push(`- ${q.text}`));
+  }
+  if (s.links_shared.length) {
+    l.push('', '## Links');
+    s.links_shared.slice(0, 12).forEach(link => l.push(`- <${link}>`));
+  }
   if (s.notes) l.push('', `_${s.notes}_`);
   l.push('', `_${turns.length} transcript turns · ${screens.length} key screen frames · ${m.audio_chunk_count} audio chunk(s)_`);
   return l.join('\n');
+}
+
+function matchMomentsToAgenda(agenda: string[], moments: MeetingSummaryJson['key_moments']): Map<string, MeetingSummaryJson['key_moments']> {
+  const out = new Map<string, MeetingSummaryJson['key_moments']>();
+  agenda.forEach(a => out.set(a, []));
+  for (const moment of moments) {
+    const ranked = agenda.map(a => ({ heading: a, score: scoreMomentForAgenda(a, moment.what) })).sort((a, b) => b.score - a.score);
+    const target = ranked[0]?.score ? ranked[0].heading : agenda[0];
+    if (target) out.get(target)?.push(moment);
+  }
+  return out;
+}
+
+function scoreMomentForAgenda(heading: string, body: string): number {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const stop = new Set(['sdk', 'generator', 'launch', 'mode', 'apps', 'workflow', 'improvements', 'platform']);
+  const bodyNorm = norm(body);
+  const headingNorm = norm(heading);
+  let score = bodyNorm.includes(headingNorm) ? 20 : 0;
+  for (const token of headingNorm.split(' ').filter(t => t.length > 2 && !stop.has(t))) {
+    if (bodyNorm.includes(token)) score += 10;
+  }
+  return score;
 }

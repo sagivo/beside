@@ -109,7 +109,9 @@ function ResultCard({ frame, searchQuery, explanation, onDeleted }: any) {
 
   return (
     <div className="group rounded-xl border bg-card overflow-hidden hover:border-primary/40 hover:shadow-sm">
-      <div className="aspect-video w-full bg-muted/40 grid place-items-center overflow-hidden">{thumb ? <img className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform" src={thumb} alt="" /> : <div className="flex flex-col items-center gap-1 text-muted-foreground"><ImageOff className="size-6" /><span className="text-xs">No screenshot</span></div>}</div>
+      <button type="button" onClick={open} className="aspect-video w-full bg-muted/40 grid place-items-center overflow-hidden text-left outline-offset-[-2px] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset cursor-pointer" aria-label="Open memory details">
+        {thumb ? <img className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform pointer-events-none" src={thumb} alt="" /> : <div className="flex flex-col items-center gap-1 text-muted-foreground pointer-events-none"><ImageOff className="size-6" /><span className="text-xs">No screenshot</span></div>}
+      </button>
       <div className="p-3 flex flex-col gap-1">
         <div className="flex items-center gap-2"><span className="font-mono text-xs text-muted-foreground">{formatLocalDateTime(frame.timestamp)}</span><Badge variant="muted">{frame.app || 'Unknown app'}</Badge>{src && <Badge variant="outline">{src}</Badge>}</div>
         <div className="text-sm line-clamp-2">{frame.window_title || frame.url || (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}</div>

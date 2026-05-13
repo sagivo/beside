@@ -27,6 +27,7 @@ const api = {
   openPath: (target: 'config' | 'data' | 'markdown' | { target: 'markdown'; category?: string }) => ipcRenderer.invoke('beside:open-path', target),
   copyText: (text: string) => ipcRenderer.invoke('beside:copy-text', text),
   openExternalUrl: (url: string) => ipcRenderer.invoke('beside:open-external-url', url),
+  openAssetPath: (assetPath: string) => ipcRenderer.invoke('beside:open-asset-path', assetPath),
   deleteFrame: (frameId: string) => ipcRenderer.invoke('beside:delete-frame', frameId),
   deleteFrames: (query: { app?: string; urlDomain?: string }) =>
     ipcRenderer.invoke('beside:delete-frames', query),
@@ -70,6 +71,20 @@ const api = {
   getActionCenter: (query?: { day?: string }) =>
     ipcRenderer.invoke('beside:get-action-center', query),
   triggerEventExtractor: () => ipcRenderer.invoke('beside:trigger-event-extractor'),
+  listCaptureHookDefinitions: () => ipcRenderer.invoke('beside:list-capture-hook-definitions'),
+  listCaptureHookWidgetManifests: () => ipcRenderer.invoke('beside:list-capture-hook-widget-manifests'),
+  getCaptureHookDiagnostics: () => ipcRenderer.invoke('beside:get-capture-hook-diagnostics'),
+  queryCaptureHookStorage: (params: { hookId: string; query?: unknown }) =>
+    ipcRenderer.invoke('beside:query-capture-hook-storage', params),
+  mutateCaptureHookStorage: (params: {
+    hookId: string;
+    mutation: { collection: string; id: string; data: unknown; evidenceEventIds?: string[]; contentHash?: string | null };
+  }) => ipcRenderer.invoke('beside:mutate-capture-hook-storage', params),
+  readCaptureHookWidgetBundle: (params: { resolvedBundlePath: string }) =>
+    ipcRenderer.invoke('beside:read-capture-hook-widget-bundle', params),
+  onCaptureHookUpdate: (callback: (payload: { hookId: string }) => void) => {
+    ipcRenderer.on('beside:capture-hook-update', (_event, payload) => callback(payload));
+  },
 };
 
 contextBridge.exposeInMainWorld('beside', api);
