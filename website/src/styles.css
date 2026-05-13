@@ -235,22 +235,44 @@ p {
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  font-size: 1.02rem;
+  gap: 11px;
   color: var(--ink);
 }
 .brand:hover { color: var(--ink); }
+.brand span {
+  position: relative;
+  font-family: "Fraunces", "Iowan Old Style", Georgia, serif;
+  font-size: 1.36rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.055em;
+  color: #24115f;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0.12) 23%, transparent 42%),
+    linear-gradient(135deg, #4f1276 0%, #1d1f72 48%, #05aee0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.75)) drop-shadow(0 3px 7px rgba(23, 18, 84, 0.16));
+}
+.brand span::after {
+  content: "Beside";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, 0.95) 20%, transparent 38%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  opacity: 0.42;
+  transform: translateY(-1px);
+  pointer-events: none;
+}
 .brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
   display: block;
   object-fit: contain;
-  padding: 2px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 8px 20px -8px var(--accent-glow);
+  filter: saturate(1.16) contrast(1.06) drop-shadow(0 3px 7px rgba(21, 24, 42, 0.14));
 }
 @keyframes pulse-soft {
   0%, 100% { opacity: 0.55; transform: scale(0.9); }
@@ -1532,16 +1554,39 @@ footer {
   z-index: 1;
 }
 
-/* Glowing core — soft "breathing" pulse */
+/* Glowing core — soft "breathing" pulse + colour shimmer matching logo palette */
 .ai-core {
   transform-origin: 200px 200px;
   transform-box: view-box;
   animation: ai-core-breathe 5.4s ease-in-out infinite;
-  filter: drop-shadow(0 0 14px rgba(107, 108, 240, 0.55));
 }
 @keyframes ai-core-breathe {
-  0%, 100% { transform: scale(0.96); }
-  50%      { transform: scale(1.04); }
+  0%   { transform: scale(0.93); filter: drop-shadow(0 0 12px rgba(138, 60, 200, 0.50)); }
+  28%  { filter: drop-shadow(0 0 22px rgba(160, 80, 240, 0.75)); }
+  55%  { filter: drop-shadow(0 0 22px rgba(20, 110, 240, 0.65)); }
+  80%  { filter: drop-shadow(0 0 18px rgba(80, 200, 255, 0.55)); }
+  100% { transform: scale(0.93); filter: drop-shadow(0 0 12px rgba(138, 60, 200, 0.50)); }
+  50%  { transform: scale(1.06); }
+}
+
+/* Individual orb animations — float apart and back together */
+.logo-orb-t {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orb-float-t 5.4s ease-in-out infinite;
+}
+.logo-orb-b {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orb-float-b 5.4s ease-in-out infinite;
+}
+@keyframes orb-float-t {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(-3px, -5px) scale(1.06); }
+}
+@keyframes orb-float-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(3px, 5px) scale(1.06); }
 }
 
 /* Glowing flow lines (stronger overlay on the dashed rail) */
@@ -2625,6 +2670,7 @@ footer {
   .cta-inner::after,
   .log-row,
   .ai-core, .ai-flow, .ai-ripple, .ai-node, .ai-node .live, .ai-tip,
+  .logo-orb-t, .logo-orb-b,
   .caption-stack span,
   .cap-app .frame, .cap-app .label::before, .cap-flash,
   .idx-row .tag, .idx-scan,

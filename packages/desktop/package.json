@@ -94,7 +94,13 @@
         "zip"
       ],
       "icon": "build/icon.icns",
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "forceCodeSigning": true,
+      "hardenedRuntime": true,
+      "notarize": true
+    },
+    "dmg": {
+      "sign": true
     },
     "win": {
       "target": [

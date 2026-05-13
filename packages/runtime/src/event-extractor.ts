@@ -226,7 +226,7 @@ export class EventExtractor {
   private readonly maxContextEventsPerTick: number;
   private readonly visionAttachments: number;
   private readonly dataDir: string;
-  private chromeTitlePurgeDone = false;
+  private legacyCalendarPurgeDone = false;
 
   constructor(private readonly storage: IStorage, private readonly model: IModelAdapter, logger: Logger, opts: EventExtractorOptions = {}) {
     this.logger = logger.child('event-extractor');
@@ -247,13 +247,15 @@ export class EventExtractor {
       meetingsLifted: 0, llmExtracted: 0, contextEnriched: 0, daysScanned: 0, bucketsScanned: 0, framesScanned: 0, modelAvailable: false, failed: 0,
     };
 
-    if (!this.chromeTitlePurgeDone) {
-      this.chromeTitlePurgeDone = true;
+    if (!this.legacyCalendarPurgeDone) {
+      this.legacyCalendarPurgeDone = true;
       try {
-        const purged = await this.purgeChromeTitleCalendarEvents();
-        if (purged > 0) this.logger.info(`purged ${purged} chrome-title calendar event(s)`);
+        const chromeTitlePurged = await this.purgeChromeTitleCalendarEvents();
+        const misdatedPurged = await this.purgeMisdatedStructuredCalendarEvents();
+        const purged = chromeTitlePurged + misdatedPurged;
+        if (purged > 0) this.logger.info(`purged ${purged} legacy calendar event(s)`);
       } catch (err) {
-        this.logger.warn('chrome-title purge failed', { err: String(err) });
+        this.logger.warn('legacy calendar purge failed', { err: String(err) });
       }
     }
 
@@ -324,6 +326,41 @@ export class EventExtractor {
       await this.storage.deleteDayEvent(event.id).catch(() => {});
       purged++;
     }
+    return purged;
+  }
+
+  private async purgeMisdatedStructuredCalendarEvents(): Promise<number> {
+    const horizonMs = 60 * 24 * 60 * 60 * 1000;
+    const from = new Date(Date.now() - horizonMs).toISOString();
+    const events = await this.storage.listDayEvents({ from, limit: 5000, order: 'recent' }).catch(() => [] as DayEvent[]);
+    const frameCache = new Map<string, Frame | null>();
+    let purged = 0;
+
+    for (const event of events) {
+      if (event.source !== 'calendar_screen' || event.meeting_id || event.evidence_frame_ids.length === 0) continue;
+
+      const matchedDays = new Set<string>();
+      for (const frameId of event.evidence_frame_ids) {
+        let frame = frameCache.get(frameId);
+        if (frame === undefined) {
+          frame = (await this.storage.getFrameContext(frameId, 0, 0).catch(() => null))?.anchor ?? null;
+          frameCache.set(frameId, frame);
+        }
+        if (!frame?.text) continue;
+
+        for (const candidate of structuredCalendarCandidatesFromText(frame.text, frame)) {
+          if (!calendarTitlesLikelySame(event.title, candidate.title ?? '')) continue;
+          const startsAt = parseCandidateStart(candidate, 'calendar_screen', event.day);
+          if (startsAt) matchedDays.add(localDayKey(new Date(startsAt)));
+        }
+      }
+
+      if (matchedDays.size > 0 && !matchedDays.has(event.day)) {
+        await this.storage.deleteDayEvent(event.id).catch(() => {});
+        purged++;
+      }
+    }
+
     return purged;
   }
 
@@ -957,14 +994,40 @@ function mergeStructuredCalendarCandidates(candidates: ExtractionCandidate[], st
 
 function dedupeExtractionCandidates(candidates: ExtractionCandidate[], captureDay: string): ExtractionCandidate[] {
   const out: ExtractionCandidate[] = [], seen = new Set<string>();
+  const allDayTitleKeys = new Set(candidates.map((c) => calendarCandidateAllDayTitleKey(c, captureDay)).filter(Boolean) as string[]);
   for (const c of candidates) {
     const titleKey = normaliseTitleForKey(c.title ?? '');
     if (!titleKey) continue;
-    const startsAt = parseEventTimestamp(c.starts_at) ?? coerceTimeOnCaptureDay(c.starts_at, captureDay);
-    const key = `${startsAt ? localDayKey(new Date(startsAt)) : captureDay}|${startsAt ? localHourBucket(startsAt) : '00'}|${titleKey}`;
+    const startsAt = parseLocalCalendarTimestamp(c.starts_at) ?? parseEventTimestamp(c.starts_at) ?? coerceTimeOnCaptureDay(c.starts_at, captureDay);
+    const day = startsAt ? localDayKey(new Date(startsAt)) : captureDay;
+    const allDay = calendarCandidateLooksAllDay(c, captureDay);
+    if (!allDay && allDayTitleKeys.has(`${day}|${titleKey}`)) continue;
+    const key = `${day}|${allDay ? 'all-day' : startsAt ? localHourBucket(startsAt) : '00'}|${titleKey}`;
     if (!seen.has(key)) { seen.add(key); out.push(c); }
   }
   return out;
+}
+
+function calendarCandidateAllDayTitleKey(candidate: ExtractionCandidate, captureDay: string): string | null {
+  if (!calendarCandidateLooksAllDay(candidate, captureDay)) return null;
+  const titleKey = normaliseTitleForKey(candidate.title ?? '');
+  if (!titleKey) return null;
+  const startsAt = parseLocalCalendarTimestamp(candidate.starts_at) ?? parseEventTimestamp(candidate.starts_at) ?? coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+  return `${startsAt ? localDayKey(new Date(startsAt)) : captureDay}|${titleKey}`;
+}
+
+function calendarCandidateLooksAllDay(candidate: ExtractionCandidate, captureDay: string): boolean {
+  const startsAt = parseLocalCalendarTimestamp(candidate.starts_at) ?? parseEventTimestamp(candidate.starts_at) ?? coerceTimeOnCaptureDay(candidate.starts_at, captureDay);
+  if (!startsAt) return false;
+  const start = new Date(startsAt);
+  if (Number.isNaN(start.getTime()) || start.getHours() !== 0 || start.getMinutes() !== 0) return false;
+  const raw = `${candidate.starts_at ?? ''} ${candidate.ends_at ?? ''} ${candidate.context ?? ''}`;
+  if (/\ball[-\s]?day\b/i.test(raw) || /^\d{4}-\d{2}-\d{2}$/.test(String(candidate.starts_at ?? '').trim())) return true;
+  if (!candidate.ends_at) return true;
+  const endsAt = parseLocalCalendarTimestamp(candidate.ends_at) ?? parseEventTimestamp(candidate.ends_at);
+  if (!endsAt) return false;
+  const end = new Date(endsAt), duration = end.getTime() - start.getTime();
+  return !Number.isNaN(end.getTime()) && end.getHours() === 0 && end.getMinutes() === 0 && duration >= 20 * 60 * 60_000;
 }
 
 function calendarCandidatesLikelySame(a: ExtractionCandidate, b: ExtractionCandidate, captureDay: string): boolean {

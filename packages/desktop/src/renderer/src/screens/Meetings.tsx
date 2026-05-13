@@ -9,7 +9,7 @@ import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { Markdown } from '@/components/Markdown';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
-import { formatLocalTime, localDayKey, prettyDay, shiftDay } from '@/lib/format';
+import { dayEventTitleKey, dedupeAllDayCalendarDuplicates, formatDayEventTime, formatDayEventTimeRange, formatLocalTime, isAllDayEvent, localDayKey, prettyDay, shiftDay } from '@/lib/format';
 import { uniqueStrings } from '@/lib/collections';
 import { DAY_EVENT_KIND_COLORS as KIND_COLOR, DAY_EVENT_KIND_LABELS as KIND_LABELS, DAY_EVENT_SOURCE_LABELS as SOURCE_LABELS } from '@/lib/day-events';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
@@ -30,6 +30,7 @@ function KindIcon({ kind, className }: { kind: DayEventKind; className?: string 
 }
 
 function eventDuration(e: DayEvent): number | null {
+  if (isAllDayEvent(e)) return null;
   if (!e.ends_at) return null;
   const ms = Date.parse(e.ends_at) - Date.parse(e.starts_at);
   return Number.isFinite(ms) && ms > 0 ? ms : null;
@@ -58,11 +59,13 @@ function eventStartsAfterNow(e: DayEvent, nowMs: number): boolean {
 function nowIndicatorIndex(es: DayEvent[], now: Date): number { const idx = es.findIndex(e => !eventBelongsBeforeNowIndicator(e, now.getTime())); return idx === -1 ? es.length : idx; }
 
 function dedupeEvents(es: DayEvent[]): DayEvent[] {
+  const allDayKeys = new Set(es.filter(isAllDayEvent).map(e => `${e.day}|${e.kind}|${dayEventTitleKey(e.title)}`));
   const seen = new Map<string, DayEvent>();
   for (const e of es) {
     if (e.title === '__merged__') continue;
+    if (!isAllDayEvent(e) && (e.kind === 'calendar' || e.source === 'calendar_screen') && allDayKeys.has(`${e.day}|${e.kind}|${dayEventTitleKey(e.title)}`)) continue;
     const m = Math.floor(Date.parse(e.starts_at) / 60000), bs = e.kind === 'meeting' ? 1 : 5, b = Math.floor(m / bs) * bs;
-    const k = e.kind === 'meeting' ? `${e.day}|${e.kind}|${e.meeting_id ?? e.id}` : `${e.day}|${e.kind}|${b}|${e.title.trim().toLowerCase()}`;
+    const k = e.kind === 'meeting' ? `${e.day}|${e.kind}|${e.meeting_id ?? e.id}` : isAllDayEvent(e) ? `${e.day}|${e.kind}|all-day|${dayEventTitleKey(e.title)}` : `${e.day}|${e.kind}|${b}|${e.title.trim().toLowerCase()}`;
     const ex = seen.get(k);
     if (!ex) { seen.set(k, e); continue; }
     if (ex.kind === 'meeting' && e.kind === 'meeting') {
@@ -70,7 +73,7 @@ function dedupeEvents(es: DayEvent[]): DayEvent[] {
       if (sc(e) > sc(ex)) seen.set(k, e);
     } else if (ex.kind !== 'meeting' && e.kind === 'meeting') seen.set(k, e);
   }
-  return Array.from(seen.values());
+  return dedupeAllDayCalendarDuplicates(Array.from(seen.values()));
 }
 
 function eventTimeRange(e: DayEvent) {
@@ -281,7 +284,7 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />{selectedDay === today ? 'Next up' : 'First event'}</div>
           <div className="min-w-0">
             <div className="text-base font-semibold leading-tight truncate">{upc.title}</div>
-            <div className="mt-1 text-sm text-muted-foreground font-medium truncate">{formatLocalTime(upc.starts_at)}{upc.ends_at ? <> – {formatLocalTime(upc.ends_at)}</> : null}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
+            <div className="mt-1 text-sm text-muted-foreground font-medium truncate">{formatDayEventTimeRange(upc)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
           </div>
         </button>
       ) : <div className="rounded-xl border border-dashed border-border/50 bg-card/50 p-5 flex items-center justify-center text-sm text-muted-foreground">Nothing else scheduled today</div>}
@@ -330,7 +333,7 @@ function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active
   return (
     <button type="button" onClick={onClick} className={cn('group w-full text-left rounded-xl px-3 py-3.5 transition-all border', active ? 'border-primary/30 bg-primary/5 shadow-sm' : 'border-transparent hover:bg-muted/50')}>
       <div className="flex items-start gap-3">
-        <div className="flex flex-col items-start min-w-[3.5rem] pt-0.5"><span className={cn("text-xs font-bold tabular-nums", active ? "text-primary" : "text-foreground")}>{formatLocalTime(event.starts_at)}</span>{dur != null && <span className="text-[10px] text-muted-foreground tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}</div>
+        <div className="flex flex-col items-start min-w-[3.5rem] pt-0.5"><span className={cn("text-xs font-bold tabular-nums", active ? "text-primary" : "text-foreground")}>{formatDayEventTime(event)}</span>{dur != null && <span className="text-[10px] text-muted-foreground tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}</div>
         <div className="flex-1 min-w-0">
           <div className="flex items-start gap-2">
             <span className={cn('mt-0.5 shrink-0 text-muted-foreground/50 transition-colors', active ? KIND_COLOR[event.kind] : 'group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
@@ -360,7 +363,7 @@ function EventDetailHeader({ event, meeting }: { event: DayEvent; meeting: Meeti
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-muted-foreground">
         <div className="flex items-center gap-2"><Calendar className="size-4 opacity-70" /><span className="font-medium">{prettyDay(event.day)}</span></div>
-        <div className="flex items-center gap-2"><Clock className="size-4 opacity-70" /><span className="font-medium">{formatLocalTime(event.starts_at)}{event.ends_at && <> – {formatLocalTime(event.ends_at)}</>}</span>{dur != null && <span className="text-muted-foreground/60 font-normal">({formatDuration(dur)})</span>}</div>
+        <div className="flex items-center gap-2"><Clock className="size-4 opacity-70" /><span className="font-medium">{formatDayEventTimeRange(event)}</span>{dur != null && <span className="text-muted-foreground/60 font-normal">({formatDuration(dur)})</span>}</div>
         {event.source_app && <div className="flex items-center gap-2"><Inbox className="size-4 opacity-70" /><span className="font-medium">{event.source_app}</span></div>}
         <div className="flex items-center gap-2 text-muted-foreground/80"><span className="text-xs uppercase tracking-wider font-bold">{sl}</span></div>
       </div>

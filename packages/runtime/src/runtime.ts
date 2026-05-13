@@ -16,9 +16,6 @@ import {
   bootstrapModel, buildOrchestrator, assertHeavyWorkAllowed, runFullReindex,
   runIncremental, runReorganisation, startAll, stopAll, type HookWidgetManifestRuntime, type OrchestratorHandles, type OrchestratorOptions,
 } from './orchestrator.js';
-import {
-  buildRuntimeActionCenter, type RuntimeActionCenter, type RuntimeActionCenterQuery,
-} from './action-center.js';
 
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
@@ -137,7 +134,6 @@ const OVERVIEW_CACHE_TTL_MS = 30_000;
 const OVERVIEW_SLOW_LOG_MS = 500;
 const EXPLAIN_SEARCH_CACHE_MAX = 256;
 const SEARCH_EXPLANATION_TIMEOUT_MS = 20_000;
-const ACTION_CENTER_CACHE_TTL_MS = 15 * 60_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
@@ -151,7 +147,6 @@ export class BesideRuntime {
   private manualJob: { name: string; startedAt: string } | null = null;
   private lastManualJobCompletedAt: string | null = null;
   private readonly explainSearchCache = new Map<string, string>();
-  private readonly actionCenterCache = new Map<string, { value: RuntimeActionCenter; expiresAt: number }>();
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -352,37 +347,6 @@ export class BesideRuntime {
 
   async listDayEvents(query: { day?: string; from?: string; to?: string; kind?: DayEventKind; limit?: number; order?: 'recent' | 'chronological'; } = {}): Promise<DayEvent[]> {
     return await this.withHandles(async (handles) => handles.storage.listDayEvents({ day: query.day, from: query.from, to: query.to, kind: query.kind, order: query.order ?? (query.day ? 'chronological' : 'recent'), limit: query.limit ?? (query.day ? 500 : 2000) }).catch(() => []));
-  }
-
-  async getActionCenter(query: RuntimeActionCenterQuery = {}): Promise<RuntimeActionCenter> {
-    const cacheKey = query.day ?? 'today';
-    const memCached = this.actionCenterCache.get(cacheKey);
-    if (memCached && memCached.expiresAt > Date.now()) return memCached.value;
-
-    return await this.withHandles(async (handles) => {
-      const cachePath = path.join(handles.loaded.dataDir, `action_center_${cacheKey}.json`);
-      try {
-        const diskCache = JSON.parse(await fs.readFile(cachePath, 'utf8'));
-        if (diskCache && diskCache.expiresAt > Date.now()) {
-          this.actionCenterCache.set(cacheKey, diskCache);
-          return diskCache.value;
-        }
-      } catch (e) {
-        // ignore missing or invalid disk cache
-      }
-
-      const value = await buildRuntimeActionCenter(handles, query);
-      const cacheEntry = { value, expiresAt: Date.now() + ACTION_CENTER_CACHE_TTL_MS };
-      this.actionCenterCache.set(cacheKey, cacheEntry);
-      
-      try {
-        await fs.writeFile(cachePath, JSON.stringify(cacheEntry), 'utf8');
-      } catch (e) {
-        handles.logger.warn('Failed to write action center disk cache', { err: String(e) });
-      }
-      
-      return value;
-    });
   }
 
   async listJournalDays(): Promise<string[]> {

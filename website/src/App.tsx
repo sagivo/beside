@@ -411,7 +411,7 @@ function AmbientAINetwork() {
 
   const center = { x: 200, y: 200 };
   const R_SVG = 158;     // SVG node radius from center
-  const INNER = 44;      // inset before reaching the core
+  const INNER = 50;      // inset before reaching the core
   const R_HTML = 41.5;   // % radius for HTML chips
   const R_TIP = 28;      // % radius for floating "indexed" tooltips (closer to core)
 
@@ -419,25 +419,32 @@ function AmbientAINetwork() {
     <>
       <svg viewBox="0 0 400 400" className="ai-net" xmlns="http://www.w3.org/2000/svg">
         <defs>
-          <radialGradient id="coreOrb" cx="38%" cy="34%" r="70%">
-            <stop offset="0%"  stopColor="#ffffff" />
-            <stop offset="38%" stopColor="#dadcfa" />
-            <stop offset="80%" stopColor="#7c7df0" />
-            <stop offset="100%" stopColor="#4a4be0" />
-          </radialGradient>
+          {/* halo behind the whole core */}
           <radialGradient id="coreHalo" cx="50%" cy="50%" r="50%">
             <stop offset="0%"  stopColor="#6b6cf0" stopOpacity="0.42" />
             <stop offset="55%" stopColor="#6b6cf0" stopOpacity="0.08" />
             <stop offset="100%" stopColor="#6b6cf0" stopOpacity="0" />
           </radialGradient>
+          {/* edge flow lines */}
           <linearGradient id="edgeFlow" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%"   stopColor="#6b6cf0" stopOpacity="0.0" />
             <stop offset="55%"  stopColor="#6b6cf0" stopOpacity="0.55" />
             <stop offset="100%" stopColor="#6b6cf0" stopOpacity="0.05" />
           </linearGradient>
+          {/* blur halo for the core glow */}
           <filter id="aiSoft" x="-50%" y="-50%" width="200%" height="200%">
             <feGaussianBlur stdDeviation="2" />
           </filter>
+          <filter id="logoDrop" x="-35%" y="-35%" width="170%" height="170%">
+            <feDropShadow dx="0" dy="5" stdDeviation="5" floodColor="#050014" floodOpacity="0.42" />
+          </filter>
+          {/* Keep the real logo artwork, but split it into two independently animated SVG bubbles. */}
+          <clipPath id="logoTopBubbleClip" clipPathUnits="userSpaceOnUse">
+            <ellipse cx="198" cy="176" rx="34" ry="28" transform="rotate(-12 198 176)" />
+          </clipPath>
+          <clipPath id="logoBottomBubbleClip" clipPathUnits="userSpaceOnUse">
+            <ellipse cx="202" cy="224" rx="32" ry="31" transform="rotate(-18 202 224)" />
+          </clipPath>
         </defs>
 
         {/* outer halo behind the core */}
@@ -505,24 +512,42 @@ function AmbientAINetwork() {
 
         {/* concentric pulse rings emanating from the core */}
         <g>
-          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple" />
-          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay2" />
-          <circle cx={center.x} cy={center.y} r="42" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay3" />
+          <circle cx={center.x} cy={center.y} r="50" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple" />
+          <circle cx={center.x} cy={center.y} r="50" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay2" />
+          <circle cx={center.x} cy={center.y} r="50" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay3" />
         </g>
 
-        {/* central AI core */}
-        <g>
-          <circle cx={center.x} cy={center.y} r="56" fill="#ffffff" opacity="0.35" filter="url(#aiSoft)" />
-          <circle cx={center.x} cy={center.y} r="38" fill="url(#coreOrb)" className="ai-core" />
-          <circle cx={center.x} cy={center.y} r="38" fill="none" stroke="#ffffff" strokeOpacity="0.7" strokeWidth="0.8" />
-          {/* tiny highlight */}
-          <circle cx={center.x - 9} cy={center.y - 10} r="4.2" fill="#ffffff" opacity="0.9" />
-          {/* neural micro-arcs inside core for subtle "thinking" texture */}
-          <g opacity="0.42">
-            <path d="M 184 200 Q 200 188 216 200" stroke="#ffffff" strokeWidth="0.7" fill="none" strokeLinecap="round" />
-            <path d="M 184 204 Q 200 220 216 204" stroke="#ffffff" strokeWidth="0.7" fill="none" strokeLinecap="round" />
-            <path d="M 196 188 L 196 212"      stroke="#ffffff" strokeWidth="0.5" fill="none" strokeLinecap="round" />
-            <path d="M 204 188 L 204 212"      stroke="#ffffff" strokeWidth="0.5" fill="none" strokeLinecap="round" />
+        {/* central AI core — actual logo artwork split into two animated SVG bubbles */}
+        <g className="ai-core">
+          {/* subtle guide ring behind the artwork */}
+          <circle cx={center.x} cy={center.y} r="46" fill="none" stroke="#ffffff" strokeOpacity="0.24" strokeWidth="0.7" />
+          {/* soft bloom behind the pair */}
+          <circle cx={center.x} cy={center.y} r="62" fill="#ffffff" opacity="0.14" filter="url(#aiSoft)" />
+          <g filter="url(#logoDrop)">
+            <g className="logo-orb-b">
+              <g clipPath="url(#logoBottomBubbleClip)">
+                <image
+                  href="/images/logo.png"
+                  x="168"
+                  y="150"
+                  width="68"
+                  height="101"
+                  preserveAspectRatio="xMidYMid meet"
+                />
+              </g>
+            </g>
+            <g className="logo-orb-t">
+              <g clipPath="url(#logoTopBubbleClip)">
+                <image
+                  href="/images/logo.png"
+                  x="168"
+                  y="150"
+                  width="68"
+                  height="101"
+                  preserveAspectRatio="xMidYMid meet"
+                />
+              </g>
+            </g>
           </g>
         </g>
       </svg>
@@ -770,7 +795,7 @@ function IndexCard() {
           <span className="tag">#pricing</span>
         </div>
         <div className="idx-row r2">
-          <span className="raw">"Sagiv shipped Onboarding v7"</span>
+          <span className="raw">"Maya shipped Onboarding v7"</span>
           <span className="arrow">→</span>
           <span className="tag">#onboarding</span>
         </div>

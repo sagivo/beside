@@ -1,6 +1,5 @@
 export * from './orchestrator.js';
 export * from './runtime.js';
-export * from './action-center.js';
 export { MeetingBuilder } from './meeting-builder.js';
 export type {
   MeetingBuilderOptions,

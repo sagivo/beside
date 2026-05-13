@@ -68,8 +68,6 @@ const api = {
     kind?: string;
     limit?: number;
   }) => ipcRenderer.invoke('beside:list-day-events', query),
-  getActionCenter: (query?: { day?: string }) =>
-    ipcRenderer.invoke('beside:get-action-center', query),
   triggerEventExtractor: () => ipcRenderer.invoke('beside:trigger-event-extractor'),
   listCaptureHookDefinitions: () => ipcRenderer.invoke('beside:list-capture-hook-definitions'),
   listCaptureHookWidgetManifests: () => ipcRenderer.invoke('beside:list-capture-hook-widget-manifests'),

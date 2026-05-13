@@ -190,11 +190,16 @@ async function main() {
     const events3 = await storage.listDayEvents({ day });
     assert(events3.length === 0, `clearAllDayEvents wiped the table (got ${events3.length})`);
 
-    // LLM calendar extraction should trust the event date visible on
-    // the calendar, not filter by proximity to "now". One calendar
-    // screenshot can legitimately show past, current, and future items.
+    // Calendar extraction should only persist events for the target
+    // capture day. Week/month views can show other columns, but those
+    // belong to their own day scans.
     const captureDay = localDayKey();
     const staleVisibleDay = captureDay === '2026-05-12' ? '2026-05-13' : '2026-05-12';
+    const nextDayDate = new Date(`${captureDay}T12:00:00`);
+    nextDayDate.setDate(nextDayDate.getDate() + 1);
+    const nextDay = localDayKey(nextDayDate);
+    const nextDate = englishDate(nextDay);
+    const misdatedFrameId = `frame_calendar_misdated_${randomUUID().slice(0, 8)}`;
     await storage.upsertFrame({
       id: `frame_calendar_old_${randomUUID().slice(0, 8)}`,
       timestamp: `${captureDay}T08:50:00.000Z`,
@@ -234,6 +239,30 @@ async function main() {
       text_source: 'ocr',
       asset_path: null,
       perceptual_hash: `cal_${randomUUID().slice(0, 8)}`,
+      trigger: 'screenshot',
+      session_id: 'sess_calendar_smoke',
+      duration_ms: null,
+      entity_path: null,
+      entity_kind: null,
+      activity_session_id: null,
+      meeting_id: null,
+      source_event_ids: [],
+    });
+    await storage.upsertFrame({
+      id: misdatedFrameId,
+      timestamp: `${captureDay}T08:55:00.000Z`,
+      day: captureDay,
+      monitor: 0,
+      app: 'Calendar',
+      app_bundle_id: 'com.apple.iCal',
+      window_title: 'Calendar — month view',
+      url: null,
+      text:
+        `Calendar May 2026 Sun Mon Tue 12 Wed 13 Thu 14 Fri 15 Sat 16 8 AM 9 AM 10 AM ` +
+        `Birthday Cheers. Starts on ${nextDate} at 4:00 PM and ends at 5:00 PM.`,
+      text_source: 'ocr_accessibility',
+      asset_path: null,
+      perceptual_hash: `cal_misdated_${randomUUID().slice(0, 8)}`,
       trigger: 'screenshot',
       session_id: 'sess_calendar_smoke',
       duration_ms: null,
@@ -303,6 +332,26 @@ async function main() {
       created_at: `${staleVisibleDay}T08:00:00.000Z`,
       updated_at: `${staleVisibleDay}T08:00:00.000Z`,
     });
+    await storage.upsertDayEvent({
+      id: `event_misdated_calendar_${randomUUID().slice(0, 8)}`,
+      day: captureDay,
+      starts_at: `${captureDay}T16:00:00.000Z`,
+      ends_at: `${captureDay}T17:00:00.000Z`,
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title: 'Birthday Cheers',
+      source_app: 'Calendar',
+      context_md: 'This row came from a legacy week-view parse and should be purged.',
+      attendees: [],
+      links: [],
+      meeting_id: null,
+      evidence_frame_ids: [misdatedFrameId],
+      content_hash: 'misdated-calendar-row',
+      status: 'ready',
+      failure_reason: null,
+      created_at: `${captureDay}T08:00:00.000Z`,
+      updated_at: `${captureDay}T08:00:00.000Z`,
+    });
 
     const availableModel = {
       ...stubModel,
@@ -347,30 +396,30 @@ async function main() {
       minTextChars: 20,
     });
     const r3 = await llmExtractor.tick();
-    assert(r3.llmExtracted >= 3, `calendar extraction accepted past/today/future dates (got ${r3.llmExtracted})`);
+    assert(r3.llmExtracted === 1, `calendar extraction only accepted the target day (got ${r3.llmExtracted})`);
     const pastEvents = await storage.listDayEvents({ day: '1999-12-31', kind: 'calendar' });
     const todayEvents = await storage.listDayEvents({ day: captureDay, kind: 'calendar' });
     const visibleDayEvents = await storage.listDayEvents({ day: staleVisibleDay, kind: 'calendar' });
     const futureEvents = await storage.listDayEvents({ day: '2050-01-02', kind: 'calendar' });
     assert(
-      pastEvents.some((e) => e.title === 'Past Strategy Review'),
-      'calendar extraction stores past-dated events',
+      !pastEvents.some((e) => e.title === 'Past Strategy Review'),
+      'calendar extraction skips non-target past-dated events',
     );
     assert(
       todayEvents.some((e) => e.title === 'Today Sync'),
       'calendar extraction stores current-day events',
     );
     assert(
-      !todayEvents.some((e) => ['Stale Calendar Item', 'Removed Calendar Item'].includes(e.title)),
-      'calendar extraction removes stale events when a newer capture has fewer items',
+      !todayEvents.some((e) => ['Stale Calendar Item', 'Removed Calendar Item', 'Birthday Cheers'].includes(e.title)),
+      'calendar extraction removes stale and legacy misdated events for the target day',
     );
     assert(
-      !visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
-      'calendar extraction removes rows for visible days that now have no events',
+      visibleDayEvents.some((e) => e.title === 'Stale Visible Calendar Item'),
+      'calendar extraction leaves other visible days for their own scan',
     );
     assert(
-      futureEvents.some((e) => e.title === 'Future Planning'),
-      'calendar extraction stores future-dated events',
+      !futureEvents.some((e) => e.title === 'Future Planning'),
+      'calendar extraction skips non-target future-dated events',
     );
 
     const structuredTmp = await fs.mkdtemp(
@@ -397,7 +446,8 @@ async function main() {
           `Calendar May 2026 Mon Tue Wed Thu Fri 8 AM 9 AM 10 AM 11 AM Noon 1 PM 2 PM 3 PM 4 PM\n` +
           `Tuesday\n` +
           `Open Enrollment Office Hour at Cupertino-1-Palaven (4) [Zoom Room]. Starts on ${structuredDate} at 3:00 PM and ends at 3:30 PM.\n` +
-          `Sagiv / Balaji - 1:1 at Cupertino Meeting Room - Vimire, Cupertino-1-Vimire (4) [Zoom Room]. Starts on ${structuredDate} at 3:30 PM and ends at 4:00 PM.\n`,
+          `Maya / Balaji - 1:1 at Cupertino Meeting Room - Vimire, Cupertino-1-Vimire (4) [Zoom Room]. Starts on ${structuredDate} at 3:30 PM and ends at 4:00 PM.\n` +
+          `Adriana's Birthday's birthday. ${structuredDate}, All-Day\n`,
         text_source: 'ocr_accessibility',
         asset_path: null,
         perceptual_hash: `structured_cal_${randomUUID().slice(0, 8)}`,
@@ -426,12 +476,28 @@ async function main() {
                 context: 'An office hour for open enrollment.',
               },
               {
-                title: 'Sagiv / Balaji - 1:1',
+                title: 'Maya / Balaji - 1:1',
                 kind: 'calendar',
                 starts_at: `${structuredDay}T13:30:00`,
                 ends_at: `${structuredDay}T16:00:00`,
                 attendees: [],
-                context: 'A one-on-one meeting between Sagiv and Balaji.',
+                context: 'A one-on-one meeting between Maya and Balaji.',
+              },
+              {
+                title: "Adriana's Birthday's birthday",
+                kind: 'calendar',
+                starts_at: `${structuredDay}T00:00:00`,
+                ends_at: `${structuredDay}T23:59:59`,
+                attendees: [],
+                context: 'An all-day birthday event.',
+              },
+              {
+                title: "Adriana's Birthday's birthday",
+                kind: 'calendar',
+                starts_at: `${structuredDay}T14:00:00`,
+                ends_at: null,
+                attendees: [],
+                context: 'A duplicate timed interpretation of the all-day birthday.',
               },
             ],
           }),
@@ -455,7 +521,7 @@ async function main() {
       const openEnrollment = structuredEvents.find((e) =>
         e.title.includes('Open Enrollment Office Hour'),
       );
-      const balaji = structuredEvents.find((e) => e.title.includes('Sagiv / Balaji'));
+      const balaji = structuredEvents.find((e) => e.title.includes('Maya / Balaji'));
       assert(
         openEnrollment &&
           new Date(openEnrollment.starts_at).getHours() === 15 &&
@@ -467,7 +533,17 @@ async function main() {
           new Date(balaji.starts_at).getHours() === 15 &&
           new Date(balaji.starts_at).getMinutes() === 30 &&
           new Date(balaji.ends_at ?? '').getHours() === 16,
-        'structured calendar accessibility time overrides wrong LLM time for Sagiv / Balaji',
+        'structured calendar accessibility time overrides wrong LLM time for Maya / Balaji',
+      );
+      const birthdayEvents = structuredEvents.filter((e) =>
+        e.title === "Adriana's Birthday's birthday",
+      );
+      assert(
+        birthdayEvents.length === 1 &&
+          new Date(birthdayEvents[0].starts_at).getHours() === 0 &&
+          birthdayEvents[0].ends_at &&
+          new Date(birthdayEvents[0].ends_at).getHours() === 0,
+        'all-day calendar event suppresses duplicate timed interpretations',
       );
     } finally {
       await fs.rm(structuredTmp, { recursive: true, force: true });

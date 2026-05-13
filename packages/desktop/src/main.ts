@@ -445,7 +445,6 @@ function registerRuntimeIpc() {
   h('beside:get-journal-day', async (e, d) => (await getRuntimeForRequest()).call('getJournalDay', d));
   h('beside:list-meetings', async (e, q) => (await getRuntimeForRequest()).call('listMeetings', q));
   h('beside:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
-  h('beside:get-action-center', async (e, q) => (await getRuntimeForRequest()).call('getActionCenter', q));
   h('beside:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));
   h('beside:list-capture-hook-definitions', async () => (await getRuntimeForRequest()).call('listCaptureHookDefinitions'));
   h('beside:list-capture-hook-widget-manifests', async () => (await getRuntimeForRequest()).call('listCaptureHookWidgetManifests'));

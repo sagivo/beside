@@ -197,6 +197,36 @@ no `winget`/`bash` available), Beside falls back to the offline
 deterministic indexer **automatically** and prints clear next-step
 instructions — the rest of the pipeline keeps running.
 
+### Desktop releases and auto-updates
+
+The desktop app uses `electron-builder` with GitHub Releases as the update
+feed. Packaged builds check for updates on launch, every six hours, and from
+the tray menu's **Check for Updates...** action. A tagged release uploads the
+DMG/ZIP plus `latest-mac.yml`; `electron-updater` reads that metadata to decide
+whether to download and install a newer build.
+
+Configure these repository secrets before publishing macOS releases:
+
+| Secret | Purpose |
+|--------|---------|
+| `MACOS_CSC_LINK` | Base64-encoded `.p12` exported from Keychain with the `Developer ID Application` certificate and private key. |
+| `MACOS_CSC_KEY_PASSWORD` | Password for the exported `.p12`. |
+| `APPLE_API_KEY_BASE64` | Base64-encoded App Store Connect `AuthKey_*.p8` file. |
+| `APPLE_API_KEY_ID` | The App Store Connect API key ID. |
+| `APPLE_API_ISSUER` | The App Store Connect issuer UUID. |
+
+To publish an update, bump `packages/desktop/package.json`'s version, commit
+the change, tag the same version, and push the tag:
+
+```bash
+git tag v0.2.1
+git push origin main --tags
+```
+
+The `desktop-release` workflow builds the macOS Apple Silicon app, signs it
+with Developer ID, notarizes it with Apple, publishes it to GitHub Releases,
+and verifies the final DMG with Gatekeeper.
+
 ### Per-OS bootstrap behaviour
 
 | Platform | How `init` installs Ollama |

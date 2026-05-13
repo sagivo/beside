@@ -5,6 +5,7 @@ packages/desktop/build/
 packages/desktop/release/
 *.tsbuildinfo
 coverage/
+eng.traineddata
 
 # Env / secrets
 .env
