@@ -5,7 +5,8 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import readline from 'node:readline';
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, Tray, nativeImage, protocol, shell, dialog, systemPreferences } from 'electron';
-import { autoUpdater } from 'electron-updater';
+import electronUpdater from 'electron-updater';
+const { autoUpdater } = electronUpdater;
 import { defaultDataDir, expandPath, loadConfig } from '@beside/core';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
