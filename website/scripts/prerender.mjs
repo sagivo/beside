@@ -13,9 +13,18 @@ const serverDir = path.join(root, "dist/server");
 const template = fs.readFileSync(path.join(clientDir, "index.html"), "utf-8");
 const { render } = await import(pathToFileURL(path.join(serverDir, "entry-server.js")).href);
 
-const appHtml = render();
-const html = template.replace("<!--app-html-->", appHtml);
+const routes = ["/", "/docs/"];
 
-fs.writeFileSync(path.join(clientDir, "index.html"), html);
+for (const route of routes) {
+  const appHtml = render(route);
+  const html = template.replace("<!--app-html-->", appHtml);
+  const filePath =
+    route === "/"
+      ? path.join(clientDir, "index.html")
+      : path.join(clientDir, route, "index.html");
 
-console.log("✓ Prerendered index.html with SSR markup");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, html);
+}
+
+console.log(`✓ Prerendered ${routes.length} route(s) with SSR markup`);

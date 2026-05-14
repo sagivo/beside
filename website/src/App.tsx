@@ -1,22 +1,34 @@
 import "./styles.css";
+import DocsPage from "./docs/DocsPage";
 
 const DOWNLOAD_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-mac.dmg";
 
-export default function App() {
+export default function App({ initialPath }: { initialPath?: string } = {}) {
+  const pathname = initialPath ?? (typeof window === "undefined" ? "/" : window.location.pathname);
+
+  if (pathname.startsWith("/docs")) {
+    return <DocsPage />;
+  }
+
+  return <LandingPage />;
+}
+
+function LandingPage() {
   return (
     <>
       <AmbientBackdrop />
 
       <header className="nav">
         <div className="container nav-inner">
-          <a href="/" className="brand" aria-label="Beside home">
+          <a href="/" className="brand" aria-label="beside home">
             <img className="brand-mark" src="/images/logo.png" alt="" aria-hidden="true" />
-            <span>Beside</span>
+            <span>beside</span>
           </a>
           <nav className="nav-links" aria-label="Primary">
             <a href="#pipeline">Live pipeline</a>
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
+            <a href="/docs">Docs</a>
             <a href="https://github.com/sagivo/beside" className="nav-gh">
               <GitHubIcon />
               <span>Open source</span>
@@ -37,18 +49,18 @@ export default function App() {
               </span>
 
               <h1>
-                <span className="grad">Watches. Indexes. Surfaces.</span>
+                <span className="grad">beside every app, every thought.</span>
                 <br />
-                A quiet memory for every AI on your&nbsp;Mac.
+                A quiet memory for the AI working by your&nbsp;side.
               </h1>
 
               <p className="lede">
-                Beside <strong>captures</strong> what you do on your computer,{" "}
-                <strong>indexes</strong> it into a self-organising knowledge base,
-                quietly <strong>surfaces</strong> what matters, and{" "}
-                <strong>remembers</strong> it as long-term context for every AI
-                agent you use — <strong>100% on your machine</strong>, every line
-                of code <strong>open source</strong>.
+                beside sits next to your work, <strong>capturing</strong> the
+                apps, decisions, and half-finished threads that usually disappear.
+                It <strong>indexes</strong> them into local memory,{" "}
+                <strong>surfaces</strong> what matters, and keeps every AI agent
+                grounded in your actual context — <strong>100% on your machine</strong>,
+                every line of code <strong>open source</strong>.
               </p>
 
               <div className="btn-row">
@@ -71,7 +83,7 @@ export default function App() {
                 </a>
               </div>
 
-              <div className="proof-bar" aria-label="What you get with Beside">
+              <div className="proof-bar" aria-label="What you get with beside">
                 <div className="proof-cell">
                   <span className="pc-ic" aria-hidden><LocalIcon /></span>
                   <div className="pc-body">
@@ -138,14 +150,14 @@ export default function App() {
             <div className="wiki-copy">
               <span className="eyebrow">
                 <span className="dot" />
-                A self-writing wiki
+                A wiki beside your work
               </span>
-              <h2>Your day, inked into a wiki you can actually read.</h2>
+              <h2>Your day, written beside you as it happens.</h2>
               <p>
-                Beside watches, then quietly writes your day into a Markdown
-                wiki on your disk — topics, tags, and decisions, all under{" "}
-                <code>~/beside/wiki</code>. No filing. No formatting. No
-                forgetting.
+                While you move through apps, beside keeps pace: writing a Markdown
+                wiki on your disk with the topics, tags, and decisions that belong
+                next to the work itself, all under <code>~/beside/wiki</code>.
+                No filing. No formatting. No forgetting.
               </p>
               <ul className="wiki-bullets" aria-label="What lives in the wiki">
                 <li>
@@ -182,11 +194,11 @@ export default function App() {
           <div className="container">
             <div className="section-head">
               <span className="eyebrow"><span className="dot" />Live pipeline</span>
-              <h2>It captures, indexes, surfaces — and remembers.</h2>
+              <h2>From beside your screen to inside your AI's memory.</h2>
               <p>
-                Four quiet loops, running in the background of your machine.
-                Together they turn every signal on your computer into structured
-                memory your AI agents can actually use.
+                Four quiet loops run beside everything you do. Together they turn
+                the signals on your computer into structured memory your AI agents
+                can actually use.
               </p>
             </div>
             <div className="pipeline-grid">
@@ -204,19 +216,19 @@ export default function App() {
             <div className="ask-grid">
               <div className="ask-copy">
                 <span className="eyebrow"><span className="dot" />Ask any AI</span>
-                <h2>Your memory, instantly available to every AI you use.</h2>
+                <h2>The context beside you, available inside every AI.</h2>
                 <p>
-                  Beside speaks <strong>MCP</strong>. Plug it into{" "}
+                  beside speaks <strong>MCP</strong>. Plug it into{" "}
                   <strong>Claude</strong>, <strong>Cursor</strong>,{" "}
                   <strong>ChatGPT</strong> — or any MCP-compatible agent —
-                  and ask the questions you'd normally have to dig through
-                  six apps to answer.
+                  and ask questions that normally send you digging through
+                  six apps, three meetings, and yesterday's tabs.
                 </p>
                 <p>
-                  The agent runs the query, Beside pulls the matching context
-                  from your <strong>local</strong> knowledge base, and the
-                  answer comes back grounded in what you actually did this
-                  week. Your raw data never leaves your machine.
+                  The agent asks; beside remembers. Matching context comes from
+                  your <strong>local</strong> knowledge base, so answers are
+                  grounded in what was actually beside you this week. Your raw
+                  data never leaves your machine.
                 </p>
                 <ul className="ask-prompts" aria-label="Example prompts">
                   <li><span className="q-dot" />“What are my open items?”</li>
@@ -242,11 +254,11 @@ export default function App() {
           <div className="container">
             <div className="section-head">
               <span className="eyebrow"><span className="dot" />What it does</span>
-              <h2>An always-on context layer, tuned for the AI age.</h2>
+              <h2>The layer between your work and the AI beside it.</h2>
               <p>
-                LLMs forget. Agents start from zero. Beside is the quiet layer in
-                between — continuously turning what you actually do on your
-                computer into recallable memory that any tool can use.
+                LLMs forget. Agents start from zero. beside stays close to the
+                work itself, continuously turning what happens on your computer
+                into recallable memory that any tool can use.
               </p>
             </div>
             <div className="features">
@@ -275,7 +287,7 @@ export default function App() {
               <Feature
                 badge="05"
                 title="Proactive surfacing"
-                body="Beside watches for the moments that matter — patterns, follow-ups, half-finished threads — and quietly pins them where you'll see them."
+                body="beside notices the moments that should stay beside you — patterns, follow-ups, half-finished threads — and quietly pins them where you'll see them."
               />
               <Feature
                 badge="06"
@@ -291,7 +303,7 @@ export default function App() {
           <div className="container">
             <div className="section-head">
               <span className="eyebrow"><span className="dot" />Under the hood</span>
-              <h2>From captured pixels to living memory.</h2>
+              <h2>How beside turns activity into living memory.</h2>
               <p>
                 The same four loops, in technical detail. Each stage is a
                 swappable plugin — capture, storage, model, index, export.
@@ -331,10 +343,10 @@ export default function App() {
           <div className="container">
             <div className="cta-inner">
               <span className="eyebrow"><span className="dot" />Free during beta</span>
-              <h2>Give your AI a memory worth&nbsp;keeping.</h2>
+              <h2>Put your memory beside every AI you use.</h2>
               <p>
-                Install Beside once and every AI tool you use gets quietly smarter
-                about <em>you</em>.
+                Install beside once. Claude, Cursor, ChatGPT, and every MCP agent
+                get the context that has been working beside you all along.
               </p>
               <div className="btn-row">
                 <a className="btn btn-primary" href={DOWNLOAD_URL}>
@@ -362,7 +374,7 @@ export default function App() {
 
       <footer>
         <div className="container footer-inner">
-          <div>© {new Date().getFullYear()} Beside · Local-first AI memory.</div>
+          <div>© {new Date().getFullYear()} beside · Local-first AI memory.</div>
           <div style={{ display: "flex", gap: 22 }}>
             <a href="https://github.com/sagivo/beside">GitHub</a>
             <a href="/privacy">Privacy</a>
@@ -525,7 +537,7 @@ function AmbientAINetwork() {
           <circle cx={center.x} cy={center.y} r="62" fill="#ffffff" opacity="0.14" filter="url(#aiSoft)" />
           <g filter="url(#logoDrop)">
             <g className="logo-orb-b">
-              <g clipPath="url(#logoBottomBubbleClip)">
+              <g className="logo-orb-art-b" clipPath="url(#logoBottomBubbleClip)">
                 <image
                   href="/images/logo.png"
                   x="168"
@@ -537,7 +549,7 @@ function AmbientAINetwork() {
               </g>
             </g>
             <g className="logo-orb-t">
-              <g clipPath="url(#logoTopBubbleClip)">
+              <g className="logo-orb-art-t" clipPath="url(#logoTopBubbleClip)">
                 <image
                   href="/images/logo.png"
                   x="168"
@@ -676,7 +688,7 @@ function AppIcon({ id }: { id: string }) {
 function MemoryLog() {
   const rows: Array<{ ts: string; kind: "cap" | "idx" | "rec"; label: string; what: string }> = [
     { ts: "09:14", kind: "cap", label: "▢", what: "Captured · Figma · Onboarding revision 7" },
-    { ts: "09:14", kind: "idx", label: "▲", what: "Linked to topic Beside › Onboarding" },
+    { ts: "09:14", kind: "idx", label: "▲", what: "Linked to topic beside › Onboarding" },
     { ts: "09:22", kind: "cap", label: "▢", what: "Captured · Slack thread · pricing #beside-core" },
     { ts: "09:23", kind: "idx", label: "▲", what: "Extracted 3 entities · pricing, beta, founders" },
     { ts: "09:31", kind: "rec", label: "✦", what: "Claude recalled · context from yesterday's meeting" },
@@ -816,7 +828,7 @@ function SurfaceCard() {
         <span className="p-step"><span className="n">3</span>Surface</span>
       </div>
       <h3>Pins the moments that matter.</h3>
-      <p>Patterns, follow-ups, half-finished threads — Beside surfaces them when you'll need them.</p>
+      <p>Patterns, follow-ups, half-finished threads — beside surfaces them when you'll need them.</p>
       <div className="p-viz" aria-hidden>
         <div className="srf-bloom" />
         <div className="srf-spark" />

@@ -23,7 +23,10 @@ http
   .createServer((req, res) => {
     const url = decodeURIComponent((req.url || "/").split("?")[0]);
     let filePath = path.join(dist, url === "/" ? "index.html" : url);
-    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+      filePath = path.join(filePath, "index.html");
+    }
+    if (!fs.existsSync(filePath)) {
       filePath = path.join(dist, "index.html");
     }
     const ext = path.extname(filePath);
