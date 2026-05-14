@@ -520,13 +520,23 @@ export class EventExtractor {
     }
 
     for (const bucket of groups.values()) {
-      const seen = new Set<string>();
-      bucket.frames = bucket.frames.filter((f) => {
+      // When two frames share a perceptual hash (e.g. a non-Calendar foreground
+      // app capturing the macOS Calendar window via accessibility on a second
+      // monitor), keep the one with the richer text. The other frame's AX text
+      // is often a stripped-down tooltip that misleads the LLM about event
+      // times (a Firefox-foreground capture of a Calendar week-view can OCR
+      // the "© 11:30AM-12:45PM" hover label without the underlying "Starts on
+      // May 14, 2026 at 11:00 AM" structured row that the Calendar-foreground
+      // capture taken a second later actually contains).
+      const byKey = new Map<string, Frame>();
+      for (const f of bucket.frames) {
         const key = f.perceptual_hash ?? `${f.window_title ?? ''}|${(f.text ?? '').slice(0, 200)}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      }).sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp)).slice(-this.maxFramesPerBucket);
+        const existing = byKey.get(key);
+        if (!existing || (f.text?.length ?? 0) > (existing.text?.length ?? 0)) byKey.set(key, f);
+      }
+      bucket.frames = Array.from(byKey.values())
+        .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+        .slice(-this.maxFramesPerBucket);
     }
     return Array.from(groups.values()).filter((b) => b.frames.length > 0).sort((a, b) => sourcePriority(a.source) - sourcePriority(b.source));
   }

@@ -12,6 +12,7 @@ import type {
   ActivitySession, CaptureStatus, CaptureHookDefinition, DayEvent, DayEventKind, ExportStatus, Frame,
   FrameQuery, HookRecord, HookRecordQuery, IndexState, Logger, Meeting, RawEvent, StorageStats,
 } from '@beside/interfaces';
+import { renderJournalMarkdown } from '@beside/interfaces';
 import {
   bootstrapModel, buildOrchestrator, assertHeavyWorkAllowed, runFullReindex,
   runIncremental, runReorganisation, startAll, stopAll, type HookWidgetManifestRuntime, type OrchestratorHandles, type OrchestratorOptions,
@@ -404,12 +405,25 @@ export class BesideRuntime {
    * Journal view works whether or not the markdown export plugin is
    * enabled. The index page is produced continuously by every
    * incremental tick (see `renderDayPage` in the karpathy plugin).
+   *
+   * Falls back to the deterministic baseline render when the index hasn't
+   * produced a page yet — otherwise the Journal view shows a blank summary
+   * area for users running with `background_model_jobs: manual` (and the
+   * day pages only appear after they manually trigger indexing).
    */
   async readJournalMarkdown(day: string): Promise<{ day: string; path: string | null; content: string | null }> {
     return await this.withHandles(async (handles) => {
       const pagePath = `days/${day}.md`;
       const page = await handles.strategy.readPage(pagePath).catch(() => null);
-      return { day, path: pagePath, content: page?.content ?? null };
+      if (page?.content) return { day, path: pagePath, content: page.content };
+
+      const [frames, sessions, meetings] = await Promise.all([
+        handles.storage.getJournal(day).catch(() => [] as Frame[]),
+        handles.storage.listSessions({ day, order: 'chronological', limit: 500 }).catch(() => [] as ActivitySession[]),
+        handles.storage.listMeetings({ day, order: 'chronological', limit: 100 }).catch(() => [] as Meeting[]),
+      ]);
+      if (!frames.length) return { day, path: pagePath, content: null };
+      return { day, path: pagePath, content: renderJournalMarkdown(day, frames, { sessions, meetings }) };
     });
   }
 
