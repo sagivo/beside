@@ -6,3 +6,4 @@ export * from './scheduler.js';
 export * from './paths.js';
 export * from './ids.js';
 export * from './load-guard.js';
+export * from './calendar-surfaces.js';

@@ -421,6 +421,100 @@ async function main() {
       !futureEvents.some((e) => e.title === 'Future Planning'),
       'calendar extraction skips non-target future-dated events',
     );
+    const canonicalToday = await storage.listCalendarEvents({ day: captureDay, status: 'active' });
+    assert(
+      canonicalToday.some((e) => e.title === 'Today Sync' && e.source_app === 'Apple Calendar'),
+      'calendar extraction writes canonical source-scoped calendar events',
+    );
+
+    const linkedMeetingId = `mtg_calendar_link_${randomUUID().slice(0, 8)}`;
+    const todaySyncCanonical = canonicalToday.find((e) => e.title === 'Today Sync');
+    const linkedStart = new Date(Date.parse(todaySyncCanonical?.starts_at ?? `${captureDay}T12:30:00.000Z`) + 4 * 60_000);
+    const linkedEnd = new Date(linkedStart.getTime() + 28 * 60_000);
+    await storage.upsertMeeting({
+      ...meeting,
+      id: linkedMeetingId,
+      title: 'Today Sync',
+      started_at: linkedStart.toISOString(),
+      ended_at: linkedEnd.toISOString(),
+      day: captureDay,
+      duration_ms: 31 * 60_000,
+      content_hash: `linked-${randomUUID()}`,
+      summary_status: 'ready',
+      summary_json: {
+        ...meeting.summary_json,
+        title: 'Today Sync',
+        tldr: 'Discussed the calendar-linked sync.',
+      },
+      updated_at: `${captureDay}T13:03:00.000Z`,
+    });
+    const remoteOnlyDay = '2026-05-09';
+    const remoteOnlyCalendarId = `calevt_remote_only_${randomUUID().slice(0, 8)}`;
+    await storage.upsertCalendarEvent({
+      id: remoteOnlyCalendarId,
+      source_key: 'apple_calendar:com.apple.ical',
+      provider: 'apple_calendar',
+      day: remoteOnlyDay,
+      starts_at: `${remoteOnlyDay}T10:00:00.000Z`,
+      ends_at: `${remoteOnlyDay}T11:00:00.000Z`,
+      title: 'Engineering Staff Meeting',
+      location: null,
+      attendees: [],
+      links: ['https://zoom.us/j/123456789'],
+      notes: null,
+      source_app: 'Apple Calendar',
+      source_url: null,
+      source_bundle_id: 'com.apple.iCal',
+      evidence_frame_ids: [],
+      first_seen_capture_id: null,
+      last_seen_capture_id: null,
+      status: 'active',
+      content_hash: `remote-only-${randomUUID()}`,
+      meeting_id: null,
+      actual_started_at: null,
+      actual_ended_at: null,
+      meeting_platform: null,
+      meeting_summary_status: null,
+      created_at: `${remoteOnlyDay}T09:00:00.000Z`,
+      updated_at: `${remoteOnlyDay}T09:00:00.000Z`,
+    });
+    const remoteOnlyMeetingId = `mtg_remote_only_${randomUUID().slice(0, 8)}`;
+    await storage.upsertMeeting({
+      ...meeting,
+      id: remoteOnlyMeetingId,
+      title: null,
+      started_at: `${remoteOnlyDay}T12:00:00.000Z`,
+      ended_at: `${remoteOnlyDay}T12:30:00.000Z`,
+      day: remoteOnlyDay,
+      duration_ms: 30 * 60_000,
+      content_hash: `remote-only-meeting-${randomUUID()}`,
+      summary_status: 'ready',
+      summary_json: {
+        ...meeting.summary_json,
+        title: null,
+        tldr: 'Unrelated captured Zoom meeting.',
+      },
+      updated_at: `${remoteOnlyDay}T12:35:00.000Z`,
+    });
+    const linker = new EventExtractor(storage, stubModel, logger, { llmEnabled: false });
+    await linker.tick();
+    const enrichedCanonical = (await storage.listCalendarEvents({ day: captureDay, status: 'active' })).find((e) => e.title === 'Today Sync');
+    const remoteOnlyCanonical = (await storage.listCalendarEvents({ day: remoteOnlyDay, status: 'active' })).find((e) => e.id === remoteOnlyCalendarId);
+    assert(
+      enrichedCanonical?.meeting_id === linkedMeetingId,
+      'calendar event links to captured meeting',
+    );
+    assert(
+      remoteOnlyCanonical?.meeting_id == null,
+      'remote meeting link requires more than a same-day Zoom signal',
+    );
+    assert(
+      enrichedCanonical &&
+        new Date(enrichedCanonical.starts_at).getMinutes() === 30 &&
+        enrichedCanonical.actual_started_at &&
+        new Date(enrichedCanonical.actual_started_at).getMinutes() === 35,
+      'calendar enrichment preserves scheduled time while recording actual meeting time',
+    );
 
     const structuredTmp = await fs.mkdtemp(
       path.join(os.tmpdir(), 'beside-events-structured-calendar-'),
@@ -433,6 +527,58 @@ async function main() {
       });
       const structuredDay = localDayKey();
       const structuredDate = englishDate(structuredDay);
+      const structuredNextDateObj = new Date(`${structuredDay}T12:00:00`);
+      structuredNextDateObj.setDate(structuredNextDateObj.getDate() + 1);
+      const structuredNextDay = localDayKey(structuredNextDateObj);
+      const structuredNextDate = englishDate(structuredNextDay);
+      await structuredStorage.upsertCalendarEvent({
+        id: `calevt_alias_${randomUUID().slice(0, 8)}`,
+        source_key: 'apple_calendar:com.tinyspeck.slackmacgap',
+        provider: 'apple_calendar',
+        day: structuredDay,
+        starts_at: `${structuredDay}T09:00:00.000Z`,
+        ends_at: `${structuredDay}T09:30:00.000Z`,
+        title: 'Legacy Alias Calendar Item',
+        location: null,
+        attendees: [],
+        links: [],
+        notes: null,
+        source_app: 'Apple Calendar',
+        source_url: null,
+        source_bundle_id: 'com.tinyspeck.slackmacgap',
+        evidence_frame_ids: [],
+        first_seen_capture_id: null,
+        last_seen_capture_id: null,
+        status: 'active',
+        content_hash: 'legacy-alias-calendar-item',
+        meeting_id: null,
+        actual_started_at: null,
+        actual_ended_at: null,
+        meeting_platform: null,
+        meeting_summary_status: null,
+        created_at: `${structuredDay}T08:00:00.000Z`,
+        updated_at: `${structuredDay}T08:00:00.000Z`,
+      });
+      await structuredStorage.upsertDayEvent({
+        id: `evt_alias_${randomUUID().slice(0, 8)}`,
+        day: structuredDay,
+        starts_at: `${structuredDay}T09:00:00.000Z`,
+        ends_at: `${structuredDay}T09:30:00.000Z`,
+        kind: 'calendar',
+        source: 'calendar_screen',
+        title: 'Legacy Alias Calendar Item',
+        source_app: 'Apple Calendar',
+        context_md: 'Should be replaced by the canonical Apple Calendar projection.',
+        attendees: [],
+        links: [],
+        meeting_id: null,
+        evidence_frame_ids: [],
+        content_hash: 'legacy-alias-day-event',
+        status: 'ready',
+        failure_reason: null,
+        created_at: `${structuredDay}T08:00:00.000Z`,
+        updated_at: `${structuredDay}T08:00:00.000Z`,
+      });
       await structuredStorage.upsertFrame({
         id: `frame_structured_calendar_${randomUUID().slice(0, 8)}`,
         timestamp: `${structuredDay}T09:00:00.000Z`,
@@ -447,7 +593,8 @@ async function main() {
           `Tuesday\n` +
           `Open Enrollment Office Hour at Cupertino-1-Palaven (4) [Zoom Room]. Starts on ${structuredDate} at 3:00 PM and ends at 3:30 PM.\n` +
           `Maya / Balaji - 1:1 at Cupertino Meeting Room - Vimire, Cupertino-1-Vimire (4) [Zoom Room]. Starts on ${structuredDate} at 3:30 PM and ends at 4:00 PM.\n` +
-          `Adriana's Birthday's birthday. ${structuredDate}, All-Day\n`,
+          `Adriana's Birthday's birthday. ${structuredDate}, All-Day\n` +
+          `Hackathon Demos. Starts on ${structuredNextDate} at 10:00 AM and ends at 12:30 PM.\n`,
         text_source: 'ocr_accessibility',
         asset_path: null,
         perceptual_hash: `structured_cal_${randomUUID().slice(0, 8)}`,
@@ -499,6 +646,14 @@ async function main() {
                 attendees: [],
                 context: 'A duplicate timed interpretation of the all-day birthday.',
               },
+              {
+                title: 'Hackathon Demos Part 1',
+                kind: 'calendar',
+                starts_at: `${structuredDay}T10:00:00`,
+                ends_at: `${structuredDay}T11:15:00`,
+                attendees: [],
+                context: 'A visible event from another day in the week view.',
+              },
             ],
           }),
       };
@@ -544,6 +699,23 @@ async function main() {
           birthdayEvents[0].ends_at &&
           new Date(birthdayEvents[0].ends_at).getHours() === 0,
         'all-day calendar event suppresses duplicate timed interpretations',
+      );
+      assert(
+        !structuredEvents.some((e) => /Hackathon Demos/i.test(e.title)),
+        'structured calendar extraction rejects LLM events that belong to another visible day',
+      );
+      assert(
+        !structuredEvents.some((e) => e.title === 'Legacy Alias Calendar Item'),
+        'canonical Apple Calendar projection removes legacy foreground-app source aliases',
+      );
+      const activeAliases = await structuredStorage.listCalendarEvents({
+        day: structuredDay,
+        status: 'active',
+        order: 'chronological',
+      });
+      assert(
+        activeAliases.every((e) => e.source_key !== 'apple_calendar:com.tinyspeck.slackmacgap'),
+        'legacy Apple Calendar alias source is retired after canonical capture',
       );
     } finally {
       await fs.rm(structuredTmp, { recursive: true, force: true });

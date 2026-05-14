@@ -1,6 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { classifyCalendarSurface, looksLikeCalendarGridText, type CalendarSurface } from '@beside/core';
+import { buildCalendarExtractionPrompt, calendarParseFrames, safeParseCalendarExtraction } from './calendar/parser.js';
 import type {
   IStorage,
   IModelAdapter,
@@ -10,6 +12,9 @@ import type {
   DayEventSource,
   Frame,
   Meeting,
+  CalendarEvent,
+  CalendarSource,
+  CalendarCapture,
 } from '@beside/interfaces';
 
 export interface EventExtractorOptions {
@@ -72,12 +77,15 @@ If EMAIL, CHAT, or TASK: surface only important threads / tickets with clear use
 
 const CONTEXT_SYSTEM_PROMPT = `You are filling in a missing context line for an event. Write a SINGLE 1-3 sentence description based on screenshots. Return PLAIN TEXT.`;
 
-const LATEST_CALENDAR_CAPTURE_WINDOW_MS = 1000;
+const LATEST_CALENDAR_CAPTURE_WINDOW_MS = 5 * 60_000;
+const CANONICAL_APPLE_CALENDAR_SOURCE_KEY = 'apple_calendar:com.apple.ical';
+const MAX_STRUCTURED_CALENDAR_CANDIDATES = 120;
 
 interface SourceBucket {
   source: DayEventSource;
   app: string;
   frames: Frame[];
+  calendarSurface?: CalendarSurface | null;
 }
 
 type SourceMatcher = {
@@ -86,64 +94,12 @@ type SourceMatcher = {
   match: (frame: Frame) => boolean;
 };
 
-const CALENDAR_APP_NAMES = new Set(['calendar', 'fantastical', 'notion calendar', 'cron', 'amie', 'busycal', 'mimestream', 'outlook']);
-const CALENDAR_BUNDLE_PREFIXES = ['com.apple.ical', 'com.flexibits.fantastical', 'notion.id.notion-calendar', 'com.cron', 'com.busymac.busycal', 'co.amie'];
-
 function isNativeCalendarAppFrame(frame: Frame): boolean {
-  const app = (frame.app ?? '').toLowerCase();
-  const bundle = (frame.app_bundle_id ?? '').toLowerCase();
-  return CALENDAR_APP_NAMES.has(app) || CALENDAR_BUNDLE_PREFIXES.some((p) => bundle.startsWith(p));
-}
-
-const CALENDAR_HOSTS = new Set([
-  'calendar.google.com', 'outlook.live.com', 'outlook.office.com', 'outlook.office365.com',
-  'outlook.com', 'icloud.com', 'www.icloud.com', 'calendar.proton.me', 'calendar.yahoo.com',
-  'calendar.zoho.com', 'app.fastmail.com', 'fastmail.com', 'app.tuta.com', 'vimcal.com',
-  'app.vimcal.com', 'cal.com', 'app.cal.com', 'cron.com', 'amie.so', 'web.morgen.so',
-  'app.akiflow.com', 'app.reclaim.ai', 'app.usemotion.com', 'app.sunsama.com', 'calendly.com',
-  'notion.so', 'www.notion.so', 'linear.app', 'asana.com', 'app.asana.com', 'app.clickup.com',
-  'monday.com', 'github.com'
-]);
-
-const CALENDAR_HOST_PATH_REQUIREMENT: Record<string, RegExp> = {
-  'icloud.com': /\/calendar\b/i,
-  'www.icloud.com': /\/calendar\b/i,
-  'app.fastmail.com': /\/calendar\b/i,
-  'fastmail.com': /\/calendar\b/i,
-  'outlook.live.com': /\/calendar\b|\/owa\b.*calendar/i,
-  'outlook.office.com': /\/calendar\b|\/owa\b.*calendar/i,
-  'outlook.office365.com': /\/calendar\b|\/owa\b.*calendar/i,
-  'outlook.com': /\/calendar\b/i,
-  'notion.so': /\/calendar\b|view=calendar|\?v=.*calendar/i,
-  'www.notion.so': /\/calendar\b|view=calendar|\?v=.*calendar/i,
-  'linear.app': /\/views?\/calendar\b|\?layout=calendar/i,
-  'asana.com': /\/calendar\b|\?view=calendar/i,
-  'app.asana.com': /\/calendar\b|\?view=calendar/i,
-  'app.clickup.com': /\/calendar\b|\?view=calendar/i,
-  'monday.com': /\bcalendar\b/i,
-  'github.com': /\/projects\/.+\/views\/.*\bcalendar\b/i,
-};
-
-function urlPartsOf(url: string | null | undefined): { host: string; path: string } | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    return { host: parsed.host.toLowerCase(), path: `${parsed.pathname}${parsed.search}` };
-  } catch {
-    return null;
-  }
+  return calendarSurfaceForFrame(frame)?.reason === 'native_app';
 }
 
 function isCalendarUrl(url: string | null | undefined): boolean {
-  const parts = urlPartsOf(url);
-  if (!parts) return false;
-  const { host, path } = parts;
-
-  let matchedHost = CALENDAR_HOSTS.has(host) ? host : [...CALENDAR_HOSTS].find((entry) => host.endsWith('.' + entry));
-  if (!matchedHost) return false;
-
-  const pathReq = CALENDAR_HOST_PATH_REQUIREMENT[matchedHost];
-  return pathReq ? pathReq.test(path) : true;
+  return !!classifyCalendarSurface({ url });
 }
 
 const MONTH_NAME_PATTERN = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
@@ -156,20 +112,7 @@ const HOUR_12H_RE = /\b(?:1[0-2]|0?[1-9])\s?(?:am|pm)\b/gi;
 const HOUR_24H_RE = /\b(?:[01]\d|2[0-3]):[0-5]\d\b/g;
 
 function looksLikeCalendarText(text: string | null): boolean {
-  if (!text || text.length < 60) return false;
-  let signals = 0;
-
-  const monthMatch = MONTHS_RE.exec(text);
-  if (monthMatch && /\b(?:20\d{2}|19\d{2})\b/.test(text.slice(monthMatch.index, monthMatch.index + 40))) signals++;
-
-  const dayHits = [...text.matchAll(WEEKDAY_ABBREV_RE)].map((m) => m.index);
-  if (dayHits.length >= 3 && dayHits.some((hit, i) => dayHits[i + 2] - hit <= 120)) signals++;
-
-  const collectHits = (re: RegExp) => [...text.matchAll(re)].map((m) => m.index);
-  const hourHits = [...collectHits(HOUR_12H_RE), ...collectHits(HOUR_24H_RE)].sort((a, b) => a - b);
-  if (hourHits.length >= 3 && hourHits.some((hit, i) => hourHits[i + 2] - hit <= 200)) signals++;
-
-  return signals >= 2;
+  return looksLikeCalendarGridText(text);
 }
 
 function looksLikeCalendarChrome(text: string | null): boolean {
@@ -177,9 +120,17 @@ function looksLikeCalendarChrome(text: string | null): boolean {
 }
 
 function isCalendarViewFrame(frame: Frame): boolean {
-  if (isNativeCalendarAppFrame(frame) || isCalendarUrl(frame.url)) return true;
-  const text = frame.text ?? '';
-  return looksLikeCalendarChrome(text) && looksLikeCalendarText(text);
+  return !!calendarSurfaceForFrame(frame);
+}
+
+function calendarSurfaceForFrame(frame: Frame): CalendarSurface | null {
+  return classifyCalendarSurface({
+    app: frame.app,
+    appBundleId: frame.app_bundle_id,
+    url: frame.url,
+    windowTitle: frame.window_title,
+    text: frame.text,
+  });
 }
 
 const SOURCE_MATCHERS: SourceMatcher[] = [
@@ -188,7 +139,6 @@ const SOURCE_MATCHERS: SourceMatcher[] = [
       if (isNativeCalendarAppFrame(f)) return looksLikeCalendarText(f.text ?? null);
       if (isCalendarUrl(f.url)) return true;
       if (looksLikeCalendarChrome(f.text ?? null) && looksLikeCalendarText(f.text ?? null)) return true;
-      if (/^https?:\/\//i.test(f.url ?? '') && looksLikeCalendarText(f.text ?? null)) return true;
       return false;
     },
   },
@@ -365,6 +315,9 @@ export class EventExtractor {
   }
 
   private async liftMeetings(): Promise<number> {
+    await this.purgeStaleCalendarMeetingLinks().catch((err) => {
+      this.logger.warn('stale calendar meeting link purge failed', { err: String(err) });
+    });
     const meetings = await this.storage.listMeetings({ order: 'recent', limit: 500 }).catch(() => []);
     let liftedNow = 0;
     for (const meeting of meetings) {
@@ -374,6 +327,9 @@ export class EventExtractor {
 
       const now = new Date().toISOString();
       const tldr = (meeting.summary_json?.tldr ?? '').trim() || deterministicMeetingContext(meeting);
+      await this.linkCanonicalCalendarEventForMeeting(meeting, tldr, now).catch((err) => {
+        this.logger.warn(`canonical calendar link failed for meeting ${meeting.id}`, { err: String(err) });
+      });
       const linkedCalendarEvent = await this.upsertCalendarAgendaItemForMeeting(meeting, tldr, hash, now);
       if (linkedCalendarEvent) {
         await this.storage.upsertDayEvent({
@@ -408,6 +364,25 @@ export class EventExtractor {
     return liftedNow;
   }
 
+  private async purgeStaleCalendarMeetingLinks(): Promise<number> {
+    const events = await this.storage
+      .listCalendarEvents({ status: 'active', limit: 5000, order: 'recent' })
+      .catch(() => [] as CalendarEvent[]);
+    const days = new Set<string>();
+    let purged = 0;
+    for (const event of events) {
+      if (!event.meeting_id) continue;
+      const meeting = await this.storage.getMeeting(event.meeting_id).catch(() => null);
+      if (meeting && scoreCanonicalCalendarEventForMeeting(event, meeting) > 0) continue;
+      await this.storage.clearCalendarEventMeetingLink(event.id).catch(() => {});
+      days.add(event.day);
+      purged++;
+    }
+    for (const day of days) await this.projectCanonicalCalendarDay(day).catch(() => 0);
+    if (purged > 0) this.logger.info(`cleared ${purged} stale calendar meeting link(s)`);
+    return purged;
+  }
+
   private async upsertCalendarAgendaItemForMeeting(
     meeting: Meeting,
     context: string,
@@ -424,13 +399,13 @@ export class EventExtractor {
     const source = best?.event ?? await this.syntheticCalendarEventForMeeting(meeting, context, meetingHash, now);
     if (!source) return null;
 
-    // The meeting capture (started_at/ended_at) is ground truth — it comes from the actual
-    // process/window lifecycle, not from OCR. The calendar event's title is what we want to keep,
-    // but its OCR-derived starts_at/ends_at can be wrong by hours, so overwrite them.
+    // Preserve scheduled calendar time when we have a real calendar row. Actual meeting start/end
+    // belongs on the canonical CalendarEvent actual_* fields; changing the DayEvent time makes the
+    // journal disagree with the calendar grid.
     const event: DayEvent = {
       ...source,
-      starts_at: roundMeetingStartForAgenda(meeting.started_at),
-      ends_at: meeting.ended_at,
+      starts_at: best?.event ? source.starts_at : roundMeetingStartForAgenda(meeting.started_at),
+      ends_at: best?.event ? source.ends_at : meeting.ended_at,
       meeting_id: meeting.id,
       context_md: context || source.context_md,
       attendees: uniqueStrings([...source.attendees, ...meeting.attendees, ...(meeting.summary_json?.attendees_seen ?? [])]).slice(0, 30),
@@ -442,6 +417,38 @@ export class EventExtractor {
       updated_at: now,
     };
     await this.storage.upsertDayEvent(event);
+    return event;
+  }
+
+  private async linkCanonicalCalendarEventForMeeting(
+    meeting: Meeting,
+    context: string,
+    now: string,
+  ): Promise<CalendarEvent | null> {
+    const candidates = await this.storage.listCalendarEvents({ day: meeting.day, status: 'active', limit: 500, order: 'chronological' }).catch(() => [] as CalendarEvent[]);
+    let best: { event: CalendarEvent; score: number } | null = null;
+    for (const event of candidates) {
+      const score = scoreCanonicalCalendarEventForMeeting(event, meeting);
+      if (score > 0 && (!best || score > best.score)) best = { event, score };
+    }
+    if (!best) return null;
+
+    const event: CalendarEvent = {
+      ...best.event,
+      notes: mergeContext(best.event.notes, context),
+      attendees: uniqueStrings([...best.event.attendees, ...meeting.attendees, ...(meeting.summary_json?.attendees_seen ?? [])]).slice(0, 30),
+      links: uniqueStrings([...best.event.links, ...meeting.links, ...(meeting.summary_json?.links_shared ?? [])]).slice(0, 50),
+      evidence_frame_ids: uniqueStrings([...best.event.evidence_frame_ids, ...(await this.representativeMeetingFrameIds(meeting.id))]).slice(0, 20),
+      meeting_id: meeting.id,
+      actual_started_at: roundMeetingStartForAgenda(meeting.started_at),
+      actual_ended_at: meeting.ended_at,
+      meeting_platform: meeting.platform,
+      meeting_summary_status: meeting.summary_status,
+      content_hash: sha1(['canonical-calendar-meeting-link', best.event.content_hash, meeting.content_hash, meeting.summary_status, context].join('|')).slice(0, 16),
+      updated_at: now,
+    };
+    await this.storage.upsertCalendarEvent(event);
+    await this.projectCanonicalCalendarDay(event.day).catch(() => 0);
     return event;
   }
 
@@ -513,10 +520,15 @@ export class EventExtractor {
       const matcher = SOURCE_MATCHERS.find((m) => m.match(frame));
       if (!matcher || (sourceFilter && !sourceFilter.has(matcher.source)) || (frame.text ?? '').trim().length < this.minTextChars) continue;
 
-      const appKey = frame.app ?? matcher.label;
-      const groupKey = matcher.source === 'calendar_screen' ? `${matcher.source}|*` : `${matcher.source}|${appKey}`;
-      if (!groups.has(groupKey)) groups.set(groupKey, { source: matcher.source, app: appKey, frames: [] });
-      groups.get(groupKey)!.frames.push(frame);
+      const surface = matcher.source === 'calendar_screen' ? calendarSurfaceForFrame(frame) : null;
+      const appKey = surface?.label ?? frame.app ?? matcher.label;
+      const groupKey = matcher.source === 'calendar_screen'
+        ? `${matcher.source}|${surface?.sourceKey ?? appKey}`
+        : `${matcher.source}|${appKey}`;
+      if (!groups.has(groupKey)) groups.set(groupKey, { source: matcher.source, app: appKey, frames: [], calendarSurface: surface });
+      const group = groups.get(groupKey)!;
+      group.frames.push(frame);
+      if (!group.calendarSurface && surface) group.calendarSurface = surface;
     }
 
     for (const bucket of groups.values()) {
@@ -545,7 +557,16 @@ export class EventExtractor {
     const extractionBucket = bucket.source === 'calendar_screen' ? latestCalendarCaptureBucket(bucket) : bucket;
     const useVision = this.visionAttachments > 0 && extractionBucket.source === 'calendar_screen' && this.model.getModelInfo().supportsVision === true;
     const visionImages = useVision ? await this.loadVisionImages(extractionBucket) : [];
-    const prompt = buildExtractionPrompt(captureDay, extractionBucket, this.maxPromptChars, visionImages.length > 0);
+    const prompt = extractionBucket.source === 'calendar_screen'
+      ? buildCalendarExtractionPrompt({
+        captureDay,
+        surface: extractionBucket.calendarSurface,
+        app: extractionBucket.app,
+        frames: calendarParseFrames(extractionBucket.frames),
+        maxChars: this.maxPromptChars,
+        vision: visionImages.length > 0,
+      })
+      : buildExtractionPrompt(captureDay, extractionBucket, this.maxPromptChars, visionImages.length > 0);
 
     let parsed: ExtractionPayload | null = null;
     let usedDeterministicFallback = false;
@@ -555,7 +576,7 @@ export class EventExtractor {
       const raw = visionImages.length > 0
         ? await this.model.completeWithVision(prompt, visionImages, { systemPrompt: EXTRACTION_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' })
         : await this.model.complete(prompt, { systemPrompt: EXTRACTION_SYSTEM_PROMPT, temperature: 0.2, maxTokens: 2400, responseFormat: 'json' });
-      parsed = safeParseExtraction(raw);
+      parsed = extractionBucket.source === 'calendar_screen' ? safeParseCalendarExtraction(raw) : safeParseExtraction(raw);
       canReplaceCalendarView = extractionBucket.source === 'calendar_screen' && parsed !== null;
     } catch {
       if (extractionBucket.source === 'calendar_screen') {
@@ -599,8 +620,13 @@ export class EventExtractor {
     }
 
     const candidatesToPersist = parsed.events.slice(0, this.maxEventsPerResponse);
-    if (extractionBucket.source === 'calendar_screen' && canReplaceCalendarView) {
-      await this.replaceCalendarDaysWithCandidates(captureDay, extractionBucket, candidatesToPersist);
+    const canonicalCalendar = extractionBucket.source === 'calendar_screen'
+      ? await this.persistCanonicalCalendarCapture(captureDay, extractionBucket, candidatesToPersist, canReplaceCalendarView)
+      : null;
+    if (extractionBucket.source === 'calendar_screen') {
+      return canonicalCalendar?.capture.status === 'ready'
+        ? await this.projectCanonicalCalendarDay(captureDay)
+        : 0;
     }
 
     let count = 0;
@@ -608,15 +634,11 @@ export class EventExtractor {
     for (const candidate of candidatesToPersist) {
       const title = (candidate?.title ?? '').trim();
       if (!title) continue;
-      if (extractionBucket.source === 'calendar_screen' && isCalendarChromeTitle(title)) continue;
 
       const startsAt = parseCandidateStart(candidate, extractionBucket.source, captureDay);
       if (!startsAt) continue;
       const eventDay = localDayKey(new Date(startsAt));
       if (!isValidEventDay(eventDay)) continue;
-      // Calendar week/month captures show other days too. Trust only events whose explicit date
-      // matches the capture day — other days will be captured on their own day naturally.
-      if (extractionBucket.source === 'calendar_screen' && eventDay !== captureDay) continue;
 
       const endsAt = parseCandidateEnd(candidate, extractionBucket.source, eventDay);
       const hourBucket = localHourBucket(startsAt);
@@ -650,6 +672,163 @@ export class EventExtractor {
     // visible days would orphan their previously-captured events without replacement, since the
     // week-view extraction tick deliberately ignores non-target-day events now.
     await this.storage.deleteDayEventsBySourceForDay(captureDay, 'calendar_screen').catch(() => {});
+  }
+
+  private async projectCanonicalCalendarDay(day: string): Promise<number> {
+    const calendarEvents = await this.storage.listCalendarEvents({ day, status: 'active', limit: 1000, order: 'chronological' }).catch(() => [] as CalendarEvent[]);
+    await this.storage.deleteDayEventsBySourceForDay(day, 'calendar_screen').catch(() => {});
+    let count = 0;
+    const now = new Date().toISOString();
+    for (const calendarEvent of calendarEvents) {
+      const existing = await this.storage.getDayEvent(dayEventIdForCalendarEvent(calendarEvent)).catch(() => null);
+      const contentHash = sha1([
+        calendarEvent.content_hash,
+        calendarEvent.meeting_id ?? '',
+        calendarEvent.meeting_summary_status ?? '',
+        calendarEvent.notes ?? '',
+        calendarEvent.attendees.join(','),
+        calendarEvent.links.join(','),
+      ].join('|')).slice(0, 16);
+      await this.storage.upsertDayEvent({
+        id: dayEventIdForCalendarEvent(calendarEvent),
+        day: calendarEvent.day,
+        starts_at: calendarEvent.starts_at,
+        ends_at: calendarEvent.ends_at,
+        kind: 'calendar',
+        source: 'calendar_screen',
+        title: calendarEvent.title,
+        source_app: calendarEvent.source_app,
+        context_md: calendarEvent.notes,
+        attendees: calendarEvent.attendees,
+        links: calendarEvent.links,
+        meeting_id: calendarEvent.meeting_id,
+        evidence_frame_ids: calendarEvent.evidence_frame_ids,
+        content_hash: contentHash,
+        status: 'ready',
+        failure_reason: null,
+        created_at: existing?.created_at ?? calendarEvent.created_at ?? now,
+        updated_at: now,
+      });
+      count++;
+    }
+    return count;
+  }
+
+  private async persistCanonicalCalendarCapture(
+    captureDay: string,
+    bucket: SourceBucket,
+    candidates: ExtractionCandidate[],
+    canReplaceCalendarView: boolean,
+  ): Promise<{ capture: CalendarCapture; events: CalendarEvent[] } | null> {
+    const surface = bucket.calendarSurface ?? bucket.frames.map(calendarSurfaceForFrame).find(Boolean) ?? null;
+    if (!surface) return null;
+
+    const now = new Date().toISOString();
+    const frameIds = bucket.frames.map((f) => f.id);
+    const evidenceHash = sha1([
+      surface.sourceKey,
+      captureDay,
+      ...bucket.frames.map((f) => `${f.id}|${f.timestamp}|${f.perceptual_hash ?? ''}|${f.text?.length ?? 0}`),
+      ...candidates.map((c) => `${c.title ?? ''}|${c.starts_at ?? ''}|${c.ends_at ?? ''}`),
+    ].join('|')).slice(0, 16);
+    const captureId = `calcap_${captureDay.replace(/-/g, '')}_${sha1(`${surface.sourceKey}|${evidenceHash}`).slice(0, 12)}`;
+    const source: CalendarSource = {
+      source_key: surface.sourceKey,
+      provider: surface.provider,
+      label: surface.label,
+      app: surface.app,
+      app_bundle_id: surface.appBundleId,
+      url_host: surface.urlHost,
+      created_at: now,
+      updated_at: now,
+    };
+
+    const events: CalendarEvent[] = [];
+    for (const candidate of candidates) {
+      const title = (candidate?.title ?? '').trim();
+      if (!title || isCalendarChromeTitle(title)) continue;
+      const startsAt = parseCandidateStart(candidate, 'calendar_screen', captureDay);
+      if (!startsAt) continue;
+      const eventDay = localDayKey(new Date(startsAt));
+      if (eventDay !== captureDay || !isValidEventDay(eventDay)) continue;
+      const endsAt = parseCandidateEnd(candidate, 'calendar_screen', eventDay);
+      const contentHash = sha1([
+        surface.sourceKey,
+        eventDay,
+        startsAt,
+        endsAt ?? '',
+        title,
+        JSON.stringify(candidate.attendees ?? []),
+      ].join('|')).slice(0, 16);
+      events.push({
+        id: deterministicCalendarEventId(surface.sourceKey, eventDay, startsAt, title),
+        source_key: surface.sourceKey,
+        provider: surface.provider,
+        day: eventDay,
+        starts_at: startsAt,
+        ends_at: endsAt,
+        title: title.slice(0, 200),
+        location: null,
+        attendees: Array.isArray(candidate?.attendees) ? candidate.attendees.filter((s): s is string => typeof s === 'string').slice(0, 30) : [],
+        links: [],
+        notes: (candidate?.context ?? '').trim().slice(0, 1200) || null,
+        source_app: surface.label,
+        source_url: surface.url,
+        source_bundle_id: surface.appBundleId,
+        evidence_frame_ids: frameIds.slice(-10),
+        first_seen_capture_id: captureId,
+        last_seen_capture_id: captureId,
+        status: 'active',
+        content_hash: contentHash,
+        meeting_id: null,
+        actual_started_at: null,
+        actual_ended_at: null,
+        meeting_platform: null,
+        meeting_summary_status: null,
+        created_at: now,
+        updated_at: now,
+      });
+    }
+
+    const capture: CalendarCapture = {
+      id: captureId,
+      source_key: surface.sourceKey,
+      day: captureDay,
+      captured_at: bucket.frames.at(-1)?.timestamp ?? now,
+      frame_ids: frameIds,
+      evidence_hash: evidenceHash,
+      parser: 'event-extractor',
+      status: events.length > 0 ? 'ready' : canReplaceCalendarView ? 'uncertain' : 'failed',
+      confidence: events.length > 0 ? Math.max(80, surface.confidence) : 35,
+      visible_days: [captureDay],
+      failure_reason: events.length > 0 ? null : 'No grounded calendar events parsed from capture.',
+      created_at: now,
+      updated_at: now,
+    };
+
+    await this.storage.reconcileCalendarEvents({
+      source,
+      capture,
+      events,
+      markMissingStale: capture.status === 'ready',
+    }).catch((err: unknown) => this.logger.warn('calendar reconcile failed', { err: String(err), sourceKey: surface.sourceKey, day: captureDay }));
+    if (capture.status === 'ready') await this.retireAppleCalendarAliasesForDay(captureDay, surface.sourceKey, now);
+    return { capture, events };
+  }
+
+  private async retireAppleCalendarAliasesForDay(day: string, sourceKey: string, now: string): Promise<number> {
+    if (sourceKey !== CANONICAL_APPLE_CALENDAR_SOURCE_KEY) return 0;
+    const aliases = await this.storage
+      .listCalendarEvents({ day, status: 'active', limit: 1000, order: 'chronological' })
+      .catch(() => [] as CalendarEvent[]);
+    let retired = 0;
+    for (const event of aliases) {
+      if (event.provider !== 'apple_calendar' || event.source_key === CANONICAL_APPLE_CALENDAR_SOURCE_KEY) continue;
+      await this.storage.upsertCalendarEvent({ ...event, status: 'removed', updated_at: now }).catch(() => {});
+      retired++;
+    }
+    if (retired > 0) this.logger.info(`retired ${retired} Apple Calendar source alias event(s) for ${day}`);
+    return retired;
   }
 
   private async loadVisionImages(bucket: SourceBucket): Promise<Buffer[]> {
@@ -717,10 +896,26 @@ export class EventExtractor {
 function latestCalendarCaptureBucket(bucket: SourceBucket): SourceBucket {
   if (bucket.frames.length <= 1) return bucket;
   const frames = bucket.frames.slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
-  const latest = frames[frames.length - 1];
-  const latestMs = Date.parse(latest.timestamp);
-  const latestFrames = Number.isFinite(latestMs) ? frames.filter((f) => f.id === latest.id || Math.abs(Date.parse(f.timestamp) - latestMs) <= LATEST_CALENDAR_CAPTURE_WINDOW_MS) : [latest];
-  return { ...bucket, frames: latestFrames.length > 0 ? latestFrames : [latest] };
+  const newestMs = Date.parse(frames[frames.length - 1]!.timestamp);
+  const scored = frames.map((frame) => {
+    const text = frame.text ?? '';
+    const structured = structuredCalendarCandidatesFromText(text, frame);
+    const targetStructured = structured.filter((candidate) => calendarCandidateLocalDay(candidate) === frame.day).length;
+    const structuredScore = targetStructured * 20_000;
+    const textScore = looksLikeCalendarText(text) ? Math.min(text.length, 12000) : 0;
+    const nativeScore = calendarSurfaceForFrame(frame)?.reason === 'native_app' ? 5_000 : 0;
+    const imageScore = frame.asset_path ? 1000 : 0;
+    const recencyScore = Number.isFinite(newestMs) && Number.isFinite(Date.parse(frame.timestamp))
+      ? Math.max(0, LATEST_CALENDAR_CAPTURE_WINDOW_MS - (newestMs - Date.parse(frame.timestamp))) / 1000
+      : 0;
+    return { frame, score: structuredScore + nativeScore + textScore + imageScore + recencyScore };
+  }).sort((a, b) => b.score - a.score);
+  const anchor = scored[0]?.frame ?? frames[frames.length - 1]!;
+  const anchorMs = Date.parse(anchor.timestamp);
+  const cluster = Number.isFinite(anchorMs)
+    ? frames.filter((f) => Math.abs(Date.parse(f.timestamp) - anchorMs) <= 30_000)
+    : [anchor];
+  return { ...bucket, frames: cluster.length > 0 ? cluster : [anchor] };
 }
 
 function recentDays(lookback: number): string[] {
@@ -771,12 +966,47 @@ function scoreCalendarEventForMeeting(event: DayEvent, meeting: Meeting): number
   const remoteSignal = meeting.platform !== 'other'
     && new RegExp(platformLabel(meeting.platform).replace(/\s+/g, '\\s+'), 'i').test(haystack);
   const titleScore = agendaTitlesLikelySame(event.title, meeting.title ?? meeting.summary_json?.title ?? '') ? 40 : 0;
-  // Allow a same-day fallback even when title doesn't match and there's no remote-signal evidence:
-  // the only signal left is "this calendar event sits near the meeting in time". That's still a
-  // better answer than fabricating a synthetic title from the meeting summary heuristic.
-  if (!titleScore && !remoteSignal && event.meeting_id !== meeting.id && !withinSameDay) return 0;
+  if (!titleScore) {
+    const NEAR_UNTITLED_MEETING_MS = 30 * 60_000;
+    if (remoteSignal) {
+      if (overlap <= 0 && startDelta > NEAR_UNTITLED_MEETING_MS) return 0;
+    } else if (startDelta > NEAR_UNTITLED_MEETING_MS) {
+      return 0;
+    }
+  }
   const sameDayFallbackBonus = !titleScore && !remoteSignal && event.meeting_id !== meeting.id ? 0.1 : 0;
   return timeScore + titleScore + (remoteSignal ? 20 : 0) + (event.meeting_id === meeting.id ? 100 : 0) + sameDayFallbackBonus;
+}
+
+function scoreCanonicalCalendarEventForMeeting(event: CalendarEvent, meeting: Meeting): number {
+  const es = Date.parse(event.starts_at), ee = event.ends_at ? Date.parse(event.ends_at) : es + 30 * 60_000;
+  const ms = Date.parse(meeting.started_at), me = Date.parse(meeting.ended_at);
+  if (![es, ee, ms, me].every(Number.isFinite)) return 0;
+  const overlap = Math.min(ee, me) - Math.max(es, ms);
+  const startDelta = Math.abs(es - ms);
+  const sameDayToleranceMs = 4 * 60 * 60_000;
+  const withinSameDay = startDelta <= sameDayToleranceMs;
+  const timeScore = overlap > 0
+    ? Math.max(1, overlap / 60_000) + Math.max(0, 30 - startDelta / 60_000)
+    : startDelta <= 15 * 60_000
+      ? Math.max(0, 30 - startDelta / 60_000)
+      : withinSameDay
+        ? Math.max(0, 10 - startDelta / (30 * 60_000))
+        : 0;
+  if (timeScore <= 0 && !withinSameDay) return 0;
+  const haystack = [event.title, event.source_app, event.notes, ...event.links].join(' ');
+  const remoteSignal = meeting.platform !== 'other'
+    && new RegExp(platformLabel(meeting.platform).replace(/\s+/g, '\\s+'), 'i').test(haystack);
+  const titleScore = agendaTitlesLikelySame(event.title, meeting.title ?? meeting.summary_json?.title ?? '') ? 40 : 0;
+  if (!titleScore) {
+    const nearUntitledMeetingMs = 30 * 60_000;
+    if (remoteSignal) {
+      if (overlap <= 0 && startDelta > nearUntitledMeetingMs) return 0;
+    } else if (startDelta > nearUntitledMeetingMs) {
+      return 0;
+    }
+  }
+  return timeScore + titleScore + (remoteSignal ? 20 : 0) + (event.meeting_id === meeting.id ? 100 : 0);
 }
 
 function agendaTitlesLikelySame(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -894,6 +1124,14 @@ function deterministicEventId(source: DayEventSource, eventDay: string, hourBuck
   return `evt_${source.split('_')[0]}_${eventDay.replace(/-/g, '')}_${sha1([source, eventDay, hourBucket, normaliseTitleForKey(title)].join('|')).slice(0, 12)}`;
 }
 
+function deterministicCalendarEventId(sourceKey: string, eventDay: string, startsAt: string, title: string): string {
+  return `calevt_${eventDay.replace(/-/g, '')}_${sha1([sourceKey, eventDay, localHourBucket(startsAt), normaliseTitleForKey(title)].join('|')).slice(0, 16)}`;
+}
+
+function dayEventIdForCalendarEvent(event: CalendarEvent): string {
+  return `evt_calendar_${event.day.replace(/-/g, '')}_${sha1(event.id).slice(0, 16)}`;
+}
+
 function sourcePriority(source: DayEventSource): number {
   return { calendar_screen: 0 as const, meeting_capture: 1 as const, email_screen: 2 as const, slack_screen: 3 as const, task_screen: 4 as const, other_screen: 9 as const }[source] ?? 9;
 }
@@ -972,7 +1210,7 @@ function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate
   const out: ExtractionCandidate[] = [];
   const seen = new Set<string>();
   for (const frame of bucket.frames.slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))) {
-    if (out.length >= 25) break;
+    if (out.length >= MAX_STRUCTURED_CALENDAR_CANDIDATES) break;
     if (!looksLikeCalendarText((frame.text ?? '').trim())) continue;
     for (const candidate of structuredCalendarCandidatesFromText(frame.text ?? '', frame)) {
       const startsAt = parseEventTimestamp(candidate.starts_at);
@@ -981,7 +1219,7 @@ function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(candidate);
-      if (out.length >= 25) break;
+      if (out.length >= MAX_STRUCTURED_CALENDAR_CANDIDATES) break;
     }
   }
   return out;
@@ -989,17 +1227,47 @@ function structuredCalendarCandidates(bucket: SourceBucket): ExtractionCandidate
 
 function mergeStructuredCalendarCandidates(candidates: ExtractionCandidate[], structured: ExtractionCandidate[], captureDay: string): ExtractionCandidate[] {
   if (!structured.length) return candidates;
+  const structuredForDay = structured.filter((candidate) => calendarCandidateLocalDay(candidate) === captureDay);
+  const structuredOtherDays = structured.filter((candidate) => {
+    const day = calendarCandidateLocalDay(candidate);
+    return day && day !== captureDay;
+  });
+  const structuredReference = structuredForDay.length > 0 ? structuredForDay : structured;
   const out: ExtractionCandidate[] = [], used = new Set<number>();
 
-  for (const s of structured) {
+  for (const s of structuredForDay) {
     const matchIdx = candidates.findIndex((c, i) => !used.has(i) && calendarCandidatesLikelySame(c, s, captureDay));
     if (matchIdx >= 0) {
       used.add(matchIdx);
-      out.push({ ...candidates[matchIdx]!, kind: 'calendar', starts_at: s.starts_at, ends_at: s.ends_at, title: (candidates[matchIdx]!.title ?? '').trim() || s.title, context: (candidates[matchIdx]!.context ?? '').trim() || s.context });
+      out.push({ ...candidates[matchIdx]!, kind: 'calendar', starts_at: s.starts_at, ends_at: s.ends_at, title: bestCalendarTitle(candidates[matchIdx]!.title, s.title), context: (candidates[matchIdx]!.context ?? '').trim() || s.context });
     } else out.push(s);
   }
-  candidates.forEach((c, i) => !used.has(i) && out.push(c));
+  candidates.forEach((c, i) => {
+    if (used.has(i)) return;
+    const day = calendarCandidateLocalDay(c);
+    if (day && day !== captureDay) return;
+    // When accessibility gives us dated structured rows, treat them as the authority for
+    // day/column membership. A vision model can see a week view and copy Friday's title while
+    // stamping it with Thursday's date; title-only grounding is not enough to accept that.
+    if (structuredReference.some((s) => calendarTitlesLikelySame(c.title ?? '', s.title ?? '') && calendarCandidateDatesOverlap(c, s, captureDay))) return;
+    if (structuredOtherDays.some((s) => calendarTitlesLikelySame(c.title ?? '', s.title ?? ''))) return;
+    out.push(c);
+  });
   return dedupeExtractionCandidates(out, captureDay);
+}
+
+function bestCalendarTitle(modelTitle: string | null | undefined, structuredTitle: string | null | undefined): string | undefined {
+  const model = (modelTitle ?? '').trim(), structured = (structuredTitle ?? '').trim();
+  if (!model) return structured || undefined;
+  if (!structured) return model;
+  if (model.length <= structured.length && calendarTitlesLikelySame(model, structured)) return model;
+  return structured;
+}
+
+function calendarCandidateLocalDay(candidate: ExtractionCandidate): string | null {
+  const startsAt = parseLocalCalendarTimestamp(candidate.starts_at) ?? parseEventTimestamp(candidate.starts_at);
+  if (!startsAt || Number.isNaN(Date.parse(startsAt))) return null;
+  return localDayKey(new Date(startsAt));
 }
 
 function dedupeExtractionCandidates(candidates: ExtractionCandidate[], captureDay: string): ExtractionCandidate[] {
@@ -1138,7 +1406,7 @@ function structuredCalendarCandidatesFromText(text: string, frame: Frame): Extra
     const startsAt = parseEnglishDateTime(m.groups?.date, '12:00 AM');
     if (startsAt && cleanCalendarFallbackTitle(m.groups?.title ?? '')) out.push({ title: cleanCalendarFallbackTitle(m.groups!.title)!, kind: 'calendar', starts_at: startsAt, ends_at: new Date(Date.parse(startsAt) + 24 * 60 * 60_000).toISOString(), attendees: [], context: 'Visible in accessibility text.' });
   });
-  return out.slice(0, 25);
+  return out.slice(0, MAX_STRUCTURED_CALENDAR_CANDIDATES);
 }
 
 function parseEnglishDateTime(date?: string, time?: string): string | null {
@@ -1248,12 +1516,22 @@ function parseCalendarTimeLabel(line: string): { hour: number; minute: number } 
 }
 
 function cleanCalendarFallbackTitle(line: string): string | null {
-  const s = line.replace(/^[•*·\-\\u2022]\s*/, '').replace(/\s+/g, ' ').trim();
+  const s = stripCalendarLocationSuffix(line.replace(/^[•*·\-\\u2022]\s*/, '').replace(/\s+/g, ' ').trim());
   if (s.length < 3 || s.length > 120) return null;
   if (isCalendarChromeTitle(s)) return null;
   if (/^https?:\/\//i.test(s) || /\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com)\b/i.test(s)) return null;
   if (/^[+<>()[\]{}|/\\]+$/.test(s)) return null;
   return s;
+}
+
+function stripCalendarLocationSuffix(value: string): string {
+  const match = /\s+at\s+/i.exec(value);
+  if (!match?.index) return value;
+  const tail = value.slice(match.index + match[0].length);
+  if (/\[[^\]]*room[^\]]*\]|\b(?:meeting room|room\s*-|cupertino|zoom room|centers?|united states|blvd|boulevard|street|st\.?|avenue|ave\.?|road|rd\.?)\b|,\s*[A-Z]{2}\s+\d{5}\b/i.test(tail)) {
+    return value.slice(0, match.index).trim();
+  }
+  return value;
 }
 
 // Strings that should never become an agenda title — UI chrome, clock labels, weekday/month

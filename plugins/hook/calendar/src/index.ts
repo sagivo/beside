@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { calendarAppBundlePrefixes, calendarAppNames, calendarUrlHosts } from '@beside/core';
 import type {
   CaptureHookContext,
   CaptureHookDefinition,
@@ -38,21 +39,9 @@ const DEFINITION: CaptureHookDefinition = {
     'Detects calendar surfaces (Apple Calendar, Google Calendar, Outlook, iCloud, Notion Calendar) and extracts visible events.',
   match: {
     inputKinds: ['screen'],
-    apps: ['calendar', 'fantastical', 'notion calendar', 'cron', 'amie', 'busycal', 'outlook'],
-    appBundleIds: ['com.apple.ical', 'com.flexibits.fantastical', 'com.busymac.busycal', 'co.amie'],
-    urlHosts: [
-      'calendar.google.com',
-      'outlook.live.com',
-      'outlook.office.com',
-      'outlook.office365.com',
-      'icloud.com',
-      'calendar.proton.me',
-      'calendar.yahoo.com',
-      'app.cal.com',
-      'cal.com',
-      'cron.com',
-      'amie.so',
-    ],
+    apps: calendarAppNames(),
+    appBundleIds: calendarAppBundlePrefixes(),
+    urlHosts: calendarUrlHosts(),
   },
   needsVision: true,
   throttleMs: 120_000,

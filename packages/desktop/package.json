@@ -19,7 +19,7 @@
     "dist": "pnpm run build && pnpm run prepare:package && electron-builder",
     "clean": "rimraf dist *.tsbuildinfo",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json",
-    "start": "pnpm run build && electron dist/main.js",
+    "start": "pnpm run build && node scripts/launch-electron.mjs dist/main.js",
     "dev": "node scripts/dev.mjs"
   },
   "dependencies": {

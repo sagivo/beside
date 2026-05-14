@@ -145,38 +145,20 @@ function LandingPage() {
     <>
       <AmbientBackdrop />
 
-      <header className="nav">
-        <div className="container nav-inner">
-          <a href="/" className="brand" aria-label="beside home">
-            <img className="brand-mark" src="/images/logo.png" alt="" aria-hidden="true" />
-            <span>beside</span>
-          </a>
-          <nav className="nav-links" aria-label="Primary">
-            <a href="#pipeline">Live pipeline</a>
-            <a href="#features">Features</a>
-            <a href="#how">How it works</a>
-            <a href="/docs">Docs</a>
-            <a href="https://github.com/sagivo/beside" className="nav-gh">
-              <GitHubIcon />
-              <span>Open source</span>
-            </a>
-            <a href="#download" className="nav-cta">Download</a>
-          </nav>
-        </div>
-      </header>
-
       <main>
         {/* ─────── Hero ─────── */}
         <section className="hero">
           <div className="container hero-grid">
             <div>
-              <span className="eyebrow">
-                <SparkleMark />
-                Open source · Runs entirely on your Mac
-              </span>
-
-              <h1>
-                <span className="grad">You AI memory, beside you.</span>
+              <h1 className="hero-title">
+                <span className="grad">
+                  You private AI,{" "}
+                  <span className="hero-title-beside">
+                    <img className="hero-title-mark" src="/images/logo.png" alt="" aria-hidden="true" />
+                    beside
+                  </span>{" "}
+                  you.
+                </span>
               </h1>
 
               <p className="lede">
@@ -192,9 +174,21 @@ function LandingPage() {
                 <DownloadDropdown />
               </div>
 
-              <div className="hero-meta" aria-hidden>
-                <span className="hm-dot" />
-                Free forever · no account · no telemetry
+              <div className="hero-meta">
+                <span className="hm-dot" aria-hidden />
+                <span>Free forever · no account · no telemetry</span>
+                <span className="hero-meta-sep" aria-hidden>·</span>
+                <a
+                  className="hero-meta-link"
+                  href="https://github.com/sagivo/beside"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  <GitHubIcon />
+                  <span>Star on GitHub</span>
+                </a>
+                <span className="hero-meta-sep" aria-hidden>·</span>
+                <a className="hero-meta-link" href="/docs">Docs</a>
               </div>
             </div>
 
@@ -1068,8 +1062,7 @@ function AskDemo() {
                   {s.bullets.map((b, j) => (
                     <div className="ans-bullet" key={j}>
                       <span className={`ans-tag t-${b.tag}`}>●</span>
-                      <strong>{b.bold}</strong>
-                      {b.rest}
+                      <span><strong>{b.bold}</strong>{b.rest}</span>
                     </div>
                   ))}
                 </div>

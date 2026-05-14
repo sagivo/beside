@@ -45,6 +45,13 @@ import type {
   DayEventSource,
   DayEventStatus,
   ListDayEventsQuery,
+  CalendarSource,
+  CalendarCapture,
+  CalendarEvent,
+  CalendarEventStatus,
+  ListCalendarEventsQuery,
+  CalendarReconcileInput,
+  CalendarReconcileResult,
   HookRecord,
   HookRecordQuery,
   PluginFactory,
@@ -140,6 +147,62 @@ interface DayEventRow {
   updated_at: string;
 }
 
+interface CalendarSourceRow {
+  source_key: string;
+  provider: string;
+  label: string;
+  app: string | null;
+  app_bundle_id: string | null;
+  url_host: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CalendarCaptureRow {
+  id: string;
+  source_key: string;
+  day: string;
+  captured_at: string;
+  frame_ids_json: string;
+  evidence_hash: string;
+  parser: string;
+  status: string;
+  confidence: number;
+  visible_days_json: string;
+  failure_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface CalendarEventRow {
+  id: string;
+  source_key: string;
+  provider: string;
+  day: string;
+  starts_at: string;
+  ends_at: string | null;
+  title: string;
+  location: string | null;
+  attendees_json: string;
+  links_json: string;
+  notes: string | null;
+  source_app: string | null;
+  source_url: string | null;
+  source_bundle_id: string | null;
+  evidence_frame_ids_json: string;
+  first_seen_capture_id: string | null;
+  last_seen_capture_id: string | null;
+  status: string;
+  content_hash: string;
+  meeting_id: string | null;
+  actual_started_at: string | null;
+  actual_ended_at: string | null;
+  meeting_platform: string | null;
+  meeting_summary_status: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 interface MemoryChunkRow {
   id: string;
   kind: string;
@@ -201,6 +264,59 @@ function dayEventFromRow(row: DayEventRow): DayEvent {
     content_hash: row.content_hash,
     status: row.status as DayEventStatus,
     failure_reason: row.failure_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function calendarSourceFromRow(row: CalendarSourceRow): CalendarSource {
+  return { ...row };
+}
+
+function calendarCaptureFromRow(row: CalendarCaptureRow): CalendarCapture {
+  return {
+    id: row.id,
+    source_key: row.source_key,
+    day: row.day,
+    captured_at: row.captured_at,
+    frame_ids: parseJsonStringArray(row.frame_ids_json),
+    evidence_hash: row.evidence_hash,
+    parser: row.parser,
+    status: row.status as CalendarCapture['status'],
+    confidence: row.confidence,
+    visible_days: parseJsonStringArray(row.visible_days_json),
+    failure_reason: row.failure_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function calendarEventFromRow(row: CalendarEventRow): CalendarEvent {
+  return {
+    id: row.id,
+    source_key: row.source_key,
+    provider: row.provider,
+    day: row.day,
+    starts_at: row.starts_at,
+    ends_at: row.ends_at,
+    title: row.title,
+    location: row.location,
+    attendees: parseJsonStringArray(row.attendees_json),
+    links: parseJsonStringArray(row.links_json),
+    notes: row.notes,
+    source_app: row.source_app,
+    source_url: row.source_url,
+    source_bundle_id: row.source_bundle_id,
+    evidence_frame_ids: parseJsonStringArray(row.evidence_frame_ids_json),
+    first_seen_capture_id: row.first_seen_capture_id,
+    last_seen_capture_id: row.last_seen_capture_id,
+    status: row.status as CalendarEventStatus,
+    content_hash: row.content_hash,
+    meeting_id: row.meeting_id,
+    actual_started_at: row.actual_started_at,
+    actual_ended_at: row.actual_ended_at,
+    meeting_platform: row.meeting_platform as CalendarEvent['meeting_platform'],
+    meeting_summary_status: row.meeting_summary_status as CalendarEvent['meeting_summary_status'],
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -2651,6 +2767,7 @@ class LocalStorage implements IStorage {
   async clearAllMeetings(): Promise<void> {
     const tx = this.db.transaction(() => {
       this.db.exec(`UPDATE frames SET meeting_id = NULL`);
+      this.db.exec(`UPDATE calendar_events SET meeting_id = NULL, actual_started_at = NULL, actual_ended_at = NULL, meeting_platform = NULL, meeting_summary_status = NULL`);
       this.db.exec(`DELETE FROM meeting_turns`);
       this.db.exec(`DELETE FROM meetings`);
       this.db.exec(`
@@ -2664,6 +2781,174 @@ class LocalStorage implements IStorage {
       `);
     });
     tx();
+  }
+
+  // -------------------------------------------------------------------------
+  // Calendar events (canonical calendar capture model).
+  // -------------------------------------------------------------------------
+
+  async upsertCalendarSource(source: CalendarSource): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO calendar_sources (
+        source_key, provider, label, app, app_bundle_id, url_host, created_at, updated_at
+      ) VALUES (
+        @source_key, @provider, @label, @app, @app_bundle_id, @url_host, @created_at, @updated_at
+      )
+      ON CONFLICT(source_key) DO UPDATE SET
+        provider = excluded.provider,
+        label = excluded.label,
+        app = COALESCE(excluded.app, calendar_sources.app),
+        app_bundle_id = COALESCE(excluded.app_bundle_id, calendar_sources.app_bundle_id),
+        url_host = COALESCE(excluded.url_host, calendar_sources.url_host),
+        updated_at = excluded.updated_at
+    `).run(source);
+  }
+
+  async upsertCalendarCapture(capture: CalendarCapture): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO calendar_captures (
+        id, source_key, day, captured_at, frame_ids_json, evidence_hash,
+        parser, status, confidence, visible_days_json, failure_reason, created_at, updated_at
+      ) VALUES (
+        @id, @source_key, @day, @captured_at, @frame_ids_json, @evidence_hash,
+        @parser, @status, @confidence, @visible_days_json, @failure_reason, @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        source_key = excluded.source_key,
+        day = excluded.day,
+        captured_at = excluded.captured_at,
+        frame_ids_json = excluded.frame_ids_json,
+        evidence_hash = excluded.evidence_hash,
+        parser = excluded.parser,
+        status = excluded.status,
+        confidence = excluded.confidence,
+        visible_days_json = excluded.visible_days_json,
+        failure_reason = excluded.failure_reason,
+        updated_at = excluded.updated_at
+    `).run({
+      ...capture,
+      frame_ids_json: JSON.stringify(capture.frame_ids ?? []),
+      visible_days_json: JSON.stringify(capture.visible_days ?? []),
+    });
+  }
+
+  async reconcileCalendarEvents(input: CalendarReconcileInput): Promise<CalendarReconcileResult> {
+    const tx = this.db.transaction(() => {
+      this.upsertCalendarSource(input.source);
+      this.upsertCalendarCapture(input.capture);
+      let upserted = 0;
+      for (const event of input.events) {
+        this.upsertCalendarEvent(event);
+        upserted++;
+      }
+      let stale = 0;
+      if (input.markMissingStale !== false && input.capture.status === 'ready') {
+        const activeIds = new Set(input.events.map((event) => event.id));
+        const rows = this.db
+          .prepare("SELECT id FROM calendar_events WHERE source_key = ? AND day = ? AND status = 'active'")
+          .all(input.source.source_key, input.capture.day) as Array<{ id: string }>;
+        const missing = rows.map((row) => row.id).filter((id) => !activeIds.has(id));
+        if (missing.length > 0) {
+          const now = input.capture.updated_at;
+          const placeholders = missing.map((_, i) => `?`).join(',');
+          stale = this.db
+            .prepare(`UPDATE calendar_events SET status = 'stale', updated_at = ? WHERE id IN (${placeholders})`)
+            .run(now, ...missing).changes;
+        }
+      }
+      return { upserted, stale };
+    });
+    return tx() as CalendarReconcileResult;
+  }
+
+  async upsertCalendarEvent(event: CalendarEvent): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO calendar_events (
+        id, source_key, provider, day, starts_at, ends_at, title, location,
+        attendees_json, links_json, notes, source_app, source_url, source_bundle_id,
+        evidence_frame_ids_json, first_seen_capture_id, last_seen_capture_id, status,
+        content_hash, meeting_id, actual_started_at, actual_ended_at, meeting_platform,
+        meeting_summary_status, created_at, updated_at
+      ) VALUES (
+        @id, @source_key, @provider, @day, @starts_at, @ends_at, @title, @location,
+        @attendees_json, @links_json, @notes, @source_app, @source_url, @source_bundle_id,
+        @evidence_frame_ids_json, @first_seen_capture_id, @last_seen_capture_id, @status,
+        @content_hash, @meeting_id, @actual_started_at, @actual_ended_at, @meeting_platform,
+        @meeting_summary_status, @created_at, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        source_key = excluded.source_key,
+        provider = excluded.provider,
+        day = excluded.day,
+        starts_at = excluded.starts_at,
+        ends_at = excluded.ends_at,
+        title = excluded.title,
+        location = excluded.location,
+        attendees_json = excluded.attendees_json,
+        links_json = excluded.links_json,
+        notes = excluded.notes,
+        source_app = excluded.source_app,
+        source_url = excluded.source_url,
+        source_bundle_id = excluded.source_bundle_id,
+        evidence_frame_ids_json = excluded.evidence_frame_ids_json,
+        last_seen_capture_id = excluded.last_seen_capture_id,
+        status = excluded.status,
+        content_hash = excluded.content_hash,
+        meeting_id = COALESCE(excluded.meeting_id, calendar_events.meeting_id),
+        actual_started_at = COALESCE(excluded.actual_started_at, calendar_events.actual_started_at),
+        actual_ended_at = COALESCE(excluded.actual_ended_at, calendar_events.actual_ended_at),
+        meeting_platform = COALESCE(excluded.meeting_platform, calendar_events.meeting_platform),
+        meeting_summary_status = COALESCE(excluded.meeting_summary_status, calendar_events.meeting_summary_status),
+        updated_at = excluded.updated_at
+    `).run({
+      ...event,
+      attendees_json: JSON.stringify(event.attendees ?? []),
+      links_json: JSON.stringify(event.links ?? []),
+      evidence_frame_ids_json: JSON.stringify(event.evidence_frame_ids ?? []),
+    });
+  }
+
+  async clearCalendarEventMeetingLink(id: string): Promise<void> {
+    this.db
+      .prepare(`
+        UPDATE calendar_events
+        SET meeting_id = NULL,
+            actual_started_at = NULL,
+            actual_ended_at = NULL,
+            meeting_platform = NULL,
+            meeting_summary_status = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(new Date().toISOString(), id);
+  }
+
+  async getCalendarEvent(id: string): Promise<CalendarEvent | null> {
+    const row = this.db.prepare('SELECT * FROM calendar_events WHERE id = ?').get(id) as CalendarEventRow | undefined;
+    return row ? calendarEventFromRow(row) : null;
+  }
+
+  async listCalendarEvents(query: ListCalendarEventsQuery = {}): Promise<CalendarEvent[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.sourceKey) { where.push('source_key = ?'); params.push(query.sourceKey); }
+    if (query.day) { where.push('day = ?'); params.push(query.day); }
+    if (query.from) { where.push('starts_at >= ?'); params.push(query.from); }
+    if (query.to) { where.push('starts_at <= ?'); params.push(query.to); }
+    if (query.status) { where.push('status = ?'); params.push(query.status); }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const orderSql = query.order === 'chronological' ? 'ORDER BY starts_at ASC' : 'ORDER BY starts_at DESC';
+    const limit = Math.max(1, Math.min(query.limit ?? 500, 5000));
+    const rows = this.db.prepare(`SELECT * FROM calendar_events ${whereSql} ${orderSql} LIMIT ?`).all(...params, limit) as CalendarEventRow[];
+    return rows.map(calendarEventFromRow);
+  }
+
+  async clearAllCalendarEvents(): Promise<void> {
+    this.db.exec(`
+      DELETE FROM calendar_events;
+      DELETE FROM calendar_captures;
+      DELETE FROM calendar_sources;
+    `);
   }
 
   // -------------------------------------------------------------------------
@@ -3191,6 +3476,9 @@ class LocalStorage implements IStorage {
       'entities',
       'meetings',
       'meeting_turns',
+      'calendar_events',
+      'calendar_captures',
+      'calendar_sources',
       'day_events',
       'memory_chunk_text',
       'memory_chunk_embeddings',
@@ -3315,6 +3603,9 @@ class LocalStorage implements IStorage {
     `).run(...meetingIds);
     this.db
       .prepare(`DELETE FROM memory_chunks WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})`)
+      .run(...meetingIds);
+    this.db
+      .prepare(`UPDATE calendar_events SET meeting_id = NULL, actual_started_at = NULL, actual_ended_at = NULL, meeting_platform = NULL, meeting_summary_status = NULL WHERE meeting_id IN (${placeholders})`)
       .run(...meetingIds);
     this.db
       .prepare(`DELETE FROM meeting_turns WHERE meeting_id IN (${placeholders})`)
@@ -3809,6 +4100,71 @@ class LocalStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_meeting_turns_meeting
         ON meeting_turns(meeting_id, t_start);
+
+      -- Calendar sources/captures/events: canonical calendar state. Day
+      -- events remain a projection; these tables preserve source-scoped
+      -- snapshots and meeting enrichment without flattening provenance.
+      CREATE TABLE IF NOT EXISTS calendar_sources (
+        source_key     TEXT PRIMARY KEY,
+        provider       TEXT NOT NULL,
+        label          TEXT NOT NULL,
+        app            TEXT,
+        app_bundle_id  TEXT,
+        url_host       TEXT,
+        created_at     TEXT NOT NULL,
+        updated_at     TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS calendar_captures (
+        id                 TEXT PRIMARY KEY,
+        source_key         TEXT NOT NULL,
+        day                TEXT NOT NULL,
+        captured_at        TEXT NOT NULL,
+        frame_ids_json     TEXT NOT NULL DEFAULT '[]',
+        evidence_hash      TEXT NOT NULL,
+        parser             TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        confidence         REAL NOT NULL DEFAULT 0,
+        visible_days_json  TEXT NOT NULL DEFAULT '[]',
+        failure_reason     TEXT,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS calendar_events (
+        id                       TEXT PRIMARY KEY,
+        source_key               TEXT NOT NULL,
+        provider                 TEXT NOT NULL,
+        day                      TEXT NOT NULL,
+        starts_at                TEXT NOT NULL,
+        ends_at                  TEXT,
+        title                    TEXT NOT NULL,
+        location                 TEXT,
+        attendees_json           TEXT NOT NULL DEFAULT '[]',
+        links_json               TEXT NOT NULL DEFAULT '[]',
+        notes                    TEXT,
+        source_app               TEXT,
+        source_url               TEXT,
+        source_bundle_id         TEXT,
+        evidence_frame_ids_json  TEXT NOT NULL DEFAULT '[]',
+        first_seen_capture_id    TEXT,
+        last_seen_capture_id     TEXT,
+        status                   TEXT NOT NULL DEFAULT 'active',
+        content_hash             TEXT NOT NULL,
+        meeting_id               TEXT,
+        actual_started_at        TEXT,
+        actual_ended_at          TEXT,
+        meeting_platform         TEXT,
+        meeting_summary_status   TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_calendar_captures_source_day
+        ON calendar_captures(source_key, day, captured_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_calendar_events_source_day
+        ON calendar_events(source_key, day, starts_at);
+      CREATE INDEX IF NOT EXISTS idx_calendar_events_day
+        ON calendar_events(day, starts_at);
+      CREATE INDEX IF NOT EXISTS idx_calendar_events_meeting
+        ON calendar_events(meeting_id) WHERE meeting_id IS NOT NULL;
 
       -- Day events: the unified "event log" surface. One row per item
       -- the EventExtractor materialised onto a day -- a live meeting we

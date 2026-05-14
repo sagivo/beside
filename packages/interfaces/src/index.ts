@@ -62,6 +62,21 @@ export type DayEventStatus = 'pending' | 'ready' | 'failed';
 export interface DayEvent { id: string; day: string; starts_at: string; ends_at: string | null; kind: DayEventKind; source: DayEventSource; title: string; source_app: string | null; context_md: string | null; attendees: string[]; links: string[]; meeting_id: string | null; evidence_frame_ids: string[]; content_hash: string; status: DayEventStatus; failure_reason: string | null; created_at: string; updated_at: string; }
 export interface ListDayEventsQuery { day?: string; from?: string; to?: string; kind?: DayEventKind; limit?: number; order?: 'recent' | 'chronological'; }
 
+export type CalendarCaptureStatus = 'ready' | 'empty' | 'uncertain' | 'failed';
+export type CalendarEventStatus = 'active' | 'removed' | 'stale';
+export interface CalendarSource { source_key: string; provider: string; label: string; app: string | null; app_bundle_id: string | null; url_host: string | null; created_at: string; updated_at: string; }
+export interface CalendarCapture { id: string; source_key: string; day: string; captured_at: string; frame_ids: string[]; evidence_hash: string; parser: string; status: CalendarCaptureStatus; confidence: number; visible_days: string[]; failure_reason: string | null; created_at: string; updated_at: string; }
+export interface CalendarEvent {
+  id: string; source_key: string; provider: string; day: string; starts_at: string; ends_at: string | null; title: string;
+  location: string | null; attendees: string[]; links: string[]; notes: string | null; source_app: string | null; source_url: string | null; source_bundle_id: string | null;
+  evidence_frame_ids: string[]; first_seen_capture_id: string | null; last_seen_capture_id: string | null; status: CalendarEventStatus; content_hash: string;
+  meeting_id: string | null; actual_started_at: string | null; actual_ended_at: string | null; meeting_platform: MeetingPlatform | null; meeting_summary_status: MeetingSummaryStatus | null;
+  created_at: string; updated_at: string;
+}
+export interface ListCalendarEventsQuery { sourceKey?: string; day?: string; from?: string; to?: string; status?: CalendarEventStatus; limit?: number; order?: 'recent' | 'chronological'; }
+export interface CalendarReconcileInput { source: CalendarSource; capture: CalendarCapture; events: CalendarEvent[]; markMissingStale?: boolean; }
+export interface CalendarReconcileResult { upserted: number; stale: number; }
+
 export interface StorageStats { totalEvents: number; totalAssetBytes: number; oldestEvent: string | null; newestEvent: string | null; eventsByType: Record<string, number>; eventsByApp: Record<string, number>; }
 
 export interface IStorage {
@@ -74,6 +89,7 @@ export interface IStorage {
   listFramesForVacuum(currentTier: FrameAssetTier, olderThanIso: string, limit: number): Promise<FrameAsset[]>; updateFrameAsset(frameId: string, update: { assetPath?: string | null; tier: FrameAssetTier }): Promise<void>; deleteAssetIfUnreferenced(assetPath: string): Promise<void>; countFramesByTier(): Promise<Record<FrameAssetTier, number>>;
   upsertSession(session: ActivitySession): Promise<void>; getSession(id: string): Promise<ActivitySession | null>; listSessions(query?: ListSessionsQuery): Promise<ActivitySession[]>; listFramesNeedingSessionAssignment(limit: number): Promise<Frame[]>; assignFramesToSession(frameIds: string[], sessionId: string): Promise<void>; getSessionFrames(sessionId: string): Promise<Frame[]>; clearAllSessions(): Promise<void>;
   upsertMeeting(meeting: Meeting): Promise<void>; getMeeting(id: string): Promise<Meeting | null>; listMeetings(query?: ListMeetingsQuery): Promise<Meeting[]>; listFramesNeedingMeetingAssignment(limit: number): Promise<Frame[]>; assignFramesToMeeting(frameIds: string[], meetingId: string): Promise<void>; getMeetingFrames(meetingId: string): Promise<Frame[]>; listAudioFramesInRange(fromIso: string, toIso: string): Promise<Frame[]>; setMeetingTurns(meetingId: string, turns: Array<Omit<MeetingTurn, 'id' | 'meeting_id'>>): Promise<MeetingTurn[]>; getMeetingTurns(meetingId: string): Promise<MeetingTurn[]>; setMeetingSummary(meetingId: string, update: MeetingSummaryUpdate): Promise<void>; clearAllMeetings(): Promise<void>;
+  upsertCalendarSource(source: CalendarSource): Promise<void>; upsertCalendarCapture(capture: CalendarCapture): Promise<void>; reconcileCalendarEvents(input: CalendarReconcileInput): Promise<CalendarReconcileResult>; upsertCalendarEvent(event: CalendarEvent): Promise<void>; clearCalendarEventMeetingLink(id: string): Promise<void>; getCalendarEvent(id: string): Promise<CalendarEvent | null>; listCalendarEvents(query?: ListCalendarEventsQuery): Promise<CalendarEvent[]>; clearAllCalendarEvents(): Promise<void>;
   upsertDayEvent(event: DayEvent): Promise<void>; getDayEvent(id: string): Promise<DayEvent | null>; listDayEvents(query?: ListDayEventsQuery): Promise<DayEvent[]>; deleteDayEvent(id: string): Promise<void>; deleteDayEventsBySourceForDay(day: string, source: DayEventSource): Promise<void>; clearAllDayEvents(): Promise<void>;
   deleteFrame(frameId: string): Promise<{ assetPath: string | null }>; deleteFrames(query: FrameDeleteQuery): Promise<{ frames: number; assetPaths: string[] }>; deleteAllMemory(): Promise<{ frames: number; events: number; assetBytes: number }>; runMaintenance(): Promise<{ vacuumed: boolean; analyzed: boolean }>; checkpointWal?(mode?: 'PASSIVE' | 'TRUNCATE'): Promise<void>; deleteOldData(retentionDays: number): Promise<{ frames: number; events: number; sessions: number; meetings: number; entities: number; assetPaths: string[] }>;
 

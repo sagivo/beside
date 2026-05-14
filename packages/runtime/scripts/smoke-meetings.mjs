@@ -224,6 +224,42 @@ async function main() {
       stageA.links_shared.some((l) => l.includes('example.com/pricing')),
       'Stage A surfaces shared link',
     );
+    const keywordMeeting = {
+      ...meeting,
+      id: `mtg_keyword_${randomUUID().slice(0, 8)}`,
+      entity_path: 'meetings/2026-05-07-engineering-staff',
+      title: 'Engineering Staff Meeting',
+    };
+    const keywordTurns = [
+      {
+        id: 1,
+        meeting_id: keywordMeeting.id,
+        t_start: now.toISOString(),
+        t_end: new Date(now.getTime() + 30_000).toISOString(),
+        speaker: 'Alex',
+        text: 'We need to talk about MCP apps and webhook listener reliability for the staff meeting.',
+        visual_frame_id: null,
+        source: 'whisper',
+      },
+      {
+        id: 2,
+        meeting_id: keywordMeeting.id,
+        t_start: new Date(now.getTime() + 60_000).toISOString(),
+        t_end: new Date(now.getTime() + 90_000).toISOString(),
+        speaker: 'Sam',
+        text: 'Command palette work is part of the broader planning discussion, not a product demo.',
+        visual_frame_id: null,
+        source: 'whisper',
+      },
+    ];
+    const keywordStageA = buildStageA(keywordMeeting, keywordTurns, []);
+    assert(keywordStageA.tldr.includes('MCP apps'), 'Stage A fallback stays grounded in transcript excerpts');
+    assert(
+      !/Demo-day style|Ruben showed|Postman agent mode|Twilio-style callbacks/i.test(
+        [keywordStageA.tldr, ...keywordStageA.key_moments.map((m) => m.what)].join('\n'),
+      ),
+      'Stage A fallback does not inject canned demo-day content',
+    );
     const md = renderSummaryMarkdown(meeting, stageA, turns, screens);
     assert(md.includes('**TL;DR.**'), 'rendered markdown contains TL;DR header');
     assert(md.includes(meeting.entity_path), 'rendered markdown links the meeting entity');

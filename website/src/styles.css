@@ -509,6 +509,19 @@ p {
   .hero { padding: 64px 0 48px; }
 }
 
+.hero-title-beside { white-space: nowrap; }
+.hero-title-mark {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.1em;
+  object-fit: contain;
+  vertical-align: baseline;
+  position: relative;
+  top: 0.08em;
+  filter: saturate(1.16) contrast(1.06) drop-shadow(0 4px 10px rgba(21, 24, 42, 0.18));
+}
+
 .eyebrow {
   display: inline-flex;
   align-items: center;
@@ -1326,6 +1339,7 @@ p {
   letter-spacing: 0.04em;
   font-weight: 500;
 }
+.hero-meta { flex-wrap: wrap; }
 .hero-meta .hm-dot {
   width: 6px;
   height: 6px;
@@ -1334,6 +1348,20 @@ p {
   box-shadow: 0 0 0 3px rgba(76, 196, 121, 0.18), 0 0 8px rgba(76, 196, 121, 0.6);
   animation: pulse-soft 3.2s ease-in-out infinite;
 }
+.hero-meta-sep { color: var(--ink-faint); opacity: 0.6; }
+.hero-meta-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted);
+  text-decoration: none;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid transparent;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+.hero-meta-link svg { width: 13px; height: 13px; }
+.hero-meta-link:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
 
 /* ─────────────────────────────────────────────────────────────
    Section structure

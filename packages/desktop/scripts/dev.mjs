@@ -9,7 +9,7 @@ const desktopRoot = path.resolve(here, '..');
 const repoRoot = path.resolve(desktopRoot, '../..');
 const isWindows = process.platform === 'win32';
 const pnpmBin = isWindows ? 'pnpm.cmd' : 'pnpm';
-const electronBin = path.join(desktopRoot, 'node_modules', '.bin', isWindows ? 'electron.cmd' : 'electron');
+const electronLauncher = path.join(desktopRoot, 'scripts', 'launch-electron.mjs');
 const rendererHost = process.env.BESIDE_RENDERER_HOST ?? '127.0.0.1';
 const rendererPort = process.env.BESIDE_RENDERER_PORT ?? '5173';
 const rendererUrl =
@@ -115,7 +115,7 @@ async function waitForRenderer() {
 
 function startElectron() {
   log(`starting Electron with renderer ${rendererUrl}`);
-  electron = spawnChild('electron', electronBin, ['dist/main.js'], {
+  electron = spawnChild('electron', process.execPath, [electronLauncher, 'dist/main.js'], {
     cwd: desktopRoot,
     env: {
       BESIDE_DEV: '1',

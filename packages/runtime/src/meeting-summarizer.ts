@@ -24,6 +24,7 @@ Rules:
 export class MeetingSummarizer {
   private readonly logger: Logger; private readonly cooldownMs: number; private readonly batchSize: number;
   private readonly maxTranscriptChars: number; private readonly visionAttachments: number; private readonly enabled: boolean; private readonly dataDir: string;
+  private cannedFallbackCleanupDone = false;
 
   constructor(private readonly storage: IStorage, private readonly model: IModelAdapter, logger: Logger, opts: MeetingSummarizerOptions) {
     this.logger = logger.child('meeting-summarizer'); this.dataDir = opts.dataDir;
@@ -33,6 +34,7 @@ export class MeetingSummarizer {
 
   async tick(): Promise<MeetingSummarizerResult> {
     const res = { attempted: 0, succeeded: 0, failed: 0, skipped: 0 };
+    await this.invalidateCannedFallbackSummaries().catch((err) => this.logger.warn('canned fallback cleanup failed', { err: String(err) }));
     for (const m of await this.storage.listMeetings({ summaryStatus: 'pending', limit: this.batchSize * 4, order: 'recent' }).then(p => p.filter(x => Date.parse(x.ended_at) <= Date.now() - this.cooldownMs).slice(0, this.batchSize))) {
       res.attempted++;
       try {
@@ -71,6 +73,19 @@ export class MeetingSummarizer {
     }
     return out;
   }
+
+  private async invalidateCannedFallbackSummaries(): Promise<void> {
+    if (this.cannedFallbackCleanupDone) return;
+    this.cannedFallbackCleanupDone = true;
+    const meetings = await this.storage.listMeetings({ summaryStatus: 'ready', limit: 500, order: 'recent' }).catch(() => [] as Meeting[]);
+    let invalidated = 0;
+    for (const meeting of meetings) {
+      if (!isCannedFallbackSummary(meeting)) continue;
+      await this.storage.setMeetingSummary(meeting.id, { status: 'pending', md: null, json: null, failureReason: null });
+      invalidated++;
+    }
+    if (invalidated > 0) this.logger.info(`queued ${invalidated} canned fallback meeting summar${invalidated === 1 ? 'y' : 'ies'} for regeneration`);
+  }
 }
 
 export function buildStageA(m: Meeting, turns: MeetingTurn[], screens: Frame[]): MeetingSummaryJson {
@@ -97,29 +112,93 @@ function inferAgenda(_t: MeetingTurn[], screens: Frame[]): string[] {
 }
 
 function inferTranscriptTopics(turns: MeetingTurn[]): { title: string | null; tldr: string; agenda: string[]; keyMoments: MeetingSummaryJson['key_moments'] } {
-  const text = turns.map(t => t.text).join('\n').toLowerCase();
-  const topics: Array<{ title: string; re: RegExp; what: string }> = [
-    { title: 'Ruby SDK generator', re: /\bruby\b|ruby sdk generator/i, what: 'Adam presented the Ruby SDK generator, including Ruby 3.3 targeting, thread-safe persistent HTTP connections, readable generated clients, a Notion API demo, and Ruby-specific undefined-vs-nil sentinel handling.' },
-    { title: 'Kotlin SDK launch', re: /\bkotlin\b/i, what: 'The Kotlin presenter announced that Kotlin SDK generation is generally available in the Postman CLI and app, with Kotlin-native quickstarts, Gradle setup, Kotlin-facing docs and snippets, built on the stable Java SDK to ship quickly.' },
-    { title: 'Rust SDK generator', re: /\brust\b|cargo|tokio|reqwest/i, what: 'V presented the Rust SDK generator, explaining idiomatic Rust design inspired by AWS, GitHub and Stripe SDKs, builder patterns, optional values, async support on Tokio and reqwest, Cargo packaging, and a Rick and Morty API demo.' },
-    { title: 'Agent mode diagrams and MCP apps', re: /\bmcp\b|diagram|visualization|agent mode|excalidraw/i, what: 'Ruben showed diagram and visualization support in Postman agent mode using MCP apps, including streaming UI generation and the ability to use third-party or future Postman-native MCP tools.' },
-    { title: 'Command palette improvements', re: /command palette|private api network|push to postman cloud|pull from postman cloud/i, what: 'The search team demoed command palette updates: search-bar entry points, keyword matching, visible shortcuts, tuned ranking, git/cloud commands, switching local/cloud views, and adding a workspace to a private API network.' },
-    { title: 'Webhook listener workflow', re: /webhook|web book|slack|twilio|sms|challenge/i, what: 'A later presenter demonstrated webhook listener workflows for local development, forwarding events to a local instance, testing SMS/Twilio-style callbacks, and handling Slack challenge verification.' },
-  ];
-  const matched = topics.filter(t => t.re.test(text));
-  const agenda = matched.map(t => t.title);
-  const keyMoments = matched.map(t => {
-    const turn = turns.find(turn => t.re.test(turn.text));
-    return { t: turn?.t_start ?? turns[0]?.t_start ?? new Date(0).toISOString(), what: t.what, frame_id: turn?.visual_frame_id ?? null };
-  });
-  const tldr = matched.length
-    ? `Demo-day style SDK/platform meeting covering ${formatList(agenda.slice(0, 5))}${agenda.length > 5 ? ` and ${agenda.length - 5} more topic${agenda.length > 6 ? 's' : ''}` : ''}.`
-    : '';
-  // Note: we deliberately don't synthesize a meeting title from these heuristics. A hardcoded title
-  // (e.g. "SDK and platform demos") would override the real calendar event name in the agenda.
-  // The title should come from the calendar event (via event-extractor's inferLinkedAgendaTitle)
-  // or the LLM stage-B summary, never from a transcript keyword match.
-  return { title: null, tldr, agenda, keyMoments };
+  const excerpts = turns
+    .map((turn) => ({ turn, excerpt: transcriptExcerpt(turn.text, 180) }))
+    .filter((item) => isMeaningfulTranscriptExcerpt(item.excerpt));
+  if (!excerpts.length) return { title: null, tldr: '', agenda: [], keyMoments: [] };
+
+  const keyTurns = pickRepresentativeItems(excerpts, 5);
+  return {
+    title: null,
+    tldr: buildExtractiveTldr(excerpts.map((item) => item.excerpt)),
+    agenda: uniqueStrings(keyTurns.map((item) => deriveTranscriptHeading(item.excerpt)).filter((heading) => heading !== 'Transcript discussion')).slice(0, 5),
+    keyMoments: keyTurns.map(({ turn, excerpt }) => ({
+      t: turn.t_start,
+      what: `Transcript excerpt: "${excerpt}".`,
+      frame_id: turn.visual_frame_id ?? null,
+    })),
+  };
+}
+
+function isCannedFallbackSummary(meeting: Meeting): boolean {
+  const text = `${meeting.summary_json?.tldr ?? ''}\n${meeting.summary_md ?? ''}`;
+  return /\bDemo-day style SDK\/platform meeting covering\b/i.test(text)
+    || /\bRuben showed diagram and visualization support in Postman agent mode\b/i.test(text)
+    || /\bThe search team demoed command palette updates\b/i.test(text);
+}
+
+function buildExtractiveTldr(excerpts: string[]): string {
+  const snippets = uniqueStrings(excerpts.map((excerpt) => transcriptExcerpt(excerpt, 140))).slice(0, 2);
+  if (!snippets.length) return '';
+  if (snippets.length === 1) return `Transcript highlights: "${snippets[0]}".`;
+  return `Transcript highlights include "${snippets[0]}" and "${snippets[1]}".`;
+}
+
+function transcriptExcerpt(text: string, maxChars: number): string {
+  const cleaned = text
+    .replace(/\bhttps?:\/\/\S+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const firstSentence = cleaned.match(/^(.+?[.!?])(?:\s|$)/)?.[1] ?? cleaned;
+  return trimToWord(firstSentence.replace(/[.!?]+$/g, ''), maxChars);
+}
+
+function isMeaningfulTranscriptExcerpt(excerpt: string): boolean {
+  if (excerpt.length < 12) return false;
+  if (/^(?:yeah|yes|yep|no|okay|ok|right|cool|thanks|thank you|bye|sounds good|mm hmm|mhm)$/i.test(excerpt)) return false;
+  return (excerpt.match(/[a-z0-9]{2,}/gi) ?? []).length >= 4;
+}
+
+function deriveTranscriptHeading(excerpt: string): string {
+  const stop = new Set(['about', 'actually', 'after', 'again', 'also', 'because', 'been', 'being', 'from', 'have', 'into', 'just', 'like', 'maybe', 'okay', 'really', 'right', 'that', 'their', 'there', 'they', 'this', 'those', 'with', 'would', 'yeah', 'your']);
+  const tokens = excerpt
+    .replace(/\bhttps?:\/\/\S+/gi, ' ')
+    .match(/[A-Za-z][A-Za-z0-9'_-]*/g) ?? [];
+  const useful = tokens.filter((token) => token.length > 2 && !stop.has(token.toLowerCase())).slice(0, 5);
+  if (useful.length < 2) return 'Transcript discussion';
+  return useful.map(titleToken).join(' ').slice(0, 80);
+}
+
+function titleToken(token: string): string {
+  if (token === token.toUpperCase()) return token;
+  if (/^[qQ]\d+$/.test(token)) return token.toUpperCase();
+  return token.charAt(0).toUpperCase() + token.slice(1);
+}
+
+function trimToWord(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const clipped = value.slice(0, maxChars).replace(/\s+\S*$/, '').trim();
+  return clipped || value.slice(0, maxChars).trim();
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>(), out: string[] = [];
+  for (const value of values) {
+    const cleaned = value.trim();
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+  }
+  return out;
+}
+
+function pickRepresentativeItems<T>(items: T[], limit: number): T[] {
+  if (items.length <= limit) return items;
+  if (limit <= 1) return [items[0]!];
+  const out: T[] = [];
+  for (let i = 0; i < limit; i++) out.push(items[Math.round(i * (items.length - 1) / (limit - 1))]!);
+  return out;
 }
 
 export function pickKeyScreenshots(screens: Frame[], limit: number): Frame[] {
