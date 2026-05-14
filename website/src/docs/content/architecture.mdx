@@ -1,0 +1,172 @@
+# Architecture
+
+Beside is built as a **typed pipeline of replaceable plugins** orchestrated by a
+small runtime. Each layer has a stable interface in `@beside/interfaces`, a
+default plugin in `plugins/<layer>/<name>`, and a place in `config.yaml` where
+you can swap or tune it.
+
+```text
+                 ┌────────────────────────────────────────────────────────────┐
+                 │                       @beside/runtime                       │
+                 │  orchestrator · scheduler · load-guard · workers           │
+                 └────────────────────────────────────────────────────────────┘
+                            ▲              ▲              ▲              ▲
+   apps & screen ──► [capture] ──► raw events ──► [storage] ──► frames + sessions + meetings
+                                                       │
+                                                       ▼
+                                                   [hooks]   ──► hook records (calendar, follow-ups, …)
+                                                       │
+                                                       ▼
+                                                   [model]   ──► [index strategy]
+                                                                       │
+                                                                       ▼
+                                                           Markdown wiki + memory chunks
+                                                                       │
+                                                                       ▼
+                                                                  [export]
+                                                                       │
+                                                ┌──────────────────────┼──────────────────────┐
+                                                ▼                      ▼                      ▼
+                                         markdown mirror         MCP server            (custom export)
+                                                                       │
+                                                Claude · Cursor · ChatGPT · Windsurf · any MCP agent
+```
+
+## Packages
+
+| Package | Role |
+| --- | --- |
+| `@beside/interfaces` | Pure type definitions for every plugin contract and data type (`RawEvent`, `Frame`, `MemoryChunk`, `IStorage`, `ICapture`, `IModelAdapter`, `IIndexStrategy`, `IExport`, `IHookPlugin`). |
+| `@beside/core` | Config loading + Zod schema, structured logger, scheduler, load guard, plugin loader, ID + path helpers. |
+| `@beside/runtime` | The orchestrator. Wires plugins together, manages capture-hook execution, embedding workers, OCR/audio workers, session/meeting/day-event derivation, and the storage vacuum. |
+| `@beside/cli` | The `beside` binary. Init, status, doctor, start, capture, index, mcp, reset. |
+| `@beside/desktop` | Electron shell + renderer + native sidecar packaging. |
+
+## Data model
+
+Beside has a few core types you’ll see referenced everywhere.
+
+- **`RawEvent`** — the immutable atom: a screenshot, a window focus change, a
+  URL change, an audio chunk, an idle boundary, a clipboard summary. Every event
+  carries `app`, `app_bundle_id`, `window_title`, `url`, `content`,
+  `asset_path`, `screen_index`, and a `capture_plugin` provenance string.
+- **`Frame`** — a derived, indexable unit built from raw events plus OCR and
+  accessibility text. Frames carry `text_source`, `entity_path`, `entity_kind`,
+  `activity_session_id`, `meeting_id`, and a `perceptual_hash` so duplicate
+  screens don’t blow up storage.
+- **`ActivitySession`** — a contiguous span of focused work. Built from idle
+  boundaries and active-window heuristics.
+- **`Meeting`** — a session that includes audio + a recognised meeting platform
+  (Zoom, Meet, Teams, Webex, Whereby, Around). Has `MeetingTurn`s, an
+  `MeetingSummaryJson`, and a Markdown summary.
+- **`DayEvent`** — calendar/communication/task events surfaced into the daily
+  journal.
+- **`MemoryChunk`** — the unit the index strategy emits and embeds: `index_page`,
+  `entity_summary`, `meeting_summary`, `day_event`, `fact`, `procedure`.
+- **`HookRecord`** — typed output a capture hook stores in its own namespaced
+  collection.
+
+## The runtime loop
+
+`@beside/runtime` is the thing that turns those types into living memory.
+
+1. **Capture plugins** push `RawEvent`s into the orchestrator.
+2. The **storage plugin** writes the event (and any asset bytes) durably.
+3. The **frame builder** turns raw events into `Frame`s, attaching OCR or
+   accessibility text via background workers.
+4. **Capture hooks** matching the event run with image bytes / transcript and
+   write their own structured `HookRecord`s.
+5. The **session builder**, **meeting builder**, and **event extractor** group
+   frames into higher-level nouns.
+6. On a schedule (or whenever the load guard is happy), the **index strategy**
+   reads new frames + chunks via `IStorage`, calls the **model adapter**, and
+   produces an `IndexUpdate` (pages to create / update / delete + a new root
+   index + a reorganisation note).
+7. The **embedding worker** keeps frame and memory-chunk embeddings up to date.
+8. **Export plugins** see every page write and either mirror them to disk
+   (`markdown`) or expose them to outside agents (`mcp`).
+
+The orchestrator is the glue: it owns lifecycle, backpressure, the load guard
+(skips heavy work when CPU/memory/battery isn’t safe), and the schedule
+(cron-like, see `@beside/core/scheduler`).
+
+## Plugin contracts
+
+Every plugin layer is one TypeScript interface, declared once in
+`@beside/interfaces`. The shapes that matter:
+
+```ts
+interface ICapture {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  pause(): Promise<void>;
+  resume(): Promise<void>;
+  onEvent(handler: (event: RawEvent) => void | Promise<void>): void;
+  getStatus(): CaptureStatus;
+  getConfig(): CaptureConfig;
+}
+
+interface IStorage {
+  init(): Promise<void>;
+  write(event: RawEvent): Promise<void>;
+  writeAsset(assetPath: string, data: Buffer): Promise<void>;
+  readEvents(query: StorageQuery): Promise<RawEvent[]>;
+  upsertFrame(frame: Frame): Promise<void>;
+  searchFrames(query: FrameQuery): Promise<Frame[]>;
+  searchFrameEmbeddings(vector: number[], q?: FrameQuery): Promise<FrameSemanticMatch[]>;
+  // …plus sessions, meetings, day events, memory chunks, hook records, vacuum
+}
+
+interface IModelAdapter {
+  complete(prompt: string, options?: CompletionOptions): Promise<string>;
+  completeWithVision(prompt: string, images: Buffer[], options?: CompletionOptions): Promise<string>;
+  embed?(texts: string[]): Promise<number[][]>;
+  isAvailable(): Promise<boolean>;
+  getModelInfo(): ModelInfo;
+}
+
+interface IIndexStrategy {
+  getUnindexedEvents(storage: IStorage): Promise<RawEvent[]>;
+  indexBatch(events: RawEvent[], state: IndexState, model: IModelAdapter): Promise<IndexUpdate>;
+  reorganise(state: IndexState, model: IModelAdapter): Promise<IndexUpdate>;
+  applyUpdate(update: IndexUpdate): Promise<IndexState>;
+}
+
+interface IExport {
+  start(): Promise<void>;
+  onPageUpdate(page: IndexPage): Promise<void>;
+  onPageDelete(pagePath: string): Promise<void>;
+  onReorganisation(summary: ReorganisationSummary): Promise<void>;
+  fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>;
+}
+
+interface IHookPlugin {
+  definitions(): CaptureHookDefinition[] | Promise<CaptureHookDefinition[]>;
+  handle?(input: CaptureHookInput, ctx: CaptureHookContext): Promise<void>;
+}
+```
+
+Each plugin ships a `plugin.json` manifest (`name`, `version`, `layer`,
+`interface`, `entrypoint`, optional `config_schema`), so the loader can validate
+configuration before the runtime starts.
+
+## On-disk layout
+
+A typical install looks like this:
+
+```text
+~/.beside/
+├── config.yaml                  # the source of truth
+├── raw/                         # storage plugin owns this
+│   ├── events.sqlite            # SQLite metadata + FTS + vector tables
+│   ├── frames/2026-05-13/…      # screenshots (webp/jpeg, tiered)
+│   └── audio/{inbox,processed,failed}/
+├── index/                       # index strategy owns this (default: karpathy)
+│   ├── README.md                # the auto-generated root index
+│   └── topics/…                 # hierarchical wiki pages
+└── export/
+    └── markdown/                # mirror of index/ for humans + agents
+```
+
+That on-disk layout is intentional: even with Beside uninstalled, your wiki
+remains usable Markdown.

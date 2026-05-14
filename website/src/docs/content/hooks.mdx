@@ -1,0 +1,195 @@
+# Capture hooks
+
+Capture hooks are how Beside reacts to **specific moments** instead of just
+indexing everything in the background. A hook subscribes to a slice of the
+capture stream (an app, a URL host, an OCR substring), runs custom logic — most
+often an LLM call against your local model — and writes structured
+`HookRecord`s into its own isolated storage namespace on disk.
+
+Hooks are also the layer that makes Beside *proactive* without being noisy.
+Pre-LLM matchers mean most events never trigger a model call; per-surface
+throttling and the global `hooks.max_image_bytes` / `max_prompt_chars` ceilings
+keep prompts cheap; and per-hook namespaced storage means a hook can never
+read another hook’s data — useful when you ship hooks to other people.
+
+Hooks can also expose React widgets that the desktop app mounts on the
+dashboard, so a hook is a complete vertical: capture matchers + LLM logic +
+storage records + UI.
+
+Two hook plugins ship with Beside today.
+
+## `calendar` — extract events from screen captures
+
+Watches Apple Calendar, Google Calendar, Outlook web, and iCloud Calendar
+screenshots, and writes typed event records (start/end, attendees, links,
+location) into its `events` collection. The desktop app uses the built-in
+`calendar` widget to render them on the dashboard.
+
+```yaml
+hooks:
+  enabled: true
+  plugins:
+    - { name: calendar, enabled: true }
+```
+
+## `followups` — find open threads across communication tools
+
+Reads OCR/accessibility text from Slack, Microsoft Teams, Gmail, Outlook, Apple
+Mail, and meeting transcripts, asks the model to identify open follow-ups, and
+writes them into the `followups` collection. Renders via the built-in
+`followups` widget.
+
+```yaml
+hooks:
+  plugins:
+    - { name: followups, enabled: true }
+```
+
+## How the engine runs your hook
+
+When a `RawEvent` lands and the frame builder produces text, the hook engine:
+
+1. Walks every active `CaptureHookDefinition`, matching against
+   `match.{inputKinds, apps, appBundleIds, windowTitles, urlHosts, urlPatterns,
+   textIncludes}` so most events never trigger an LLM call.
+2. Throttles per surface (`app+window+url+text-hash`) using `throttleMs` (or
+   the global `hooks.throttle_ms_default`, default `60_000`).
+3. Loads image bytes only when `needsVision: true`.
+4. Calls your `handle(input, ctx)` if you provided one — otherwise runs the
+   built-in fallback that combines `systemPrompt` + `promptTemplate`, expects
+   JSON back, and stores it under `outputCollection`.
+5. Persists the result through the per-hook namespace
+   (`ctx.storage.put({ collection, id, data, evidenceEventIds })`).
+6. Optionally records `ctx.skip(reason)` for any non-fatal "no output" case so
+   the desktop UI can explain *why* a hook keeps running but never stores
+   anything.
+
+## CaptureHookDefinition
+
+```ts
+interface CaptureHookDefinition {
+  id: string;
+  title: string;
+  description?: string;
+  match: {
+    inputKinds?: ('screen' | 'audio')[];   // default ['screen']
+    apps?: string[];                        // substring or /regex/
+    appBundleIds?: string[];
+    windowTitles?: string[];
+    urlHosts?: string[];                    // 'calendar.google.com'
+    urlPatterns?: string[];                 // free-form regex
+    textIncludes?: string[];                // OCR/transcript substring
+  };
+  throttleMs?: number;
+  needsVision?: boolean;
+  promptTemplate?: string;
+  systemPrompt?: string;
+  outputCollection?: string;
+  widget?: {
+    id: string;
+    title: string;
+    bundlePath?: string;          // ship a compiled React bundle
+    builtin?: 'calendar' | 'followups' | 'list' | 'json';
+    defaultCollection?: string;
+    placement?: 'dashboard-main' | 'dashboard-aside';
+  };
+}
+```
+
+## Writing a custom hook
+
+The smallest useful hook is a couple of dozen lines.
+
+```ts
+import type {
+  IHookPlugin, CaptureHookDefinition, CaptureHookInput, CaptureHookContext, PluginFactory,
+} from '@beside/interfaces';
+
+const factory: PluginFactory<IHookPlugin> = () => ({
+  name: 'pricing-watch',
+
+  definitions(): CaptureHookDefinition[] {
+    return [{
+      id: 'pricing-watch.threads',
+      title: 'Pricing thread watcher',
+      match: {
+        inputKinds: ['screen'],
+        apps: ['Slack', 'Mail'],
+        textIncludes: ['pricing', 'tier', 'discount'],
+      },
+      throttleMs: 60_000,
+      needsVision: false,
+      outputCollection: 'pricing-threads',
+    }];
+  },
+
+  async handle(input: CaptureHookInput, ctx: CaptureHookContext) {
+    if (input.kind !== 'screen') return;
+    if (!input.ocrText) { ctx.skip?.('no_ocr_text'); return; }
+
+    const json = await ctx.model.complete(
+      `Extract pricing-related decisions from this screen text and return JSON ` +
+      `with shape { items: [{ title, decision, owner, due }] }.\n\n${input.ocrText}`,
+      { responseFormat: 'json', maxTokens: 800 },
+    );
+
+    let parsed: { items?: Array<{ title: string }> } = {};
+    try { parsed = JSON.parse(json); } catch { ctx.skip?.('bad_json'); return; }
+
+    for (const item of parsed.items ?? []) {
+      await ctx.storage.put({
+        collection: 'pricing-threads',
+        id: `${input.app}:${item.title}`,
+        data: item,
+        evidenceEventIds: [input.event.id],
+      });
+    }
+  },
+});
+
+export default factory;
+```
+
+Storage scoping is enforced by the runtime — your hook can only see records it
+wrote.
+
+```ts
+ctx.storage.list({ collection: 'pricing-threads', updatedAfter, limit: 50 });
+ctx.storage.get('pricing-threads', id);
+ctx.storage.delete('pricing-threads', id);
+ctx.storage.clear('pricing-threads');
+```
+
+## Hook widgets
+
+If you want your hook to surface in the desktop app, add a `widget` block to
+the definition. Two paths:
+
+1. **Use a built-in renderer** — `calendar`, `followups`, `list`, or `json`.
+   You write zero React.
+2. **Ship a compiled bundle** — point `bundlePath` at a built React bundle and
+   the renderer mounts it inside the dashboard. The renderer hands your bundle
+   the hook records and re-renders on changes.
+
+Widgets get a placement (`dashboard-main` or `dashboard-aside`) and a default
+collection. Your widget code reads via the same `IHookStorageNamespace` API.
+
+## Global hook controls
+
+```yaml
+hooks:
+  enabled: true
+  throttle_ms_default: 60000
+  max_image_bytes: 2097152          # don't load huge screenshots into LLM calls
+  max_prompt_chars: 14000           # cap on OCR text per prompt
+  max_records_per_hook: 2000        # eviction ceiling per hook
+  plugins:
+    - { name: calendar, enabled: true }
+    - { name: followups, enabled: true }
+  definitions: []                   # inline definitions, no plugin needed
+```
+
+You can also declare hook definitions inline under `hooks.definitions` without
+writing a plugin — handy for quick `promptTemplate`-driven extractors. Built-in
+widgets (`calendar`, `followups`, `list`, `json`) cover the common shapes, so a
+useful hook can be a single prompt template with zero React.

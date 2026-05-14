@@ -1,0 +1,188 @@
+# Capture layer
+
+The capture layer is what makes Beside feel like *memory* instead of a logging
+tool. It produces a stream of typed `RawEvent`s — screenshots, focused window
+metadata, URL changes, idle boundaries, audio chunks, clipboard summaries —
+that the rest of the pipeline turns into structured context. Everything is
+written to disk on your own machine; capture never makes a network call.
+
+The interface (`ICapture`) is intentionally small. Anything that can produce
+`RawEvent`s and respect `start` / `stop` / `pause` / `resume` is a valid capture
+plugin. Two ship with Beside today, both fully open source.
+
+## `node` — portable TypeScript capture
+
+Best when you want a default that runs anywhere Node 20+ runs.
+
+- Polls active window via `active-win`, takes screenshots via
+  `screenshot-desktop`, and resolves browser URLs through OS-specific helpers.
+- Diff-rejects nearly identical screens via `screenshot_diff_threshold` and a
+  perceptual hash so storage stays small.
+- Falls back gracefully on Linux Wayland (window metadata only) and warns
+  cleanly when permissions are missing.
+
+```yaml
+capture:
+  plugin: node
+  poll_interval_ms: 3000
+  idle_poll_interval_ms: 30000
+  focus_settle_delay_ms: 900
+  screenshot_diff_threshold: 0.15
+  idle_threshold_sec: 60
+  screenshot_format: webp
+  screenshot_quality: 45
+  screenshot_max_dim: 1100
+  capture_mode: active     # 'active' | 'all'
+  excluded_apps:
+    - 1Password
+    - Bitwarden
+    - Keychain Access
+  excluded_url_patterns:
+    - "^https://.*\\.bank\\."
+    - "^https://admin\\."
+```
+
+## `native` — Mac sidecar capture
+
+Best when you want richer macOS signals (system audio, ScreenCaptureKit-quality
+screens, lower overhead) and are running on Apple silicon or Intel macOS.
+
+The plugin spawns a Swift helper binary that emits `RawEvent` NDJSON, plus
+manages live audio recording. The TypeScript shim restarts the helper on crash,
+respects backpressure, and keeps the same `ICapture` surface as `node` so
+swapping plugins is a one-line config change.
+
+Notable extras over `node`:
+
+- **Live audio recording** with chunked m4a output, sample-rate / channel
+  control, and a choice between `core_audio_tap` and `screencapturekit`
+  backends.
+- **Activation modes** — `other_process_input` records system audio only when
+  another process is producing input (so silent meetings don’t fill your disk).
+- **Multi-screen** support via `screens: [0, 1]`.
+- **Content-change throttling** through `content_change_min_interval_ms` so a
+  noisy app can’t monopolise the capture queue.
+
+```yaml
+capture:
+  plugin: native
+  capture_mode: active
+  capture_audio: true
+  audio:
+    inbox_path: ~/.beside/raw/audio/inbox
+    live_recording:
+      enabled: true
+      chunk_seconds: 300
+      format: m4a
+      sample_rate: 16000
+      channels: 1
+      activation: other_process_input
+      system_audio_backend: core_audio_tap
+      poll_interval_sec: 3
+  multi_screen: false
+  screens: [0]
+```
+
+## RawEvent shape
+
+Every capture plugin emits the same envelope, so downstream consumers don’t
+care who produced it.
+
+```ts
+interface RawEvent {
+  id: string;
+  timestamp: string;        // ISO
+  session_id: string;
+  type:
+    | 'screenshot' | 'audio_transcript' | 'window_focus' | 'window_blur'
+    | 'url_change' | 'click' | 'keystroke_summary'
+    | 'idle_start' | 'idle_end'
+    | 'app_launch' | 'app_quit' | 'clipboard_summary';
+  app: string;
+  app_bundle_id: string;
+  window_title: string;
+  url: string | null;
+  content: string | null;
+  asset_path: string | null;       // screenshot or audio file under storage root
+  duration_ms: number | null;
+  idle_before_ms: number | null;
+  screen_index: number;
+  metadata: Record<string, unknown>;
+  privacy_filtered: boolean;
+  capture_plugin: string;          // 'node' | 'native' | …
+}
+```
+
+The orchestrator never trusts events implicitly — `privacy_filtered` is
+respected, `excluded_apps` and `excluded_url_patterns` are matched at multiple
+layers, and the `accessibility` text path is read with a timeout so a stuck
+process can’t freeze the runtime.
+
+## Privacy model
+
+Capture is the layer where trust is won or lost. The defaults are conservative
+and every knob is in `config.yaml`.
+
+```yaml
+capture:
+  privacy:
+    blur_password_fields: true
+    pause_on_screen_lock: true
+    sensitive_keywords:
+      - password
+      - api_key
+      - secret
+  accessibility:
+    enabled: true
+    timeout_ms: 1500
+    max_chars: 8000
+    excluded_apps: []
+```
+
+What that buys you in marketing-friendly terms:
+
+- **Always-on doesn’t mean reckless.** Password managers, banking pages, and
+  keyword-flagged content are skipped before they reach storage.
+- **Tunable per workflow.** A founder can keep capture wide; a regulated team
+  can narrow it down to a handful of allow-listed apps.
+- **Auditable.** Every event records its `capture_plugin` and the matchers that
+  let it through, so you can prove what Beside did and didn’t see.
+
+## Writing a custom capture plugin
+
+You only need three things:
+
+1. A `plugin.json` with `layer: "capture"` and `interface: "ICapture"`.
+2. A factory that returns an object implementing `ICapture`.
+3. Emit `RawEvent`s through the handler registered in `onEvent`.
+
+```ts
+import type { ICapture, RawEvent, PluginFactory } from '@beside/interfaces';
+
+const factory: PluginFactory<ICapture> = ({ logger, config }) => {
+  let handler: ((e: RawEvent) => void | Promise<void>) | null = null;
+
+  return {
+    async start() { /* spin up your source */ },
+    async stop()  { /* tear it down */ },
+    async pause() { /* short-circuit emit */ },
+    async resume() {},
+    onEvent(h) { handler = h; },
+    getStatus() { return { running: true, paused: false, /* … */ }; },
+    getConfig() { return /* echo your normalised config */; },
+  };
+};
+
+export default factory;
+```
+
+You can ship a `screenshot_format`, `screenshot_quality`, and `excluded_apps`
+schema in `plugin.json`’s `config_schema`, and Beside will validate the user’s
+config before instantiating you.
+
+Capture is also where Beside earns its "ambient, not greedy" reputation.
+Events are throttled by interval, perceptual hash, and content-change windows;
+audio is recorded in chunked m4a only when another process is producing input;
+and the runtime’s load guard pauses heavy capture work when CPU, memory, or
+battery cross your configured thresholds. The result is a system you can leave
+on for weeks at a time without noticing it’s there.

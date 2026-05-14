@@ -274,12 +274,16 @@ function useHookRecords(hookId: string, query: CaptureHookStorageQuery) {
 }
 
 function CalendarBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.Element {
-  const items = records.flatMap((r) => extractCalendarItems(r));
-  if (items.length === 0)
-    return <p className="text-sm text-muted-foreground">No events yet.</p>;
+  const allItems = records.flatMap((r) => extractCalendarItems(r));
+  const now = Date.now();
+  const upcoming = allItems
+    .filter((item) => isUpcomingCalendarItem(item, now))
+    .sort((a, b) => calendarItemSortKey(a) - calendarItemSortKey(b));
+  if (upcoming.length === 0)
+    return <p className="text-sm text-muted-foreground">No upcoming events.</p>;
   return (
     <ul className="flex flex-col gap-2">
-      {items.slice(0, 10).map((item, idx) => (
+      {upcoming.slice(0, 10).map((item, idx) => (
         <li key={idx} className="rounded-md border bg-background/55 px-3 py-2 text-sm">
           <div className="flex items-baseline justify-between gap-2">
             <span className="font-medium truncate">{item.title}</span>
@@ -351,7 +355,12 @@ function JsonBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.E
 // Helpers
 // ---------------------------------------------------------------------------
 
-type CalendarItem = { title: string; starts_at?: string; context?: string };
+type CalendarItem = {
+  title: string;
+  starts_at?: string;
+  ends_at?: string;
+  context?: string;
+};
 type FollowupItem = { title: string; body?: string; urgency?: string };
 
 function extractCalendarItems(record: CaptureHookRecord): CalendarItem[] {
@@ -372,10 +381,42 @@ function extractCalendarItems(record: CaptureHookRecord): CalendarItem[] {
       return {
         title,
         starts_at: pickString(item, 'starts_at', 'startsAt', 'start', 'when') ?? undefined,
+        ends_at: pickString(item, 'ends_at', 'endsAt', 'end') ?? undefined,
         context: pickString(item, 'context', 'description', 'body') ?? undefined,
       } as CalendarItem;
     })
     .filter((x: CalendarItem | null): x is CalendarItem => x !== null);
+}
+
+// Returns ms-since-epoch for an event time string, or null if unparseable.
+// Handles ISO timestamps, "May 11, 2026 9:00 AM", and "May 11, 2026 all day".
+function parseCalendarTime(value: string | undefined): number | null {
+  if (!value) return null;
+  const cleaned = value.replace(/\s+all day$/i, '').trim();
+  if (!cleaned) return null;
+  const ts = Date.parse(cleaned);
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function isAllDay(item: CalendarItem): boolean {
+  return /\ball day\b/i.test(item.starts_at ?? '');
+}
+
+function isUpcomingCalendarItem(item: CalendarItem, now: number): boolean {
+  const end = parseCalendarTime(item.ends_at);
+  if (end !== null) return end >= now;
+  const start = parseCalendarTime(item.starts_at);
+  if (start === null) return true; // unknown time → keep so we don't accidentally hide
+  if (isAllDay(item)) {
+    // Include any all-day event whose day hasn't fully passed.
+    const endOfDay = start + 24 * 60 * 60 * 1000;
+    return endOfDay >= now;
+  }
+  return start >= now;
+}
+
+function calendarItemSortKey(item: CalendarItem): number {
+  return parseCalendarTime(item.starts_at) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function extractFollowupItems(record: CaptureHookRecord): FollowupItem[] {

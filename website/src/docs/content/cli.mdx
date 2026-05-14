@@ -1,0 +1,144 @@
+# CLI
+
+The `beside` binary (from `@beside/cli`) is the developer-facing surface.
+It wraps the same `@beside/runtime` the desktop app uses, so anything you can
+do in the UI you can do — and script — from the terminal. There is no remote
+control plane and no required network call: every command runs against the
+same `~/.beside/` directory, on the same machine.
+
+Install it via the desktop bundle (`/Applications/Beside.app/Contents/Resources/bin/beside`)
+or by running it in dev (`pnpm cli …`).
+
+## Commands at a glance
+
+| Command | What it does |
+| --- | --- |
+| `beside init` | Write `~/.beside/config.yaml`, auto-install Ollama, pull the default model. |
+| `beside status` | Capture state, storage stats, and index state in one report. |
+| `beside doctor` | Preflight: Node version, native deps, OS permissions, capture helpers, model bootstrap. |
+| `beside stats` (`info`) | Detailed snapshot of your data. Add `--json` for machine output. |
+| `beside start` | Start capture + scheduled indexing + MCP server (the always-on daemon). |
+| `beside capture --once` | Run a single capture cycle and exit (handy for testing). |
+| `beside index --once` | Run an incremental indexing pass. |
+| `beside index --reorganise` | Run the reorganisation pass. |
+| `beside index --full-reindex` | Wipe the index and rebuild it from raw data. |
+| `beside index --reindex-from <date>` | Shortcut for `--full-reindex --from <date>`. |
+| `beside mcp [--stdio]` | Run only the MCP server (HTTP by default, `--stdio` for subprocess clients). |
+| `beside model:update` | Re-pull the configured local model (handy when revisions bump). |
+| `beside plugin list` | List discovered plugins by layer. |
+| `beside reset [--yes]` | Wipe everything (events, frames, index, exports) and start fresh. |
+
+## Global flags
+
+```bash
+beside <command> [options]
+
+  --config <path>     Override config.yaml path
+  --log-level level   debug | info | warn | error
+  --offline           Skip Ollama install/pull and use the offline indexer
+  --no-bootstrap      Skip model bootstrap for this command
+```
+
+## A few common workflows
+
+### First-run bootstrap
+
+```bash
+beside init
+beside doctor
+beside start
+```
+
+`init` is idempotent — it’ll only write the config if it’s missing, and it’ll
+only install Ollama if you don’t pass `--offline`/`--no-bootstrap`. `doctor`
+runs the same preflight the desktop app shows in its onboarding screen, but as
+plain text suitable for CI logs.
+
+### Running headless (no UI)
+
+```bash
+beside start                              # default: capture + index + MCP
+beside start --offline --log-level info   # no Ollama, no hosted models
+```
+
+`start` is what you wire into a launchd plist, a systemd unit, or a
+`pm2`/`forever` runner. It owns the capture loop, the index scheduler, the
+embedding worker, the storage vacuum, and the MCP server.
+
+### Just the MCP server
+
+If you’re running capture and indexing somewhere else (e.g. the desktop app)
+and just need to expose memory:
+
+```bash
+beside mcp                  # HTTP on 127.0.0.1:3456
+beside mcp --stdio          # subprocess transport for Claude Desktop, etc.
+```
+
+### Reindex on demand
+
+```bash
+beside index --once                 # incremental
+beside index --reorganise           # nightly cleanup, manually
+beside index --full-reindex         # wipe + rebuild
+beside index --reindex-from 2026-04-01   # rebuild from a date
+```
+
+The full-reindex flow goes through the same pipeline as the incremental one —
+it just clears the strategy state first and replays raw events. The wiki on
+disk is rebuilt deterministically.
+
+### Inspect what Beside has
+
+```bash
+beside status
+beside stats
+beside stats --json | jq '.storage.eventsByApp'
+beside plugin list
+```
+
+`stats --json` is the right surface to scrape from a dashboard or CI check —
+it’s stable and machine-readable. `plugin list` is what to run when you’re
+debugging a config that won’t load.
+
+## Diagnostics: `beside doctor`
+
+`doctor` is the first thing to run when something is off. It reports per
+**area** (`runtime`, `capture`, `permissions`, `bootstrap`) with statuses:
+
+- `ok` — the green path
+- `warn` — degraded but usable (e.g. Wayland: capture metadata only)
+- `fail` — the runtime won’t work end-to-end without intervention
+- `info` — context, no action
+
+Sample output:
+
+```text
+# Beside — doctor
+
+- [ok]   runtime: Node 20.16.0
+    meets >=20
+- [info] runtime: darwin 24.3.0 (arm64)
+- [ok]   native: sharp
+    image encoding
+- [ok]   native: better-sqlite3
+    local SQLite storage
+- [ok]   capture: active-win
+    active window metadata
+- [ok]   capture: screencapture
+    macOS screen capture CLI
+- [info] permissions: macOS requires permissions
+- [ok]   capture: native helper present
+
+summary: 0 fail, 0 warn, 7 ok/info
+```
+
+`doctor` also checks the native capture helper, the import-ability of every
+native module, and (on macOS) the screencapture/osascript availability. Any
+`fail` is exit code 1, so you can wire it into pre-flight scripts.
+
+Because the CLI shares the runtime with the desktop app, the same load guard
+and battery thresholds apply: a `beside index --reorganise` you kick off on
+battery will defer its heaviest work the same way the desktop’s nightly pass
+would. Nothing about driving Beside from the terminal trades away the
+"ambient, on-device, doesn’t-melt-your-laptop" properties.

@@ -3,6 +3,7 @@ import path from 'node:path';
 import {
   createLogger,
   defaultDataDir,
+  expandPath,
   loadConfig,
   validateConfig,
   writeConfig,
@@ -396,6 +397,22 @@ export class BesideRuntime {
       day, frames: (await handles.storage.getJournal(day)).slice().sort((a, b) => Date.parse(b.timestamp ?? '') - Date.parse(a.timestamp ?? '')),
       sessions: await handles.storage.listSessions({ day, limit: 500 }).catch(() => []),
     }));
+  }
+
+  /**
+   * Returns the rendered `journal/<day>.md` produced by the markdown
+   * export plugin, if it exists. Used by the desktop Journal view to
+   * surface the model-enriched day story alongside the agenda.
+   */
+  async readJournalMarkdown(day: string): Promise<{ day: string; path: string | null; content: string | null }> {
+    return await this.withHandles(async (handles) => {
+      const md = handles.config.export?.plugins?.find((p: any) => p.name === 'markdown' && p.enabled !== false) as any;
+      if (!md) return { day, path: null, content: null };
+      const out = typeof md.path === 'string' && md.path.trim() ? md.path : '~/.beside/export/markdown';
+      const file = path.join(expandPath(out), 'journal', `${day}.md`);
+      try { return { day, path: file, content: await fs.readFile(file, 'utf8') }; }
+      catch { return { day, path: file, content: null }; }
+    });
   }
 
   async searchFrames(query: FrameQuery): Promise<Frame[]> {

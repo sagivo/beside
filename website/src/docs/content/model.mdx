@@ -1,0 +1,153 @@
+# Model adapters
+
+The model layer is where you decide **whose intelligence Beside uses**. Every
+prompt — index pages, reorganisation, hook reasoning, meeting summaries, agent
+intent routing — goes through one `IModelAdapter` instance. Two adapters ship
+with the product, and writing a third is small.
+
+The default is local: Ollama running Gemma on your machine, with embeddings
+from `nomic-embed-text`. Hosted providers are first-class but always opt-in,
+and the adapter contract carries `isLocal` through to the UI so users always
+know whether a given prompt is running on-device or going off-machine.
+
+```ts
+interface IModelAdapter {
+  complete(prompt: string, options?: CompletionOptions): Promise<string>;
+  completeWithVision(prompt: string, images: Buffer[], options?: CompletionOptions): Promise<string>;
+  completeStream?(prompt: string, options: CompletionOptions, onChunk: (s: string) => void): Promise<string>;
+  embed?(texts: string[]): Promise<number[][]>;
+  isAvailable(): Promise<boolean>;
+  getModelInfo(): ModelInfo;        // contextWindowTokens, isLocal, supportsVision, costPerMillionTokens
+  ensureReady?(onProgress?, opts?): Promise<void>;
+  unload?(): Promise<void>;
+}
+```
+
+`CompletionOptions` covers `maxTokens`, `temperature`, `responseFormat`
+(`'text' | 'json'`), and a `systemPrompt`. The orchestrator never assumes a
+specific provider — it just calls `complete`, `completeWithVision`, and `embed`.
+
+## `ollama` — local-first by default
+
+The default. Beside runs Gemma 3 (and friends) through a local
+[Ollama](https://ollama.com) server, with an optional auto-install path that
+keeps `init` friendly.
+
+```yaml
+index:
+  model:
+    plugin: ollama
+    ollama:
+      model: gemma4:e4b           # primary chat / index model
+      embedding_model: nomic-embed-text
+      host: http://127.0.0.1:11434
+      vision_model: gemma4:e4b    # optional override
+      indexer_model:              # optional override for indexing-only calls
+      keep_alive: "30s"
+      unload_after_idle_min: 0
+      auto_install: true
+      model_revision: 3
+```
+
+Highlights:
+
+- **Auto-bootstrap** — `beside init` and the desktop app can install Ollama
+  (`brew`, `winget`, or curl install script) and pull the configured model.
+  Streaming progress is surfaced via the `ModelBootstrapHandler` events
+  (`install_started`, `pull_progress`, `ready`, …).
+- **Vision-capable** when the model supports it (Gemma 3 vision, Llama vision,
+  etc.). The orchestrator routes to `completeWithVision` whenever it has image
+  evidence.
+- **Embeddings via the same daemon** — by default `nomic-embed-text`, but you
+  can swap to `mxbai-embed-large` or any embedding model Ollama supports.
+- **Offline fallback** — when Ollama is unreachable, the runtime drops down to
+  a deterministic offline indexer so the pipeline still produces output. You
+  can opt in explicitly with `beside start --offline`.
+
+Marketing-friendly translation: with Ollama, Beside genuinely runs without a
+network. Your wiki gets indexed even on a flight, and your raw data never
+leaves the device.
+
+## `openai` — hosted models, OpenAI-compatible endpoints
+
+Use this when you want the quality of GPT-class models, want to centralise
+inference on an internal endpoint, or already pay for a hosted provider.
+
+```yaml
+index:
+  model:
+    plugin: openai
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      base_url: https://api.openai.com/v1
+      model: gpt-4o-mini
+      vision_model: gpt-4o          # optional
+      embedding_model: text-embedding-3-small
+```
+
+Notes:
+
+- **Any OpenAI-compatible endpoint works** — Azure OpenAI, Together, Groq,
+  vLLM, llama.cpp server, etc. — by setting `base_url`.
+- **Embeddings** flow through `embed`, so you can mix and match (e.g. local
+  Ollama for chat, hosted OpenAI for embeddings) by combining a custom adapter
+  that wraps both.
+- The runtime uses `getModelInfo().costPerMillionTokens` for the cost-aware
+  scheduler in the orchestrator, so it knows when not to fire a hosted model
+  during a reorganisation pass.
+
+## How the runtime uses your model
+
+A few places where your choice matters:
+
+1. **Index strategy** (`indexBatch`, `reorganise`) — the heaviest user. Runs in
+   the background, batched, and load-guarded. Local models are fine here.
+2. **Capture hooks** (`followups`, `calendar`, anything custom) — short prompts
+   over OCR text, sometimes with image attachments. Latency-sensitive but
+   throttled per surface (`throttleMs`).
+3. **Meeting summarisation** — long-context, vision-attached. Best when the
+   model has at least an 8k window.
+4. **Agent harness** (`@beside/runtime/agent`) — used when something inside the
+   product needs to plan over Beside’s own MCP-shaped tools.
+5. **Embeddings** — every frame and memory chunk that text exists for is
+   embedded once, cached by content hash, and deduped across runs.
+
+The orchestrator respects `system.background_model_jobs` (`manual` /
+`scheduled`) so you can keep heavy model work off battery, and `system.load_guard`
+(CPU/memory/battery thresholds) so capture stays smooth even when the model is
+busy.
+
+## Writing a custom model adapter
+
+```ts
+import type { IModelAdapter, PluginFactory } from '@beside/interfaces';
+
+const factory: PluginFactory<IModelAdapter> = async ({ config, logger }) => {
+  return {
+    async complete(prompt, options) { /* call your provider */ return '...'; },
+    async completeWithVision(prompt, images, options) { /* … */ return '...'; },
+    async embed(texts) { /* … */ return texts.map(() => new Array(384).fill(0)); },
+    async isAvailable() { return true; },
+    getModelInfo() {
+      return { name: 'my-model', contextWindowTokens: 32_000, isLocal: false, supportsVision: true, costPerMillionTokens: 0.5 };
+    },
+  };
+};
+
+export default factory;
+```
+
+Best practices:
+
+- Always implement `isAvailable()` honestly — it’s how the orchestrator decides
+  whether to fall back to the offline indexer.
+- Honour `responseFormat: 'json'` — the index strategy parses your output, and
+  hard-failing here forces the runtime to retry.
+- If your provider supports streaming, implement `completeStream` so the
+  desktop UI can render tokens as they arrive.
+
+Because the model is a plugin, switching from local Ollama to a hosted endpoint
+to a custom internal proxy is a config edit, not a migration. The wiki on
+disk, the embeddings in SQLite, and the MCP server all stay the same — only
+*who answers the prompt* changes. That’s what keeps Beside vendor-agnostic in
+a market where models are still moving every few weeks.

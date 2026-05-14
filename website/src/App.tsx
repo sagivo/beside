@@ -7,7 +7,7 @@ export default function App({ initialPath }: { initialPath?: string } = {}) {
   const pathname = initialPath ?? (typeof window === "undefined" ? "/" : window.location.pathname);
 
   if (pathname.startsWith("/docs")) {
-    return <DocsPage />;
+    return <DocsPage pathname={pathname} />;
   }
 
   return <LandingPage />;

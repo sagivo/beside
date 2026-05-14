@@ -60,7 +60,7 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
 
   return (
     <div className="flex h-screen flex-col bg-background bg-gradient-ambient">
-      <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur"><BrandMark className="size-7" /><span className="font-semibold text-sm">Beside</span>
+      <header className="app-drag flex items-center gap-4 border-b border-border bg-background/85 px-6 py-3 backdrop-blur"><BrandMark className="size-7" /><span className="brand-wordmark text-base leading-none">beside</span>
         <div className="flex-1 mx-6 flex flex-col gap-1.5"><div className="flex items-center justify-between text-[11px] font-medium uppercase text-muted-foreground"><span>{STEP_LABELS[step]}</span><span>{stepIndex + 1} / {STEPS.length}</span></div><Progress value={progressPct} /></div>
         {step !== 'done' && <Button variant="ghost" size="sm" onClick={onComplete} disabled={!allGatesMet} title={allGatesMet ? 'Skip setup' : !gateMet.screen ? 'Grant Screen Recording first.' : 'Install local AI first.'} className="app-no-drag">Skip setup</Button>}
       </header>

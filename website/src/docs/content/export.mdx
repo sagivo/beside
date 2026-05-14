@@ -1,0 +1,184 @@
+# Export & MCP
+
+Exports are how Beside’s memory **leaves the runtime** — into Markdown on disk,
+into Claude or Cursor or ChatGPT via MCP, or into anything else you wire up.
+Every page write, page delete, and reorganisation summary is fanned out to
+every active export plugin.
+
+Both shipped exports run locally: the Markdown mirror writes to your own disk,
+and the MCP server binds to `127.0.0.1` so only processes on your machine can
+talk to it. Agents that connect over MCP get bounded excerpts, never the raw
+screenshots, which keeps the privacy boundary the same whether you’re using a
+local agent or a hosted one.
+
+```ts
+interface IExport {
+  readonly name: string;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  onPageUpdate(page: IndexPage): Promise<void>;
+  onPageDelete(pagePath: string): Promise<void>;
+  onReorganisation(summary: ReorganisationSummary): Promise<void>;
+  fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>;
+  getStatus(): ExportStatus;
+  bindServices?(services: ExportServices): void;
+}
+```
+
+`ExportServices` exposes `storage`, `strategy`, `model`, `embeddingModelName`,
+`embeddingSearchWeight`, `dataDir`, a `triggerReindex(full?)` callback, and an
+optional `summarizeMeeting(id)` so an export can request fresh artifacts on
+demand.
+
+Two exports ship with Beside, and both are on by default.
+
+## `markdown` — human-readable mirror
+
+```yaml
+export:
+  plugins:
+    - { name: markdown, enabled: true }
+```
+
+What it does:
+
+- Mirrors the wiki to `~/.beside/export/markdown/` (override with
+  `markdown.path`).
+- Always-on, always idempotent — you can `rm -rf` the export directory and the
+  next page write rebuilds it.
+- Strips internal-only fields, renders `[[wikilinks]]` to plain relative paths,
+  and writes a top-level `README.md` mirroring the index strategy’s root.
+
+This is the export to point your existing tools at: Obsidian, Logseq, your own
+note-taking flow, a `git` repo, anything that consumes Markdown.
+
+## `mcp` — agents talk to Beside via MCP
+
+This is the marquee export. The MCP plugin runs a local Model Context Protocol
+server and exposes Beside memory as MCP tools and resources to any compatible
+AI agent — Claude Desktop, Cursor, Windsurf, and increasingly ChatGPT desktop.
+
+```yaml
+export:
+  plugins:
+    - { name: mcp, enabled: true }
+
+# (under the plugin's config_schema in plugin.json)
+mcp:
+  host: 127.0.0.1
+  port: 3456
+  transport: http       # 'http' | 'stdio'
+  text_excerpt_chars: 5000
+```
+
+Two transports:
+
+- **HTTP** (default, `http://127.0.0.1:3456`). Good for Cursor / Windsurf /
+  Claude Desktop’s MCP-over-HTTP clients, and easy to confirm with `curl`.
+- **stdio**. Used when an agent spawns Beside as a subprocess (the way Claude
+  Desktop’s built-in MCP launcher works).
+
+### What the MCP server exposes
+
+Conceptually, agents get four kinds of tools:
+
+1. **`recall`** — semantic + keyword search over `MemoryChunk`s with optional
+   filters (`kind`, `entityPath`, `day`, `from/to`). Returns excerpts capped at
+   `text_excerpt_chars`.
+2. **`journal`** — daily timeline for a given day, including sessions and
+   meetings, in agent-friendly Markdown.
+3. **`entities` / `sessions` / `meetings` / `day_events`** — structured listings
+   so an agent can navigate by noun.
+4. **`frames`** — fine-grained access to the underlying `Frame`s when an agent
+   needs the raw screen context behind a chunk.
+
+Plus resources: the live `index/README.md`, individual wiki pages, and meeting
+summaries.
+
+### Hooking it into your agent
+
+Most MCP clients want a JSON config snippet. The HTTP form looks like this in
+Cursor / Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "beside": {
+      "url": "http://127.0.0.1:3456/mcp"
+    }
+  }
+}
+```
+
+For stdio-launched clients (no Beside daemon running):
+
+```json
+{
+  "mcpServers": {
+    "beside": {
+      "command": "beside",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
+```
+
+Once it’s wired in, you can ask the agent things like:
+
+- "What did we decide on pricing this week?"
+- "Summarise my last three Acme meetings."
+- "What follow-ups are still open in Slack and Mail?"
+- "Before drafting this reply, recall any related context Beside has."
+
+The agent does the asking; Beside does the remembering. Because MCP is the
+common protocol, one Beside instance feeds Claude *and* Cursor *and* ChatGPT
+*and* whatever you adopt next — long-term memory becomes an external,
+swappable service, exactly the gap stateless LLMs leave today.
+
+## Writing a custom export
+
+Common reasons to write one: send memory chunks into a team wiki, mirror the
+journal to a calendar, push action items into a task tracker, ship daily
+digests over email/Slack, or expose a custom HTTP API for a homegrown agent.
+
+```ts
+import type { IExport, IndexPage, ReorganisationSummary, ExportServices, PluginFactory } from '@beside/interfaces';
+
+const factory: PluginFactory<IExport> = ({ dataDir, config, logger }) => {
+  let services: ExportServices | null = null;
+
+  return {
+    name: 'team-wiki',
+    bindServices(s) { services = s; },
+
+    async start() { /* open connections etc. */ },
+    async stop()  { /* close them */ },
+
+    async onPageUpdate(page: IndexPage)  { /* push diff to remote wiki */ },
+    async onPageDelete(pagePath: string) { /* archive remote */ },
+    async onReorganisation(summary: ReorganisationSummary) {
+      logger.info(`reorg: merged=${summary.merged.length} split=${summary.split.length}`);
+    },
+    async fullSync(state, strategy) {
+      const root = await strategy.readRootIndex();
+      // walk pages and push them all
+    },
+    getStatus() {
+      return { name: 'team-wiki', running: true, lastSync: null, pendingUpdates: 0, errorCount: 0 };
+    },
+  };
+};
+
+export default factory;
+```
+
+The runtime calls `start` once, fans page-level events to your handlers as
+they happen, and calls `fullSync` after a full reindex or on demand. You can
+use `services.triggerReindex(false)` if your export wants to nudge the
+strategy after an external change.
+
+Adding an export never replaces the existing ones — your team-wiki bridge or
+Slack digest sits next to MCP and Markdown, all driven by the same page
+events. Markdown stays the human source of truth, MCP stays the agent source
+of truth, and the two can never drift because they’re fed from the same
+strategy output.

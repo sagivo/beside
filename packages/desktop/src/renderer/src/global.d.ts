@@ -13,6 +13,7 @@ declare global {
       saveConfigPatch: (patch: unknown) => Promise<LoadedConfig>;
       listJournalDays: () => Promise<string[]>;
       getJournalDay: (day: string) => Promise<JournalDay>;
+      readJournalMarkdown: (day: string) => Promise<{ day: string; path: string | null; content: string | null }>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       getFrameIndexDetails: (frameId: string) => Promise<FrameIndexDetails | null>;

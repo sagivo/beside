@@ -8,6 +8,7 @@ const api = {
   saveConfigPatch: (patch: unknown) => ipcRenderer.invoke('beside:save-config-patch', patch),
   listJournalDays: () => ipcRenderer.invoke('beside:list-journal-days'),
   getJournalDay: (day: string) => ipcRenderer.invoke('beside:get-journal-day', day),
+  readJournalMarkdown: (day: string) => ipcRenderer.invoke('beside:read-journal-markdown', day),
   searchFrames: (query: unknown) => ipcRenderer.invoke('beside:search-frames', query),
   explainSearchResults: (query: unknown) => ipcRenderer.invoke('beside:explain-search-results', query),
   getFrameIndexDetails: (frameId: string) => ipcRenderer.invoke('beside:get-frame-index-details', frameId),

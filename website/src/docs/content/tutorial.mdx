@@ -1,0 +1,233 @@
+# Tutorial: from install to grounded AI in one afternoon
+
+This walkthrough takes a real-world workflow — a product lead who wants Beside
+to remember launch decisions, surface follow-ups, and feed that context into
+Cursor — and turns it into a concrete setup. It uses every layer the docs
+describe.
+
+## Step 1 — Install
+
+Easiest path: download the desktop app from the latest GitHub release. It
+installs the runtime, the native capture helper, the bundled plugins, and the
+auto-updater.
+
+If you’re building from source:
+
+```bash
+git clone https://github.com/sagivo/beside
+cd beside
+pnpm install
+pnpm build
+pnpm desktop                # native app
+# or
+pnpm cli init && pnpm cli start    # headless
+```
+
+After install, run a sanity check:
+
+```bash
+beside doctor
+```
+
+A clean output is "0 fail, 0 warn". Anything red is the right thing to chase
+before going further.
+
+## Step 2 — Decide who provides the intelligence
+
+Open `~/.beside/config.yaml`. The default is local Ollama with Gemma; that’s a
+good starting point for everyone.
+
+```yaml
+index:
+  model:
+    plugin: ollama
+    ollama:
+      model: gemma4:e4b
+      embedding_model: nomic-embed-text
+      host: http://127.0.0.1:11434
+      auto_install: true
+```
+
+If you want hosted quality, swap the block — see [Model adapters](/docs/model/).
+You can mix later (custom adapter) without rebuilding the wiki.
+
+## Step 3 — Tune capture for trust
+
+A launch workflow needs Slack, mail, design, and engineering signals. It does
+*not* need password managers, banking, or admin pages. Add the exclusions
+*first*.
+
+```yaml
+capture:
+  plugin: native
+  capture_mode: active
+  capture_audio: true
+  excluded_apps: [1Password, Bitwarden, Keychain Access]
+  excluded_url_patterns:
+    - "^https://.*\\.bank\\."
+    - "^https://admin\\."
+  privacy:
+    blur_password_fields: true
+    pause_on_screen_lock: true
+    sensitive_keywords: [password, api_key, secret]
+```
+
+Restart the runtime (`beside start` or relaunch the desktop app) so the new
+matchers take effect.
+
+## Step 4 — Let the indexer build the wiki
+
+Run a one-off pass to confirm the loop:
+
+```bash
+beside index --once
+beside stats
+```
+
+You should see frame counts climb, sessions and (if any audio captured)
+meetings appear, and pages start showing up under `~/.beside/index/topics/`.
+Open them — they’re plain Markdown, edit anything that’s wrong. The strategy
+keeps your edits on the next pass.
+
+For a deeper view:
+
+```bash
+beside index --reorganise
+```
+
+This is the merge / split / archive cycle. It’s scheduled nightly; running it
+on demand is fine.
+
+## Step 5 — Wire Beside into your AI agent
+
+Confirm the MCP server is up:
+
+```bash
+curl http://127.0.0.1:3456/mcp/healthz
+```
+
+For Cursor / Claude Desktop / Windsurf, add Beside to the MCP servers section
+of your client config:
+
+```json
+{
+  "mcpServers": {
+    "beside": { "url": "http://127.0.0.1:3456/mcp" }
+  }
+}
+```
+
+For stdio-launching clients (no Beside daemon running):
+
+```json
+{
+  "mcpServers": {
+    "beside": { "command": "beside", "args": ["mcp", "--stdio"] }
+  }
+}
+```
+
+Restart the agent. Then ask it questions that used to mean digging through six
+apps:
+
+- "What did we decide about pricing in the last two weeks?"
+- "Summarise the customer concerns from my last three Acme calls."
+- "What follow-ups are still open in Slack and Mail?"
+- "Recall any Beside context related to the launch checklist before drafting
+  this reply."
+
+That’s the product promise made literal: the agent answers from your *actual*
+work.
+
+## Step 6 — Add a hook for proactive surfacing
+
+Follow-ups are the easiest valuable hook to enable. Make sure it’s on:
+
+```yaml
+hooks:
+  enabled: true
+  plugins:
+    - { name: calendar, enabled: true }
+    - { name: followups, enabled: true }
+```
+
+Now anything that looks like an open thread in Slack, Teams, Gmail, Outlook,
+or Apple Mail gets stored as a `followup` record and rendered on the desktop
+dashboard.
+
+For a domain-specific watcher — say "any pricing decision mentioned this
+week" — add an inline definition (no plugin required):
+
+```yaml
+hooks:
+  definitions:
+    - id: pricing.decisions
+      title: Pricing decisions
+      match:
+        inputKinds: [screen]
+        apps: [Slack, Mail, Notion]
+        textIncludes: [pricing, tier, discount]
+      throttleMs: 60000
+      promptTemplate: |
+        Extract pricing decisions from this screen text and return JSON:
+        { "items": [{ "title": "...", "decision": "...", "owner": "..." }] }
+
+        Text:
+        {{text}}
+      outputCollection: pricing-decisions
+      widget:
+        id: pricing-decisions
+        title: Pricing decisions
+        builtin: list
+        defaultCollection: pricing-decisions
+        placement: dashboard-aside
+```
+
+Reload, work normally for an hour, and a Pricing Decisions widget will start
+populating.
+
+## Step 7 — Decide what to keep on disk
+
+Out of the box Beside keeps frames forever and tiers screenshots down. For a
+faster, smaller install:
+
+```yaml
+storage:
+  local:
+    retention_days: 180
+    vacuum:
+      compress_after_minutes: 30
+      compress_quality: 35
+      thumbnail_after_days: 14
+      delete_after_days: 60
+```
+
+Memory chunks (the agent-facing rows) and the wiki on disk are unaffected;
+you’re just compressing or removing the older raw screenshot bytes.
+
+## Step 8 — Make it durable
+
+If you’re running headless, wire `beside start` into a launchd plist
+(`~/Library/LaunchAgents/so.beside.plist`) or a systemd unit. The desktop app
+starts on login automatically.
+
+For backups: the entire product state is `~/.beside/`. Snapshot it with your
+usual tool. To migrate to a new machine, copy the directory and run
+`beside doctor` to confirm permissions.
+
+## Where this leaves you
+
+You now have:
+
+- Local capture you trust, with explicit exclusions.
+- A self-organising Markdown wiki under `~/.beside/index/`, mirrored to
+  `~/.beside/export/markdown/` for any tool that reads Markdown.
+- An MCP server feeding your agent of choice with grounded context.
+- One built-in hook (follow-ups) and one custom hook (pricing decisions),
+  both visible on the dashboard.
+- A storage policy that won’t silently fill your disk.
+
+From here, the natural next steps are: write an [export plugin](/docs/export/)
+that pushes pages into your team wiki, or a custom
+[capture hook](/docs/hooks/) that watches for the specific moments your team
+keeps losing track of.

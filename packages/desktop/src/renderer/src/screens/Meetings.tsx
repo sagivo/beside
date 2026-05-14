@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, ImageOff, Inbox, Loader2, MessageSquare, Mic, RefreshCcw, ScanLine, Sparkles, Users, Video } from 'lucide-react';
+import { BookOpen, Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Clock, ImageOff, Inbox, Loader2, MessageSquare, Mic, RefreshCcw, ScanLine, Sparkles, Users, Video } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -221,6 +221,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
           </div>
           
           <div className="flex-1 flex flex-col min-w-0 gap-5">
+            <DaySummary day={selectedDay} />
             <DayBriefRecap events={visibleEvents} meetingsById={meetingsById} selectedDay={selectedDay} today={today} now={currentTime} onSelectEvent={setSelectedId} />
             <Card className="flex-1 flex flex-col min-h-0 overflow-hidden bg-card border-border/50 shadow-sm">
               {!selEvent ? (
@@ -253,6 +254,41 @@ function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, on
       {!it && <Button variant="outline" size="sm" onClick={onToday} className="h-9 rounded-full px-3 font-medium">Today</Button>}
       {eventCount > 0 && <span className="ml-2 text-xs font-medium text-muted-foreground bg-muted px-2 py-1 rounded-full">{eventCount} event{eventCount > 1 ? 's' : ''}</span>}
     </div>
+  );
+}
+
+function DaySummary({ day }: { day: string }) {
+  const [state, setState] = React.useState<{ status: 'idle' | 'loading' | 'ready'; content: string | null }>({ status: 'loading', content: null });
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false;
+    setState({ status: 'loading', content: null });
+    setOpen(false);
+    (async () => {
+      try {
+        const res = await window.beside.readJournalMarkdown(day);
+        if (!cancelled) setState({ status: 'ready', content: res?.content ?? null });
+      } catch { if (!cancelled) setState({ status: 'ready', content: null }); }
+    })();
+    return () => { cancelled = true; };
+  }, [day]);
+  if (state.status !== 'ready' || !state.content) return null;
+  return (
+    <Card className="flex-none border-border/50 bg-card shadow-sm overflow-hidden">
+      <button type="button" onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left hover:bg-muted/30 transition-colors">
+        <div className="flex items-center gap-2.5 text-xs font-bold uppercase tracking-wider text-muted-foreground">
+          <BookOpen className="size-4" />Day summary
+        </div>
+        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <CardContent className="pt-0 pb-5 px-5">
+          <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg">
+            <Markdown content={state.content} />
+          </div>
+        </CardContent>
+      )}
+    </Card>
   );
 }
 

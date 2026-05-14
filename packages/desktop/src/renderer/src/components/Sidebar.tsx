@@ -3,11 +3,11 @@ import {
   ChevronsRight,
   HelpCircle,
   LayoutDashboard,
+  NotebookPen,
   Plug,
   Search,
   Settings,
   ShieldCheck,
-  Video,
   type LucideIcon,
 } from 'lucide-react';
 import { BrandMark } from '@/components/BrandMark';
@@ -32,7 +32,7 @@ interface NavItem {
  */
 const NAV_PRIMARY: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: LayoutDashboard, shortcut: '1' },
-  { id: 'meetings', label: 'Agenda', icon: Video, shortcut: '2' },
+  { id: 'meetings', label: 'Journal', icon: NotebookPen, shortcut: '2' },
   { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '3' },
   { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
 ];
@@ -57,6 +57,10 @@ export function Sidebar({
   helpHasUnread?: boolean;
 }) {
   const { collapsed, toggle } = useSidebar();
+  // Background work — indexing, reorganising, full re-index. We treat all
+  // of these as "the brand is thinking" and let BrandMark animate so the
+  // user has an ambient cue even when the runtime is working off-screen.
+  const busy = !!overview?.indexing.running;
 
   return (
     <aside
@@ -72,14 +76,14 @@ export function Sidebar({
           collapsed ? 'justify-center px-2' : 'gap-3 px-4',
         )}
       >
-        <BrandMark />
+        <BrandMark busy={busy} />
         {!collapsed && (
           <div className="min-w-0">
-            <div className="text-[15px] font-semibold leading-tight tracking-tight truncate">
-              Beside
+            <div className="brand-wordmark text-[20px] leading-none truncate">
+              beside
             </div>
             <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-              Your memory, on this device
+              Your AI memory,<br />beside you
             </div>
           </div>
         )}

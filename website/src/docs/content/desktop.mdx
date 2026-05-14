@@ -1,0 +1,120 @@
+# Desktop app
+
+`@beside/desktop` is the consumer-grade Electron shell around the runtime.
+It’s what most people install — packaging, permissions, auto-update, a
+React-based UI built on top of Radix and Tailwind, and the bridge that mounts
+hook widgets on the dashboard.
+
+The important thing to internalise: **the desktop app and the CLI run the same
+runtime**. Anything `beside start` does is also what the desktop app does in
+the background. The desktop is the front-of-house surface; the runtime is the
+shared back-of-house. There’s no Beside server in the middle — capture,
+indexing, embeddings, hooks, and the MCP server all run inside the app on
+your Mac.
+
+## What the app gives you
+
+- A **macOS native bundle** (DMG + ZIP, signed and notarised, hardened
+  runtime, Apple silicon + Intel) ready to ship via GitHub Releases or your
+  own auto-update channel.
+- A **dashboard** that shows today’s timeline (sessions, meetings, day
+  events), recent captures, and any hook widgets the user has enabled.
+- An **onboarding flow** that requests the macOS permissions Beside needs
+  (Screen Recording, Accessibility, optionally Microphone for meeting audio)
+  with clear copy and OS-level deep links.
+- **Live capture status** — what’s running, what’s paused, why a hook is or
+  isn’t firing — so the system stops feeling like a black box.
+- **Settings UI** for capture exclusions, model choice (local vs hosted),
+  hooks, exports, retention, and the storage vacuum.
+- **Updater** via `electron-updater` against the GitHub release feed.
+
+## How it’s assembled
+
+```text
+packages/desktop/
+├── src/
+│   ├── main.ts                  # Electron main process — owns the runtime
+│   ├── preload/                 # secure IPC bridge
+│   ├── renderer/                # React UI (Radix + Tailwind + shadcn-style)
+│   └── lib/                     # IPC contract, hook widget host, etc.
+├── scripts/
+│   ├── build-native.sh          # builds the Swift capture helper
+│   ├── build-icons.mjs          # generates icns/ico/png from one source
+│   ├── prepare-package-resources.mjs   # copies the helper + plugins into the bundle
+│   └── copy-preload.mjs
+└── build/
+    ├── icon.icns / icon.png
+    └── resources/beside/        # bundled plugins + native helper
+```
+
+The main process boots the runtime in-process, owns the SQLite handle, and
+exposes a typed IPC surface to the renderer (`getOverview`, `triggerReindex`,
+hook widget feeds, settings reads/writes, etc.). The renderer is a normal
+React app that talks to that IPC — which means a future browser-based remote
+UI is a small surface to build.
+
+## Native capture helper
+
+For real-grade macOS capture (system audio, ScreenCaptureKit, low overhead),
+the desktop bundle ships a Swift sidecar built from
+`plugins/capture/native/native/capture.swift`. The build pipeline:
+
+1. `build:main` runs `tsc` for the main process and `bash scripts/build-native.sh`
+   to produce a universal binary.
+2. `prepare:package` copies the helper into `build/resources/beside/` so
+   `electron-builder` includes it as `extraResources`.
+3. The `native` capture plugin discovers the helper at runtime via
+   `helper_path` (or the bundled default).
+
+Switching between the bundled helper and a custom one is a config edit:
+
+```yaml
+capture:
+  plugin: native
+  native:
+    helper_path: /opt/my/beside-capture-helper
+```
+
+## Hook widgets, rendered
+
+The desktop app is what makes capture hooks visible. The renderer hosts every
+hook widget the active hooks declare:
+
+- **Built-in widgets** (`calendar`, `followups`, `list`, `json`) cover the
+  common shapes; a hook just declares `widget.builtin` and the dashboard renders
+  it without any plugin-side React.
+- **Custom React bundles** can be loaded via `widget.bundlePath` — the
+  renderer mounts your bundle inside an isolated container and feeds it the
+  hook’s records through the same `IHookStorageNamespace` API.
+
+This is what keeps Beside from collapsing into "just a database with a UI".
+Domain-specific intelligence (calendar, follow-ups, your own bespoke watcher)
+gets a first-class home on the dashboard.
+
+## Packaging & shipping
+
+`electron-builder` handles the actual bundling. Notable bits from the
+`build` config:
+
+- `appId: so.beside.desktop`, `productName: Beside`, ASAR enabled.
+- `mac.target: ['dmg', 'zip']`, signed + notarised + hardened runtime.
+- Auto-update via the GitHub provider (`sagivo/beside`).
+- Cross-platform stubs (`win.target: ['nsis']`, `linux.target: ['AppImage', 'deb']`)
+  so non-Mac builds are one toolchain change away.
+- `extraResources` carries the built capture helper and the bundled plugins
+  into the app at `app.asar.unpacked`-friendly paths.
+
+```bash
+pnpm desktop:dev        # tsc + electron, hot reload via vite
+pnpm desktop            # build everything and launch electron
+pnpm desktop:package    # produce an unsigned `electron-builder --dir` artifact
+pnpm desktop:dist       # full signed + notarised dist
+```
+
+For most people the desktop app is the entire product: download a DMG,
+double-click, grant the three macOS permissions, done. No CLI, no API keys,
+nothing leaving the machine. The settings panel exposes the same knobs as
+`config.yaml`, so power users and casual users land on the same surface — and
+because hook widgets render natively on the dashboard, the proactive parts of
+Beside (calendar, follow-ups, anything custom you ship) are visible instead
+of hidden behind a config flag.

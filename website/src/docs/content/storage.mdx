@@ -1,0 +1,129 @@
+# Storage layer
+
+Storage is where Beside’s **local-first** promise becomes concrete. The storage
+plugin owns the bytes on disk: raw events, screenshot/audio assets, derived
+frames, embeddings, sessions, meetings, day events, memory chunks, and the
+namespaced records produced by capture hooks. Nothing here ever phones home —
+your `~/.beside/` directory is the entire product state, on your disk, in
+formats you can read with standard tools.
+
+The default plugin (`local`) ships with the runtime and is what almost every
+install uses. The interface (`IStorage`) is large because the surface is real:
+SQLite + asset directories give you a queryable knowledge base *and* a vector
+store without dragging in Postgres, Pinecone, or anyone else’s cloud.
+
+## `local` — SQLite + asset directories
+
+```yaml
+storage:
+  plugin: local
+  local:
+    path: ~/.beside
+    max_size_gb: 50
+    retention_days: 365
+    vacuum:
+      compress_after_minutes: 60
+      compress_quality: 40
+      thumbnail_after_days: 30
+      thumbnail_max_dim: 480
+      delete_after_days: 180
+      tick_interval_min: 15
+      batch_size: 50
+```
+
+What lives where:
+
+- **`~/.beside/raw/events.sqlite`** — a single SQLite database with WAL,
+  embedded FTS5 search, vector tables for embeddings, and indexes for sessions,
+  meetings, day events, memory chunks, and hook records.
+- **`~/.beside/raw/frames/<day>/<id>.webp`** — screenshot assets, written once
+  and tiered later by the vacuum (compressed → thumbnail → deleted).
+- **`~/.beside/raw/audio/{inbox,processed,failed}/`** — audio chunks moving
+  through the transcription worker.
+- **`~/.beside/index/`** — the wiki the index strategy emits.
+
+## What the IStorage surface gives you
+
+`IStorage` is a thick interface on purpose: it lets index strategies, hooks,
+and exports stay simple. The headline operations:
+
+- **Events** — append-only writes, plus replayable reads with `from`, `to`,
+  `types`, `apps`, paginated and checkpointable per index strategy
+  (`since_checkpoint`, `markIndexed`).
+- **Assets** — `writeAsset` / `readAsset` are the only ways anything writes to
+  the asset directory, so the vacuum can move bytes around safely.
+- **Frames** — `upsertFrame`, `searchFrames`, `getFrameContext(before, after)`,
+  `getJournal(day)`, OCR + accessibility task queues, perceptual-hash dedupe.
+- **Embeddings** — `searchFrameEmbeddings`, `upsertFrameEmbeddings`,
+  `findExistingFrameEmbeddings`, plus the same trio for memory chunks.
+- **Sessions / meetings / day events** — assignment, listing, summary writeback,
+  and full-bin clears for reindexing.
+- **Memory chunks** — `replaceMemoryChunks`, `upsertMemoryChunks`,
+  `searchMemoryChunks`, `searchMemoryChunkEmbeddings` — the queryable surface
+  the MCP exporter exposes to agents.
+- **Vacuum** — tier transitions for assets, deletes for frames orphaned by
+  retention, `runMaintenance` for SQLite VACUUM/ANALYZE, optional WAL
+  checkpoints.
+- **Hook records** — `hookPut` / `hookGet` / `hookList` / `hookClear`,
+  scoped per `hookId` so plugins can never read each other’s data.
+
+## The vacuum
+
+Storage isn’t just "write everything forever". A background storage vacuum
+keeps the asset directory tractable.
+
+- After `compress_after_minutes` (default 60), originals are re-encoded at
+  `compress_quality: 40` — same dimensions, smaller bytes.
+- After `thumbnail_after_days` (default 30), assets are downscaled to
+  `thumbnail_max_dim: 480` so older days still preview but cost almost nothing.
+- After `delete_after_days` (default 180), the asset bytes are removed but the
+  metadata (timestamp, app, window title, OCR text, embedding) stays — so the
+  wiki can still cite a frame that no longer has its picture.
+
+The vacuum loop ticks every `tick_interval_min` minutes and only processes
+`batch_size` frames per tick, so it never spikes CPU.
+
+## Why a typed storage layer matters
+
+Most "memory" tools blur the line between application logic and storage. Beside
+deliberately enforces it via `IStorage`, which buys two things:
+
+1. **You can replace storage without breaking anything else.** Want a
+   network-mounted SQLite, or a Postgres-backed store, or an in-memory test
+   double? Implement `IStorage`, register it as a plugin, point `config.yaml`
+   at it. The orchestrator, hooks, index strategy, and exports don’t change.
+2. **The wiki and the database stay in sync.** Pages live on disk, but every
+   page also references a `MemoryChunk` row with content hashes, embeddings,
+   and source frame IDs. That’s what makes hybrid keyword + vector retrieval
+   feel honest — the agent gets a citation, not a vibe.
+
+## Writing a custom storage plugin
+
+The minimum viable `IStorage` is large but mechanical. Most people don’t need
+to write one — but if you do, the trick is to lean on `replaceMemoryChunks`
+and `upsertFrameEmbeddings` for the bulk operations and treat the per-frame
+methods as the source of truth.
+
+```ts
+const factory: PluginFactory<IStorage> = async ({ dataDir, config, logger }) => {
+  // open your database, create tables, return an IStorage implementation
+};
+
+export default factory;
+```
+
+Important constraints if you write one:
+
+- `write` must be **append-only and durable** — the runtime treats raw events
+  as the truth.
+- `markIndexed(strategy, eventIds)` must be **idempotent** — strategies replay
+  on restart.
+- Asset paths must be **stable strings relative to your storage root** — frames
+  carry them around for the life of the install.
+
+Because storage is the bottom of the stack, it’s also the layer that defines
+Beside’s posture toward your data: one directory you can back up, encrypt with
+FileVault, sync with whatever you already trust, or wipe with `rm -rf`. Capture
+hook records are namespaced and isolated per hook, the wiki on disk is plain
+Markdown, and the vacuum keeps disk pressure flat over months of always-on
+use. There is no "Beside cloud" to opt out of, because there isn’t one.

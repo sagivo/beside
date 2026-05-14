@@ -1,0 +1,239 @@
+# Configuration reference
+
+All of Beside is driven by **one** YAML file at `~/.beside/config.yaml` (or a
+custom path via `beside --config`). The schema is defined and validated by
+`@beside/core` — every value below has a Zod default, so you only need to set
+what you want to change. An empty file gives you a sensible local-first,
+battery-aware install with the local Markdown export and the local MCP server
+already wired up.
+
+This page is a flat reference. For the why behind each section, jump to the
+matching layer page.
+
+## Top-level shape
+
+```yaml
+app:        # …
+capture:    # see Capture
+storage:    # see Storage
+index:      # see Index strategies
+hooks:      # see Capture hooks
+export:     # see Export & MCP
+system:     # global runtime guards
+```
+
+## `app`
+
+```yaml
+app:
+  name: Beside
+  data_dir: ~/.beside           # all on-disk state lives here
+  log_level: info               # debug | info | warn | error
+  session_id:                   # optional — set to pin the install id
+```
+
+`data_dir` is the root for everything: raw events, assets, the index, exports,
+the SQLite database. Move it onto an external drive by changing this one line.
+
+## `capture`
+
+```yaml
+capture:
+  plugin: node                  # 'node' | 'native' | <your plugin>
+  poll_interval_ms: 3000
+  idle_poll_interval_ms: 30000
+  focus_settle_delay_ms: 900
+  screenshot_diff_threshold: 0.15
+  idle_threshold_sec: 60
+  capture_audio: true
+  whisper_model: base
+  audio:
+    inbox_path: ~/.beside/raw/audio/inbox
+    processed_path: ~/.beside/raw/audio/processed
+    failed_path: ~/.beside/raw/audio/failed
+    tick_interval_sec: 60
+    batch_size: 5
+    whisper_command: whisper
+    delete_audio_after_transcribe: true
+    max_audio_bytes: 524288000
+    min_audio_bytes_per_sec: 4096
+    min_audio_rate_check_ms: 5000
+    live_recording:
+      enabled: true
+      activation: other_process_input        # 'other_process_input' | 'always'
+      system_audio_backend: core_audio_tap   # 'core_audio_tap' | 'screencapturekit' | 'off'
+      poll_interval_sec: 3
+      chunk_seconds: 300
+      format: m4a
+      sample_rate: 16000
+      channels: 1
+  screenshot_format: webp        # 'webp' | 'jpeg'
+  screenshot_quality: 45
+  screenshot_max_dim: 1100
+  content_change_min_interval_ms: 60000
+  jpeg_quality:                  # optional override for jpeg
+  excluded_apps:
+    - 1Password
+    - Bitwarden
+    - Keychain Access
+  excluded_url_patterns: []
+  multi_screen: false
+  capture_mode: active           # 'active' | 'all'
+  accessibility:
+    enabled: true
+    timeout_ms: 1500
+    max_chars: 8000
+    max_elements: 4000
+    excluded_apps: []
+  privacy:
+    blur_password_fields: true
+    pause_on_screen_lock: true
+    sensitive_keywords: [password, api_key, secret]
+```
+
+## `storage`
+
+```yaml
+storage:
+  plugin: local
+  local:
+    path: ~/.beside
+    max_size_gb: 50
+    retention_days: 365
+    vacuum:
+      compress_after_minutes: 60
+      compress_quality: 40
+      thumbnail_after_days: 30
+      thumbnail_max_dim: 480
+      delete_after_days: 180
+      tick_interval_min: 15
+      batch_size: 50
+```
+
+## `index`
+
+```yaml
+index:
+  strategy: karpathy
+  index_path: ~/.beside/index
+  incremental_interval_min: 30
+  reorganise_schedule: "0 2 * * *"     # cron syntax
+  reorganise_on_idle: true
+  idle_trigger_min: 10
+  batch_size: 50
+  sessions:
+    idle_threshold_sec: 300
+    afk_threshold_sec: 120
+    min_active_ms: 30000
+    fallback_frame_attention_ms: 5000
+  meetings:
+    idle_threshold_sec: 300
+    min_duration_sec: 180
+    audio_grace_sec: 60
+    summarize: true
+    summarize_cooldown_sec: 300
+    vision_attachments: 4
+  events:
+    llm_enabled: true
+    lookback_days: 7
+    min_text_chars: 80
+    max_frames_per_bucket: 30
+  embeddings:
+    enabled: true
+    batch_size: 32
+    tick_interval_min: 5
+    search_weight: 0.35              # blend weight against keyword
+  model:
+    plugin: ollama                   # 'ollama' | 'openai' | <your plugin>
+    ollama:
+      model: gemma4:e4b
+      embedding_model: nomic-embed-text
+      host: http://127.0.0.1:11434
+      vision_model:                  # optional override
+      indexer_model:                 # optional override for indexing-only calls
+      keep_alive: "30s"
+      unload_after_idle_min: 0
+      auto_install: true
+      model_revision: 3
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      base_url: https://api.openai.com/v1
+      model: gpt-4o-mini
+      vision_model:                  # optional
+      embedding_model: text-embedding-3-small
+    claude:
+      api_key:
+      model: claude-sonnet-4-6
+```
+
+## `hooks`
+
+```yaml
+hooks:
+  enabled: true
+  throttle_ms_default: 60000
+  max_image_bytes: 2097152
+  max_prompt_chars: 14000
+  max_records_per_hook: 2000
+  plugins:
+    - { name: calendar, enabled: true }
+    - { name: followups, enabled: true }
+  definitions: []                    # inline CaptureHookDefinition entries
+```
+
+## `export`
+
+```yaml
+export:
+  plugins:
+    - { name: markdown, enabled: true }
+    - { name: mcp, enabled: true }
+```
+
+Each plugin reads its own block from the top level of the YAML
+(see the `plugin.json` `config_schema` for each plugin). For example:
+
+```yaml
+mcp:
+  host: 127.0.0.1
+  port: 3456
+  transport: http
+  text_excerpt_chars: 5000
+
+markdown:
+  path: ~/.beside/export/markdown
+```
+
+## `system`
+
+```yaml
+system:
+  background_model_jobs: manual        # 'manual' | 'scheduled'
+  load_guard:
+    enabled: true
+    threshold: 0.7                     # 1m load average / cores
+    memory_threshold: 0.9              # fraction of RSS / total
+    low_battery_threshold_pct: 25
+    max_consecutive_skips: 0           # 0 = no skip limit
+```
+
+The load guard is what keeps Beside from melting your laptop. When CPU,
+memory, or battery are outside the configured thresholds, scheduled heavy work
+(reorganisation, embedding batches, meeting summarisation) is deferred to the
+next tick. Capture itself is never deferred.
+
+## Recommended postures
+
+| Scenario | What to change |
+| --- | --- |
+| **Strict privacy / regulated team** | `capture.plugin: node`, narrow `excluded_apps`, set `excluded_url_patterns`, keep `index.model.plugin: ollama`, disable `mcp` export until ready, lower `storage.local.retention_days`. |
+| **Pure local performance** | `capture.plugin: native`, `index.model.plugin: ollama`, `index.embeddings.tick_interval_min: 1`, `system.load_guard.threshold: 0.85`. |
+| **Hosted-model quality** | `index.model.plugin: openai`, set a real `embedding_model`, raise `index.batch_size` for fewer hosted calls. |
+| **Always-on, minimal disk** | `screenshot_quality: 35`, `screenshot_max_dim: 900`, `vacuum.compress_after_minutes: 30`, `vacuum.delete_after_days: 60`. |
+| **Meetings-first** | `capture_audio: true`, `audio.live_recording.enabled: true`, `index.meetings.summarize: true`, `vision_attachments: 6`. |
+
+Every Beside install is reproducible from this one YAML — back it up, version
+it in git, copy it between machines. Bad values fail at startup with
+line-precise errors instead of breaking the indexer at midnight, and the
+defaults are tuned so the empty-file install is already private, on-device,
+and gentle on your battery.

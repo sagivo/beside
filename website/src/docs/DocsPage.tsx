@@ -1,15 +1,18 @@
-import TechTutorial from "./content/technical-tutorial.mdx";
+import { DOC_PAGES, findDocByPath, siblingsFor, type DocPage } from "./pages";
 
-const docSections = [
-  { href: "#what-beside-gives-you", label: "What Beside gives you" },
-  { href: "#architecture-at-a-glance", label: "Architecture" },
-  { href: "#choose-the-right-layer", label: "Layers" },
-  { href: "#customize-the-pipeline", label: "Customize" },
-  { href: "#tutorial-build-your-first-workflow", label: "Tutorial" },
-  { href: "#where-to-go-next", label: "Next steps" },
-];
+export default function DocsPage({ pathname }: { pathname?: string }) {
+  const path = pathname ?? (typeof window === "undefined" ? "/docs/" : window.location.pathname);
+  const page = findDocByPath(path);
+  const { prev, next } = siblingsFor(page);
+  const PageBody = page.Component;
 
-export default function DocsPage() {
+  const groups: Array<{ name: string; pages: DocPage[] }> = [];
+  for (const p of DOC_PAGES) {
+    const last = groups[groups.length - 1];
+    if (!last || last.name !== p.group) groups.push({ name: p.group, pages: [p] });
+    else last.pages.push(p);
+  }
+
   return (
     <>
       <div className="ambient" aria-hidden>
@@ -39,54 +42,61 @@ export default function DocsPage() {
       </header>
 
       <main className="docs-shell">
-        <section className="docs-hero">
-          <div className="container docs-hero-grid">
-            <div>
-              <span className="eyebrow">
-                <span className="dot" />
-                Technical docs
-              </span>
-              <h1>Build an AI memory layer that fits the way you work.</h1>
-              <p className="lede">
-                Beside captures the context around your apps, indexes it locally,
-                and makes it useful inside every AI agent you already trust. These
-                docs explain the layers so you can keep the default magic or tune
-                every part of the stack.
-              </p>
-              <div className="docs-hero-actions">
-                <a className="btn btn-primary" href="#tutorial-build-your-first-workflow">
-                  Start the tutorial
-                </a>
-                <a className="btn btn-ghost" href="https://github.com/sagivo/beside">
-                  View source
-                </a>
-              </div>
-            </div>
-
-            <div className="docs-map" aria-hidden>
-              <div className="docs-map-core">beside</div>
-              <div className="docs-map-row"><span>Apps</span><i />Capture</div>
-              <div className="docs-map-row"><span>Events</span><i />Local storage</div>
-              <div className="docs-map-row"><span>Signals</span><i />Index + hooks</div>
-              <div className="docs-map-row"><span>Memory</span><i />MCP + CLI</div>
-            </div>
-          </div>
-        </section>
-
         <div className="container docs-layout">
           <aside className="docs-sidebar" aria-label="Docs navigation">
             <div className="docs-sidebar-card">
-              <span className="docs-sidebar-label">Tutorial</span>
-              {docSections.map((section) => (
-                <a href={section.href} key={section.href}>
-                  {section.label}
-                </a>
+              <a href="/docs/" className="docs-sidebar-brand">
+                <span className="docs-sidebar-brand-eyebrow">Beside</span>
+                <span className="docs-sidebar-brand-title">Documentation</span>
+              </a>
+              {groups.map((group) => (
+                <div className="docs-sidebar-group" key={group.name}>
+                  <span className="docs-sidebar-label">{group.name}</span>
+                  {group.pages.map((p) => {
+                    const active = p.path === page.path;
+                    return (
+                      <a
+                        href={p.path}
+                        key={p.path}
+                        className={active ? "docs-sidebar-link is-active" : "docs-sidebar-link"}
+                        aria-current={active ? "page" : undefined}
+                      >
+                        {p.title}
+                      </a>
+                    );
+                  })}
+                </div>
               ))}
             </div>
           </aside>
 
           <article className="docs-article docs-markdown">
-            <TechTutorial />
+            <div className="docs-eyebrow">
+              <span className="docs-eyebrow-group">{page.group}</span>
+              <span className="docs-eyebrow-sep" />
+              <span className="docs-eyebrow-title">{page.title}</span>
+            </div>
+
+            <PageBody />
+
+            <nav className="docs-pager" aria-label="Page navigation">
+              {prev ? (
+                <a href={prev.path} className="docs-pager-link docs-pager-prev">
+                  <span className="docs-pager-direction">← Previous</span>
+                  <span className="docs-pager-title">{prev.title}</span>
+                </a>
+              ) : (
+                <span />
+              )}
+              {next ? (
+                <a href={next.path} className="docs-pager-link docs-pager-next">
+                  <span className="docs-pager-direction">Next →</span>
+                  <span className="docs-pager-title">{next.title}</span>
+                </a>
+              ) : (
+                <span />
+              )}
+            </nav>
           </article>
         </div>
       </main>

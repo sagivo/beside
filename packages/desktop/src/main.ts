@@ -443,6 +443,7 @@ function registerRuntimeIpc() {
   h('beside:save-config-patch', async (e, p) => (await getRuntimeForRequest()).call('saveConfigPatch', p));
   h('beside:list-journal-days', async () => (await getRuntimeForRequest()).call('listJournalDays'));
   h('beside:get-journal-day', async (e, d) => (await getRuntimeForRequest()).call('getJournalDay', d));
+  h('beside:read-journal-markdown', async (e, d) => (await getRuntimeForRequest()).call('readJournalMarkdown', d));
   h('beside:list-meetings', async (e, q) => (await getRuntimeForRequest()).call('listMeetings', q));
   h('beside:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
   h('beside:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));

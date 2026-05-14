@@ -253,6 +253,8 @@ async function handle(req: Request): Promise<unknown> {
       return await runtime.listJournalDays();
     case 'getJournalDay':
       return await runtime.getJournalDay(String(req.params));
+    case 'readJournalMarkdown':
+      return await runtime.readJournalMarkdown(String(req.params));
     case 'listMeetings':
       return await runtime.listMeetings(
         req.params && typeof req.params === 'object' ? (req.params as Record<string, unknown>) : {},

@@ -1,0 +1,202 @@
+# Index strategies
+
+The index layer turns raw frames and hook records into something an agent can
+**recall** — a hierarchical Markdown wiki on your own disk, plus typed
+`MemoryChunk` rows that power semantic search and the MCP API. The wiki is
+intentionally plain Markdown so you can read it in any editor, version it with
+git, fix things by hand, or wipe it and let Beside reconverge from raw events.
+
+The interface (`IIndexStrategy`) is intentionally small so different strategies
+can take wildly different shapes. The default is `karpathy`, a self-organising
+LLM-wiki pattern, but the contract supports anything from a simple chronological
+journal to a graph index.
+
+```ts
+interface IIndexStrategy {
+  readonly name: string;
+  readonly description: string;
+  init(rootPath: string): Promise<void>;
+  getUnindexedEvents(storage: IStorage): Promise<RawEvent[]>;
+  indexBatch(events: RawEvent[], state: IndexState, model: IModelAdapter): Promise<IndexUpdate>;
+  reorganise(state: IndexState, model: IModelAdapter): Promise<IndexUpdate>;
+  applyUpdate(update: IndexUpdate): Promise<IndexState>;
+  getState(): Promise<IndexState>;
+  readPage(pagePath: string): Promise<IndexPage | null>;
+  readRootIndex(): Promise<string>;
+  reset(): Promise<void>;
+}
+```
+
+An `IndexUpdate` is just `{ pagesToCreate, pagesToUpdate, pagesToDelete,
+newRootIndex, reorganisationNotes }` — a diff against the wiki on disk. The
+runtime applies it transactionally and notifies every export plugin.
+
+## `karpathy` — self-organising Markdown wiki
+
+The default strategy implements the "Karpathy LLM-wiki" pattern: incremental
+batches grow leaf pages, then a periodic reorganisation pass merges thin pages,
+splits broad ones, builds a summary-of-summaries, and archives stale topics.
+
+```yaml
+index:
+  strategy: karpathy
+  index_path: ~/.beside/index
+  incremental_interval_min: 30
+  reorganise_schedule: "0 2 * * *"     # cron — nightly at 02:00
+  reorganise_on_idle: true
+  idle_trigger_min: 10
+  batch_size: 50
+```
+
+What you get on disk:
+
+```text
+~/.beside/index/
+├── README.md                    # the auto-generated root index (a "summary of summaries")
+├── topics/
+│   ├── acme/
+│   │   ├── pricing.md
+│   │   ├── onboarding.md
+│   │   └── _index.md            # rolled-up summary
+│   ├── platform/
+│   │   ├── mcp.md
+│   │   └── ocr-pipeline.md
+│   └── _index.md
+└── people/
+    └── …
+```
+
+Pages are plain Markdown with frontmatter, links to source frame IDs, and
+`[[wikilink]]`-style cross-references between pages. You can edit them by hand
+— the strategy will respect your edits on the next pass and only touch the
+sections it owns.
+
+### Sub-passes the runtime layers on top
+
+`@beside/runtime` plugs several derivation passes into the same loop, all
+gated by the same load guard and cron:
+
+- **Frame builder** — turns raw events into `Frame`s, attaches OCR
+  (`tesseract.js`) + accessibility text, dedupes via perceptual hash.
+- **Session builder** — groups frames into `ActivitySession`s using
+  `index.sessions.{idle_threshold_sec, afk_threshold_sec, min_active_ms}`.
+- **Meeting builder + summarizer** — recognises Zoom / Meet / Teams / Webex /
+  Whereby / Around windows, attaches audio chunks, generates `MeetingTurn`s
+  and a `MeetingSummaryJson` via the model.
+- **Event extractor** — produces `DayEvent`s for the daily journal
+  (`index.events.{lookback_days, min_text_chars, max_frames_per_bucket}`).
+- **Embedding worker** — fills `searchFrameEmbeddings` /
+  `searchMemoryChunkEmbeddings` in batches of `embeddings.batch_size`, on a
+  `embeddings.tick_interval_min` cadence.
+- **Entity resolver** — resolves frames to entities (`project`, `repo`,
+  `meeting`, `contact`, `channel`, `doc`, `webpage`, `app`) so the wiki can
+  cluster work around real nouns.
+
+```yaml
+index:
+  sessions:
+    idle_threshold_sec: 300
+    afk_threshold_sec: 120
+    min_active_ms: 30000
+  meetings:
+    min_duration_sec: 180
+    summarize: true
+    vision_attachments: 4
+  events:
+    llm_enabled: true
+    lookback_days: 7
+    min_text_chars: 80
+  embeddings:
+    enabled: true
+    batch_size: 32
+    tick_interval_min: 5
+    search_weight: 0.35     # blend weight against keyword score
+```
+
+### The reorganisation pass
+
+This is the part that makes the wiki feel alive instead of accreting. On each
+reorganisation:
+
+1. The strategy reads the current `IndexState` and Markdown tree.
+2. It asks the model to produce a `ReorganisationSummary`:
+   - **`merged`** — thin pages merged into a richer one
+   - **`split`** — a broad page split into focused children
+   - **`archived`** — stale pages moved out of the way
+   - **`newSummaryPages`** — rolled-up summary pages
+   - **`reclassified`** — pages moved between categories
+   - **`notes`** — a free-form rationale included in the page diff for review
+3. The diff is applied through `applyUpdate`, the export plugins are notified,
+   and embeddings refresh on the next tick.
+
+You can trigger it on demand: `beside index --reorganise`.
+
+## Memory chunks
+
+In parallel with the wiki on disk, the index strategy emits `MemoryChunk` rows
+into storage. These are what the MCP exporter actually serves — they’re the
+agent-facing form of the wiki:
+
+```ts
+type MemoryChunkKind =
+  | 'index_page'        // a wiki page
+  | 'entity_summary'    // condensed view of a project / contact / channel
+  | 'meeting_summary'   // structured meeting recap
+  | 'day_event'         // calendar / communication entry
+  | 'fact'              // standalone assertion (e.g. "we picked Stripe")
+  | 'procedure';        // repeatable how-to
+```
+
+Every chunk has a `contentHash` so embeddings can be cached and replayed; the
+runtime calls `replaceMemoryChunks` with the kinds it just regenerated, so old
+versions get cleanly evicted.
+
+## Writing a custom index strategy
+
+A custom strategy is the way to make Beside fit a specific recall model — for
+example, a graph-shaped index, a per-customer notebook, a daily-journal-only
+strategy, or a strict timeline.
+
+The minimal shape:
+
+```ts
+import type { IIndexStrategy, IndexUpdate, PluginFactory } from '@beside/interfaces';
+
+const factory: PluginFactory<IIndexStrategy> = ({ dataDir, config, logger }) => {
+  return {
+    name: 'my-strategy',
+    description: 'A custom index that keeps a single rolling brief.',
+    async init(rootPath) { /* mkdir, scaffold any seed pages */ },
+    async getUnindexedEvents(storage) {
+      return storage.readEvents({ unindexed_for_strategy: 'my-strategy' });
+    },
+    async indexBatch(events, state, model) {
+      // ask the model to update one page; return a tiny IndexUpdate
+      return { pagesToCreate: [], pagesToUpdate: [/*…*/], pagesToDelete: [], newRootIndex: '...', reorganisationNotes: '' };
+    },
+    async reorganise(state, model) { /* periodic cleanup */ return /*…*/; },
+    async applyUpdate(update) { /* write to disk + return new state */ },
+    async getState() { /*…*/ },
+    async readPage(pagePath) { /*…*/ },
+    async readRootIndex() { /*…*/ },
+    async reset() { /*…*/ },
+  };
+};
+
+export default factory;
+```
+
+Things to remember:
+
+- Use `storage.markIndexed('my-strategy', ids)` after each batch so you don’t
+  reprocess events on restart.
+- Emit `MemoryChunk` rows alongside Markdown pages if you want MCP recall to
+  work — the wiki on disk is for humans, the chunks are for agents.
+- Honour idempotence: the runtime may call `indexBatch` with the same events
+  twice (network glitch, restart) and the wiki shouldn’t corrupt.
+
+The whole layer is engineered to keep you in control: the model that does the
+indexing is whichever adapter you’ve picked (typically local Ollama); every
+heavy pass is gated by the load guard so it backs off on battery; and the
+output is a plain Markdown tree that lives next to your other notes, not a
+proprietary database you’d need an export feature to escape.

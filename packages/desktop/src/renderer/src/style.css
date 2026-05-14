@@ -4,29 +4,26 @@
 @custom-variant dark (&:is(.dark *));
 
 /* ────────────────────────────────────────────────────────────────────────
-   Beside design system — "lamplight + linen". An ambient AI sitting
-   beside you should feel warm, lived-in, paper-soft. Brand is a honey →
-   coral → rose gradient (think morning sun on linen, or a desk lamp in
-   the evening), surfaces are warm cream / cocoa-ink rather than the
-   cold blue-grey of a typical product UI. A slow ambient breathing
-   layer drifts behind everything to give the room a quiet pulse.
+   Beside design system — "quiet intelligence". Mirrors the website
+   (beside/website): cool paper surfaces, deep indigo ink, one calm
+   electric-violet accent, and a slow drifting aurora behind everything.
+   The redesign aligns the Mac app with the marketing site so the brand
+   reads as one product end-to-end (Inter for UI, Fraunces for display).
    ──────────────────────────────────────────────────────────────────── */
 :root {
-  --radius: 0.875rem;
+  --radius: 1rem;
 
-  /* Tell Chromium / WebKit to theme native controls (date pickers,
-     scrollbars, form widgets) in light mode by default. Overridden to
-     "dark" inside `.dark` below. */
+  /* Tell Chromium / WebKit to theme native controls in light mode. */
   color-scheme: light;
 
-  /* Light surfaces — warm linen / sunlit paper */
-  --background: oklch(0.985 0.010 75);
-  --foreground: oklch(0.20 0.022 45);
+  /* Light surfaces — cool paper */
+  --background: #f5f6fb;
+  --foreground: #15182a;
 
-  --surface-1: oklch(0.998 0.006 75);
-  --surface-2: oklch(0.965 0.014 70);
-  --surface-raised: oklch(1 0.004 75);
-  --surface-glass: oklch(1 0.004 75 / 0.72);
+  --surface-1: #ffffff;
+  --surface-2: #eef0f7;
+  --surface-raised: #ffffff;
+  --surface-glass: rgba(255, 255, 255, 0.72);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -34,110 +31,97 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  /* Warm amber-coral primary — the lamp itself */
-  --primary: oklch(0.64 0.15 45);
-  --primary-foreground: oklch(0.99 0.004 75);
-  --primary-soft: oklch(0.64 0.15 45 / 0.12);
+  /* Calm electric violet — the AI presence */
+  --primary: #6b6cf0;
+  --primary-foreground: #ffffff;
+  --primary-soft: rgba(107, 108, 240, 0.12);
+  --accent-deep: #4a4be0;
 
-  --secondary: oklch(0.955 0.020 60);
-  --secondary-foreground: oklch(0.24 0.025 45);
+  --secondary: #eef0f7;
+  --secondary-foreground: #15182a;
 
-  --muted: oklch(0.955 0.014 70);
-  --muted-foreground: oklch(0.51 0.024 55);
+  --muted: #eef0f7;
+  --muted-foreground: #5a607d;
 
-  --accent: oklch(0.94 0.038 50);
-  --accent-foreground: oklch(0.30 0.05 45);
+  --accent: rgba(107, 108, 240, 0.10);
+  --accent-foreground: #4a4be0;
 
-  --destructive: oklch(0.6 0.22 25);
-  --destructive-foreground: oklch(0.99 0 0);
+  --destructive: #c43c52;
+  --destructive-foreground: #ffffff;
 
-  --success: oklch(0.66 0.13 145);
-  --success-foreground: oklch(0.99 0 0);
+  --success: #2f9d63;
+  --success-foreground: #ffffff;
 
-  --warning: oklch(0.74 0.17 75);
-  --warning-foreground: oklch(0.22 0.03 45);
+  --warning: #d8932b;
+  --warning-foreground: #15182a;
 
-  --border: oklch(0.905 0.015 70);
-  --input: oklch(0.92 0.015 70);
-  --ring: oklch(0.64 0.15 45);
+  --border: rgba(21, 24, 42, 0.08);
+  --input: rgba(21, 24, 42, 0.10);
+  --ring: rgba(107, 108, 240, 0.55);
 
-  --sidebar: oklch(0.975 0.014 72);
-  --sidebar-foreground: var(--foreground);
+  --sidebar: rgba(255, 255, 255, 0.62);
+  --sidebar-foreground: #15182a;
   --sidebar-primary: var(--primary);
   --sidebar-primary-foreground: var(--primary-foreground);
-  --sidebar-accent: oklch(0.94 0.036 50);
-  --sidebar-accent-foreground: oklch(0.30 0.06 45);
-  --sidebar-border: oklch(0.92 0.013 70);
+  --sidebar-accent: rgba(107, 108, 240, 0.10);
+  --sidebar-accent-foreground: #2a2d44;
+  --sidebar-border: rgba(21, 24, 42, 0.08);
   --sidebar-ring: var(--ring);
 
-  --chart-1: oklch(0.64 0.15 45);   /* amber-coral */
-  --chart-2: oklch(0.66 0.13 145);  /* sage */
-  --chart-3: oklch(0.74 0.17 75);   /* honey */
-  --chart-4: oklch(0.6 0.22 25);    /* tomato */
-  --chart-5: oklch(0.66 0.15 320);  /* warm mauve */
+  --chart-1: #6b6cf0;   /* violet */
+  --chart-2: #4a4be0;   /* deep violet */
+  --chart-3: #b8d0e6;   /* mist */
+  --chart-4: #d2c8ec;   /* lavender */
+  --chart-5: #c7dccb;   /* sage */
 
-  --gradient-brand: linear-gradient(
-    135deg,
-    oklch(0.80 0.14 78) 0%,    /* honey */
-    oklch(0.68 0.18 42) 55%,   /* coral */
-    oklch(0.58 0.18 15) 100%   /* rose */
-  );
+  /* Aurora tints — borrowed from the site backdrop */
+  --aurora-mist: #b8d0e6;
+  --aurora-lavender: #d2c8ec;
+  --aurora-sage: #c7dccb;
+  --aurora-blush: #ecd5d5;
+
+  --gradient-brand: linear-gradient(135deg, #6b6cf0 0%, #4a4be0 100%);
   --gradient-brand-soft: linear-gradient(
     135deg,
-    oklch(0.975 0.04 75) 0%,
-    oklch(0.96 0.045 30) 100%
+    rgba(107, 108, 240, 0.14) 0%,
+    rgba(74, 75, 224, 0.10) 100%
   );
   --gradient-page:
-    radial-gradient(
-      ellipse 1100px 600px at 100% 0%,
-      oklch(0.74 0.16 55 / 0.10) 0%,
-      transparent 60%
-    ),
-    radial-gradient(
-      ellipse 800px 500px at 0% 100%,
-      oklch(0.66 0.18 20 / 0.06) 0%,
-      transparent 60%
-    );
+    radial-gradient(120% 80% at 50% -10%, #eef1fa 0%, transparent 60%),
+    linear-gradient(180deg, #f6f7fb 0%, #eef0f7 100%);
   --gradient-hero-live: linear-gradient(
     135deg,
-    oklch(0.97 0.04 65) 0%,
-    oklch(0.96 0.045 30) 100%
-  );
-  /* Ambient lamp — a soft warm halo that breathes behind the canvas. */
-  --gradient-ambient: radial-gradient(
-    ellipse 1200px 700px at 80% -10%,
-    oklch(0.78 0.16 55 / 0.10) 0%,
-    transparent 65%
+    rgba(107, 108, 240, 0.10) 0%,
+    rgba(184, 208, 230, 0.18) 100%
   );
 
-  /* Softer, more atmospheric shadows — warm-tinted rather than pure black */
-  --shadow-xs: 0 1px 1px oklch(0.25 0.04 45 / 0.05);
-  --shadow-card: 0 1px 2px oklch(0.25 0.04 45 / 0.05),
-    0 1px 3px oklch(0.25 0.04 45 / 0.06);
-  --shadow-raised: 0 4px 14px oklch(0.25 0.04 45 / 0.08),
-    0 2px 4px oklch(0.25 0.04 45 / 0.06);
-  --shadow-pop: 0 14px 34px oklch(0.25 0.04 45 / 0.14),
-    0 4px 10px oklch(0.25 0.04 45 / 0.08);
-  --shadow-glow: 0 0 0 1px oklch(0.68 0.16 45 / 0.22),
-    0 10px 32px oklch(0.68 0.16 45 / 0.22);
+  /* Feather-soft, never harsh — matches website shadows */
+  --shadow-xs: 0 1px 0 rgba(21, 24, 42, 0.04);
+  --shadow-card: 0 1px 0 rgba(21, 24, 42, 0.04),
+    0 4px 12px -6px rgba(21, 24, 42, 0.08);
+  --shadow-raised: 0 1px 0 rgba(21, 24, 42, 0.04),
+    0 18px 40px -22px rgba(21, 24, 42, 0.18);
+  --shadow-pop: 0 1px 0 rgba(21, 24, 42, 0.04),
+    0 30px 80px -28px rgba(74, 75, 224, 0.28);
+  --shadow-glow: 0 0 0 1px rgba(107, 108, 240, 0.22),
+    0 10px 32px rgba(107, 108, 240, 0.28);
 
-  /* Type scale — display headlines for hero, normal flow for body */
+  /* Type scale */
   --text-display: clamp(40px, 5.6vw, 64px);
   --text-hero: clamp(28px, 3.4vw, 40px);
 }
 
 .dark {
-  /* Flip native controls (date pickers, scrollbars, etc.) to dark. */
   color-scheme: dark;
 
-  /* Warm cocoa-ink rather than blue-black — feels like an evening room */
-  --background: oklch(0.165 0.014 50);
-  --foreground: oklch(0.96 0.012 75);
+  /* Deep indigo-ink night */
+  --background: #0d0f1c;
+  --foreground: #e6e8f4;
 
-  --surface-1: oklch(0.215 0.018 50);
-  --surface-2: oklch(0.245 0.020 50);
-  --surface-raised: oklch(0.275 0.022 52);
-  --surface-glass: oklch(0.215 0.018 50 / 0.62);
+  --surface-1: #161a2e;
+  --surface-2: #1c2038;
+  --surface-raised: #20243e;
+  --surface-glass: rgba(22, 26, 46, 0.62);
 
   --card: var(--surface-1);
   --card-foreground: var(--foreground);
@@ -145,87 +129,71 @@
   --popover: var(--surface-raised);
   --popover-foreground: var(--foreground);
 
-  /* Glowing honey-amber on warm ink — like a lantern */
-  --primary: oklch(0.82 0.14 70);
-  --primary-foreground: oklch(0.165 0.014 50);
-  --primary-soft: oklch(0.82 0.14 70 / 0.16);
+  --primary: #8b8cf5;
+  --primary-foreground: #0d0f1c;
+  --primary-soft: rgba(139, 140, 245, 0.18);
+  --accent-deep: #a4a5f7;
 
-  --secondary: oklch(0.28 0.018 50);
-  --secondary-foreground: oklch(0.96 0.012 75);
+  --secondary: #1c2038;
+  --secondary-foreground: #e6e8f4;
 
-  --muted: oklch(0.255 0.016 50);
-  --muted-foreground: oklch(0.72 0.020 60);
+  --muted: #1c2038;
+  --muted-foreground: #8e93ad;
 
-  --accent: oklch(0.30 0.04 50);
-  --accent-foreground: oklch(0.96 0.012 75);
+  --accent: rgba(139, 140, 245, 0.16);
+  --accent-foreground: #c8c9fb;
 
-  --destructive: oklch(0.72 0.18 22);
-  --destructive-foreground: oklch(0.99 0 0);
+  --destructive: #e25a72;
+  --destructive-foreground: #ffffff;
 
-  --success: oklch(0.76 0.15 145);
-  --success-foreground: oklch(0.165 0.014 50);
+  --success: #5fc28a;
+  --success-foreground: #0d0f1c;
 
-  --warning: oklch(0.83 0.16 75);
-  --warning-foreground: oklch(0.165 0.014 50);
+  --warning: #e8b44d;
+  --warning-foreground: #0d0f1c;
 
-  --border: oklch(1 0.01 75 / 0.08);
-  --input: oklch(1 0.01 75 / 0.12);
-  --ring: oklch(0.82 0.14 70);
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: rgba(139, 140, 245, 0.6);
 
-  /* Sidebar sits a touch deeper than the canvas so the ambient glow
-     bleeds through the glass-pane overlay. */
-  --sidebar: oklch(0.135 0.014 48);
-  --sidebar-foreground: oklch(0.96 0.012 75);
-  --sidebar-primary: oklch(0.82 0.14 70);
-  --sidebar-primary-foreground: oklch(0.165 0.014 50);
-  --sidebar-accent: oklch(0.30 0.06 55);
-  --sidebar-accent-foreground: oklch(0.96 0.012 75);
-  --sidebar-border: oklch(1 0.01 75 / 0.06);
-  --sidebar-ring: oklch(0.82 0.14 70);
+  --sidebar: rgba(13, 15, 28, 0.62);
+  --sidebar-foreground: #e6e8f4;
+  --sidebar-primary: #8b8cf5;
+  --sidebar-primary-foreground: #0d0f1c;
+  --sidebar-accent: rgba(139, 140, 245, 0.16);
+  --sidebar-accent-foreground: #e6e8f4;
+  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-ring: rgba(139, 140, 245, 0.6);
 
-  --gradient-brand: linear-gradient(
-    135deg,
-    oklch(0.86 0.16 78) 0%,    /* honey-glow */
-    oklch(0.72 0.20 40) 55%,   /* coral */
-    oklch(0.58 0.20 12) 100%   /* deep rose */
-  );
+  --aurora-mist: #4a6e8f;
+  --aurora-lavender: #6a5b96;
+  --aurora-sage: #4f7159;
+  --aurora-blush: #8a4f5e;
+
+  --gradient-brand: linear-gradient(135deg, #8b8cf5 0%, #6b6cf0 100%);
   --gradient-brand-soft: linear-gradient(
     135deg,
-    oklch(0.32 0.07 55) 0%,
-    oklch(0.27 0.06 22) 100%
+    rgba(139, 140, 245, 0.18) 0%,
+    rgba(107, 108, 240, 0.12) 100%
   );
   --gradient-page:
-    radial-gradient(
-      ellipse 1200px 700px at 100% -10%,
-      oklch(0.84 0.16 65 / 0.14) 0%,
-      transparent 55%
-    ),
-    radial-gradient(
-      ellipse 900px 600px at -5% 110%,
-      oklch(0.65 0.20 20 / 0.10) 0%,
-      transparent 60%
-    );
+    radial-gradient(120% 80% at 50% -10%, rgba(46, 42, 96, 0.55) 0%, transparent 60%),
+    linear-gradient(180deg, #0d0f1c 0%, #11132a 100%);
   --gradient-hero-live: linear-gradient(
     135deg,
-    oklch(0.82 0.18 65 / 0.22) 0%,
-    oklch(0.6 0.22 20 / 0.15) 60%,
-    transparent 100%
-  );
-  --gradient-ambient: radial-gradient(
-    ellipse 1300px 800px at 80% -10%,
-    oklch(0.86 0.18 65 / 0.18) 0%,
-    transparent 65%
+    rgba(139, 140, 245, 0.18) 0%,
+    rgba(74, 110, 143, 0.18) 100%
   );
 
-  --shadow-xs: 0 1px 1px oklch(0 0 0 / 0.4);
-  --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3),
-    0 2px 6px oklch(0 0 0 / 0.35);
-  --shadow-raised: 0 6px 18px oklch(0 0 0 / 0.45),
-    0 2px 6px oklch(0 0 0 / 0.3);
-  --shadow-pop: 0 18px 40px oklch(0 0 0 / 0.55),
-    0 6px 14px oklch(0 0 0 / 0.4);
-  --shadow-glow: 0 0 0 1px oklch(0.82 0.14 70 / 0.30),
-    0 12px 36px oklch(0.82 0.14 70 / 0.25);
+  --shadow-xs: 0 1px 1px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-raised: 0 6px 18px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-pop: 0 18px 40px rgba(0, 0, 0, 0.55),
+    0 6px 14px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 0 1px rgba(139, 140, 245, 0.30),
+    0 12px 36px rgba(139, 140, 245, 0.30);
 }
 
 @theme inline {
@@ -284,11 +252,11 @@
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 4px);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-xl: calc(var(--radius) + 8px);
+  --radius-2xl: calc(var(--radius) + 16px);
 
   --shadow-xs: var(--shadow-xs);
   --shadow-card: var(--shadow-card);
@@ -296,9 +264,9 @@
   --shadow-pop: var(--shadow-pop);
   --shadow-glow: var(--shadow-glow);
 
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --font-display: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: "Fraunces", "Iowan Old Style", "Georgia", serif;
 }
 
 @layer base {
@@ -311,6 +279,8 @@
     font-family: var(--font-sans);
     font-size: 14px;
     font-feature-settings: "cv11", "ss01", "ss03", "ss04";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
   body {
     margin: 0;
@@ -320,42 +290,63 @@
     background-repeat: no-repeat;
     background-size: 100% 100%;
     position: relative;
+    isolation: isolate;
   }
-  /* Paper grain — warmer, slightly more present than the old version
-     so surfaces feel tactile rather than digital. */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    opacity: 0.03;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0.96 0 0 0 0 0.82 0 0 0 0 0.62 0 0 0 0.55 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    background-size: 200px 200px;
-  }
-  .dark body::before {
-    opacity: 0.06;
-  }
-  /* Ambient lamp — a slow warm halo that breathes behind the UI.
-     `transform` + `opacity` only so it stays on the compositor.
-     `prefers-reduced-motion` users get a static glow. */
+  /* Drifting aurora — the website's signature ambient backdrop, ported to
+     the app shell. Four soft pastel orbs float behind the canvas; each one
+     is GPU-cheap (transform + opacity), and `prefers-reduced-motion`
+     freezes them in place. They sit at z-index 0 so all content stays on
+     top via the `body > #root` rule below. */
+  body::before,
   body::after {
     content: "";
     position: fixed;
+    pointer-events: none;
+    z-index: 0;
+    border-radius: 50%;
+    filter: blur(80px);
+    will-change: transform;
+  }
+  body::before {
+    width: 60vw;
+    height: 60vw;
+    left: -10vw;
+    top: -10vw;
+    background: radial-gradient(circle at 50% 50%, var(--aurora-lavender), transparent 70%);
+    opacity: 0.55;
+    animation: aurora-a 32s ease-in-out infinite alternate;
+  }
+  body::after {
+    width: 55vw;
+    height: 55vw;
+    right: -12vw;
+    top: 10vh;
+    background: radial-gradient(circle at 50% 50%, var(--aurora-mist), transparent 70%);
+    opacity: 0.5;
+    animation: aurora-b 38s ease-in-out infinite alternate;
+  }
+  .dark body::before { opacity: 0.35; }
+  .dark body::after { opacity: 0.30; }
+  @media (prefers-reduced-motion: reduce) {
+    body::before,
+    body::after { animation: none; }
+  }
+  /* Faint film grain so gradients feel material, not plastic. Layered on
+     a fixed pseudo-element of #root so it tracks with content but stays
+     behind everything interactive. */
+  body > #root::before {
+    content: "";
+    position: fixed;
     inset: 0;
     pointer-events: none;
     z-index: 0;
-    background-image: var(--gradient-ambient);
-    background-repeat: no-repeat;
-    background-size: 140% 140%;
-    background-position: 50% 0%;
-    will-change: opacity, transform;
-    animation: ambient-breathe 22s ease-in-out infinite;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    opacity: 0.5;
+    mix-blend-mode: multiply;
   }
-  @media (prefers-reduced-motion: reduce) {
-    body::after {
-      animation: none;
-    }
+  .dark body > #root::before {
+    mix-blend-mode: screen;
+    opacity: 0.18;
   }
   /* Keep app content above the ambient/grain layers. */
   body > #root,
@@ -363,14 +354,30 @@
     position: relative;
     z-index: 1;
   }
+  /* Display headings use Fraunces (serif), tightened tracking, exactly
+     like the marketing site. UI chrome (sidebar, buttons, body copy)
+     stays on Inter for readability at small sizes. */
   h1, h2, h3, h4 {
-    letter-spacing: -0.018em;
-  }
-  /* Selection in the brand colour rather than browser default */
-  ::selection {
-    background: oklch(from var(--primary) l c h / 0.32);
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: -0.022em;
     color: var(--foreground);
   }
+  h1 { letter-spacing: -0.035em; }
+  /* Selection in the brand colour rather than browser default */
+  ::selection {
+    background: rgba(107, 108, 240, 0.22);
+    color: var(--foreground);
+  }
+}
+
+@keyframes aurora-a {
+  0%   { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(6vw, 8vh) scale(1.12); }
+}
+@keyframes aurora-b {
+  0%   { transform: translate(0, 0) scale(1.05); }
+  100% { transform: translate(-8vw, 6vh) scale(0.95); }
 }
 
 /* Electron titlebar drag region */
@@ -396,7 +403,7 @@
   background-image: var(--gradient-hero-live);
 }
 .bg-gradient-ambient {
-  background-image: var(--gradient-ambient);
+  background-image: var(--gradient-page);
 }
 .text-gradient-brand {
   background-image: var(--gradient-brand);
@@ -405,28 +412,34 @@
   color: transparent;
 }
 
-/* Brand-gradient primary CTA */
+/* Brand-gradient primary CTA — matches the website's pill button feel */
 .btn-brand {
-  background-image: var(--gradient-brand);
-  color: white;
-  box-shadow: var(--shadow-card);
-  transition: box-shadow 180ms ease, transform 150ms ease, filter 180ms ease;
+  background: var(--foreground);
+  color: var(--background);
+  box-shadow: var(--shadow-card), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  transition: box-shadow 220ms ease, transform 180ms ease, background 220ms ease;
 }
 .btn-brand:hover {
-  filter: brightness(1.05) saturate(1.06);
-  box-shadow: var(--shadow-glow);
+  background: #1c1f36;
+  box-shadow: var(--shadow-raised);
+  transform: translateY(-1px);
 }
 .btn-brand:active {
-  filter: brightness(0.96);
-  transform: translateY(1px);
+  transform: translateY(0);
+}
+.dark .btn-brand {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.dark .btn-brand:hover {
+  background: #a4a5f7;
 }
 
-/* True frosted-glass surface — used for sidebar and floating overlays.
-   Falls back to a solid surface where backdrop-filter isn't supported. */
+/* True frosted-glass surface — used for sidebar and floating overlays. */
 .glass-pane {
   background-color: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
 }
 @supports not (backdrop-filter: blur(1px)) {
   .glass-pane {
@@ -436,19 +449,83 @@
 
 /* Display typography */
 .text-display {
+  font-family: var(--font-display);
   font-size: var(--text-display);
   line-height: 1.02;
-  letter-spacing: -0.025em;
-  font-weight: 600;
+  letter-spacing: -0.035em;
+  font-weight: 500;
 }
 .text-hero {
+  font-family: var(--font-display);
   font-size: var(--text-hero);
   line-height: 1.08;
-  letter-spacing: -0.02em;
-  font-weight: 600;
+  letter-spacing: -0.025em;
+  font-weight: 500;
 }
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* "beside" wordmark — gradient ink that mirrors the site brand */
+.brand-wordmark {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.055em;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0.12) 23%, transparent 42%),
+    linear-gradient(135deg, #4f1276 0%, #1d1f72 48%, #05aee0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.6));
+}
+.dark .brand-wordmark {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.20) 0%, transparent 50%),
+    linear-gradient(135deg, #c8c9fb 0%, #8b8cf5 50%, #6b6cf0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: none;
+}
+
+/* Brand mark "thinking" state — used while the runtime is doing
+   intensive background work (indexing, reorganising, full re-index).
+   The container gets a slow breathing violet halo and the logo itself
+   floats with a gentle bob + tilt, evoking a small creature at work
+   beside you. Both animations are GPU-cheap (transform + box-shadow on
+   a single element) and pause for `prefers-reduced-motion`. */
+.brand-mark-busy {
+  animation: brand-mark-halo 2.6s ease-in-out infinite;
+}
+.brand-mark-img-busy {
+  transform-origin: 50% 60%;
+  animation: brand-mark-bob 2.6s ease-in-out infinite;
+}
+@keyframes brand-mark-halo {
+  0%, 100% {
+    box-shadow:
+      var(--shadow-card),
+      0 0 0 0 rgba(107, 108, 240, 0.0),
+      0 0 0 0 rgba(107, 108, 240, 0.0);
+  }
+  50% {
+    box-shadow:
+      var(--shadow-card),
+      0 0 0 3px rgba(107, 108, 240, 0.18),
+      0 6px 22px rgba(107, 108, 240, 0.35);
+  }
+}
+@keyframes brand-mark-bob {
+  0%   { transform: translateY(0)    rotate(0deg);   }
+  25%  { transform: translateY(-1.5px) rotate(-3deg); }
+  50%  { transform: translateY(-2.5px) rotate(0deg);  }
+  75%  { transform: translateY(-1.5px) rotate(3deg);  }
+  100% { transform: translateY(0)    rotate(0deg);   }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-mark-busy,
+  .brand-mark-img-busy { animation: none; }
 }
 
 /* Refined scrollbars */
@@ -471,7 +548,6 @@
   background-clip: content-box;
 }
 
-/* Hide scrollbars where we explicitly want a clean horizontal strip */
 .scrollbar-none::-webkit-scrollbar {
   display: none;
 }
@@ -496,22 +572,18 @@
   background: linear-gradient(
     90deg,
     transparent 0%,
-    oklch(from var(--foreground) l c h / 0.06) 50%,
+    rgba(21, 24, 42, 0.06) 50%,
     transparent 100%
   );
   background-size: 200% 100%;
   animation: shimmer 1.8s linear infinite;
 }
-
-/* Ambient lamp breathing — slow, never distracting. The drift gives
-   the impression that the room around the UI is alive. */
-@keyframes ambient-breathe {
-  0%, 100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    opacity: 0.78;
-    transform: translate3d(-1.5%, -2%, 0) scale(1.04);
-  }
+.dark .shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.06) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
 }

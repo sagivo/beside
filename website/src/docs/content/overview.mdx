@@ -1,0 +1,66 @@
+# Beside, in one page
+
+Beside is a **local-first AI memory layer** for your computer. It silently
+captures what you do across apps, indexes that activity into a self-organising
+Markdown wiki, and exposes the result to every AI agent you already use through
+the Model Context Protocol (MCP).
+
+The product runs entirely on your machine. Every line of code is open source
+under MIT, the model can be local (Ollama) or hosted (OpenAI / OpenAI-compatible),
+and your raw screenshots, audio, and text never leave your disk unless you
+explicitly export them.
+
+## What you get out of the box
+
+- **A timeline of your work**, built from screenshots, focused windows, URLs,
+  idle/active state, and (optionally) audio with on-device transcription.
+- **A self-organising wiki** at `~/.beside/index/` and a stable mirror at
+  `~/.beside/export/markdown/` — readable, greppable, and diff-friendly.
+- **Sessions, meetings, and day events**, automatically derived from raw
+  activity so the agent gets durable nouns, not just frames.
+- **Semantic search** over both raw frames and the higher-level memory chunks,
+  via local embeddings.
+- **An MCP server on `127.0.0.1:3456`** that any compatible agent — Claude
+  Desktop, Cursor, Windsurf, ChatGPT desktop with MCP — can call into.
+- **A CLI** (`beside`) for status, doctor, init, capture, indexing, MCP, and
+  resets.
+- **A native macOS desktop app** with packaging, auto-update, permissions,
+  and a renderer that can mount custom hook widgets.
+- **A plugin system** that lets you replace any capture, storage, model,
+  index, hook, or export behaviour without forking the product.
+
+## How it’s positioned
+
+Most AI products try to convince you to move your work into them. Beside does
+the opposite: it sits beside whatever you already use and turns it into context
+your AI can recall. That makes it useful on day one, and durable as your
+toolchain changes — the memory is yours, in plain Markdown plus SQLite, on your
+own disk.
+
+The unique selling points worth keeping in mind as you read these docs:
+
+1. **Local-first by construction.** Capture, embeddings, indexing, and the MCP
+   server all run on-device. Hosted models are opt-in.
+2. **Plain Markdown wiki.** No proprietary format. You can read it in any
+   editor, version it in git, or wipe it and rebuild it from raw events.
+3. **Replaceable layers.** Capture, storage, model, index, hooks, export — each
+   one is a typed interface (`ICapture`, `IStorage`, `IModelAdapter`,
+   `IIndexStrategy`, `IHookPlugin`, `IExport`) backed by drop-in plugins.
+4. **MCP-native.** Beside is not a chat UI. The product surface is your existing
+   agent, augmented with persistent memory.
+
+## Where to go from here
+
+| If you want to…                                  | Start with              |
+| ------------------------------------------------ | ----------------------- |
+| Understand the system end-to-end                 | [Architecture](/docs/architecture/) |
+| Install and run the product hands-on             | [Tutorial](/docs/tutorial/) |
+| Tune what gets captured and how                  | [Capture](/docs/capture/) |
+| Decide between local and hosted models           | [Model adapters](/docs/model/) |
+| Reshape the wiki or write a new index strategy   | [Index strategies](/docs/index-layer/) |
+| Add domain-specific intelligence (calendar, follow-ups, …) | [Capture hooks](/docs/hooks/) |
+| Hook Beside into Claude / Cursor / ChatGPT       | [Export & MCP](/docs/export/) |
+| Drive Beside from a terminal or script           | [CLI](/docs/cli/) |
+| Ship Beside as a native app                      | [Desktop app](/docs/desktop/) |
+| Verify what stays on your machine                | [Privacy](/docs/privacy/) |
+| See every config knob                            | [Configuration](/docs/configuration/) |

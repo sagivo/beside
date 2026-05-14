@@ -232,7 +232,7 @@ function AboutCard() {
         <BrandMark className="size-12" />
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-baseline gap-2">
-            <h3 className="text-xl font-semibold tracking-tight">Beside</h3>
+            <h3 className="brand-wordmark text-2xl leading-none">beside</h3>
             <Badge variant="muted" className="font-mono">
               v{__APP_VERSION__}
             </Badge>

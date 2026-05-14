@@ -4,6 +4,7 @@ import {
   FolderOpen,
   HelpCircle,
   LayoutDashboard,
+  NotebookPen,
   Pause,
   Play,
   Plug,
@@ -12,7 +13,6 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
-  Video,
   Wand2,
 } from 'lucide-react';
 import {
@@ -87,7 +87,7 @@ export function CommandPalette({
             <LayoutDashboard /> Dashboard
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('meetings'))}>
-            <Video /> Agenda
+            <NotebookPen /> Journal
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('privacy'))}>
             <ShieldCheck /> Privacy
