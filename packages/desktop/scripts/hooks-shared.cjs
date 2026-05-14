@@ -26,6 +26,24 @@ async function clean() {
   await fsp.rm(stagedImg, { recursive: true, force: true });
 }
 
+async function syncRebuiltPluginNativeModules(appOutDir, productFilename = 'Beside') {
+  const resources = path.join(appOutDir, `${productFilename}.app`, 'Contents', 'Resources');
+  const appUnpacked = path.join(resources, 'app.asar.unpacked', 'node_modules');
+  const pluginNodeModules = path.join(resources, 'beside', 'node_modules');
+
+  const nativeModuleDirs = [
+    'better-sqlite3/build/Release',
+  ];
+
+  for (const rel of nativeModuleDirs) {
+    const src = path.join(appUnpacked, rel);
+    const dst = path.join(pluginNodeModules, rel);
+    if (!fs.existsSync(src) || !fs.existsSync(dst)) continue;
+    await copyDir(src, dst);
+    console.log(`[desktop] synced rebuilt plugin native module ${rel}`);
+  }
+}
+
 const archNames = ['ia32', 'x64', 'armv7l', 'arm64', 'universal'];
 
 async function stageSharpForArch(electronPlatformName, archIndex) {
@@ -57,4 +75,4 @@ async function stageSharpForArch(electronPlatformName, archIndex) {
   console.log(`[desktop] staged sharp + @img/{${required.join(', ')}} for ${platform}-${archName}`);
 }
 
-module.exports = { stageSharpForArch, clean };
+module.exports = { stageSharpForArch, syncRebuiltPluginNativeModules, clean };

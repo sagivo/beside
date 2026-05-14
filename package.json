@@ -46,7 +46,7 @@
     "@types/node": "^22.7.4",
     "@types/screenshot-desktop": "^1.12.3",
     "active-win": "^9.0.0",
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "^12.10.0",
     "concurrently": "^9.2.1",
     "cross-env": "^10.1.0",
     "ollama": "^0.5.9",

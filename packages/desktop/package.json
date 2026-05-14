@@ -39,6 +39,8 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tailwindcss/vite": "^4.2.4",
+    "active-win": "^9.0.0",
+    "better-sqlite3": "^12.10.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -48,6 +50,7 @@
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "screenshot-desktop": "^1.15.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.4",
@@ -93,7 +96,18 @@
     "extraResources": [
       {
         "from": "build/resources/beside",
+        "filter": [
+          "**/*",
+          "!node_modules/**"
+        ],
         "to": "beside"
+      },
+      {
+        "from": "build/resources/beside/node_modules",
+        "to": "beside/node_modules",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {
