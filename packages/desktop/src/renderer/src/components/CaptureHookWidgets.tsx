@@ -39,7 +39,7 @@ type WidgetFactory = (api: HookWidgetApi) => React.ComponentType;
 
 const widgetModuleCache = new Map<string, WidgetFactory>();
 
-export function CaptureHookWidgets(): JSX.Element | null {
+export function CaptureHookWidgets(): React.JSX.Element | null {
   const [manifests, setManifests] = React.useState<CaptureHookWidgetManifestRuntime[] | null>(null);
   const [updateTick, setUpdateTick] = React.useState(0);
 
@@ -60,7 +60,7 @@ export function CaptureHookWidgets(): JSX.Element | null {
 
   React.useEffect(() => {
     if (typeof window.beside.onCaptureHookUpdate !== 'function') return;
-    window.beside.onCaptureHookUpdate(() => setUpdateTick((t) => t + 1));
+    return window.beside.onCaptureHookUpdate(() => setUpdateTick((t) => t + 1));
   }, []);
 
   if (manifests == null) return null;
@@ -75,7 +75,7 @@ export function CaptureHookWidgets(): JSX.Element | null {
   );
 }
 
-function HookWidgetCard({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): JSX.Element {
+function HookWidgetCard({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): React.JSX.Element {
   return (
     <div className="rounded-lg border bg-card/70 p-4 shadow-card">
       <header className="mb-3 flex items-center gap-2">
@@ -92,7 +92,7 @@ function HookWidgetCard({ manifest }: { manifest: CaptureHookWidgetManifestRunti
   );
 }
 
-function HookWidgetBody({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): JSX.Element {
+function HookWidgetBody({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): React.JSX.Element {
   if (manifest.resolvedBundlePath) {
     return <PluginWidget manifest={manifest} />;
   }
@@ -103,7 +103,7 @@ function HookWidgetBody({ manifest }: { manifest: CaptureHookWidgetManifestRunti
 // Plugin-provided widget loader
 // ---------------------------------------------------------------------------
 
-function PluginWidget({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): JSX.Element {
+function PluginWidget({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): React.JSX.Element {
   const [Component, setComponent] = React.useState<React.ComponentType | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -196,10 +196,10 @@ function buildWidgetApi(manifest: CaptureHookWidgetManifestRuntime): HookWidgetA
       React.useEffect(() => {
         refresh().catch(() => undefined);
         if (typeof window.beside.onCaptureHookUpdate !== 'function') return;
-        window.beside.onCaptureHookUpdate((p) => {
+        return window.beside.onCaptureHookUpdate((p) => {
           if (p.hookId === manifest.hookId) refresh().catch(() => undefined);
         });
-      }, [refresh]);
+      }, [refresh, manifest.hookId]);
       return { records, loading, refresh };
     },
   };
@@ -209,7 +209,7 @@ function buildWidgetApi(manifest: CaptureHookWidgetManifestRuntime): HookWidgetA
 // Built-in widgets (used by config-defined hooks without a custom bundle)
 // ---------------------------------------------------------------------------
 
-function BuiltinWidget({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): JSX.Element {
+function BuiltinWidget({ manifest }: { manifest: CaptureHookWidgetManifestRuntime }): React.JSX.Element {
   const collection = manifest.widget.defaultCollection;
   const { records, loading } = useHookRecords(manifest.hookId, collection ? { collection } : {});
   const diagnostics = useHookDiagnostics(manifest.hookId);
@@ -256,7 +256,7 @@ function useHookRecords(hookId: string, query: CaptureHookStorageQuery) {
       }
     })();
     if (typeof window.beside.onCaptureHookUpdate === 'function') {
-      window.beside.onCaptureHookUpdate(async (p) => {
+      const unsubscribe = window.beside.onCaptureHookUpdate(async (p) => {
         if (cancelled) return;
         if (p.hookId !== hookId) return;
         try {
@@ -265,6 +265,10 @@ function useHookRecords(hookId: string, query: CaptureHookStorageQuery) {
           // ignore
         }
       });
+      return () => {
+        cancelled = true;
+        unsubscribe();
+      };
     }
     return () => {
       cancelled = true;
@@ -273,7 +277,7 @@ function useHookRecords(hookId: string, query: CaptureHookStorageQuery) {
   return { records, loading };
 }
 
-function CalendarBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.Element {
+function CalendarBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
   const allItems = records.flatMap((r) => extractCalendarItems(r));
   const now = Date.now();
   const upcoming = allItems
@@ -300,7 +304,7 @@ function CalendarBuiltinWidget({ records }: { records: CaptureHookRecord[] }): J
   );
 }
 
-function FollowupsBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.Element {
+function FollowupsBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
   const items = records.flatMap((r) => extractFollowupItems(r));
   if (items.length === 0)
     return <p className="text-sm text-muted-foreground">No follow-ups yet.</p>;
@@ -323,7 +327,7 @@ function FollowupsBuiltinWidget({ records }: { records: CaptureHookRecord[] }): 
   );
 }
 
-function ListBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.Element {
+function ListBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
   return (
     <ul className="flex flex-col gap-2 text-sm">
       {records.slice(0, 10).map((r) => (
@@ -343,7 +347,7 @@ function ListBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.E
   );
 }
 
-function JsonBuiltinWidget({ records }: { records: CaptureHookRecord[] }): JSX.Element {
+function JsonBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
   return (
     <pre className="max-h-72 overflow-auto rounded-md border bg-background/40 p-2 text-[11px]">
       {JSON.stringify(records, null, 2)}
@@ -467,7 +471,7 @@ function useHookDiagnostics(hookId: string): CaptureHookDiagnostics | null {
   return diagnostics;
 }
 
-function EmptyHookState({ diagnostics }: { diagnostics: CaptureHookDiagnostics | null }): JSX.Element {
+function EmptyHookState({ diagnostics }: { diagnostics: CaptureHookDiagnostics | null }): React.JSX.Element {
   if (!diagnostics) {
     return (
       <p className="text-sm text-muted-foreground">

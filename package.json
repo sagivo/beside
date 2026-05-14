@@ -1,6 +1,6 @@
 {
   "name": "beside",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "private": true,
   "description": "AI-powered device capture, knowledge indexing, and agent memory system.",
   "license": "MIT",
@@ -39,6 +39,8 @@
   "devDependencies": {
     "@beside/core": "workspace:*",
     "@beside/interfaces": "workspace:*",
+    "@img/sharp-darwin-x64": "0.33.5",
+    "@img/sharp-libvips-darwin-x64": "1.0.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.7.4",

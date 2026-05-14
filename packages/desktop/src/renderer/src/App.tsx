@@ -29,9 +29,12 @@ function AppInner() {
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => { try { return localStorage.getItem(ONBOARDING_KEY) !== '1'; } catch { return true; } });
 
   React.useEffect(() => {
-    window.beside?.onDesktopLogs?.(l => setLogs(l || ''));
-    window.beside?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p]));
-    window.beside?.onOverview?.(setOverview);
+    const cleanups = [
+      window.beside?.onDesktopLogs?.(l => setLogs(l || '')),
+      window.beside?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p])),
+      window.beside?.onOverview?.(setOverview),
+    ].filter((cleanup): cleanup is () => void => typeof cleanup === 'function');
+    return () => cleanups.forEach(cleanup => cleanup());
   }, []);
 
   React.useEffect(() => { if (!showOnboarding) loadScreen(screen); }, [screen, showOnboarding]);

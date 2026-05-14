@@ -50,7 +50,7 @@ const BUILTIN_WIDGET_OPTIONS = [
   { value: 'json', label: 'Raw JSON' },
 ];
 
-export function HookSettings({ config, onSaved }: HookSettingsProps): JSX.Element {
+export function HookSettings({ config, onSaved }: HookSettingsProps): React.JSX.Element {
   const [hooksEnabled, setHooksEnabled] = React.useState(true);
   const [pluginRefs, setPluginRefs] = React.useState<Array<{ name: string; enabled: boolean }>>([]);
   const [definitions, setDefinitions] = React.useState<CaptureHookDefinition[]>([]);
@@ -354,7 +354,7 @@ function PluginRow({
   diagnostics: CaptureHookDiagnostics[];
   onToggle: (enabled: boolean) => void;
   onRemove: () => void;
-}): JSX.Element {
+}): React.JSX.Element {
   return (
     <div className="flex flex-col gap-2 rounded-md border bg-background/55 p-3">
       <div className="flex items-center justify-between gap-4">
@@ -398,7 +398,7 @@ function AddPluginRow({
 }: {
   existing: string[];
   onAdd: (name: string) => void;
-}): JSX.Element {
+}): React.JSX.Element {
   const [custom, setCustom] = React.useState('');
   const missingBuiltins = BUILTIN_PLUGIN_NAMES.filter((b) => !existing.includes(b));
   return (
@@ -451,7 +451,7 @@ function DefinitionRow({
   diagnostics: CaptureHookDiagnostics | null;
   onEdit: () => void;
   onDelete: () => void;
-}): JSX.Element {
+}): React.JSX.Element {
   const inputKinds = def.match.inputKinds ?? ['screen'];
   const triggerCount =
     (def.match.apps?.length ?? 0) +
@@ -504,7 +504,7 @@ function DefinitionRow({
   );
 }
 
-function DiagnosticsLine({ diagnostics }: { diagnostics: CaptureHookDiagnostics }): JSX.Element {
+function DiagnosticsLine({ diagnostics }: { diagnostics: CaptureHookDiagnostics }): React.JSX.Element {
   const status: { tone: 'ok' | 'warn' | 'error' | 'idle'; label: string } = (() => {
     if (diagnostics.lastError) return { tone: 'error', label: diagnostics.lastError };
     if (diagnostics.stored > 0) return { tone: 'ok', label: `last stored ${formatTimeAgo(diagnostics.lastStoredAt)}` };
@@ -652,7 +652,7 @@ function HookEditorDialog({
   existingIds: string[];
   onClose: () => void;
   onSave: (def: CaptureHookDefinition) => void;
-}): JSX.Element {
+}): React.JSX.Element {
   const [draft, setDraft] = React.useState<EditorDraft>(blankDraft);
   React.useEffect(() => {
     if (!open) return;
@@ -871,7 +871,7 @@ function InputKindPicker({
 }: {
   value: CaptureHookInputKind[];
   onChange: (v: CaptureHookInputKind[]) => void;
-}): JSX.Element {
+}): React.JSX.Element {
   return (
     <div className="flex flex-wrap gap-2">
       {INPUT_KIND_OPTIONS.map((opt) => {
@@ -915,7 +915,7 @@ function HookSaveBar({
   onSave: () => void;
   onSaveAndRestart: () => void;
   onReset: () => void;
-}): JSX.Element | null {
+}): React.JSX.Element | null {
   if (!hasUnsavedChanges) return null;
   return (
     <div

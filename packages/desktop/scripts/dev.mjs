@@ -299,7 +299,7 @@ async function main() {
   const schedulePluginBuild = createDebouncedTask('plugin build', buildPlugins, 800);
   watchers = [
     ...watchRecursive('desktop preload', path.join(desktopRoot, 'src'), (relPath) => {
-      if (relPath === 'preload.cjs') schedulePreloadCopy();
+      if (relPath === 'preload.ts') schedulePreloadCopy();
     }),
     ...watchRecursive('desktop native helper', path.join(desktopRoot, 'native'), () => {
       scheduleDesktopNativeBuild();

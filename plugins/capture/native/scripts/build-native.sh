@@ -7,6 +7,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/native/capture.swift"
+BUILD_ARCH="${BESIDE_BUILD_ARCH:-${npm_config_arch:-$(uname -m)}}"
 
 case "$(uname -s)" in
   Darwin)
@@ -18,15 +19,18 @@ case "$(uname -s)" in
     ;;
 esac
 
-case "$(uname -m)" in
+case "$BUILD_ARCH" in
   arm64|aarch64)
     ARCH="arm64"
+    SWIFT_TARGET="arm64-apple-macosx12.0"
     ;;
-  x86_64|amd64)
+  x64|x86_64|amd64)
     ARCH="x64"
+    SWIFT_TARGET="x86_64-apple-macosx12.0"
     ;;
   *)
-    ARCH="$(uname -m)"
+    ARCH="$BUILD_ARCH"
+    SWIFT_TARGET=""
     ;;
 esac
 
@@ -40,11 +44,16 @@ fi
 
 mkdir -p "$DST_DIR"
 
-if [ -x "$DST" ] && [ "$DST" -nt "$SRC" ]; then
+if [ -z "${BESIDE_BUILD_ARCH:-}" ] && [ -x "$DST" ] && [ "$DST" -nt "$SRC" ]; then
   exit 0
 fi
 
-if swiftc -O "$SRC" -o "$DST" 2>&1; then
+SWIFT_ARGS=(-O)
+if [ -n "$SWIFT_TARGET" ]; then
+  SWIFT_ARGS+=(-target "$SWIFT_TARGET")
+fi
+
+if swiftc "${SWIFT_ARGS[@]}" "$SRC" -o "$DST" 2>&1; then
   chmod +x "$DST"
   echo "[capture-native] built native helper at $DST"
 else

@@ -56,3 +56,4 @@ await fs.writeFile(
 );
 
 console.log(`[desktop] prepared package resources at ${path.relative(repoRoot, outRoot)}`);
+

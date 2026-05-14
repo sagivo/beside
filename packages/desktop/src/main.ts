@@ -159,12 +159,13 @@ function createElectronTrayFallback() {
 
 function startNativeStatusItem() {
   try {
-    statusItemHelper = spawn(path.resolve(here, 'native/beside-status-item'), [], { stdio: ['pipe', 'pipe', 'pipe'] });
-    statusItemHelper.stdout?.setEncoding('utf8').on('data', (c) => c.split(/\r?\n/).filter(Boolean).forEach((l: string) => {
+    const helper = spawn(path.resolve(here, 'native/beside-status-item'), [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    statusItemHelper = helper;
+    helper.stdout?.setEncoding('utf8').on('data', (c) => c.split(/\r?\n/).filter(Boolean).forEach((l: string) => {
       try { const m = JSON.parse(l); if (m.kind === 'show-status') showStatusWindow(); if (m.kind === 'quit') app.quit(); if (m.kind === 'ready') applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); } catch {}
     }));
-    statusItemHelper.on('exit', () => { if (statusItemHelper === statusItemHelper) statusItemHelper = null; });
-    statusItemHelper.on('error', () => { if (statusItemHelper === statusItemHelper) statusItemHelper = null; });
+    helper.on('exit', () => { if (statusItemHelper === helper) statusItemHelper = null; });
+    helper.on('error', () => { if (statusItemHelper === helper) statusItemHelper = null; });
     return true;
   } catch { return false; }
 }
@@ -330,8 +331,10 @@ async function renderStatusWindow() {
 
 async function startRuntime() {
   if (managedRuntime) { try { await managedRuntime.call('start'); } catch (err) { dialog.showErrorBox('Start failed', String(err)); } finally { await refreshTray(); } return; }
-  managedRuntime = new RuntimeServiceClient();
-  try { await managedRuntime.call('start'); } catch (err) { managedRuntime.close(); managedRuntime = null; dialog.showErrorBox('Start failed', String(err)); }
+  const rt = new RuntimeServiceClient();
+  managedRuntime = rt;
+  try { await rt.call('start'); }
+  catch (err) { try { rt.close(); } catch {} if (managedRuntime === rt) managedRuntime = null; dialog.showErrorBox('Start failed', String(err)); }
   finally { await refreshTray(); if (statusWindow) await renderStatusWindow(); }
 }
 

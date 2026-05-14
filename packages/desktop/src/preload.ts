@@ -1,4 +1,12 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+
+function onIpc<T>(channel: string, callback: (payload: T) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: T) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => {
+    ipcRenderer.removeListener(channel, listener);
+  };
+}
 
 const api = {
   getOverview: () => ipcRenderer.invoke('beside:overview'),
@@ -49,16 +57,16 @@ const api = {
     ipcRenderer.invoke('beside:open-permission-settings', kind),
   relaunchApp: () => ipcRenderer.invoke('beside:relaunch-app'),
   onDesktopLogs: (callback: (logs: string) => void) => {
-    ipcRenderer.on('beside:desktop-logs', (_event, logs: string) => callback(logs));
+    return onIpc('beside:desktop-logs', callback);
   },
   onBootstrapProgress: (callback: (progress: unknown) => void) => {
-    ipcRenderer.on('beside:bootstrap-progress', (_event, progress: unknown) => callback(progress));
+    return onIpc('beside:bootstrap-progress', callback);
   },
   onWhisperInstallProgress: (callback: (event: unknown) => void) => {
-    ipcRenderer.on('beside:whisper-install-progress', (_e, event: unknown) => callback(event));
+    return onIpc('beside:whisper-install-progress', callback);
   },
   onOverview: (callback: (overview: unknown) => void) => {
-    ipcRenderer.on('beside:overview', (_event, overview: unknown) => callback(overview));
+    return onIpc('beside:overview', callback);
   },
   listMeetings: (query?: { from?: string; to?: string; limit?: number }) =>
     ipcRenderer.invoke('beside:list-meetings', query),
@@ -82,7 +90,7 @@ const api = {
   readCaptureHookWidgetBundle: (params: { resolvedBundlePath: string }) =>
     ipcRenderer.invoke('beside:read-capture-hook-widget-bundle', params),
   onCaptureHookUpdate: (callback: (payload: { hookId: string }) => void) => {
-    ipcRenderer.on('beside:capture-hook-update', (_event, payload) => callback(payload));
+    return onIpc('beside:capture-hook-update', callback);
   },
 };
 

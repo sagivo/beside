@@ -10,10 +10,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/native/axtext.swift"
 DST_DIR="$ROOT/dist/native"
 DST="$DST_DIR/axtext"
+BUILD_ARCH="${BESIDE_BUILD_ARCH:-${npm_config_arch:-$(uname -m)}}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   exit 0
 fi
+
+case "$BUILD_ARCH" in
+  arm64|aarch64)
+    SWIFT_TARGET="arm64-apple-macosx12.0"
+    ;;
+  x64|x86_64|amd64)
+    SWIFT_TARGET="x86_64-apple-macosx12.0"
+    ;;
+  *)
+    SWIFT_TARGET=""
+    ;;
+esac
 
 if ! command -v swiftc >/dev/null 2>&1; then
   echo "[capture-node] swiftc not found — skipping native AX helper build (run will fall back to OCR-only)." >&2
@@ -27,12 +40,17 @@ fi
 mkdir -p "$DST_DIR"
 
 # Skip rebuild if binary is newer than source (saves ~20s on every build).
-if [ -x "$DST" ] && [ "$DST" -nt "$SRC" ]; then
+if [ -z "${BESIDE_BUILD_ARCH:-}" ] && [ -x "$DST" ] && [ "$DST" -nt "$SRC" ]; then
   exit 0
 fi
 
-if swiftc -O "$SRC" -o "$DST" 2>&1; then
-  echo "[capture-node] built native/axtext"
+SWIFT_ARGS=(-O)
+if [ -n "$SWIFT_TARGET" ]; then
+  SWIFT_ARGS+=(-target "$SWIFT_TARGET")
+fi
+
+if swiftc "${SWIFT_ARGS[@]}" "$SRC" -o "$DST" 2>&1; then
+  echo "[capture-node] built native/axtext${SWIFT_TARGET:+ for $SWIFT_TARGET}"
 else
   echo "[capture-node] swiftc failed; AX helper will be skipped at runtime" >&2
   rm -f "$DST"

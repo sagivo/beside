@@ -1,7 +1,8 @@
 import "./styles.css";
 import DocsPage from "./docs/DocsPage";
 
-const DOWNLOAD_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-0.2.0-mac-arm64.dmg";
+const DOWNLOAD_ARM_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-0.0.1-mac-arm64.dmg";
+const DOWNLOAD_INTEL_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-0.0.1-mac-x64.dmg";
 
 export default function App({ initialPath }: { initialPath?: string } = {}) {
   const pathname = initialPath ?? (typeof window === "undefined" ? "/" : window.location.pathname);
@@ -62,11 +63,18 @@ function LandingPage() {
               </p>
 
               <div className="btn-row">
-                <a className="btn btn-primary" href={DOWNLOAD_URL} id="download">
+                <a className="btn btn-primary" href={DOWNLOAD_ARM_URL} id="download">
                   <DownloadIcon />
                   <span>
                     Download for Mac
                     <small>macOS 12+ · Apple silicon</small>
+                  </span>
+                </a>
+                <a className="btn btn-ghost" href={DOWNLOAD_INTEL_URL}>
+                  <DownloadIcon />
+                  <span>
+                    Intel Mac
+                    <small>macOS 12+ · Intel</small>
                   </span>
                 </a>
                 <a
@@ -359,10 +367,17 @@ function LandingPage() {
                 get the context that has been working beside you all along.
               </p>
               <div className="btn-row">
-                <a className="btn btn-primary" href={DOWNLOAD_URL}>
+                <a className="btn btn-primary" href={DOWNLOAD_ARM_URL}>
                   <DownloadIcon />
                   <span>
-                    Download for Mac
+                    Download for Apple silicon
+                    <small>Free forever · macOS 12+</small>
+                  </span>
+                </a>
+                <a className="btn btn-ghost" href={DOWNLOAD_INTEL_URL}>
+                  <DownloadIcon />
+                  <span>
+                    Download for Intel Mac
                     <small>Free forever · macOS 12+</small>
                   </span>
                 </a>

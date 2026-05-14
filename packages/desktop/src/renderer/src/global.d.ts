@@ -59,12 +59,12 @@ declare global {
         kind: 'screen' | 'accessibility' | 'microphone' | 'automation',
       ) => Promise<{ opened: boolean }>;
       relaunchApp: () => Promise<{ relaunching: true }>;
-      onDesktopLogs?: (callback: (logs: string) => void) => void;
-      onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => void;
+      onDesktopLogs?: (callback: (logs: string) => void) => () => void;
+      onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => () => void;
       onWhisperInstallProgress?: (
         callback: (event: WhisperInstallProgress) => void,
-      ) => void;
-      onOverview?: (callback: (overview: RuntimeOverview) => void) => void;
+      ) => () => void;
+      onOverview?: (callback: (overview: RuntimeOverview) => void) => () => void;
       listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
       listDayEvents: (query?: {
         day?: string;
@@ -79,7 +79,7 @@ declare global {
       queryCaptureHookStorage: (params: { hookId: string; query?: CaptureHookStorageQuery }) => Promise<CaptureHookRecord[]>;
       mutateCaptureHookStorage: (params: { hookId: string; mutation: CaptureHookStorageMutation }) => Promise<CaptureHookRecord | null>;
       readCaptureHookWidgetBundle: (params: { resolvedBundlePath: string }) => Promise<{ source: string }>;
-      onCaptureHookUpdate?: (callback: (payload: { hookId: string }) => void) => void;
+      onCaptureHookUpdate?: (callback: (payload: { hookId: string }) => void) => () => void;
       triggerEventExtractor: () => Promise<{
         meetingsLifted: number;
         llmExtracted: number;

@@ -3,6 +3,7 @@ node_modules/
 dist/
 packages/desktop/build/
 packages/desktop/release/
+packages/desktop/release-*/
 *.tsbuildinfo
 coverage/
 eng.traineddata

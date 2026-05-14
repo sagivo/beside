@@ -1,6 +1,6 @@
 {
   "name": "@beside/desktop",
-  "version": "0.2.0",
+  "version": "0.0.1",
   "private": true,
   "description": "Desktop interface for Beside local memory capture and journals.",
   "author": "Beside",
@@ -78,9 +78,17 @@
         "releaseType": "release"
       }
     ],
+    "beforePack": "scripts/before-pack.cjs",
+    "afterPack": "scripts/after-pack.cjs",
     "files": [
       "dist/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/sharp/**",
+      "node_modules/@img/**"
+    ],
+    "asarUnpack": [
+      "node_modules/sharp/**/*.node",
+      "node_modules/@img/**"
     ],
     "extraResources": [
       {
