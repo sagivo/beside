@@ -85,9 +85,9 @@ Beside.
 | `BESIDE_CONFIG` | Path to the YAML config file. Overrides the `~/.beside/config.yaml` lookup. |
 | `BESIDE_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/beside` on Linux or `%APPDATA%\beside` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
 | `BESIDE_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
-| `BESIDE_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Used by CI to run `capture --once` on headless Linux/macOS/Windows runners. |
+| `BESIDE_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Useful for smoke tests and headless automation. |
 | `NO_COLOR` | Disable ANSI colour output (logs + status). |
-| `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY (CI logs that render ANSI). |
+| `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY. |
 
 ---
 
@@ -201,31 +201,39 @@ instructions — the rest of the pipeline keeps running.
 
 The desktop app uses `electron-builder` with GitHub Releases as the update
 feed. Packaged builds check for updates on launch, every six hours, and from
-the tray menu's **Check for Updates...** action. A tagged release uploads the
-DMG/ZIP plus `latest-mac.yml`; `electron-updater` reads that metadata to decide
-whether to download and install a newer build.
+the tray menu's **Check for Updates...** action. The release artifacts include
+the DMG/ZIP plus `latest-mac.yml`; `electron-updater` reads that metadata to
+decide whether to download and install a newer build.
 
-Configure these repository secrets before publishing macOS releases:
+Releases are built and signed locally for now. Configure these environment
+variables before producing a macOS release:
 
-| Secret | Purpose |
-|--------|---------|
-| `MACOS_CSC_LINK` | Base64-encoded `.p12` exported from Keychain with the `Developer ID Application` certificate and private key. |
-| `MACOS_CSC_KEY_PASSWORD` | Password for the exported `.p12`. |
-| `APPLE_API_KEY_BASE64` | Base64-encoded App Store Connect `AuthKey_*.p8` file. |
+| Variable | Purpose |
+|----------|---------|
+| `CSC_LINK` | Path or base64 value for a `.p12` exported from Keychain with the `Developer ID Application` certificate and private key. |
+| `CSC_KEY_PASSWORD` | Password for the exported `.p12`. |
+| `APPLE_API_KEY` | Path to the App Store Connect `AuthKey_*.p8` file. |
 | `APPLE_API_KEY_ID` | The App Store Connect API key ID. |
 | `APPLE_API_ISSUER` | The App Store Connect issuer UUID. |
+| `GH_TOKEN` | GitHub token used by `electron-builder` when publishing artifacts to GitHub Releases. |
+
+To create a local signed/notarized macOS build without publishing:
+
+```bash
+pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish never
+```
 
 To publish an update, bump `packages/desktop/package.json`'s version, commit
-the change, tag the same version, and push the tag:
+the change, tag the same version, then build and publish from your local
+machine:
 
 ```bash
 git tag v0.2.1
 git push origin main --tags
+pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish always
 ```
 
-The `desktop-release` workflow builds the macOS Apple Silicon app, signs it
-with Developer ID, notarizes it with Apple, publishes it to GitHub Releases,
-and verifies the final DMG with Gatekeeper.
+There are currently no GitHub Actions release jobs in this repository.
 
 ### Per-OS bootstrap behaviour
 
@@ -357,8 +365,8 @@ For one-off CLI commands against live source (e.g. `stats`, `index --once`):
 pnpm --filter @beside/cli exec tsx src/cli.ts stats
 ```
 
-For headless smoke tests or CI, use the capture fixture. It writes a real
-synthetic screenshot + raw event through the same storage path as normal
+For headless smoke tests or local automation, use the capture fixture. It writes
+a real synthetic screenshot + raw event through the same storage path as normal
 capture without touching desktop APIs or OS permissions:
 
 ```bash
@@ -490,14 +498,15 @@ contract powers wiki indexing, vision calls, and semantic embeddings.
 
 ### Audio transcription
 
-V2 audio starts with a local inbox rather than live system-audio capture.
-Drop transcript files (`.txt`, `.md`, `.vtt`, `.srt`) into the inbox and
-Beside imports them directly. Drop audio files (`.wav`, `.mp3`,
-`.m4a`, `.flac`, `.ogg`, `.opus`, `.webm`, `.mp4`) and Beside runs
-the configured local Whisper CLI, then stores the transcript as an
-`audio_transcript` event. Those transcripts become frames with
-`text_source: audio`, so normal search, sessions, entities, embeddings,
-journals, and MCP tools all pick them up.
+Beside supports two audio paths. Drop transcript files (`.txt`, `.md`,
+`.vtt`, `.srt`) into the inbox and Beside imports them directly. Drop audio
+files (`.wav`, `.mp3`, `.m4a`, `.flac`, `.ogg`, `.opus`, `.webm`, `.mp4`) and
+Beside runs the configured local Whisper CLI, then stores the transcript as an
+`audio_transcript` event. With the native macOS capture plugin, Beside can also
+write live microphone/system-audio chunks into the same inbox for the transcript
+worker to process. Those transcripts become frames with `text_source: audio`, so
+normal search, sessions, entities, embeddings, journals, and MCP tools all pick
+them up.
 
 ```yaml
 capture:
@@ -966,19 +975,19 @@ upward `node_modules` walk without each plugin declaring its own deps.
 
 ---
 
-## Status vs spec v0.2
+## Current status
 
-This implementation tracks the **V1 / MVP** scope from the spec, with two
-explicit substitutions for tractability:
+Beside is usable today as a local-first desktop app plus CLI/runtime:
 
-| Spec component        | Status in this repo |
-|-----------------------|---------------------|
-| Rust capture agent    | Replaced by `plugins/capture/node/` (TypeScript). Same `ICapture` interface, so the Rust agent is a drop-in replacement once built. |
-| Electron tray + UI    | Deferred. CLI exposes the full surface (`beside start/stop/status/...`). Electron is a thin wrapper to be added later. |
-| Audio transcription   | Capture layer surfaces the event types and config knobs; transcription itself is V2. |
-| Cloud storage / models| `IStorage` and `IModelAdapter` are stable; concrete cloud plugins live under `plugins/` and are not part of MVP. |
+| Area | Status in this repo |
+|------|---------------------|
+| Desktop app | Electron tray + renderer are implemented in `packages/desktop/`, with local runtime management, dashboard/search/settings screens, auto-update checks, and packaging via `electron-builder`. |
+| Capture | `plugins/capture/node/` is the default cross-platform capture plugin. `plugins/capture/native/` adds an experimental macOS sidecar for richer metadata, AX text, content-change screenshots, and live audio chunks. |
+| Storage | `plugins/storage/local/` is the default local JSONL + SQLite store under `~/.beside`. |
+| Models | Ollama is the default local model adapter; OpenAI-compatible hosted APIs are available through the `openai` plugin. |
+| Index/export | The Karpathy wiki strategy, Markdown export, built-in MCP server, semantic embeddings, full re-index, and raw-event replay are implemented. |
+| Hooks/widgets | Capture hooks and dashboard widgets ship with calendar and follow-up examples under `plugins/hook/`. |
+| Cloud storage | The `IStorage` interface is stable, but this repo currently ships only the local storage plugin. |
 
-Everything else (the four layer interfaces, plugin loader, default storage,
-default model adapter, Karpathy strategy with self-reorganisation, Markdown
-export, built-in MCP server, CLI, full re-index from raw) is implemented and
-runnable.
+GitHub Actions are intentionally disabled for now. Desktop releases are signed
+and published locally as described above.
