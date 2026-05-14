@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import "./styles.css";
 import DocsPage from "./docs/DocsPage";
 
@@ -12,6 +13,131 @@ export default function App({ initialPath }: { initialPath?: string } = {}) {
   }
 
   return <LandingPage />;
+}
+
+type MacArch = "arm" | "intel" | "unknown";
+
+function useDetectedMacArch(): MacArch {
+  const [arch, setArch] = useState<MacArch>("unknown");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function detect() {
+      if (typeof navigator === "undefined") return;
+      const uaData = (navigator as unknown as {
+        userAgentData?: {
+          platform?: string;
+          getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string; platform?: string }>;
+        };
+      }).userAgentData;
+      try {
+        if (uaData?.getHighEntropyValues) {
+          const values = await uaData.getHighEntropyValues(["architecture", "platform"]);
+          if (cancelled) return;
+          const platform = (values.platform || uaData.platform || "").toLowerCase();
+          if (platform.includes("mac")) {
+            setArch(values.architecture === "arm" ? "arm" : "intel");
+            return;
+          }
+        }
+      } catch {
+        // fall through to heuristic
+      }
+
+      const ua = navigator.userAgent || "";
+      if (!/Mac/i.test(ua)) {
+        setArch("unknown");
+        return;
+      }
+      // Safari/Firefox don't expose architecture. Use a WebGL renderer heuristic:
+      // Apple Silicon reports an Apple GPU; Intel Macs report Intel/AMD/Radeon.
+      try {
+        const canvas = document.createElement("canvas");
+        const gl = (canvas.getContext("webgl") || canvas.getContext("experimental-webgl")) as WebGLRenderingContext | null;
+        const ext = gl?.getExtension("WEBGL_debug_renderer_info");
+        const renderer = ext && gl ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : "";
+        if (/Apple/i.test(renderer) && !/Intel|AMD|Radeon|NVIDIA/i.test(renderer)) {
+          setArch("arm");
+          return;
+        }
+        if (/Intel|AMD|Radeon|NVIDIA/i.test(renderer)) {
+          setArch("intel");
+          return;
+        }
+      } catch {
+        // ignore
+      }
+      // Default modern Macs to Apple Silicon.
+      setArch("arm");
+    }
+    detect();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return arch;
+}
+
+function DownloadDropdown() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const arch = useDetectedMacArch();
+  const primaryUrl = arch === "intel" ? DOWNLOAD_INTEL_URL : DOWNLOAD_ARM_URL;
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  return (
+    <div className="dl-wrap" ref={ref}>
+      <div className="dl-split">
+        <a className="btn btn-primary dl-main" href={primaryUrl} id="download">
+          <DownloadIcon />
+          <span>
+            Download for Mac
+            <small>macOS 12+ · Free forever</small>
+          </span>
+        </a>
+        <button
+          className="btn btn-primary dl-arrow"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-label="Choose Mac architecture"
+        >
+          <svg width="10" height="6" viewBox="0 0 10 6" fill="none" aria-hidden>
+            <path d={open ? "M1 5L5 1L9 5" : "M1 1L5 5L9 1"} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      {open && (
+        <div className="dl-menu" role="listbox">
+          <a className="dl-option" href={DOWNLOAD_ARM_URL} onClick={() => setOpen(false)}>
+            <div className="dl-option-icon"><DownloadIcon /></div>
+            <div>
+              <div className="dl-option-title">Apple Silicon</div>
+              <div className="dl-option-sub">M1 · M2 · M3 · M4</div>
+            </div>
+          </a>
+          <a className="dl-option" href={DOWNLOAD_INTEL_URL} onClick={() => setOpen(false)}>
+            <div className="dl-option-icon"><DownloadIcon /></div>
+            <div>
+              <div className="dl-option-title">Intel Mac</div>
+              <div className="dl-option-sub">Core i5 · i7 · i9</div>
+            </div>
+          </a>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LandingPage() {
@@ -63,66 +189,7 @@ function LandingPage() {
               </p>
 
               <div className="btn-row">
-                <a className="btn btn-primary" href={DOWNLOAD_ARM_URL} id="download">
-                  <DownloadIcon />
-                  <span>
-                    Download for Mac
-                    <small>macOS 12+ · Apple silicon</small>
-                  </span>
-                </a>
-                <a className="btn btn-ghost" href={DOWNLOAD_INTEL_URL}>
-                  <DownloadIcon />
-                  <span>
-                    Intel Mac
-                    <small>macOS 12+ · Intel</small>
-                  </span>
-                </a>
-                <a
-                  className="btn btn-ghost"
-                  href="https://github.com/sagivo/beside"
-                >
-                  <GitHubIcon />
-                  <span>
-                    View source
-                    <small>MIT · star on GitHub</small>
-                  </span>
-                </a>
-              </div>
-
-              <div className="proof-bar" aria-label="What you get with beside">
-                <div className="proof-cell pc--local">
-                  <span className="pc-ic" aria-hidden><LocalIcon /></span>
-                  <div className="pc-body">
-                    <span className="pc-label">Local-only</span>
-                    <span className="pc-value">
-                      <strong>0 bytes</strong> leave your Mac
-                    </span>
-                  </div>
-                </div>
-                <a className="proof-cell proof-cell--link pc--oss" href="https://github.com/sagivo/beside">
-                  <span className="pc-ic" aria-hidden><GitHubIcon /></span>
-                  <div className="pc-body">
-                    <span className="pc-label">MIT licensed</span>
-                    <span className="pc-value">
-                      <strong>sagivo/beside</strong>
-                      <span className="pc-chev" aria-hidden>↗</span>
-                    </span>
-                  </div>
-                </a>
-                <div className="proof-cell pc--model">
-                  <span className="pc-ic" aria-hidden><ModelIcon /></span>
-                  <div className="pc-body">
-                    <span className="pc-label">Any model</span>
-                    <span className="pc-value">Ollama · OpenAI · Anthropic</span>
-                  </div>
-                </div>
-                <div className="proof-cell pc--mcp">
-                  <span className="pc-ic" aria-hidden><MCPIcon /></span>
-                  <div className="pc-body">
-                    <span className="pc-label">MCP-ready</span>
-                    <span className="pc-value">Claude · Cursor · ChatGPT</span>
-                  </div>
-                </div>
+                <DownloadDropdown />
               </div>
 
               <div className="hero-meta" aria-hidden>
@@ -367,27 +434,7 @@ function LandingPage() {
                 get the context that has been working beside you all along.
               </p>
               <div className="btn-row">
-                <a className="btn btn-primary" href={DOWNLOAD_ARM_URL}>
-                  <DownloadIcon />
-                  <span>
-                    Download for Apple silicon
-                    <small>Free forever · macOS 12+</small>
-                  </span>
-                </a>
-                <a className="btn btn-ghost" href={DOWNLOAD_INTEL_URL}>
-                  <DownloadIcon />
-                  <span>
-                    Download for Intel Mac
-                    <small>Free forever · macOS 12+</small>
-                  </span>
-                </a>
-                <a className="btn btn-ghost" href="https://github.com/sagivo/beside">
-                  <GitHubIcon />
-                  <span>
-                    Star on GitHub
-                    <small>Open source · MIT</small>
-                  </span>
-                </a>
+                <DownloadDropdown />
               </div>
               <p className="os-hint" style={{ marginTop: 22 }}>
                 Windows &amp; Linux — coming soon.

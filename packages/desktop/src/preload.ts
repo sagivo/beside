@@ -56,6 +56,8 @@ const api = {
   openPermissionSettings: (kind: 'screen' | 'accessibility' | 'microphone' | 'automation') =>
     ipcRenderer.invoke('beside:open-permission-settings', kind),
   relaunchApp: () => ipcRenderer.invoke('beside:relaunch-app'),
+  getOnboardingComplete: (): Promise<boolean> => ipcRenderer.invoke('beside:get-onboarding-complete'),
+  setOnboardingComplete: (done: boolean): Promise<boolean> => ipcRenderer.invoke('beside:set-onboarding-complete', done),
   onDesktopLogs: (callback: (logs: string) => void) => {
     return onIpc('beside:desktop-logs', callback);
   },

@@ -43,7 +43,7 @@ const CaptureSchema = z.object({
       format: z.enum(['m4a']).default('m4a'),
       sample_rate: z.number().int().positive().default(16_000),
       channels: z.number().int().positive().max(2).default(1),
-      activation: z.enum(['other_process_input', 'always']).default('other_process_input'),
+      activation: z.enum(['other_process_input']).default('other_process_input'),
       system_audio_backend: z.enum(['core_audio_tap', 'screencapturekit', 'off']).default('core_audio_tap'),
       poll_interval_sec: z.number().int().positive().default(3),
     }).default({ enabled: true, chunk_seconds: 300, format: 'm4a', sample_rate: 16_000, channels: 1, activation: 'other_process_input', system_audio_backend: 'core_audio_tap', poll_interval_sec: 3 }),

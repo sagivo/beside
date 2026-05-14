@@ -385,6 +385,111 @@ p {
   color: var(--ink-faint);
 }
 
+/* Download split button + dropdown */
+.dl-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.dl-split {
+  display: flex;
+  align-items: stretch;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+.dl-split .btn-primary {
+  box-shadow: none;
+}
+.dl-main {
+  border-radius: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.12) !important;
+  flex: 1;
+  padding: 12px 22px;
+}
+.dl-main small {
+  font-size: 0.65rem;
+}
+.dl-arrow {
+  border-radius: 0;
+  padding: 0 14px;
+  flex-shrink: 0;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.dl-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  background: #ffffff;
+  border: 1px solid rgba(21, 24, 42, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+}
+.dl-option {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  color: var(--ink);
+  transition: background 140ms ease;
+}
+.dl-option:hover {
+  background: #f5f6fa;
+  color: var(--ink);
+}
+.dl-option + .dl-option {
+  border-top: 1px solid rgba(21, 24, 42, 0.07);
+}
+.dl-option-icon {
+  opacity: 0.45;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.dl-option-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+.dl-option-sub {
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  margin-top: 1px;
+}
+
+/* GitHub open-source link button */
+.btn-oss {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  background: transparent;
+  transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
+  white-space: nowrap;
+}
+.btn-oss svg {
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+}
+.btn-oss:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--bg-elev);
+}
+
 /* ─────────────────────────────────────────────────────────────
    Hero
    ───────────────────────────────────────────────────────────── */
@@ -392,7 +497,6 @@ p {
 .hero {
   position: relative;
   padding: 96px 0 72px;
-  overflow: hidden;
 }
 .hero-grid {
   display: grid;

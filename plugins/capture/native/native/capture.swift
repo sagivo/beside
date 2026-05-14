@@ -1358,6 +1358,10 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
   private var prepared = false
   private var permissionDeniedLogged = false
   private var nextInputCheckAt = Date.distantPast
+  /// True when the current recording session was started because the default
+  /// input device became active (device-level trigger), rather than the per-
+  /// process check. Cleared on stop; used to re-evaluate at chunk boundaries.
+  private var deviceTriggered = false
 
   init(config: HelperConfig) {
     let live = config.audio?.live_recording
@@ -1436,6 +1440,7 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     recorder?.stop()
     recorder = nil
     currentStartedAt = nil
+    deviceTriggered = false
     finalizeCurrentChunk()
   }
 
@@ -1448,8 +1453,24 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
 
   private func shouldRecordNow() -> Bool {
     switch activation {
-    case "always", "other_process_input":
-      return inputDetector.isOtherProcessUsingInput()
+    case "other_process_input":
+      // Primary: per-process check. Works for native apps (Zoom, FaceTime, Teams desktop…).
+      if inputDetector.isOtherProcessUsingInput() {
+        deviceTriggered = false
+        return true
+      }
+      // Fallback: device-level check. Catches browser-based audio (Chrome/Google Meet via
+      // WebRTC) that doesn't appear in Core Audio's per-process list.
+      // Only used as a start trigger while not recording — avoids the feedback loop
+      // where our own AVAudioRecorder would keep DeviceIsRunningSomewhere true.
+      // Once started, deviceTriggered keeps us recording until rotate() re-evaluates
+      // cleanly with the recorder stopped (no self-contamination).
+      if recorder == nil && inputDetector.isDefaultInputDeviceRunningSomewhere() {
+        deviceTriggered = true
+        return true
+      }
+      if deviceTriggered { return true }
+      return false
     default:
       emit([
         "kind": "error",
@@ -1500,6 +1521,23 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     recorder = nil
     currentStartedAt = nil
     finalizeCurrentChunk()
+
+    // When the session was started via the device-level trigger (browser audio),
+    // re-evaluate with the recorder stopped so DeviceIsRunningSomewhere is no
+    // longer contaminated by our own process. This is the only safe point to
+    // check — while recording we can't distinguish "Chrome is still there" from
+    // "we're the only user".
+    let shouldContinue: Bool
+    if deviceTriggered {
+      let externalActive = inputDetector.isOtherProcessUsingInput()
+        || inputDetector.isDefaultInputDeviceRunningSomewhere()
+      deviceTriggered = externalActive
+      shouldContinue = externalActive
+    } else {
+      shouldContinue = shouldRecordNow()
+    }
+    guard shouldContinue else { return }
+
     do {
       try startNewChunk()
     } catch {
@@ -1704,6 +1742,31 @@ final class OtherProcessAudioInputDetector {
     return status == noErr && running != 0
   }
 
+  /// Returns true when any process (including this one) has the default
+  /// input device running. Works on all macOS versions and catches browser-
+  /// based audio (Chrome/WebRTC/Google Meet) that doesn't appear in Core
+  /// Audio's per-process list.
+  func isDefaultInputDeviceRunningSomewhere() -> Bool {
+    var addr = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDefaultInputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var deviceID = AudioDeviceID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID
+    ) == noErr, deviceID != AudioDeviceID(kAudioObjectUnknown) else { return false }
+
+    addr.mSelector = kAudioDevicePropertyDeviceIsRunningSomewhere
+    var running: UInt32 = 0
+    size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(
+      deviceID, &addr, 0, nil, &size, &running
+    ) == noErr else { return false }
+    return running != 0
+  }
+
   private func logUnsupported(_ message: String) {
     guard !unsupportedLogged else { return }
     unsupportedLogged = true
@@ -1876,8 +1939,9 @@ final class CoreAudioSystemAudioChunker {
 
   private func shouldRecordNow() -> Bool {
     switch activation {
-    case "always", "other_process_input":
+    case "other_process_input":
       return inputDetector.isOtherProcessUsingInput()
+        || inputDetector.isDefaultInputDeviceRunningSomewhere()
     default:
       emit(["kind": "error", "code": "audio_activation_unsupported",
             "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",
@@ -2167,8 +2231,9 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
 
   private func shouldRecordNow() -> Bool {
     switch activation {
-    case "always", "other_process_input":
+    case "other_process_input":
       return inputDetector.isOtherProcessUsingInput()
+        || inputDetector.isDefaultInputDeviceRunningSomewhere()
     default:
       emit(["kind": "error", "code": "audio_activation_unsupported",
             "message": "Unsupported live audio activation mode '\(activation)'; refusing to start system output recording.",

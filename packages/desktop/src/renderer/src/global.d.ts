@@ -59,6 +59,8 @@ declare global {
         kind: 'screen' | 'accessibility' | 'microphone' | 'automation',
       ) => Promise<{ opened: boolean }>;
       relaunchApp: () => Promise<{ relaunching: true }>;
+      getOnboardingComplete: () => Promise<boolean>;
+      setOnboardingComplete: (done: boolean) => Promise<boolean>;
       onDesktopLogs?: (callback: (logs: string) => void) => () => void;
       onBootstrapProgress?: (callback: (progress: ModelBootstrapProgress) => void) => () => void;
       onWhisperInstallProgress?: (

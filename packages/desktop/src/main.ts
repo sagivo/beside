@@ -17,6 +17,11 @@ const dataDir = defaultDataDir();
 const configPath = path.join(dataDir, 'config.yaml');
 const markdownExportDir = path.join(dataDir, 'export/markdown');
 const windowStatePath = path.join(dataDir, 'desktop-window.json');
+// Presence of this marker on disk means the user finished onboarding at least once.
+// The main process reads it at launch to decide whether to auto-start the runtime
+// (which would otherwise spawn the capture helper and trigger the Screen Recording
+// TCC prompt before the renderer has surfaced the permissions step).
+const onboardingMarkerPath = path.join(dataDir, 'onboarding-complete');
 const rendererDevUrl = process.env.BESIDE_RENDERER_URL;
 const ASSET_PROTOCOL = 'beside-asset';
 
@@ -319,7 +324,7 @@ async function showStatusWindow(opts: { focus?: 'doctor' } = {}) {
 }
 
 function enterMacAccessoryMode() { if (useMacAccessoryMode) { app.setActivationPolicy('accessory'); app.dock?.hide(); } }
-function enterMacStatusWindowMode() { if (useMacAccessoryMode) { app.setActivationPolicy('regular'); app.dock?.show(); } }
+function enterMacStatusWindowMode() { if (useMacAccessoryMode) { app.setActivationPolicy('regular'); app.dock?.show(); app.setName('Beside'); applyBrandDockIcon(); } }
 
 async function renderStatusWindow() {
   const w = statusWindow; if (!w || w.isDestroyed()) return;
@@ -338,8 +343,24 @@ async function startRuntime() {
   finally { await refreshTray(); if (statusWindow) await renderStatusWindow(); }
 }
 
+function isOnboardingComplete(): boolean {
+  try { return fs.existsSync(onboardingMarkerPath); } catch { return false; }
+}
+
+function setOnboardingComplete(done: boolean): boolean {
+  try {
+    if (done) { fs.mkdirSync(path.dirname(onboardingMarkerPath), { recursive: true }); fs.writeFileSync(onboardingMarkerPath, new Date().toISOString(), 'utf8'); }
+    else fs.rmSync(onboardingMarkerPath, { force: true });
+  } catch (err) { appendLog(`Failed to update onboarding marker: ${String(err)}`); }
+  return isOnboardingComplete();
+}
+
 async function startDaemonIfNeeded() {
   if (process.env.BESIDE_DESKTOP_AUTOSTART === '0') return;
+  // Defer runtime auto-start (and the capture helper spawn that triggers the
+  // Screen Recording TCC prompt) until the user has completed onboarding once.
+  // The onboarding flow itself explicitly calls startRuntime() at the end.
+  if (!isOnboardingComplete()) { appendLog('Onboarding not complete: deferring runtime auto-start.'); return; }
   if ((await getHealth()).ok) return;
   await startRuntime();
 }
@@ -496,6 +517,8 @@ function registerRuntimeIpc() {
   h('beside:request-accessibility-permission', requestAccessibilityPermission);
   h('beside:open-permission-settings', (e, k: any) => openPermissionSettings(k));
   h('beside:relaunch-app', relaunchApp);
+  h('beside:get-onboarding-complete', () => isOnboardingComplete());
+  h('beside:set-onboarding-complete', (_e, done: boolean) => setOnboardingComplete(!!done));
 }
 
 async function getOverviewForRequest() { try { return await (await getRuntimeForRequest()).call<any>('overview'); } catch (err) { if (/closed|exited/.test(String(err))) return lastOverview; throw err; } }

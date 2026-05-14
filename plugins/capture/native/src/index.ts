@@ -48,15 +48,7 @@ interface NativeCaptureConfig {
       sample_rate?: number;
       channels?: number;
       system_audio_backend?: 'core_audio_tap' | 'screencapturekit' | 'off';
-      /**
-       * When to join an already-active microphone session:
-       *   'other_process_input' — record when another process is actively
-       *     using the microphone. Beside does not initiate recording based
-       *     on meeting UI or URLs.
-       *   'always' — legacy value accepted for older configs; treated as
-       *     input-only so the app never opens audio by itself.
-       */
-      activation?: 'other_process_input' | 'always';
+      activation?: 'other_process_input';
       poll_interval_sec?: number;
     };
   };
