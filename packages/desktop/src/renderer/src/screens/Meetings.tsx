@@ -296,7 +296,7 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
   const nMs = now.getTime();
   const upc = selectedDay === today
     ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
-    : events[0];
+    : null;
   const mtgs = events.map((e: DayEvent) => e.meeting_id ? meetingsById.get(e.meeting_id) ?? null : null).filter(Boolean);
   const sigs = collectMeetingSummarySignals(mtgs);
   const followups = sigs.actionItems.slice(0, 4);
@@ -313,18 +313,18 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
   };
 
   return (
-    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)] flex-none">
-      {upc ? (
+    <div className={cn('grid gap-4 flex-none', upc && followups.length > 0 ? 'md:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]' : 'grid-cols-1')}>
+      {upc && (
         <button type="button" onClick={() => onSelectEvent(upc.id)} className="rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-2 min-w-0">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />{selectedDay === today ? 'Next up' : 'First event'}</div>
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />Next up</div>
           <div className="min-w-0">
             <div className="text-base font-semibold leading-tight truncate">{upc.title}</div>
             <div className="mt-1 text-sm text-muted-foreground font-medium truncate">{formatDayEventTimeRange(upc)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
           </div>
         </button>
-      ) : <div className="rounded-xl border border-dashed border-border/50 bg-card/50 p-5 flex items-center justify-center text-sm text-muted-foreground">Nothing else scheduled today</div>}
+      )}
 
-      <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3 min-w-0">
+      {followups.length > 0 && <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><CheckSquare className="size-4" />Follow-ups</div>
           {followups.length > 0 && <Badge variant="default" className="px-2">{sigs.actionItems.length}</Badge>}
@@ -349,7 +349,7 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
         ) : (
           <p className="text-sm text-muted-foreground">No action items captured for this day.</p>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
