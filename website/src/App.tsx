@@ -1,7 +1,7 @@
 import "./styles.css";
 import DocsPage from "./docs/DocsPage";
 
-const DOWNLOAD_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-mac.dmg";
+const DOWNLOAD_URL = "https://github.com/sagivo/beside/releases/latest/download/Beside-0.2.0-mac-arm64.dmg";
 
 export default function App({ initialPath }: { initialPath?: string } = {}) {
   const pathname = initialPath ?? (typeof window === "undefined" ? "/" : window.location.pathname);
@@ -66,7 +66,7 @@ function LandingPage() {
                   <DownloadIcon />
                   <span>
                     Download for Mac
-                    <small>macOS 12+ · Apple silicon &amp; Intel</small>
+                    <small>macOS 12+ · Apple silicon</small>
                   </span>
                 </a>
                 <a
