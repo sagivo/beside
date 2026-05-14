@@ -19,6 +19,7 @@ import type {
 import { isoTimestamp } from '@beside/core';
 import { slugify } from './bucketer.js';
 import { PageStore } from './page-store.js';
+import { dayPagePath, renderDayPage } from './day-page.js';
 
 const STRATEGY_NAME = 'karpathy';
 
@@ -125,6 +126,20 @@ interface StrategyConfig {
    */
   render_concurrency?: number;
   /**
+   * Whether the day-page narrative can be rendered with text-only models.
+   * Vision models always get a narrative; text-only models only get one
+   * when this is true. Default true — continuous journaling is the
+   * primary value of day pages so we'd rather have a text narrative
+   * than none.
+   */
+  day_page_narrative_text_enabled?: boolean;
+  /**
+   * Per-day-page narrative call timeout. Vision is slow on big models
+   * (~30-60s); the cap is generous but bounded so a single hung call
+   * doesn't stall the whole incremental batch.
+   */
+  day_page_narrative_timeout_ms?: number;
+  /**
    * Minimum total focused minutes an `apps/<x>` entity needs before
    * it earns a wiki page of its own. After P1 entity lifting, what's
    * left on `apps/*` is mostly transient tool use that nobody wants
@@ -192,6 +207,21 @@ function stringArraysEqual(a: string[], b: string[]): boolean {
   return true;
 }
 
+/**
+ * Days touched by this incremental batch — the dirty-set for day pages.
+ * We derive the day from each event's local timestamp slice (YYYY-MM-DD).
+ * Cheap and tolerant of clock skew: any frame that landed counts toward
+ * its calendar day exactly once.
+ */
+function collectDirtyDays(events: RawEvent[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    if (!e.timestamp || e.timestamp.length < 10) continue;
+    out.add(e.timestamp.slice(0, 10));
+  }
+  return out;
+}
+
 export class KarpathyStrategy implements IIndexStrategy {
   readonly name = STRATEGY_NAME;
   readonly description =
@@ -204,6 +234,9 @@ export class KarpathyStrategy implements IIndexStrategy {
   private readonly appPageMinMs: number;
   private readonly appPageMinFrames: number;
   private readonly renderConcurrency: number;
+  private readonly dataDir: string;
+  private readonly dayPageNarrativeTextEnabled: boolean;
+  private readonly dayPageNarrativeTimeoutMs: number;
   private store!: PageStore;
   /**
    * Captured on the first `getUnindexedEvents` call. We use it inside
@@ -219,7 +252,11 @@ export class KarpathyStrategy implements IIndexStrategy {
    */
   private entityLookupCache = new Map<string, EntityRecord | null>();
 
-  constructor(private readonly config: StrategyConfig, logger: Logger) {
+  constructor(
+    private readonly config: StrategyConfig,
+    logger: Logger,
+    opts: { dataDir?: string } = {},
+  ) {
     this.logger = logger.child(`index-${STRATEGY_NAME}`);
     this.batchSize = config.batch_size ?? 50;
     this.archiveAfterDays = config.archive_after_days ?? 30;
@@ -230,6 +267,9 @@ export class KarpathyStrategy implements IIndexStrategy {
       1,
       config.render_concurrency ?? DEFAULT_RENDER_CONCURRENCY,
     );
+    this.dataDir = opts.dataDir ?? os.homedir();
+    this.dayPageNarrativeTextEnabled = config.day_page_narrative_text_enabled ?? true;
+    this.dayPageNarrativeTimeoutMs = config.day_page_narrative_timeout_ms ?? 120_000;
   }
 
   /**
@@ -452,6 +492,59 @@ export class KarpathyStrategy implements IIndexStrategy {
       }
     }
 
+    // Phase C: render day pages for any day touched by this batch. Day
+    // pages live alongside entity pages so they flow through the same
+    // `onPageUpdate` → markdown export mirror, search/embeddings, and
+    // archive lanes — no parallel pipeline needed. Re-rendered every
+    // tick but gated by an evidence hash so identical days short-circuit
+    // without an LLM call.
+    const dirtyDays = collectDirtyDays(events);
+    const dayRenders = await pmap(
+      [...dirtyDays],
+      Math.min(2, concurrency),
+      async (day) => {
+        try {
+          const existing = await this.store.readPage(dayPagePath(day));
+          return {
+            day,
+            existing,
+            result: await renderDayPage(day, existing, {
+              storage: this.storage!,
+              model,
+              dataDir: this.dataDir,
+              logger: this.logger,
+              narrativeTextEnabled: this.dayPageNarrativeTextEnabled,
+              narrativeTimeoutMs: this.dayPageNarrativeTimeoutMs,
+            }),
+          };
+        } catch (err) {
+          this.logger.warn('renderDayPage failed; skipping day', { day, err: String(err) });
+          return { day, existing: null, result: null };
+        }
+      },
+    );
+    let dayPagesCreated = 0;
+    let dayPagesUpdated = 0;
+    let dayPagesUnchanged = 0;
+    for (const r of dayRenders) {
+      if (!r.result) continue;
+      if (r.result.reused && r.existing) {
+        dayPagesUnchanged += 1;
+        continue;
+      }
+      if (r.existing) {
+        if (pageHasMeaningfulChanges(r.existing, r.result.page)) {
+          pagesToUpdate.push(r.result.page);
+          dayPagesUpdated += 1;
+        } else {
+          dayPagesUnchanged += 1;
+        }
+      } else {
+        pagesToCreate.push(r.result.page);
+        dayPagesCreated += 1;
+      }
+    }
+
     const newPagesByPath = new Map<string, IndexPage>();
     [...pagesToCreate, ...pagesToUpdate].forEach((p) => newPagesByPath.set(p.path, p));
     const allPages = await this.collectAllPagesAfterUpdate(
@@ -469,9 +562,12 @@ export class KarpathyStrategy implements IIndexStrategy {
       ? ` [cache: ${modelCallsAvoided} hash-skip${modelCallsAvoided === 1 ? '' : 's'}` +
         `${skippedHashUnchanged > 0 ? `, ${skippedHashUnchanged} no-write` : ''}]`
       : '';
+    const daySuffix = dirtyDays.size > 0
+      ? ` [days: ${dayPagesCreated} new + ${dayPagesUpdated} updated + ${dayPagesUnchanged} unchanged]`
+      : '';
     this.logger.info(
       `karpathy: ${pagesToCreate.length} new + ${pagesToUpdate.length} updated + ${pagesToDelete.length} deleted pages` +
-        ` from ${dirtyByPath.size} active entities${noiseSuffix}${cacheSuffix}`,
+        ` from ${dirtyByPath.size} active entities${noiseSuffix}${cacheSuffix}${daySuffix}`,
     );
 
     return {

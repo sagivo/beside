@@ -7,12 +7,14 @@ interface FactoryConfig {
   batch_size?: number;
   archive_after_days?: number;
   summary_threshold_pages?: number;
+  day_page_narrative_text_enabled?: boolean;
+  day_page_narrative_timeout_ms?: number;
 }
 
 const factory: PluginFactory<IIndexStrategy> = async (ctx) => {
   const cfg = (ctx.config as FactoryConfig) ?? {};
   const root = expandPath(cfg.index_path ?? `${ctx.dataDir}/index`);
-  const strat = new KarpathyStrategy(cfg, ctx.logger);
+  const strat = new KarpathyStrategy(cfg, ctx.logger, { dataDir: ctx.dataDir });
   await strat.init(root);
   return strat;
 };

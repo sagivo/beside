@@ -49,9 +49,7 @@ function LandingPage() {
               </span>
 
               <h1>
-                <span className="grad">beside every app, every thought.</span>
-                <br />
-                A quiet memory for the AI working by your&nbsp;side.
+                <span className="grad">You AI memory, beside you.</span>
               </h1>
 
               <p className="lede">
@@ -84,42 +82,44 @@ function LandingPage() {
               </div>
 
               <div className="proof-bar" aria-label="What you get with beside">
-                <div className="proof-cell">
+                <div className="proof-cell pc--local">
                   <span className="pc-ic" aria-hidden><LocalIcon /></span>
                   <div className="pc-body">
                     <span className="pc-label">Local-only</span>
-                    <span className="pc-value">0 bytes leave your Mac</span>
+                    <span className="pc-value">
+                      <strong>0 bytes</strong> leave your Mac
+                    </span>
                   </div>
                 </div>
-                <div className="proof-cell">
+                <a className="proof-cell proof-cell--link pc--oss" href="https://github.com/sagivo/beside">
                   <span className="pc-ic" aria-hidden><GitHubIcon /></span>
                   <div className="pc-body">
                     <span className="pc-label">MIT licensed</span>
                     <span className="pc-value">
-                      <a href="https://github.com/sagivo/beside">github.com/sagivo/beside</a>
+                      <strong>sagivo/beside</strong>
+                      <span className="pc-chev" aria-hidden>↗</span>
                     </span>
                   </div>
-                </div>
-                <div className="proof-cell">
+                </a>
+                <div className="proof-cell pc--model">
                   <span className="pc-ic" aria-hidden><ModelIcon /></span>
                   <div className="pc-body">
                     <span className="pc-label">Any model</span>
                     <span className="pc-value">Ollama · OpenAI · Anthropic</span>
                   </div>
                 </div>
-                <div className="proof-cell">
+                <div className="proof-cell pc--mcp">
                   <span className="pc-ic" aria-hidden><MCPIcon /></span>
                   <div className="pc-body">
                     <span className="pc-label">MCP-ready</span>
                     <span className="pc-value">Claude · Cursor · ChatGPT</span>
                   </div>
                 </div>
-                <span className="proof-corner" aria-hidden />
               </div>
 
               <div className="hero-meta" aria-hidden>
                 <span className="hm-dot" />
-                Free during beta · no account · no telemetry
+                Free forever · no account · no telemetry
               </div>
             </div>
 
@@ -267,32 +267,42 @@ function LandingPage() {
                 title="100% local-first"
                 body="Captures, embeddings, and indexes live on your disk as JSONL + SQLite. Bring your own model — Ollama, llama.cpp, OpenAI, Anthropic — or run fully offline."
                 accent="local"
+                viz="vault"
               />
               <Feature
                 badge="02"
                 title="Open source · MIT"
                 body="Every capture path, every prompt, every byte we touch is auditable on GitHub. Fork it, extend it, self-host it. No black boxes."
                 accent="oss"
+                viz="commits"
               />
               <Feature
                 badge="03"
                 title="Silent capture"
                 body="Screenshots, active window, URLs, idle state — captured locally with negligible overhead. Nothing leaves your machine unless you say so."
+                accent="capture"
+                viz="ticks"
               />
               <Feature
                 badge="04"
                 title="Self-organising knowledge"
                 body="A local model turns captures into structured notes, topics, and timelines. The wiki re-organises itself as your work evolves."
+                accent="cluster"
+                viz="cluster"
               />
               <Feature
                 badge="05"
                 title="Proactive surfacing"
                 body="beside notices the moments that should stay beside you — patterns, follow-ups, half-finished threads — and quietly pins them where you'll see them."
+                accent="surface"
+                viz="pin"
               />
               <Feature
                 badge="06"
                 title="Memory for any agent"
                 body="Ship rich context to Claude, ChatGPT, Cursor and any MCP-compatible agent — so they remember yesterday, last week, last quarter."
+                accent="agents"
+                viz="fanout"
               />
             </div>
           </div>
@@ -342,7 +352,7 @@ function LandingPage() {
         <section className="cta">
           <div className="container">
             <div className="cta-inner">
-              <span className="eyebrow"><span className="dot" />Free during beta</span>
+              <span className="eyebrow"><span className="dot" />Free forever</span>
               <h2>Put your memory beside every AI you use.</h2>
               <p>
                 Install beside once. Claude, Cursor, ChatGPT, and every MCP agent
@@ -353,7 +363,7 @@ function LandingPage() {
                   <DownloadIcon />
                   <span>
                     Download for Mac
-                    <small>Free during beta · macOS 12+</small>
+                    <small>Free forever · macOS 12+</small>
                   </span>
                 </a>
                 <a className="btn btn-ghost" href="https://github.com/sagivo/beside">
@@ -1030,24 +1040,120 @@ function AskDemo() {
   );
 }
 
+type FeatureAccent = "local" | "oss" | "capture" | "cluster" | "surface" | "agents";
+type FeatureVizKind = "vault" | "commits" | "ticks" | "cluster" | "pin" | "fanout";
+
 function Feature({
   badge,
   title,
   body,
   accent,
+  viz,
 }: {
   badge: string;
   title: string;
   body: string;
-  accent?: "local" | "oss";
+  accent: FeatureAccent;
+  viz: FeatureVizKind;
 }) {
   return (
-    <div className={`feature${accent ? ` feature--${accent}` : ""}`}>
-      <div className="ico">{badge}</div>
+    <div className={`feature feature--${accent}`}>
+      <div className="feature-viz" aria-hidden>
+        <span className="feature-badge">{badge}</span>
+        <FeatureViz kind={viz} />
+      </div>
       <h3>{title}</h3>
       <p>{body}</p>
     </div>
   );
+}
+
+/* Tiny animated motifs that sit at the top of each feature card. They share
+   the same visual vocabulary as the rest of the homepage (dashed rings,
+   packets, pulse rails, ripples) but each tells a different story so the
+   six cards no longer look identical. Pure CSS animations — no state. */
+function FeatureViz({ kind }: { kind: FeatureVizKind }) {
+  switch (kind) {
+    case "vault":
+      // Local-first: signals bounce inside a sealed dashed boundary.
+      return (
+        <span className="fv fv-vault">
+          <span className="fv-vault-ring" />
+          <span className="fv-vault-ring fv-vault-ring-2" />
+          <span className="fv-vault-core" />
+          <span className="fv-vault-bolt b1" />
+          <span className="fv-vault-bolt b2" />
+          <span className="fv-vault-bolt b3" />
+        </span>
+      );
+    case "commits":
+      // Open source: a tiny git rail with commits ticking in + a star pulse.
+      return (
+        <span className="fv fv-commits">
+          <span className="fv-rail" />
+          <span className="fv-commit c1" />
+          <span className="fv-commit c2" />
+          <span className="fv-commit c3" />
+          <span className="fv-commit c4" />
+          <span className="fv-head" />
+          <span className="fv-star">★</span>
+        </span>
+      );
+    case "ticks":
+      // Silent capture: a quiet baseline with periodic capture pulses.
+      return (
+        <span className="fv fv-ticks">
+          <span className="fv-baseline" />
+          <span className="fv-tick t1" />
+          <span className="fv-tick t2" />
+          <span className="fv-tick t3" />
+          <span className="fv-tick t4" />
+          <span className="fv-tick t5" />
+          <span className="fv-cursor" />
+        </span>
+      );
+    case "cluster":
+      // Self-organising: loose tag chips drift into 2 topic clusters.
+      return (
+        <span className="fv fv-cluster">
+          <span className="fv-chip cc1">#acme</span>
+          <span className="fv-chip cc2">#q2</span>
+          <span className="fv-chip cc3">#ship</span>
+          <span className="fv-chip cc4">#flow</span>
+          <span className="fv-chip cc5">#price</span>
+          <span className="fv-cluster-halo h1" />
+          <span className="fv-cluster-halo h2" />
+        </span>
+      );
+    case "pin":
+      // Proactive surfacing: one line rises out of a stack and gets pinned.
+      return (
+        <span className="fv fv-pin">
+          <span className="fv-row r1" />
+          <span className="fv-row r2" />
+          <span className="fv-row r3" />
+          <span className="fv-lift">
+            <span className="fv-lift-bar" />
+            <span className="fv-pin-mark">★</span>
+          </span>
+        </span>
+      );
+    case "fanout":
+      // Memory for any agent: a core radiates rings to three agent dots.
+      return (
+        <span className="fv fv-fanout">
+          <span className="fv-core" />
+          <span className="fv-ring g1" />
+          <span className="fv-ring g2" />
+          <span className="fv-ring g3" />
+          <span className="fv-agent a1">C</span>
+          <span className="fv-agent a2">Cu</span>
+          <span className="fv-agent a3">G</span>
+        </span>
+      );
+    default:
+      return null;
+  }
 }
 
 function Step({ n, title, body }: { n: string; title: string; body: string }) {

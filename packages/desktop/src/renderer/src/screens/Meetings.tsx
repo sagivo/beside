@@ -201,7 +201,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   return (
     <div className="flex flex-col h-full gap-5 pt-6 pb-2 min-h-0">
       <div className="flex-none">
-        <PageHeader title="Agenda" description="Meetings, calendar entries, and extracted events." actions={<><Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button></>} />
+        <PageHeader title="Journal" description="Your day story, meetings, and extracted events." actions={<><Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button></>} />
       </div>
 
       {loading && !visibleEvents.length && !dayOverrides.size ? <div className="flex-1 grid place-items-center text-muted-foreground text-sm gap-2"><div className="flex flex-col items-center gap-2"><Loader2 className="size-5 animate-spin" />Loading…</div></div> : (
@@ -258,12 +258,11 @@ function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, on
 }
 
 function DaySummary({ day }: { day: string }) {
-  const [state, setState] = React.useState<{ status: 'idle' | 'loading' | 'ready'; content: string | null }>({ status: 'loading', content: null });
-  const [open, setOpen] = React.useState(false);
+  const [state, setState] = React.useState<{ status: 'loading' | 'ready'; content: string | null }>({ status: 'loading', content: null });
+  const [open, setOpen] = React.useState(true);
   React.useEffect(() => {
     let cancelled = false;
     setState({ status: 'loading', content: null });
-    setOpen(false);
     (async () => {
       try {
         const res = await window.beside.readJournalMarkdown(day);
@@ -283,7 +282,7 @@ function DaySummary({ day }: { day: string }) {
       </button>
       {open && (
         <CardContent className="pt-0 pb-5 px-5">
-          <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg">
+          <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg max-h-[420px] overflow-y-auto">
             <Markdown content={state.content} />
           </div>
         </CardContent>

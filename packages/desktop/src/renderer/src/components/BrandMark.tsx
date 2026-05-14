@@ -19,7 +19,7 @@ export function BrandMark({
   return (
     <div
       className={cn(
-        'relative grid size-9 place-items-center overflow-hidden rounded-xl bg-white/90 shadow-card ring-1 ring-border',
+        'relative grid size-9 place-items-center overflow-hidden rounded-xl',
         busy && 'brand-mark-busy',
         className,
       )}
