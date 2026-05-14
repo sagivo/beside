@@ -67,15 +67,19 @@ async function findPackageRoot(packageName, resolver = requireFromRoot) {
     }
   }
 
+  // Walk up to the package.json whose `name` matches the requested package.
+  // We must NOT stop at sub-package.json markers like `dist/cjs/package.json`
+  // that only carry `{"type": "commonjs"}` -- those would make us copy only a
+  // sub-tree and miss the package's real dependency list.
   let dir = path.dirname(resolved);
   while (dir !== path.dirname(dir)) {
     const pkgJson = path.join(dir, 'package.json');
     if (await pathExists(pkgJson)) {
       try {
         const pkg = JSON.parse(await fs.readFile(pkgJson, 'utf8'));
-        if (pkg.name === packageName || !pkg.name) return dir;
+        if (pkg.name === packageName) return dir;
       } catch {
-        return dir;
+        // Continue walking up.
       }
     }
     dir = path.dirname(dir);
@@ -104,6 +108,7 @@ async function stageRuntimePackage(packageName, seen = new Set(), resolver = req
   const deps = {
     ...(pkg.dependencies ?? {}),
     ...(pkg.optionalDependencies ?? {}),
+    ...(pkg.peerDependencies ?? {}),
   };
   const childResolver = createRequire(path.join(root, 'package.json'));
   for (const dep of Object.keys(deps)) {
