@@ -107,35 +107,20 @@ final class StatusApp: NSObject, NSApplicationDelegate {
     image.lockFocus()
     NSColor.black.setFill()
 
+    // Two stacked blobs echoing the Beside app logo (figure-8 silhouette).
     let cx: CGFloat = 9
-    let cy: CGFloat = 9
-    let outer: CGFloat = 7
-    let inner: CGFloat = 1.6
+    let radius: CGFloat = 4.6
+    let topCy: CGFloat = 12.4
+    let bottomCy: CGFloat = 5.6
 
-    let sparkle = NSBezierPath()
-    sparkle.move(to: NSPoint(x: cx, y: cy + outer))
-    sparkle.curve(
-      to: NSPoint(x: cx + outer, y: cy),
-      controlPoint1: NSPoint(x: cx + inner, y: cy + inner),
-      controlPoint2: NSPoint(x: cx + inner, y: cy + inner)
-    )
-    sparkle.curve(
-      to: NSPoint(x: cx, y: cy - outer),
-      controlPoint1: NSPoint(x: cx + inner, y: cy - inner),
-      controlPoint2: NSPoint(x: cx + inner, y: cy - inner)
-    )
-    sparkle.curve(
-      to: NSPoint(x: cx - outer, y: cy),
-      controlPoint1: NSPoint(x: cx - inner, y: cy - inner),
-      controlPoint2: NSPoint(x: cx - inner, y: cy - inner)
-    )
-    sparkle.curve(
-      to: NSPoint(x: cx, y: cy + outer),
-      controlPoint1: NSPoint(x: cx - inner, y: cy + inner),
-      controlPoint2: NSPoint(x: cx - inner, y: cy + inner)
-    )
-    sparkle.close()
-    sparkle.fill()
+    let top = NSBezierPath(ovalIn: NSRect(
+      x: cx - radius, y: topCy - radius, width: radius * 2, height: radius * 2
+    ))
+    let bottom = NSBezierPath(ovalIn: NSRect(
+      x: cx - radius, y: bottomCy - radius, width: radius * 2, height: radius * 2
+    ))
+    top.fill()
+    bottom.fill()
 
     image.unlockFocus()
     image.isTemplate = true
