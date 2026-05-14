@@ -318,6 +318,9 @@ export class EventExtractor {
     await this.purgeStaleCalendarMeetingLinks().catch((err) => {
       this.logger.warn('stale calendar meeting link purge failed', { err: String(err) });
     });
+    await this.purgeStaleDayEventMeetingLinks().catch((err) => {
+      this.logger.warn('stale day-event meeting link purge failed', { err: String(err) });
+    });
     const meetings = await this.storage.listMeetings({ order: 'recent', limit: 500 }).catch(() => []);
     let liftedNow = 0;
     for (const meeting of meetings) {
@@ -373,13 +376,35 @@ export class EventExtractor {
     for (const event of events) {
       if (!event.meeting_id) continue;
       const meeting = await this.storage.getMeeting(event.meeting_id).catch(() => null);
-      if (meeting && scoreCanonicalCalendarEventForMeeting(event, meeting) > 0) continue;
+      if (meeting && event.day === meeting.day && scoreCanonicalCalendarEventForMeeting(event, meeting) > 0) continue;
       await this.storage.clearCalendarEventMeetingLink(event.id).catch(() => {});
       days.add(event.day);
       purged++;
     }
     for (const day of days) await this.projectCanonicalCalendarDay(day).catch(() => 0);
     if (purged > 0) this.logger.info(`cleared ${purged} stale calendar meeting link(s)`);
+    return purged;
+  }
+
+  private async purgeStaleDayEventMeetingLinks(): Promise<number> {
+    const events = await this.storage
+      .listDayEvents({ limit: 5000, order: 'recent' })
+      .catch(() => [] as DayEvent[]);
+    let purged = 0;
+    for (const event of events) {
+      if (!event.meeting_id) continue;
+      const meeting = await this.storage.getMeeting(event.meeting_id).catch(() => null);
+      if (meeting && event.day === meeting.day) continue;
+      await this.storage.upsertDayEvent({
+        ...event,
+        meeting_id: null,
+        context_md: event.source === 'calendar_screen' ? null : event.context_md,
+        content_hash: sha1(['day-event-meeting-link-cleared', event.content_hash, event.meeting_id ?? '', meeting?.day ?? 'missing'].join('|')).slice(0, 16),
+        updated_at: new Date().toISOString(),
+      }).catch(() => {});
+      purged++;
+    }
+    if (purged > 0) this.logger.info(`cleared ${purged} stale day-event meeting link(s)`);
     return purged;
   }
 
@@ -944,6 +969,7 @@ function platformLabel(platform: Meeting['platform']): string {
 }
 
 function scoreCalendarEventForMeeting(event: DayEvent, meeting: Meeting): number {
+  if (event.day !== meeting.day) return 0;
   const es = Date.parse(event.starts_at), ee = event.ends_at ? Date.parse(event.ends_at) : es + 30 * 60_000;
   const ms = Date.parse(meeting.started_at), me = Date.parse(meeting.ended_at);
   if (![es, ee, ms, me].every(Number.isFinite)) return 0;
@@ -979,6 +1005,7 @@ function scoreCalendarEventForMeeting(event: DayEvent, meeting: Meeting): number
 }
 
 function scoreCanonicalCalendarEventForMeeting(event: CalendarEvent, meeting: Meeting): number {
+  if (event.day !== meeting.day) return 0;
   const es = Date.parse(event.starts_at), ee = event.ends_at ? Date.parse(event.ends_at) : es + 30 * 60_000;
   const ms = Date.parse(meeting.started_at), me = Date.parse(meeting.ended_at);
   if (![es, ee, ms, me].every(Number.isFinite)) return 0;

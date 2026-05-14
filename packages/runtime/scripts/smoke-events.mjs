@@ -448,6 +448,77 @@ async function main() {
       },
       updated_at: `${captureDay}T13:03:00.000Z`,
     });
+    const wrongDayMeetingId = `mtg_wrong_day_${randomUUID().slice(0, 8)}`;
+    const wrongMeetingDayDate = new Date(`${captureDay}T12:00:00`);
+    wrongMeetingDayDate.setDate(wrongMeetingDayDate.getDate() - 1);
+    const wrongMeetingDay = localDayKey(wrongMeetingDayDate);
+    await storage.upsertMeeting({
+      ...meeting,
+      id: wrongDayMeetingId,
+      title: 'Today Sync',
+      started_at: linkedStart.toISOString(),
+      ended_at: linkedEnd.toISOString(),
+      day: wrongMeetingDay,
+      duration_ms: 31 * 60_000,
+      content_hash: `wrong-day-meeting-${randomUUID()}`,
+      summary_status: 'ready',
+      summary_json: {
+        ...meeting.summary_json,
+        title: 'Today Sync',
+        tldr: 'This is the wrong previous-day meeting.',
+      },
+      updated_at: `${captureDay}T13:04:00.000Z`,
+    });
+    const wrongDayCalendarId = `calevt_wrong_day_${randomUUID().slice(0, 8)}`;
+    await storage.upsertCalendarEvent({
+      id: wrongDayCalendarId,
+      source_key: 'apple_calendar:com.apple.ical',
+      provider: 'apple_calendar',
+      day: captureDay,
+      starts_at: todaySyncCanonical?.starts_at ?? `${captureDay}T12:30:00.000Z`,
+      ends_at: todaySyncCanonical?.ends_at ?? `${captureDay}T13:00:00.000Z`,
+      title: 'Today Sync',
+      location: null,
+      attendees: [],
+      links: [],
+      notes: 'Wrong previous-day summary should be cleared.',
+      source_app: 'Apple Calendar',
+      source_url: null,
+      source_bundle_id: 'com.apple.iCal',
+      evidence_frame_ids: [],
+      first_seen_capture_id: null,
+      last_seen_capture_id: null,
+      status: 'active',
+      content_hash: `wrong-day-calendar-${randomUUID()}`,
+      meeting_id: wrongDayMeetingId,
+      actual_started_at: linkedStart.toISOString(),
+      actual_ended_at: linkedEnd.toISOString(),
+      meeting_platform: 'zoom',
+      meeting_summary_status: 'ready',
+      created_at: `${captureDay}T09:00:00.000Z`,
+      updated_at: `${captureDay}T09:00:00.000Z`,
+    });
+    const wrongDayEventId = `evt_wrong_day_${randomUUID().slice(0, 8)}`;
+    await storage.upsertDayEvent({
+      id: wrongDayEventId,
+      day: captureDay,
+      starts_at: todaySyncCanonical?.starts_at ?? `${captureDay}T12:30:00.000Z`,
+      ends_at: todaySyncCanonical?.ends_at ?? `${captureDay}T13:00:00.000Z`,
+      kind: 'calendar',
+      source: 'calendar_screen',
+      title: 'Today Sync',
+      source_app: 'Calendar',
+      context_md: 'This is the wrong previous-day meeting.',
+      attendees: [],
+      links: [],
+      meeting_id: wrongDayMeetingId,
+      evidence_frame_ids: [],
+      content_hash: `wrong-day-event-${randomUUID()}`,
+      status: 'ready',
+      failure_reason: null,
+      created_at: `${captureDay}T09:00:00.000Z`,
+      updated_at: `${captureDay}T09:00:00.000Z`,
+    });
     const remoteOnlyDay = '2026-05-09';
     const remoteOnlyCalendarId = `calevt_remote_only_${randomUUID().slice(0, 8)}`;
     await storage.upsertCalendarEvent({
@@ -498,11 +569,21 @@ async function main() {
     });
     const linker = new EventExtractor(storage, stubModel, logger, { llmEnabled: false });
     await linker.tick();
-    const enrichedCanonical = (await storage.listCalendarEvents({ day: captureDay, status: 'active' })).find((e) => e.title === 'Today Sync');
+    const enrichedCanonical = (await storage.listCalendarEvents({ day: captureDay, status: 'active' })).find((e) => e.id === todaySyncCanonical?.id);
+    const wrongDayCanonical = await storage.getCalendarEvent(wrongDayCalendarId);
+    const wrongDayEvent = await storage.getDayEvent(wrongDayEventId);
     const remoteOnlyCanonical = (await storage.listCalendarEvents({ day: remoteOnlyDay, status: 'active' })).find((e) => e.id === remoteOnlyCalendarId);
     assert(
       enrichedCanonical?.meeting_id === linkedMeetingId,
       'calendar event links to captured meeting',
+    );
+    assert(
+      wrongDayCanonical?.meeting_id == null,
+      'calendar link is cleared when meeting belongs to a different day',
+    );
+    assert(
+      wrongDayEvent?.meeting_id == null,
+      'day-event link is cleared when meeting belongs to a different day',
     );
     assert(
       remoteOnlyCanonical?.meeting_id == null,

@@ -2042,6 +2042,10 @@ section.block {
 .cta h2 { margin: 0 auto 14px; max-width: 600px; position: relative; }
 .cta p { max-width: 520px; margin: 0 auto 32px; position: relative; }
 .cta .btn-row { justify-content: center; position: relative; }
+.cta .dl-menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
 
 /* ─────────────────────────────────────────────────────────────
    Footer

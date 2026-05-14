@@ -120,10 +120,17 @@ function isAgendaWorthyEvent(e: DayEvent): boolean {
 }
 
 function calendarMatchScore(c: DayEvent, e: DayEvent): number {
+  if (c.day !== e.day) return 0;
   if (!titlesLikelySame(c.title, e.title)) return 0;
   const cr = eventTimeRange(c), er = eventTimeRange(e); if (!cr || !er) return 0;
   const o = Math.min(cr.end, er.end) - Math.max(cr.start, er.start), sd = Math.abs(cr.start - er.start), si = er.start >= cr.start - 600000 && er.start <= cr.end + 600000;
   return o <= 0 && !si && sd > 600000 ? 0 : Math.max(1, o / 60000) + Math.max(0, 30 - sd / 60000);
+}
+
+function meetingForEvent(e: DayEvent, meetingsById: Map<string, Meeting>): Meeting | null {
+  if (!e.meeting_id) return null;
+  const meeting = meetingsById.get(e.meeting_id) ?? null;
+  return meeting && meeting.day === e.day ? meeting : null;
 }
 
 function reconcileCalendarMeetingItems(events: DayEvent[], meetingsById: Map<string, Meeting>): DayEvent[] {
@@ -132,18 +139,20 @@ function reconcileCalendarMeetingItems(events: DayEvent[], meetingsById: Map<str
   const hd = new Set<string>(), lk = new Map<string, { id: string; score: number }>();
   for (const e of dd) {
     if (e.source !== 'meeting_capture' || e.kind !== 'meeting' || !e.meeting_id) continue;
+    const m = meetingForEvent(e, meetingsById);
+    if (!m) continue;
     let b = null;
     for (const c of ce) { const s = calendarMatchScore(c, e); if (s > 0 && (!b || s > b.score)) b = { calendar: c, score: s }; }
     if (!b) continue;
     hd.add(e.id);
-    const m = meetingsById.get(e.meeting_id) ?? null;
     const qs = (m?.summary_status === 'ready' ? 10000 : 0) + (m?.summary_json?.tldr ? 3000 : 0) + (m?.transcript_chars ?? 0) + (m?.audio_chunk_count ?? 0) * 500 + Math.min(eventDuration(e) ?? 0, 5400000) / 1000 + (e.context_md?.length ?? 0);
     const curr = lk.get(b.calendar.id);
     if (!curr || qs > curr.score) lk.set(b.calendar.id, { id: e.meeting_id, score: qs });
   }
   return hd.size === 0 ? dd : dd.filter(e => !hd.has(e.id)).map(e => {
     const l = lk.get(e.id); if (!l) return e;
-    const m = meetingsById.get(l.id) ?? null;
+    const m = meetingForEvent({ ...e, meeting_id: l.id }, meetingsById);
+    if (!m) return e;
     return { ...e, meeting_id: l.id, context_md: m?.summary_json?.tldr ?? e.context_md, attendees: Array.from(new Set([...e.attendees, ...(m?.attendees ?? [])])), links: Array.from(new Set([...e.links, ...(m?.links ?? [])])) };
   });
 }
@@ -197,6 +206,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
 
   const ni = selectedDay === today && visibleEvents.length ? nowIndicatorIndex(visibleEvents, currentTime) : -1;
   const selEvent = visibleEvents.find(e => e.id === selectedId) ?? null;
+  const selMeeting = selEvent ? meetingForEvent(selEvent, meetingsById) : null;
 
   return (
     <div className="flex flex-col h-full gap-5 pt-6 pb-2 min-h-0">
@@ -213,7 +223,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
             <Card className="flex-1 flex flex-col min-h-0 overflow-hidden bg-card border-border/50 shadow-sm">
               <ScrollArea className="flex-1">
                 <div className="flex flex-col p-2 gap-1.5">
-                  {!visibleEvents.length ? <DayEmptyState day={selectedDay} loading={perDayLoading === selectedDay} onScan={runScan} scanning={scanning} /> : visibleEvents.map((e, i) => <React.Fragment key={e.id}>{i === ni && <NowIndicator now={currentTime} />}<EventRow event={e} active={e.id === selectedId} onClick={() => setSelectedId(e.id === selectedId ? null : e.id)} meeting={e.meeting_id ? meetingsById.get(e.meeting_id) ?? null : null} /></React.Fragment>)}
+                  {!visibleEvents.length ? <DayEmptyState day={selectedDay} loading={perDayLoading === selectedDay} onScan={runScan} scanning={scanning} /> : visibleEvents.map((e, i) => <React.Fragment key={e.id}>{i === ni && <NowIndicator now={currentTime} />}<EventRow event={e} active={e.id === selectedId} onClick={() => setSelectedId(e.id === selectedId ? null : e.id)} meeting={meetingForEvent(e, meetingsById)} /></React.Fragment>)}
                   {ni === visibleEvents.length && <NowIndicator now={currentTime} />}
                 </div>
               </ScrollArea>
@@ -232,9 +242,9 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
               ) : (
                 <ScrollArea className="flex-1">
                   <div className="flex flex-col p-8 max-w-4xl mx-auto w-full gap-8">
-                    <EventDetailHeader event={selEvent} meeting={selEvent.meeting_id ? meetingsById.get(selEvent.meeting_id) ?? null : null} />
+                    <EventDetailHeader event={selEvent} meeting={selMeeting} />
                     <Separator className="bg-border/50" />
-                    {selEvent.meeting_id ? <MeetingBody event={selEvent} meeting={meetingsById.get(selEvent.meeting_id)!} allMeetings={meetings} now={currentTime} /> : <NonMeetingBody event={selEvent} allMeetings={meetings} now={currentTime} />}
+                    {selMeeting ? <MeetingBody event={selEvent} meeting={selMeeting} allMeetings={meetings} now={currentTime} /> : <NonMeetingBody event={selEvent} allMeetings={meetings} now={currentTime} />}
                   </div>
                 </ScrollArea>
               )}
@@ -249,10 +259,18 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
 function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, onToday, onPick }: any) {
   const r = React.useRef<HTMLInputElement>(null), it = selectedDay === today;
   return (
-    <div className="flex items-center gap-2">
-      <div className="relative inline-flex items-center gap-1 rounded-full border border-border/50 bg-card p-1 shadow-sm"><Button variant="ghost" size="icon" onClick={onPrev} className="rounded-full size-8 hover:text-foreground"><ChevronLeft className="size-4" /></Button><button type="button" onClick={() => { if (r.current?.showPicker) { try { r.current.showPicker(); } catch { r.current.focus(); r.current.click(); } } else { r.current?.focus(); r.current?.click(); } }} className="inline-flex h-8 min-w-28 items-center justify-center gap-2 rounded-full px-3 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground">{loading ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : <CalendarDays className="size-3.5" />}<span>{prettyDay(selectedDay)}</span></button><Button variant="ghost" size="icon" onClick={onNext} className="rounded-full size-8 hover:text-foreground"><ChevronRight className="size-4" /></Button><input ref={r} type="date" value={selectedDay} onChange={e => e.target.value && onPick(e.target.value)} className="absolute inset-0 opacity-0 pointer-events-none" /></div>
-      {!it && <Button variant="outline" size="sm" onClick={onToday} className="h-9 rounded-full px-3 font-medium">Today</Button>}
-      {eventCount > 0 && <span className="ml-2 text-xs font-medium text-muted-foreground bg-muted px-2 py-1 rounded-full">{eventCount} event{eventCount > 1 ? 's' : ''}</span>}
+    <div className="flex items-center gap-2 flex-wrap">
+      <div className="relative inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-card/80 p-1 shadow-sm backdrop-blur-sm">
+        <Button variant="ghost" size="icon" onClick={onPrev} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronLeft className="size-4" /></Button>
+        <button type="button" onClick={() => { if (r.current?.showPicker) { try { r.current.showPicker(); } catch { r.current.focus(); r.current.click(); } } else { r.current?.focus(); r.current?.click(); } }} className="inline-flex h-8 min-w-32 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors hover:bg-accent hover:text-accent-foreground">
+          {loading ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : <CalendarDays className="size-3.5 text-muted-foreground" />}
+          <span className="tabular-nums">{it ? 'Today' : prettyDay(selectedDay)}</span>
+        </button>
+        <Button variant="ghost" size="icon" onClick={onNext} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronRight className="size-4" /></Button>
+        <input ref={r} type="date" value={selectedDay} onChange={e => e.target.value && onPick(e.target.value)} className="absolute inset-0 opacity-0 pointer-events-none" />
+      </div>
+      {!it && <Button variant="ghost" size="sm" onClick={onToday} className="h-9 rounded-full px-3 text-xs font-semibold text-muted-foreground hover:text-foreground">Jump to today</Button>}
+      {eventCount > 0 && <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"><span className="size-1.5 rounded-full bg-primary/70" />{eventCount} event{eventCount > 1 ? 's' : ''}</span>}
     </div>
   );
 }
@@ -274,16 +292,20 @@ function DaySummary({ day }: { day: string }) {
   if (state.status !== 'ready' || !state.content) return null;
   return (
     <Card className="flex-none border-border/50 bg-card shadow-sm overflow-hidden">
-      <button type="button" onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between gap-3 px-5 py-4 text-left hover:bg-muted/30 transition-colors">
-        <div className="flex items-center gap-2.5 text-xs font-bold uppercase tracking-wider text-muted-foreground">
-          <BookOpen className="size-4" />Day summary
+      <button type="button" onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/30 transition-colors">
+        <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground">
+          <span className="grid size-7 place-items-center rounded-full bg-primary/10 text-primary"><BookOpen className="size-3.5" /></span>
+          Day summary
         </div>
-        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform duration-200', open && 'rotate-180')} />
       </button>
       {open && (
         <CardContent className="pt-0 pb-5 px-5">
-          <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg max-h-[420px] overflow-y-auto">
-            <Markdown content={state.content} />
+          <div className="relative">
+            <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-headings:font-semibold prose-h2:text-base prose-h3:text-sm prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg prose-a:text-primary prose-a:no-underline hover:prose-a:underline max-h-[420px] overflow-y-auto pr-1">
+              <Markdown content={state.content} />
+            </div>
+            <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-card to-transparent" />
           </div>
         </CardContent>
       )}
@@ -297,7 +319,7 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
   const upc = selectedDay === today
     ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
     : null;
-  const mtgs = events.map((e: DayEvent) => e.meeting_id ? meetingsById.get(e.meeting_id) ?? null : null).filter(Boolean);
+  const mtgs = events.map((e: DayEvent) => meetingForEvent(e, meetingsById)).filter(Boolean);
   const sigs = collectMeetingSummarySignals(mtgs);
   const followups = sigs.actionItems.slice(0, 4);
   if (!upc && followups.length === 0) return null;
@@ -315,19 +337,20 @@ function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelect
   return (
     <div className={cn('grid gap-4 flex-none', upc && followups.length > 0 ? 'md:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]' : 'grid-cols-1')}>
       {upc && (
-        <button type="button" onClick={() => onSelectEvent(upc.id)} className="rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-2 min-w-0">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-4" />Next up</div>
+        <button type="button" onClick={() => onSelectEvent(upc.id)} className="relative overflow-hidden rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-2 min-w-0">
+          <span aria-hidden="true" className="absolute left-0 top-4 bottom-4 w-1 rounded-r-full bg-primary/60 group-hover:bg-primary transition-colors" />
+          <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-3.5" />Next up</div>
           <div className="min-w-0">
-            <div className="text-base font-semibold leading-tight truncate">{upc.title}</div>
-            <div className="mt-1 text-sm text-muted-foreground font-medium truncate">{formatDayEventTimeRange(upc)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
+            <div className="text-base font-semibold leading-snug truncate">{upc.title}</div>
+            <div className="mt-1 text-sm text-muted-foreground font-medium truncate tabular-nums">{formatDayEventTimeRange(upc)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
           </div>
         </button>
       )}
 
       {followups.length > 0 && <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><CheckSquare className="size-4" />Follow-ups</div>
-          {followups.length > 0 && <Badge variant="default" className="px-2">{sigs.actionItems.length}</Badge>}
+          <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground"><CheckSquare className="size-3.5" />Follow-ups</div>
+          {followups.length > 0 && <Badge variant="default" className="px-2 h-5 text-[10px] font-bold">{sigs.actionItems.length}</Badge>}
         </div>
         {followups.length > 0 ? (
           <ul className="flex flex-col gap-1.5 text-sm text-foreground/90">
@@ -360,23 +383,39 @@ function DayEmptyState({ day, loading, onScan, scanning }: any) {
 }
 
 function NowIndicator({ now }: { now: Date }) {
-  return <div className="grid grid-cols-[3.5rem_1fr] items-center gap-2 px-1 py-2"><span className="text-[11px] font-bold tabular-nums text-primary">{formatLocalTime(now.toISOString())}</span><div className="flex items-center gap-2"><span className="size-2.5 rounded-full bg-primary shadow-[0_0_0_4px_hsl(var(--primary)/0.15)]" /><span className="h-0.5 flex-1 bg-primary/40 rounded-full" /><span className="text-[10px] font-bold uppercase tracking-widest text-primary">Now</span></div></div>;
+  return (
+    <div className="grid grid-cols-[3.5rem_1fr] items-center gap-2 px-1 py-1.5">
+      <span className="text-[10px] font-bold tabular-nums text-primary tracking-tight">{formatLocalTime(now.toISOString())}</span>
+      <div className="flex items-center gap-2">
+        <span className="relative flex size-2 items-center justify-center">
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/60 opacity-75" />
+          <span className="relative inline-flex size-2 rounded-full bg-primary shadow-[0_0_0_3px_hsl(var(--primary)/0.18)]" />
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-r from-primary/50 to-transparent" />
+        <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-primary">Now</span>
+      </div>
+    </div>
+  );
 }
 
 function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active: boolean; onClick: () => void; meeting: Meeting | null }) {
   const dur = eventDuration(event), ht = (meeting?.transcript_chars ?? 0) > 0;
   return (
-    <button type="button" onClick={onClick} className={cn('group w-full text-left rounded-xl px-3 py-3.5 transition-all border', active ? 'border-primary/30 bg-primary/5 shadow-sm' : 'border-transparent hover:bg-muted/50')}>
+    <button type="button" onClick={onClick} className={cn('group relative w-full text-left rounded-xl pl-4 pr-3 py-3 transition-all border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60', active ? 'border-primary/30 bg-primary/[0.06] shadow-[0_1px_0_0_hsl(var(--primary)/0.08)_inset]' : 'border-transparent hover:bg-muted/40')}>
+      <span aria-hidden="true" className={cn('absolute left-0 top-2 bottom-2 w-[3px] rounded-full transition-all', active ? 'bg-primary' : 'bg-transparent group-hover:bg-border')} />
       <div className="flex items-start gap-3">
-        <div className="flex flex-col items-start min-w-[3.5rem] pt-0.5"><span className={cn("text-xs font-bold tabular-nums", active ? "text-primary" : "text-foreground")}>{formatDayEventTime(event)}</span>{dur != null && <span className="text-[10px] text-muted-foreground tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}</div>
+        <div className="flex flex-col items-start min-w-[3.25rem] pt-0.5">
+          <span className={cn('text-[11px] font-bold tabular-nums tracking-tight uppercase', active ? 'text-primary' : 'text-foreground/90')}>{formatDayEventTime(event)}</span>
+          {dur != null && <span className="text-[10px] text-muted-foreground/70 tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}
+        </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-start gap-2">
-            <span className={cn('mt-0.5 shrink-0 text-muted-foreground/50 transition-colors', active ? KIND_COLOR[event.kind] : 'group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
+            <span className={cn('mt-[3px] shrink-0 transition-colors', active ? KIND_COLOR[event.kind] : 'text-muted-foreground/45 group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
             <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold leading-tight line-clamp-2">{event.title}</div>
-              {event.kind !== 'meeting' && event.context_md && <p className="mt-1.5 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{event.context_md}</p>}
-              {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && <p className="mt-1.5 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{meeting.summary_json.tldr}</p>}
-              {event.kind === 'meeting' && ht && !meeting?.summary_json?.tldr && <p className="mt-1.5 text-xs text-muted-foreground/60 italic line-clamp-2">Summary pending.</p>}
+              <div className={cn('text-sm font-semibold leading-snug line-clamp-2', active ? 'text-foreground' : 'text-foreground/95')}>{event.title}</div>
+              {event.kind !== 'meeting' && event.context_md && <p className="mt-1 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{event.context_md}</p>}
+              {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && <p className="mt-1 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{meeting.summary_json.tldr}</p>}
+              {event.kind === 'meeting' && ht && !meeting?.summary_json?.tldr && <p className="mt-1 text-xs text-muted-foreground/55 italic line-clamp-2">Summary pending.</p>}
             </div>
           </div>
         </div>
@@ -388,19 +427,20 @@ function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active
 function EventDetailHeader({ event, meeting }: { event: DayEvent; meeting: Meeting | null }) {
   const dur = eventDuration(event), sl = SOURCE_LABELS[event.source] ?? event.source;
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">{event.title}</h1>
+        <h1 className="text-[1.65rem] font-semibold tracking-tight leading-tight text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>{event.title}</h1>
         <div className="flex items-center gap-2 mt-1">
           <Badge variant="secondary" className={cn('text-xs gap-1.5 px-2.5 py-0.5', KIND_COLOR[event.kind])}><KindIcon kind={event.kind} className="size-3.5" />{KIND_LABELS[event.kind]}</Badge>
           {meeting && <Badge variant="outline" className="text-xs px-2.5 py-0.5 font-medium">{platformLabel(meeting.platform)}</Badge>}
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-muted-foreground">
-        <div className="flex items-center gap-2"><Calendar className="size-4 opacity-70" /><span className="font-medium">{prettyDay(event.day)}</span></div>
-        <div className="flex items-center gap-2"><Clock className="size-4 opacity-70" /><span className="font-medium">{formatDayEventTimeRange(event)}</span>{dur != null && <span className="text-muted-foreground/60 font-normal">({formatDuration(dur)})</span>}</div>
-        {event.source_app && <div className="flex items-center gap-2"><Inbox className="size-4 opacity-70" /><span className="font-medium">{event.source_app}</span></div>}
-        <div className="flex items-center gap-2 text-muted-foreground/80"><span className="text-xs uppercase tracking-wider font-bold">{sl}</span></div>
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-1.5"><Calendar className="size-3.5 opacity-70" /><span className="font-medium">{prettyDay(event.day)}</span></div>
+        <span className="text-border" aria-hidden="true">·</span>
+        <div className="flex items-center gap-1.5"><Clock className="size-3.5 opacity-70" /><span className="font-medium tabular-nums">{formatDayEventTimeRange(event)}</span>{dur != null && <span className="text-muted-foreground/60 font-normal tabular-nums">({formatDuration(dur)})</span>}</div>
+        {event.source_app && <><span className="text-border" aria-hidden="true">·</span><div className="flex items-center gap-1.5"><Inbox className="size-3.5 opacity-70" /><span className="font-medium">{event.source_app}</span></div></>}
+        <span className="ml-auto text-[10px] uppercase tracking-[0.16em] font-bold text-muted-foreground/70">{sl}</span>
       </div>
       {event.attendees.length > 0 && (
         <div className="flex items-center gap-2.5 text-sm text-muted-foreground mt-1">
