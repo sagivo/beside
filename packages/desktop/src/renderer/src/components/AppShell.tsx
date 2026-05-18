@@ -61,10 +61,10 @@ export function AppShell({
 
     const SCREEN_KEYS: Record<string, Screen> = {
       '1': 'dashboard',
-      '2': 'meetings',
-      '3': 'privacy',
-      '4': 'search',
-      '5': 'ai',
+      '2': 'ai',
+      '3': 'meetings',
+      '4': 'privacy',
+      '5': 'search',
       '6': 'connect',
       '7': 'settings',
       '8': 'help',
