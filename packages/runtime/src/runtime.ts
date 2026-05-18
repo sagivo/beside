@@ -17,6 +17,8 @@ import {
   bootstrapModel, buildOrchestrator, assertHeavyWorkAllowed, runFullReindex,
   runIncremental, runReorganisation, startAll, stopAll, type HookWidgetManifestRuntime, type OrchestratorHandles, type OrchestratorOptions,
 } from './orchestrator.js';
+import { OpenCodeHarness } from './agent/opencode-harness.js';
+import type { ChatStreamHandler, ChatTurnInput } from './agent/types.js';
 
 export type RuntimeStatus = 'not_started' | 'starting' | 'running' | 'stopping' | 'stopped';
 
@@ -148,6 +150,7 @@ export class BesideRuntime {
   private manualJob: { name: string; startedAt: string } | null = null;
   private lastManualJobCompletedAt: string | null = null;
   private readonly explainSearchCache = new Map<string, string>();
+  private opencodeHarness: OpenCodeHarness | null = null;
 
   constructor(opts: RuntimeOptions = {}) {
     this.logger = opts.logger ?? createLogger({ level: 'info' });
@@ -173,6 +176,8 @@ export class BesideRuntime {
   }
 
   async stop(): Promise<void> {
+    this.opencodeHarness?.close();
+    this.opencodeHarness = null;
     if (!this.handles) { this.status = 'stopped'; return; }
     this.status = 'stopping';
     this.invalidateOverview();
@@ -338,8 +343,15 @@ export class BesideRuntime {
     const validation = validateConfig(next);
     if (!validation.ok) throw new Error(`Invalid config: ${validation.issues.map((i: any) => `${i.path}: ${i.message}`).join('; ')}`);
     await writeConfig(validation.config, this.opts.configPath);
-    if (this.handles) await this.stop();
+    if (this.handles || this.opencodeHarness) await this.stop();
     return await loadConfig(this.opts.configPath);
+  }
+
+  async chatTurn(input: ChatTurnInput, onEvent: ChatStreamHandler): Promise<void> {
+    if (this.status !== 'running') await this.start({ bootstrap: false });
+    const handles = await this.getOrCreateHandles();
+    this.opencodeHarness ??= new OpenCodeHarness(this.logger.child('opencode-harness'));
+    await this.opencodeHarness.runTurn(handles, input, onEvent);
   }
 
   async listMeetings(query: { from?: string; to?: string; limit?: number } = {}): Promise<Meeting[]> {

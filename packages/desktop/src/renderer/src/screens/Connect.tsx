@@ -20,16 +20,18 @@ export function Connect({ overview, config, onRefresh }: { overview: RuntimeOver
   const mcpC = config.config.export.plugins.find(p => p.name === 'mcp'), mdC = config.config.export.plugins.find(p => p.name === 'markdown');
   const mcpS = overview.exports.find(e => e.name === 'mcp'), mdS = overview.exports.find(e => e.name === 'markdown');
   const host = typeof mcpC?.host === 'string' ? mcpC.host : '127.0.0.1', port = typeof mcpC?.port === 'number' ? mcpC.port : 3456, url = `http://${host}:${port}`;
-  const snip = JSON.stringify({ mcpServers: { beside: { url } } }, null, 2), clCmd = `claude mcp add --transport http beside ${url}`;
+  const snip = JSON.stringify({ mcpServers: { beside: { url } } }, null, 2);
+  const claudeSnip = JSON.stringify({ mcpServers: { beside: { command: 'npx', args: ['-y', 'mcp-remote', url] } } }, null, 2);
+  const clCmd = `claude mcp add --transport http beside ${url}`;
 
-  return <ConnectScreen url={url} snippet={snip} claudeCommand={clCmd} copyText={async (l: string, t: string) => { await window.beside.copyText(t); toast.success(`${l} copied`); }} enableMcp={async () => {
+  return <ConnectScreen url={url} snippet={snip} claudeSnippet={claudeSnip} claudeCommand={clCmd} copyText={async (l: string, t: string) => { await window.beside.copyText(t); toast.success(`${l} copied`); }} enableMcp={async () => {
     const p = [...config.config.export.plugins], i = p.findIndex(x => x.name === 'mcp'), n = { ...(i >= 0 ? p[i] : {}), name: 'mcp', enabled: true, host, port, transport: 'http' as const };
     i >= 0 ? p[i] = n : p.push(n);
     try { await window.beside.saveConfigPatch({ export: { plugins: p } }); if (overview.status === 'running') await window.beside.startRuntime(); toast.success('MCP server enabled'); await onRefresh(); } catch (err: any) { toast.error('Could not enable MCP', { description: err.message }); }
   }} mcpEnabled={mcpC?.enabled !== false} mcpRunning={!!mcpS?.running} markdownRunning={!!mdS?.running} markdownPath={typeof mdC?.path === 'string' ? mdC.path : ''} onRefresh={onRefresh} />;
 }
 
-function ConnectScreen({ url, snippet, claudeCommand, copyText, enableMcp, mcpEnabled, mcpRunning, markdownRunning, markdownPath, onRefresh }: any) {
+function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, enableMcp, mcpEnabled, mcpRunning, markdownRunning, markdownPath, onRefresh }: any) {
   const [test, setTest] = React.useState<TestState>({ status: 'idle' }), [enabling, setEnabling] = React.useState(false);
   React.useEffect(() => { if (test.status === 'ok') { const t = window.setTimeout(() => setTest({ status: 'idle' }), 6000); return () => window.clearTimeout(t); } }, [test]);
 
@@ -57,7 +59,7 @@ function ConnectScreen({ url, snippet, claudeCommand, copyText, enableMcp, mcpEn
             {test.status === 'idle' ? <span className="text-xs text-muted-foreground/80 font-mono truncate">{`${url}/health`}</span> : test.status === 'pending' ? <span className="text-xs text-muted-foreground">Pinging...</span> : test.status === 'ok' ? <span className="inline-flex items-center gap-1.5 text-xs text-success font-medium animate-in fade-in-0"><CheckCircle2 className="size-3.5" />Connected · {test.latencyMs}ms</span> : <span className="inline-flex items-center gap-1.5 text-xs text-destructive font-medium animate-in fade-in-0" title={test.reason}><XCircle className="size-3.5" /><span className="truncate max-w-[260px]">{test.reason}</span></span>}
           </div>
           <div className="grid gap-3 md:grid-cols-3">
-            <div className="flex flex-col gap-3 rounded-lg border bg-background/60 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><span className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"><Plug className="size-4" /></span>Claude Desktop</div><p className="text-xs text-muted-foreground">Use the MCP JSON in Claude's developer settings.</p><Button variant="outline" size="sm" onClick={() => copyText('Claude MCP JSON', snippet)}><Copy />Copy JSON</Button></div>
+            <div className="flex flex-col gap-3 rounded-lg border bg-background/60 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><span className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"><Plug className="size-4" /></span>Claude Desktop</div><p className="text-xs text-muted-foreground">Use the MCP JSON in Claude's developer settings. Requires Node.js (uses <code className="font-mono">mcp-remote</code> to bridge HTTP).</p><Button variant="outline" size="sm" onClick={() => copyText('Claude MCP JSON', claudeSnippet)}><Copy />Copy JSON</Button></div>
             <div className="flex flex-col gap-3 rounded-lg border bg-background/60 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><span className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"><Copy className="size-4" /></span>Cursor</div><p className="text-xs text-muted-foreground">Paste this into Cursor's MCP configuration.</p><Button variant="outline" size="sm" onClick={() => copyText('Cursor MCP JSON', snippet)}><Copy />Copy JSON</Button></div>
             <div className="flex flex-col gap-3 rounded-lg border bg-background/60 p-4"><div className="flex items-center gap-2 text-sm font-semibold"><span className="grid size-7 place-items-center rounded-md bg-primary/10 text-primary"><Terminal className="size-4" /></span>Claude Code</div><p className="text-xs text-muted-foreground">Run this command in your terminal.</p><Button variant="outline" size="sm" onClick={() => copyText('Claude Code command', claudeCommand)}><Copy />Copy command</Button></div>
           </div>

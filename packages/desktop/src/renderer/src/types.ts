@@ -3,6 +3,7 @@ export type Screen =
   | 'meetings'
   | 'privacy'
   | 'search'
+  | 'ai'
   | 'connect'
   | 'settings'
   | 'help';

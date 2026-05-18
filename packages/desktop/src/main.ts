@@ -63,13 +63,16 @@ class RuntimeServiceClient {
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (r?: unknown) => void; }>();
 
   constructor() {
-    this.child = spawn(app.isPackaged ? process.execPath : (process.env.COFUNDEROS_NODE ?? 'node'), [path.join(here, 'runtime-service.js')], { env: { ...process.env, BESIDE_RESOURCE_ROOT: workspaceRoot, ...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const runtimeNode = process.env.BESIDE_NODE ?? process.execPath;
+    const useElectronAsNode = runtimeNode === process.execPath;
+    this.child = spawn(runtimeNode, [path.join(here, 'runtime-service.js')], { env: { ...process.env, BESIDE_RESOURCE_ROOT: workspaceRoot, ...(useElectronAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     this.child.stderr?.setEncoding('utf8').on('data', (c) => appendLog(c.trimEnd()));
     this.child.on('error', (err) => this.rejectAll(err));
-    this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow(); });
+    this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow().catch((err) => appendLog(`Render refresh failed after runtime exit: ${String(err)}`)); });
     this.on('bootstrap-progress', (p) => statusWindow?.webContents.send('beside:bootstrap-progress', p));
     this.on('overview', (p) => { lastOverview = p; applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); statusWindow?.webContents.send('beside:overview', p); });
     this.on('capture-hook-update', (p) => statusWindow?.webContents.send('beside:capture-hook-update', p));
+    this.on('chat-stream', (p) => statusWindow?.webContents.send('beside:chat-stream', p));
     readline.createInterface({ input: this.child.stdout!, crlfDelay: Infinity }).on('line', (line) => this.handleLine(line));
   }
 
@@ -468,6 +471,7 @@ function registerRuntimeIpc() {
   h('beside:list-journal-days', async () => (await getRuntimeForRequest()).call('listJournalDays'));
   h('beside:get-journal-day', async (e, d) => (await getRuntimeForRequest()).call('getJournalDay', d));
   h('beside:read-journal-markdown', async (e, d) => (await getRuntimeForRequest()).call('readJournalMarkdown', d));
+  h('beside:chat-turn', async (e, params) => (await getRuntimeForRequest()).call('chatTurn', params));
   h('beside:list-meetings', async (e, q) => (await getRuntimeForRequest()).call('listMeetings', q));
   h('beside:list-day-events', async (e, q) => (await getRuntimeForRequest()).call('listDayEvents', q));
   h('beside:trigger-event-extractor', async () => (await getRuntimeForRequest()).call('triggerEventExtractor', undefined));

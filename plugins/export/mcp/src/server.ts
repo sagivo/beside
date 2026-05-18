@@ -25,6 +25,7 @@ import { isSelfFrame } from './parsers.js';
 import {
   buildDailySummary,
   buildEntitySummary,
+  type DailySummary,
   type OpenLoop,
 } from './digest.js';
 
@@ -60,6 +61,8 @@ type MemoryChunkMatch = {
   retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
   semanticScore?: number;
 };
+
+type StoredMeeting = NonNullable<Awaited<ReturnType<IStorage['getMeeting']>>>;
 
 type DateWindow = {
   source: 'explicit' | 'query' | 'default';
@@ -433,12 +436,15 @@ export function createMcpServer(
       const requestedOffset = offset ?? 0;
       const dropSelf = exclude_self !== false;
       const candidateLimit = requestedLimit + requestedOffset;
-      const surfaceQuery = preferredSurface(query);
+      const effectiveQuery = app && isGenericAppActivityQuery(query)
+        ? app
+        : query;
+      const surfaceQuery = preferredSurface(effectiveQuery);
       const explicitDateWindow = explicitDateWindowFromInput({ day, from, to });
       const dateWindow = explicitDateWindow ?? inferQueryDateWindow(query);
       const dateFilters = dateWindowToStorageFilter(dateWindow);
-      const retrievalQuery = retrievalQueryForDateAwareSearch(query, dateWindow);
-      const rankingQuery = retrievalQuery ?? query;
+      const retrievalQuery = retrievalQueryForDateAwareSearch(effectiveQuery, dateWindow);
+      const rankingQuery = retrievalQuery ?? effectiveQuery;
       // Over-fetch when filtering self frames so the post-filter list
       // still has enough rows to satisfy the requested page.
       const fetchLimit = candidateLimit * (surfaceQuery ? 8 : dropSelf ? 2 : 1);
@@ -1020,15 +1026,19 @@ export function createMcpServer(
           .max(50)
           .optional()
           .describe('Cap on the open-loops list. Default 10.'),
+        compact: z
+          .boolean()
+          .optional()
+          .describe('Return a smaller model-friendly digest. Default true.'),
       },
     },
-    async ({ day, include_self, open_loops_limit }) => {
+    async ({ day, include_self, open_loops_limit, compact }) => {
       const summary = await buildDailySummary(services.storage, day, {
         include_self,
         open_loops_limit,
       });
       return {
-        content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(compact === false ? summary : compactDailySummary(summary), null, 2) }],
       };
     },
   );
@@ -1201,13 +1211,17 @@ export function createMcpServer(
     'get_slack_activity',
     {
       description:
-        'Structured digest of Slack / chat frames observed on a day: per-channel observation count, the last representative message OCR\'d, mentions, and whether the visible message looks unanswered. Heuristic — pair with `get_frame_context` to verify any single conversation. Frames from the Beside dashboard are excluded by default.',
+        'Structured digest of Slack / chat frames observed on a day: per-channel observation count, the last representative message OCR\'d, mentions, and whether the visible message looks unanswered. Use `channel` for an exact channel like "#liblab"; use `query` for a person/topic/channel phrase like "Stevan", "liblab PR flow", or "build alerts". Heuristic — pair with `get_frame_context` to verify any single conversation. Frames from the Beside dashboard are excluded by default.',
       inputSchema: {
         day: z.string().describe('Day in YYYY-MM-DD format.'),
         channel: z
           .string()
           .optional()
           .describe('Restrict to one Slack channel name (with or without leading "#").'),
+        query: z
+          .string()
+          .optional()
+          .describe('Optional person/topic/channel phrase to filter representative messages, mentions, and channel names.'),
         limit: z.number().int().min(1).max(50).optional().describe('Max threads returned. Default 12.'),
         include_self: z
           .boolean()
@@ -1215,7 +1229,7 @@ export function createMcpServer(
           .describe('Include Beside dashboard frames. Default false.'),
       },
     },
-    async ({ day, channel, limit, include_self }) => {
+    async ({ day, channel, query, limit, include_self }) => {
       const summary = await buildDailySummary(services.storage, day, {
         include_self,
         open_loops_limit: 0,
@@ -1229,6 +1243,24 @@ export function createMcpServer(
             (t) => (t.channel ?? '').toLowerCase() === targetChannel,
           )
         : summary.slack_threads;
+      const channelFallbackQuery = targetChannel && filtered.length === 0
+        ? targetChannel.replace(/^#/, '')
+        : null;
+      const baseThreads = channelFallbackQuery
+        ? summary.slack_threads.filter((thread) => slackThreadMatchesQuery(thread, channelFallbackQuery))
+        : filtered;
+      const queryFiltered = query?.trim()
+        ? baseThreads.filter((thread) => slackThreadMatchesQuery(thread, query))
+        : baseThreads;
+      const threads = queryFiltered.slice(0, cap).map(compactSlackThread);
+      const notes = [...summary.notes];
+      if (channelFallbackQuery) notes.push(`No exact Slack channel match for ${targetChannel}; searched representative messages and mentions for "${channelFallbackQuery}".`);
+      if (!queryFiltered.length) notes.push('No Slack threads matched the requested channel/query.');
+      const threadLines = threads.map((thread) => {
+        const mentions = thread.mentions.length ? ` mentions=${thread.mentions.join(',')}` : '';
+        const open = thread.looks_unanswered ? ' unanswered=true' : '';
+        return `${thread.channel} ${thread.last_seen}: ${thread.representative_message}${mentions}${open} (${thread.example_frame_id})`;
+      });
       return {
         content: [
           {
@@ -1237,9 +1269,11 @@ export function createMcpServer(
               {
                 day,
                 channel: targetChannel,
-                count: filtered.length,
-                threads: filtered.slice(0, cap),
-                notes: summary.notes,
+                query: query?.trim() || null,
+                count: queryFiltered.length,
+                thread_lines: threadLines,
+                threads,
+                notes,
               },
               null,
               2,
@@ -1263,14 +1297,22 @@ export function createMcpServer(
           .enum(MEETING_PLATFORMS as [MeetingPlatform, ...MeetingPlatform[]])
           .optional()
           .describe('Filter to one platform (zoom/meet/teams/webex/whereby/around/other).'),
+        query: z
+          .string()
+          .optional()
+          .describe('Optional title/topic/person phrase to filter meeting title, summary, entity path, or attendees.'),
         limit: z.number().int().positive().optional().describe('Max meetings to return. Default 50.'),
         order: z
           .enum(['recent', 'chronological'])
           .optional()
           .describe('"recent" (default) returns newest first.'),
+        compact: z
+          .boolean()
+          .optional()
+          .describe('Return smaller rows without full links/attendee arrays. Default true.'),
       },
     },
-    async ({ day, from, to, platform, limit, order }) => {
+    async ({ day, from, to, platform, query, limit, order, compact }) => {
       try {
         const meetings = await services.storage.listMeetings({
           day,
@@ -1280,22 +1322,42 @@ export function createMcpServer(
           limit: limit ?? 50,
           order,
         });
-        const rows = meetings.map((m) => ({
-          id: m.id,
-          entity_path: m.entity_path,
-          platform: m.platform,
-          started_at: m.started_at,
-          ended_at: m.ended_at,
-          day: m.day,
-          duration_min: Math.round(m.duration_ms / 60_000),
-          screenshot_count: m.screenshot_count,
-          audio_chunk_count: m.audio_chunk_count,
-          transcript_chars: m.transcript_chars,
-          attendees: m.attendees,
-          links: m.links,
-          summary_status: m.summary_status,
-          has_summary: m.summary_status === 'ready',
-        }));
+        const matchedMeetings = query?.trim()
+          ? meetings.filter((meeting) => meetingMatchesQuery(meeting, query))
+          : meetings;
+        const rows = (matchedMeetings.length || !query?.trim() ? matchedMeetings : meetings).map((m) => {
+          if (compact !== false) {
+            const summary = objectValue(m.summary_json);
+            return {
+              id: m.id,
+              entity_path: m.entity_path,
+              title: compactLine(m.title ?? stringValue(summary.title), 140),
+              tldr: compactLine(stringValue(summary.tldr), 220),
+              platform: m.platform,
+              time: compactTimeRange(m.started_at, m.ended_at),
+              duration_min: Math.round(m.duration_ms / 60_000),
+              transcript_chars: m.transcript_chars,
+              summary_status: m.summary_status,
+              has_summary: m.summary_status === 'ready',
+            };
+          }
+          return {
+            id: m.id,
+            entity_path: m.entity_path,
+            platform: m.platform,
+            started_at: m.started_at,
+            ended_at: m.ended_at,
+            day: m.day,
+            duration_min: Math.round(m.duration_ms / 60_000),
+            screenshot_count: m.screenshot_count,
+            audio_chunk_count: m.audio_chunk_count,
+            transcript_chars: m.transcript_chars,
+            attendees: m.attendees,
+            links: m.links,
+            summary_status: m.summary_status,
+            has_summary: m.summary_status === 'ready',
+          };
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(rows, null, 2) }],
         };
@@ -1315,7 +1377,8 @@ export function createMcpServer(
       description:
         'Fetch a single meeting by id with its structured summary, fused transcript turns (each tied to a screenshot via visual_frame_id), and metadata. Pair with `list_meetings` to drill in. Pass `include` to control payload size; the default is summary+turns.',
       inputSchema: {
-        id: z.string().describe('Meeting id (starts with "mtg_").'),
+        id: z.string().optional().describe('Meeting id (starts with "mtg_").'),
+        meeting_id: z.string().optional().describe('Alias for id.'),
         include_turns: z
           .boolean()
           .optional()
@@ -1324,20 +1387,36 @@ export function createMcpServer(
           .boolean()
           .optional()
           .describe('Include the meeting\'s screenshot frames as a thin manifest. Default false.'),
+        compact: z
+          .boolean()
+          .optional()
+          .describe('Return a smaller model-friendly meeting summary. Default true.'),
       },
     },
-    async ({ id, include_turns, include_screens }) => {
-      const meeting = await services.storage.getMeeting(id);
+    async ({ id, meeting_id, include_turns, include_screens, compact }) => {
+      const meetingId = id ?? meeting_id;
+      if (!meetingId) {
+        return {
+          content: [{ type: 'text', text: 'Meeting id required.' }],
+          isError: true,
+        };
+      }
+      const meeting = await resolveMeeting(services.storage, meetingId);
       if (!meeting) {
         return {
-          content: [{ type: 'text', text: `Meeting ${id} not found.` }],
+          content: [{ type: 'text', text: `Meeting ${meetingId} not found.` }],
+        };
+      }
+      if (compact !== false) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify(compactMeetingDetails(meeting), null, 2) }],
         };
       }
       const wantTurns = include_turns !== false;
       const wantScreens = include_screens === true;
-      const turns = wantTurns ? await services.storage.getMeetingTurns(id) : [];
+      const turns = wantTurns ? await services.storage.getMeetingTurns(meeting.id) : [];
       const screens = wantScreens
-        ? (await services.storage.getMeetingFrames(id)).filter(
+        ? (await services.storage.getMeetingFrames(meeting.id)).filter(
             (f) => f.entity_kind === 'meeting' && f.asset_path,
           )
         : [];
@@ -2755,6 +2834,214 @@ function tokenOverlap(a: string, b: string): number {
     if (right.has(term)) shared += 1;
   }
   return shared / Math.max(left.size, right.size);
+}
+
+function compactDailySummary(summary: DailySummary): Record<string, unknown> {
+  return {
+    day: summary.day,
+    totals: summary.totals,
+    top_apps: summary.top_apps
+      .slice(0, 5)
+      .map((app) => `${app.app}: ${app.focused_min}m, ${app.frames} frames`),
+    top_entities: summary.top_entities
+      .slice(0, 5)
+      .map((entity) => `${entity.title} (${entity.kind}, ${entity.focused_min}m, ${entity.frames} frames, ${entity.path})`),
+    sessions: summary.sessions
+      .slice(0, 6)
+      .map((session) => `${compactTimeRange(session.started_at, session.ended_at)} ${session.active_min}m ${session.primary_app ?? 'unknown'} / ${session.primary_entity ?? 'unknown'}: ${compactLine(session.headline, 90) ?? 'no headline'}`),
+    open_loops: summary.open_loops
+      .slice(0, 3)
+      .map((loop) => `${loop.kind} ${loop.ref}: ${compactLine(loop.description, 90)} (${compactTime(loop.last_seen)}, ${loop.example_frame_id})`),
+    notes: summary.notes,
+  };
+}
+
+function compactMeetingDetails(meeting: {
+  id: string;
+  entity_path: string;
+  platform: string;
+  started_at: string;
+  ended_at: string;
+  day: string;
+  duration_ms: number;
+  transcript_chars: number;
+  summary_status: string;
+  summary_json: unknown;
+  failure_reason: string | null;
+}): Record<string, unknown> {
+  const summary = objectValue(meeting.summary_json);
+  return {
+    meeting: {
+      id: meeting.id,
+      entity_path: meeting.entity_path,
+      platform: meeting.platform,
+      day: meeting.day,
+      time: compactTimeRange(meeting.started_at, meeting.ended_at),
+      duration_min: Math.round(meeting.duration_ms / 60_000),
+      transcript_chars: meeting.transcript_chars,
+      summary_status: meeting.summary_status,
+      summary_failure_reason: meeting.failure_reason,
+    },
+    summary: {
+      title: compactLine(stringValue(summary.title), 120),
+      tldr: compactLine(stringValue(summary.tldr), 700),
+      agenda: compactStringArray(summary.agenda, 8, 140),
+      decisions: compactStringArray(summary.decisions, 6, 160),
+      action_items: compactStringArray(summary.action_items, 8, 160),
+      open_questions: compactStringArray(summary.open_questions, 6, 160),
+      key_moments: arrayValue(summary.key_moments)
+        .slice(0, 6)
+        .map((moment) => {
+          const rec = objectValue(moment);
+          return `${compactTime(stringValue(rec.t) ?? '')} ${compactLine(stringValue(rec.what), 180) ?? ''}${rec.frame_id ? ` (${String(rec.frame_id)})` : ''}`;
+        }),
+    },
+  };
+}
+
+async function resolveMeeting(storage: IStorage, id: string): Promise<StoredMeeting | null> {
+  const exact = await storage.getMeeting(id);
+  if (exact) return exact;
+
+  const normalized = normalizeMeetingId(id);
+  if (normalized.length < 10) return null;
+
+  try {
+    const meetings = await storage.listMeetings({ limit: 500, order: 'recent' });
+    const candidate = meetings.find((meeting) => {
+      const candidateId = normalizeMeetingId(meeting.id);
+      return candidateId.startsWith(normalized) || normalized.startsWith(candidateId);
+    });
+    return candidate ? await storage.getMeeting(candidate.id) : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeMeetingId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function slackThreadMatchesQuery(
+  thread: {
+    channel?: string | null;
+    representative_message?: string | null;
+    mentions?: string[];
+  },
+  query: string,
+): boolean {
+  const haystack = normalizeSearchText([
+    thread.channel,
+    thread.representative_message,
+    ...(thread.mentions ?? []),
+  ].filter(Boolean).join(' '));
+  const tokens = searchTokens(query);
+  if (!tokens.length) return true;
+  return tokens.some((token) => haystack.includes(token));
+}
+
+function compactSlackThread(thread: {
+  channel?: string | null;
+  source_app?: string | null;
+  observation_count?: number;
+  last_seen?: string;
+  representative_message?: string | null;
+  mentions?: string[];
+  looks_unanswered?: boolean;
+  example_frame_id?: string;
+}): {
+  channel: string | null;
+  source_app: string | null;
+  observation_count: number;
+  last_seen: string | null;
+  representative_message: string | null;
+  mentions: string[];
+  looks_unanswered: boolean;
+  example_frame_id: string | null;
+} {
+  return {
+    channel: thread.channel ?? null,
+    source_app: thread.source_app ?? null,
+    observation_count: thread.observation_count ?? 0,
+    last_seen: thread.last_seen ?? null,
+    representative_message: compactLine(thread.representative_message, 420),
+    mentions: thread.mentions ?? [],
+    looks_unanswered: Boolean(thread.looks_unanswered),
+    example_frame_id: thread.example_frame_id ?? null,
+  };
+}
+
+function meetingMatchesQuery(meeting: StoredMeeting, query: string): boolean {
+  const summary = objectValue(meeting.summary_json);
+  const haystack = normalizeSearchText([
+    meeting.title,
+    meeting.entity_path,
+    meeting.platform,
+    ...meeting.attendees,
+    ...meeting.links,
+    stringValue(summary.title),
+    stringValue(summary.tldr),
+    ...compactStringArray(summary.agenda, 12, 200),
+    ...compactStringArray(summary.action_items, 12, 200),
+  ].filter(Boolean).join(' '));
+  const tokens = searchTokens(query);
+  if (!tokens.length) return true;
+  return tokens.some((token) => haystack.includes(token));
+}
+
+function isGenericAppActivityQuery(query: string): boolean {
+  const tokens = searchTokens(query);
+  if (!tokens.length) return true;
+  const generic = new Set(['work', 'worked', 'working', 'activity', 'activities', 'what', 'did', 'doing']);
+  return tokens.every((token) => generic.has(token));
+}
+
+function normalizeSearchText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9#@._-]+/g, ' ');
+}
+
+function searchTokens(value: string): string[] {
+  return normalizeSearchText(value)
+    .split(/\s+/)
+    .map((token) => token.replace(/^#/, '').replace(/^@/, ''))
+    .filter((token) => token.length >= 3);
+}
+
+function compactStringArray(value: unknown, limit: number, max: number): string[] {
+  return arrayValue(value)
+    .slice(0, limit)
+    .map((item) => compactLine(typeof item === 'string' ? item : JSON.stringify(item), max))
+    .filter((item): item is string => Boolean(item));
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function compactTimeRange(startIso: string, endIso: string): string {
+  return `${compactTime(startIso)}-${compactTime(endIso)}`;
+}
+
+function compactTime(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function compactLine(value: string | null | undefined, max: number): string | null {
+  if (!value) return null;
+  const line = value.replace(/\s+/g, ' ').trim();
+  return line.length <= max ? line : `${line.slice(0, max - 3)}...`;
 }
 
 // ---------------------------------------------------------------------------

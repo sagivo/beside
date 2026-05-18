@@ -14,6 +14,7 @@ declare global {
       listJournalDays: () => Promise<string[]>;
       getJournalDay: (day: string) => Promise<JournalDay>;
       readJournalMarkdown: (day: string) => Promise<{ day: string; path: string | null; content: string | null }>;
+      chatTurn: (input: ChatTurnInput) => Promise<void>;
       searchFrames: (query: unknown) => Promise<Frame[]>;
       explainSearchResults: (query: unknown) => Promise<SearchResultExplanation[]>;
       getFrameIndexDetails: (frameId: string) => Promise<FrameIndexDetails | null>;
@@ -67,6 +68,7 @@ declare global {
         callback: (event: WhisperInstallProgress) => void,
       ) => () => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => () => void;
+      onChatStream?: (callback: (event: ChatStreamEvent) => void) => () => void;
       listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
       listDayEvents: (query?: {
         day?: string;
@@ -109,6 +111,28 @@ declare global {
     };
   }
 }
+
+export interface ChatTurnHistoryItem {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatTurnInput {
+  turnId: string;
+  conversationId: string;
+  message: string;
+  history: ChatTurnHistoryItem[];
+}
+
+export type ChatStreamEvent =
+  | { kind: 'phase'; turnId: string; phase: 'classify' | 'plan' | 'execute' | 'compose' }
+  | { kind: 'reasoning'; turnId: string; text: string }
+  | { kind: 'intent'; turnId: string; intent: string; anchor: unknown }
+  | { kind: 'tool-call'; turnId: string; tool: string; args: Record<string, unknown>; callId: string }
+  | { kind: 'tool-result'; turnId: string; callId: string; tool: string; summary: string }
+  | { kind: 'content'; turnId: string; delta: string }
+  | { kind: 'done'; turnId: string }
+  | { kind: 'error'; turnId: string; message: string };
 
 export interface RuntimeOverview {
   status: string;

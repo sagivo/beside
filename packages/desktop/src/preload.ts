@@ -17,6 +17,7 @@ const api = {
   listJournalDays: () => ipcRenderer.invoke('beside:list-journal-days'),
   getJournalDay: (day: string) => ipcRenderer.invoke('beside:get-journal-day', day),
   readJournalMarkdown: (day: string) => ipcRenderer.invoke('beside:read-journal-markdown', day),
+  chatTurn: (input: unknown) => ipcRenderer.invoke('beside:chat-turn', input),
   searchFrames: (query: unknown) => ipcRenderer.invoke('beside:search-frames', query),
   explainSearchResults: (query: unknown) => ipcRenderer.invoke('beside:explain-search-results', query),
   getFrameIndexDetails: (frameId: string) => ipcRenderer.invoke('beside:get-frame-index-details', frameId),
@@ -69,6 +70,9 @@ const api = {
   },
   onOverview: (callback: (overview: unknown) => void) => {
     return onIpc('beside:overview', callback);
+  },
+  onChatStream: (callback: (event: unknown) => void) => {
+    return onIpc('beside:chat-stream', callback);
   },
   listMeetings: (query?: { from?: string; to?: string; limit?: number }) =>
     ipcRenderer.invoke('beside:list-meetings', query),

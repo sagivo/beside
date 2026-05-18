@@ -152,14 +152,14 @@ function LandingPage() {
             <div>
               <h1 className="hero-title">
                 <span className="grad">
-                  You private AI,{" "}
                   <span className="hero-title-beside">
-                    <img className="hero-title-mark" src="/images/logo.png" alt="" aria-hidden="true" />
-                    beside
-                  </span>{" "}
-                  you.
+                    <img className="hero-title-mark" src="/images/logo.png" alt="Beside logo" aria-hidden="true" />
+                    beside <br />
+                  </span>
+                  Your private AI
                 </span>
               </h1>
+         
 
               <p className="lede">
                 beside sits next to your work, <strong>capturing</strong> the
@@ -558,26 +558,17 @@ function AmbientAINetwork() {
                 strokeWidth="1.2"
                 className={`ai-flow ai-flow-${i % 4}`}
               />
-              {/* primary data packet riding the line into the core */}
+              {/* Single data packet riding the line into the core.
+                  Originally there were two packets per edge (×8 apps = 16
+                  perpetual SMIL animations on the always-visible hero).
+                  One packet per edge is plenty visually and halves the
+                  per-frame cost of the hero viz. */}
               <circle r="2.6" fill="#6b6cf0" opacity="0" className="ai-packet">
                 <set attributeName="opacity" to="0.95" begin={`${(i * 0.35).toFixed(2)}s`} />
                 <animateMotion
                   dur="2.8s"
                   repeatCount="indefinite"
                   begin={`${(i * 0.35).toFixed(2)}s`}
-                  path={path}
-                  keyPoints="0;1"
-                  keyTimes="0;1"
-                  calcMode="linear"
-                />
-              </circle>
-              {/* secondary trailing packet */}
-              <circle r="1.6" fill="#a4a5f7" opacity="0" className="ai-packet-2">
-                <set attributeName="opacity" to="0.9" begin={`${(i * 0.35 + 1.4).toFixed(2)}s`} />
-                <animateMotion
-                  dur="2.8s"
-                  repeatCount="indefinite"
-                  begin={`${(i * 0.35 + 1.4).toFixed(2)}s`}
                   path={path}
                   keyPoints="0;1"
                   keyTimes="0;1"

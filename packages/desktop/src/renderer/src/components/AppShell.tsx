@@ -64,9 +64,10 @@ export function AppShell({
       '2': 'meetings',
       '3': 'privacy',
       '4': 'search',
-      '5': 'connect',
-      '6': 'settings',
-      '7': 'help',
+      '5': 'ai',
+      '6': 'connect',
+      '7': 'settings',
+      '8': 'help',
     };
 
     function onKey(e: KeyboardEvent) {

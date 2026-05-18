@@ -12,9 +12,12 @@
     "test": "node scripts/smoke-meetings.mjs && pnpm run build && node scripts/smoke-events.mjs && node scripts/smoke-journal-story.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.47",
     "@beside/core": "workspace:*",
     "@beside/interfaces": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opencode-ai/sdk": "1.15.0",
+    "opencode-ai": "1.15.0",
     "sharp": "^0.33.5",
     "tesseract.js": "^7.0.0"
   },
