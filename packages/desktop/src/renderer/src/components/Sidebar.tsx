@@ -13,7 +13,6 @@ import {
 } from 'lucide-react';
 import { BrandMark } from '@/components/BrandMark';
 import { StatusFooter } from '@/components/StatusFooter';
-import logoUrl from '@/assets/logo.png';
 import type { Screen } from '@/types';
 import type { RuntimeOverview } from '@/global';
 import { useSidebar } from '@/lib/sidebar-state';
@@ -34,10 +33,10 @@ interface NavItem {
  */
 const NAV_PRIMARY: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: LayoutDashboard, shortcut: '1' },
-  { id: 'ai', label: 'Ask AI', icon: Sparkles, shortcut: '2' },
-  { id: 'meetings', label: 'Journal', icon: NotebookPen, shortcut: '3' },
-  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '4' },
-  { id: 'search', label: 'Search', icon: Search, shortcut: '5' },
+  { id: 'meetings', label: 'Journal', icon: NotebookPen, shortcut: '2' },
+  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '3' },
+  { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
+  { id: 'ai', label: 'AI', icon: Sparkles, shortcut: '5' },
 ];
 
 const NAV_SECONDARY: NavItem[] = [
@@ -75,38 +74,17 @@ export function Sidebar({
       {/* Brand */}
       <div
         className={cn(
-          'flex pt-10 pb-5',
-          collapsed
-            ? 'items-center justify-center px-2'
-            : 'flex-col items-center gap-3 px-4 text-center',
+          'flex items-center pt-12 pb-5',
+          collapsed ? 'justify-center px-2' : 'gap-3 px-4',
         )}
       >
-        {collapsed ? (
-          <BrandMark busy={busy} />
-        ) : (
-          <div className="relative grid place-items-center">
-            <div
-              aria-hidden
-              className="absolute size-32 rounded-full bg-gradient-brand-soft blur-3xl opacity-90"
-            />
-            <img
-              src={logoUrl}
-              alt=""
-              aria-hidden
-              draggable={false}
-              className={cn(
-                'relative size-24 select-none object-contain drop-shadow-[0_14px_28px_rgba(107,108,240,0.42)] mascot-bob',
-                busy && 'brand-mark-img-busy',
-              )}
-            />
-          </div>
-        )}
+        <BrandMark busy={busy} />
         {!collapsed && (
           <div className="min-w-0">
-            <div className="brand-wordmark text-[22px] leading-none truncate">
+            <div className="brand-wordmark text-[20px] leading-none truncate">
               beside
             </div>
-            <div className="text-[11px] text-muted-foreground truncate mt-1.5">
+            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
               Your AI memory,<br />beside you
             </div>
           </div>

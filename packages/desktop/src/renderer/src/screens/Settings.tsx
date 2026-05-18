@@ -20,7 +20,7 @@ import { formatBootstrapLine, pullPercent } from '@/lib/bootstrap-phases';
 import { MODEL_CHOICES, findModelChoice, isPlausibleOllamaTag } from '@/lib/model-catalog';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
-import { NumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
+import { NumberField, OptionalNumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
 import { HookSettings } from '@/screens/settings/HookSettings';
 import { configPatchFromDraft, settingsDraftFromConfig, type BackgroundModelJobs, type CaptureMode, type LiveRecordingFormat, type LogLevel, type McpTransport, type ScreenshotFormat, type SettingsDraft, type SystemAudioBackend } from '@/screens/settings/settings-draft';
 import type { AccessibilityPermission, LoadedConfig, MicPermission, ModelBootstrapProgress, RuntimeOverview, ScreenPermission, WhisperProbe } from '@/global';
@@ -140,11 +140,16 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
               <NumberField label="Keep memories for" value={draft.retentionDays} onChange={(v: any) => set('retentionDays', v)} min={0} step={1} unit="days" typeLabel="integer" />
             </div>
           </SettingsSection>
-          <SettingsSection title="Screenshot vacuum" description="Downsize or remove old screenshot files. Set days to 0 to disable a stage.">
+          <SettingsSection title="Screenshot vacuum" description="Downsize or remove old screenshot files.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <NumberField label="Compress after (days)" value={draft.compressAfterDays} onChange={(v: any) => set('compressAfterDays', v)} min={0} step={1} unit="days" typeLabel="integer" />
+              <OptionalNumberField label="Compress after (min)" value={draft.compressAfterMinutes} onChange={(v: any) => set('compressAfterMinutes', v)} min={0} step={15} typeLabel="integer" />
+              <NumberField label="Compress after (days)" value={draft.compressAfterDays} onChange={(v: any) => set('compressAfterDays', v)} min={0} step={1} typeLabel="integer" />
               <NumberField label="Compressed quality" value={draft.compressQuality} onChange={(v: any) => set('compressQuality', v)} min={1} max={100} step={1} typeLabel="integer" />
-              <NumberField label="Delete after (days)" value={draft.deleteAfterDays} onChange={(v: any) => set('deleteAfterDays', v)} min={0} step={1} unit="days" typeLabel="integer" hint="0 = never delete" />
+              <OptionalNumberField label="Thumbnail after (min)" value={draft.thumbnailAfterMinutes} onChange={(v: any) => set('thumbnailAfterMinutes', v)} min={0} step={60} typeLabel="integer" />
+              <NumberField label="Thumbnail after (days)" value={draft.thumbnailAfterDays} onChange={(v: any) => set('thumbnailAfterDays', v)} min={0} step={1} typeLabel="integer" />
+              <NumberField label="Thumbnail max dim" value={draft.thumbnailMaxDim} onChange={(v: any) => set('thumbnailMaxDim', v)} min={64} max={2048} step={16} unit="px" typeLabel="integer" />
+              <OptionalNumberField label="Delete after (min)" value={draft.deleteAfterMinutes} onChange={(v: any) => set('deleteAfterMinutes', v)} min={0} step={60} typeLabel="integer" />
+              <NumberField label="Delete after (days)" value={draft.deleteAfterDays} onChange={(v: any) => set('deleteAfterDays', v)} min={0} step={1} typeLabel="integer" />
               <NumberField label="Vacuum interval (min)" value={draft.vacuumTickIntervalMin} onChange={(v: any) => set('vacuumTickIntervalMin', v)} min={1} step={1} typeLabel="integer" />
               <NumberField label="Vacuum batch size" value={draft.vacuumBatchSize} onChange={(v: any) => set('vacuumBatchSize', v)} min={1} step={10} typeLabel="integer" />
             </div>

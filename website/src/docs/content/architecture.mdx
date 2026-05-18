@@ -20,7 +20,7 @@ you can swap or tune it.
                                                    [model]   ──► [index strategy]
                                                                        │
                                                                        ▼
-                                                   Markdown wiki + chunks + memory tree
+                                                           Markdown wiki + memory chunks
                                                                        │
                                                                        ▼
                                                                   [export]
@@ -36,9 +36,9 @@ you can swap or tune it.
 
 | Package | Role |
 | --- | --- |
-| `@beside/interfaces` | Pure type definitions for every plugin contract and data type (`RawEvent`, `Frame`, `MemoryChunk`, `MemoryLeaf`, `MemoryNode`, `IStorage`, `ICapture`, `IModelAdapter`, `IIndexStrategy`, `IExport`, `IHookPlugin`). |
+| `@beside/interfaces` | Pure type definitions for every plugin contract and data type (`RawEvent`, `Frame`, `MemoryChunk`, `IStorage`, `ICapture`, `IModelAdapter`, `IIndexStrategy`, `IExport`, `IHookPlugin`). |
 | `@beside/core` | Config loading + Zod schema, structured logger, scheduler, load guard, plugin loader, ID + path helpers. |
-| `@beside/runtime` | The orchestrator. Wires plugins together, manages capture-hook execution, embedding workers, memory-tree refreshes, OCR/audio workers, session/meeting/day-event derivation, and the storage vacuum. |
+| `@beside/runtime` | The orchestrator. Wires plugins together, manages capture-hook execution, embedding workers, OCR/audio workers, session/meeting/day-event derivation, and the storage vacuum. |
 | `@beside/cli` | The `beside` binary. Init, status, doctor, start, capture, index, mcp, reset. |
 | `@beside/desktop` | Electron shell + renderer + native sidecar packaging. |
 
@@ -63,9 +63,6 @@ Beside has a few core types you’ll see referenced everywhere.
   journal.
 - **`MemoryChunk`** — the unit the index strategy emits and embeds: `index_page`,
   `entity_summary`, `meeting_summary`, `day_event`, `fact`, `procedure`.
-- **`MemoryLeaf` / `MemoryNode`** — the persistent memory tree above chunks.
-  Leaves are admitted, evidence-backed memories; nodes roll leaves up by
-  source, topic, day, or global scope.
 - **`HookRecord`** — typed output a capture hook stores in its own namespaced
   collection.
 
@@ -85,10 +82,9 @@ Beside has a few core types you’ll see referenced everywhere.
    reads new frames + chunks via `IStorage`, calls the **model adapter**, and
    produces an `IndexUpdate` (pages to create / update / delete + a new root
    index + a reorganisation note).
-7. The **embedding worker** keeps frame and memory-chunk embeddings up to date,
-   then rebuilds the memory leaf/node tree.
-8. **Export plugins** see every page write and memory update, then mirror them
-   to disk (`markdown`) or expose them to outside agents (`mcp`).
+7. The **embedding worker** keeps frame and memory-chunk embeddings up to date.
+8. **Export plugins** see every page write and either mirror them to disk
+   (`markdown`) or expose them to outside agents (`mcp`).
 
 The orchestrator is the glue: it owns lifecycle, backpressure, the load guard
 (skips heavy work when CPU/memory/battery isn’t safe), and the schedule
@@ -118,8 +114,7 @@ interface IStorage {
   upsertFrame(frame: Frame): Promise<void>;
   searchFrames(query: FrameQuery): Promise<Frame[]>;
   searchFrameEmbeddings(vector: number[], q?: FrameQuery): Promise<FrameSemanticMatch[]>;
-  // …plus sessions, meetings, day events, memory chunks/leaves/nodes/jobs,
-  // hook records, vacuum
+  // …plus sessions, meetings, day events, memory chunks, hook records, vacuum
 }
 
 interface IModelAdapter {
@@ -168,10 +163,9 @@ A typical install looks like this:
 │   └── audio/{inbox,processed,failed}/
 ├── index/                       # index strategy owns this (default: karpathy)
 │   ├── README.md                # the auto-generated root index
-│   ├── notes/…                  # optional user-authored memory notes
 │   └── topics/…                 # hierarchical wiki pages
 └── export/
-    └── markdown/                # mirror of index/ plus _memory/tree.md
+    └── markdown/                # mirror of index/ for humans + agents
 ```
 
 That on-disk layout is intentional: even with Beside uninstalled, your wiki

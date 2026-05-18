@@ -16,8 +16,9 @@ export interface SettingsDraft {
   captureMode: CaptureMode; blurPasswordFields: boolean; pauseOnScreenLock: boolean; sensitiveKeywords: string;
   excludedApps: string; excludedUrlPatterns: string; accessibilityEnabled: boolean; accessibilityTimeoutMs: number;
   accessibilityMaxChars: number; accessibilityMaxElements: number; accessibilityExcludedApps: string; storagePlugin: string;
-  storagePath: string; maxSizeGb: number; retentionDays: number; compressAfterDays: number;
-  compressQuality: number; deleteAfterDays: number; vacuumTickIntervalMin: number; vacuumBatchSize: number;
+  storagePath: string; maxSizeGb: number; retentionDays: number; compressAfterDays: number; compressAfterMinutes: string;
+  compressQuality: number; thumbnailAfterDays: number; thumbnailAfterMinutes: string; thumbnailMaxDim: number;
+  deleteAfterDays: number; deleteAfterMinutes: string; vacuumTickIntervalMin: number; vacuumBatchSize: number;
   indexStrategy: string; indexPath: string; incrementalIntervalMin: number; reorganiseSchedule: string; reorganiseOnIdle: boolean;
   indexIdleTriggerMin: number; indexBatchSize: number; sessionsIdleThresholdSec: number; sessionsAfkThresholdSec: number;
   sessionsMinActiveMs: number; sessionsFallbackFrameAttentionMs: number; meetingsIdleThresholdSec: number; meetingsMinDurationSec: number;
@@ -55,7 +56,9 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     accessibilityEnabled: ax?.enabled ?? true, accessibilityTimeoutMs: ax?.timeout_ms ?? 1500, accessibilityMaxChars: ax?.max_chars ?? 8000,
     accessibilityMaxElements: ax?.max_elements ?? 4000, accessibilityExcludedApps: (ax?.excluded_apps ?? []).join('\n'),
     storagePlugin: c.storage.plugin, storagePath: c.storage.local.path, maxSizeGb: c.storage.local.max_size_gb, retentionDays: c.storage.local.retention_days,
-    compressAfterDays: v.compress_after_days, compressQuality: v.compress_quality, deleteAfterDays: v.delete_after_days,
+    compressAfterDays: v.compress_after_days, compressAfterMinutes: v.compress_after_minutes == null ? '' : String(v.compress_after_minutes),
+    compressQuality: v.compress_quality, thumbnailAfterDays: v.thumbnail_after_days, thumbnailAfterMinutes: v.thumbnail_after_minutes == null ? '' : String(v.thumbnail_after_minutes),
+    thumbnailMaxDim: v.thumbnail_max_dim, deleteAfterDays: v.delete_after_days, deleteAfterMinutes: v.delete_after_minutes == null ? '' : String(v.delete_after_minutes),
     vacuumTickIntervalMin: v.tick_interval_min, vacuumBatchSize: v.batch_size, indexStrategy: c.index.strategy, indexPath: c.index.index_path,
     incrementalIntervalMin: c.index.incremental_interval_min, reorganiseSchedule: c.index.reorganise_schedule, reorganiseOnIdle: c.index.reorganise_on_idle,
     indexIdleTriggerMin: c.index.idle_trigger_min, indexBatchSize: c.index.batch_size, sessionsIdleThresholdSec: c.index.sessions.idle_threshold_sec,
@@ -114,7 +117,7 @@ export function configPatchFromDraft(d: SettingsDraft) {
       plugin: d.storagePlugin.trim() || 'local',
       local: {
         path: d.storagePath.trim() || '~/.beside', max_size_gb: clampNumber(d.maxSizeGb, 0.1), retention_days: clampInt(d.retentionDays, 0),
-        vacuum: { compress_after_days: clampInt(d.compressAfterDays, 0), compress_quality: clampInt(d.compressQuality, 1, 100), delete_after_days: clampInt(d.deleteAfterDays, 0), tick_interval_min: clampInt(d.vacuumTickIntervalMin, 1), batch_size: clampInt(d.vacuumBatchSize, 1) }
+        vacuum: { compress_after_days: clampInt(d.compressAfterDays, 0), compress_after_minutes: optionalInt(d.compressAfterMinutes, 0), compress_quality: clampInt(d.compressQuality, 1, 100), thumbnail_after_days: clampInt(d.thumbnailAfterDays, 0), thumbnail_after_minutes: optionalInt(d.thumbnailAfterMinutes, 0), thumbnail_max_dim: clampInt(d.thumbnailMaxDim, 64, 2048), delete_after_days: clampInt(d.deleteAfterDays, 0), delete_after_minutes: optionalInt(d.deleteAfterMinutes, 0), tick_interval_min: clampInt(d.vacuumTickIntervalMin, 1), batch_size: clampInt(d.vacuumBatchSize, 1) }
       }
     },
     index: {

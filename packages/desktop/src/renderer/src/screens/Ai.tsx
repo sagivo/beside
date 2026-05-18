@@ -27,12 +27,10 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/Markdown';
 import { cn } from '@/lib/utils';
 import type { ChatStreamEvent } from '@/global';
-import mascotRecallUrl from '@/assets/mascot-recall.png';
 
 interface ReasoningStep {
   kind: 'thought';
   text: string;
-  partId?: string;
 }
 interface ToolCallStep {
   kind: 'tool';
@@ -447,47 +445,22 @@ function ThinkingBubble() {
       <div className="grid size-7 shrink-0 place-items-center rounded-full bg-gradient-brand-soft">
         <Sparkles className="size-3.5 animate-pulse" />
       </div>
-      <ThinkingDots />
+      <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-xs">
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-300ms]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-150ms]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50" />
+        <span className="ml-1 text-[11px] text-muted-foreground">Thinking...</span>
+      </div>
     </div>
-  );
-}
-
-function ThinkingDots() {
-  return (
-    <div className="inline-flex items-center gap-1.5 rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-xs">
-      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-300ms]" />
-      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-150ms]" />
-      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50" />
-      <span className="ml-1 text-[11px] text-muted-foreground">Thinking...</span>
-    </div>
-  );
-}
-
-function StreamingCaret() {
-  return (
-    <span
-      aria-hidden
-      className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-primary align-middle"
-    />
   );
 }
 
 function EmptyState({ onPick }: { onPick: (text: string) => void }) {
   return (
-    <div className="mx-auto flex max-w-3xl flex-col items-center gap-8 px-6 pt-12 pb-12 text-center">
-      <div className="flex flex-col items-center gap-4">
-        <div className="relative grid place-items-center">
-          <div
-            aria-hidden
-            className="absolute size-40 rounded-full bg-gradient-brand-soft blur-3xl opacity-90"
-          />
-          <img
-            src={mascotRecallUrl}
-            alt=""
-            aria-hidden
-            className="relative size-28 select-none object-contain drop-shadow-[0_14px_28px_rgba(107,108,240,0.35)] mascot-bob"
-            draggable={false}
-          />
+    <div className="mx-auto flex max-w-3xl flex-col items-center gap-8 px-6 pt-16 pb-12 text-center">
+      <div className="flex flex-col items-center gap-3">
+        <div className="grid size-12 place-items-center rounded-2xl border border-border bg-gradient-brand-soft">
+          <Sparkles className="size-6" />
         </div>
         <h2 className="text-2xl font-semibold tracking-tight">
           Ask your memory anything
@@ -557,27 +530,18 @@ function MessageView({ message }: { message: Message }) {
 
 function AssistantMessage({ message }: { message: Message }) {
   const hasSteps = (message.steps?.length ?? 0) > 0;
-  const showThinkingBubble = message.pending && !hasSteps && !message.content;
   return (
     <div className="flex gap-3">
       <div className="grid size-7 shrink-0 place-items-center rounded-full bg-gradient-brand-soft">
-        <Sparkles
-          className={cn('size-3.5', message.pending && 'animate-pulse')}
-        />
+        <Sparkles className="size-3.5" />
       </div>
       <div className="flex-1 min-w-0">
         {hasSteps && (
-          <ReasoningBlock
-            steps={message.steps!}
-            totalMs={message.thoughtForMs}
-            pending={message.pending}
-          />
+          <ReasoningBlock steps={message.steps!} totalMs={message.thoughtForMs} />
         )}
-        {showThinkingBubble && <ThinkingDots />}
         {message.content && (
           <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-sm shadow-xs">
             <Markdown content={message.content} />
-            {message.pending && <StreamingCaret />}
           </div>
         )}
         <div className="mt-1.5 flex items-center gap-1.5 pl-1 text-muted-foreground">
@@ -617,32 +581,15 @@ function IconAction({ icon, label }: { icon: React.ReactNode; label: string }) {
 function ReasoningBlock({
   steps,
   totalMs,
-  pending,
 }: {
   steps: AgentStep[];
   totalMs?: number;
-  pending?: boolean;
 }) {
-  // Auto-expand while pending so the user can watch the model reason in
-  // real time. Once the turn finishes, collapse to get out of the way —
-  // the user can re-open with the chevron. Completed messages from
-  // earlier in the session start collapsed.
-  const [open, setOpen] = React.useState(pending ?? false);
-  const wasPendingRef = React.useRef(pending ?? false);
-  React.useEffect(() => {
-    if (wasPendingRef.current && !pending) setOpen(false);
-    wasPendingRef.current = pending ?? false;
-  }, [pending]);
-
+  const [open, setOpen] = React.useState(false);
   const seconds = totalMs != null ? (totalMs / 1000).toFixed(1) : null;
   const summary = (() => {
     const tools = steps.filter((s): s is ToolCallStep => s.kind === 'tool');
     const thoughts = steps.filter((s): s is ReasoningStep => s.kind === 'thought');
-    if (pending) {
-      if (tools.some((t) => t.status === 'running')) return 'Checking sources...';
-      if (thoughts.length) return 'Thinking...';
-      return 'Working...';
-    }
     if (tools.length && thoughts.length) {
       return `Checked ${tools.length} source${tools.length === 1 ? '' : 's'}${seconds ? ` in ${seconds}s` : ''}`;
     }
@@ -657,12 +604,9 @@ function ReasoningBlock({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={cn(
-          'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
-          pending && 'text-foreground',
-        )}
+        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
       >
-        <Brain className={cn('size-3.5', pending && 'animate-pulse text-primary')} />
+        <Brain className="size-3.5" />
         <span>{summary}</span>
         <ChevronDown
           className={cn('size-3.5 transition-transform', open && 'rotate-180')}
@@ -864,7 +808,7 @@ function applyEventToMessage(message: Message, event: ChatStreamEvent): Message 
     case 'phase':
       return message;
     case 'reasoning':
-      return appendThought(message, event.text, event.partId);
+      return appendThought(message, event.text);
     case 'tool-call':
       return upsertTool(message, {
         kind: 'tool',
@@ -877,8 +821,6 @@ function applyEventToMessage(message: Message, event: ChatStreamEvent): Message 
       return finishTool(message, event.callId, event.summary);
     case 'content':
       return { ...message, content: `${message.content}${event.delta}` };
-    case 'content-reset':
-      return { ...message, content: '' };
     case 'done':
       return {
         ...message,
@@ -901,24 +843,11 @@ function applyEventToMessage(message: Message, event: ChatStreamEvent): Message 
   }
 }
 
-function appendThought(message: Message, text: string, partId?: string): Message {
+function appendThought(message: Message, text: string): Message {
   if (!text.trim()) return message;
-  const steps = message.steps ?? [];
-  // If we have a partId, the harness is streaming this same reasoning
-  // chunk in place — replace the matching step's text instead of pushing
-  // a new bullet for every token.
-  if (partId) {
-    const idx = steps.findIndex((s) => s.kind === 'thought' && s.partId === partId);
-    if (idx !== -1) {
-      const next = steps.slice();
-      next[idx] = { kind: 'thought', text, partId };
-      return { ...message, steps: next };
-    }
-    return { ...message, steps: [...steps, { kind: 'thought', text, partId }] };
-  }
-  const last = steps[steps.length - 1];
+  const last = message.steps?.[message.steps.length - 1];
   if (last?.kind === 'thought' && last.text === text) return message;
-  return { ...message, steps: [...steps, { kind: 'thought', text }] };
+  return { ...message, steps: [...(message.steps ?? []), { kind: 'thought', text }] };
 }
 
 function upsertTool(message: Message, step: ToolCallStep): Message {

@@ -24,41 +24,10 @@ export interface FrameSemanticMatch { frame: Frame; score: number; }
 
 export type MemoryChunkKind = 'index_page' | 'entity_summary' | 'meeting_summary' | 'day_event' | 'fact' | 'procedure';
 export interface MemoryChunk { id: string; kind: MemoryChunkKind; sourceId: string; title: string; body: string; entityPath: string | null; entityKind: EntityKind | null; day: string | null; timestamp: string | null; sourceRefs: string[]; contentHash: string; createdAt: string; updatedAt: string; }
-export interface MemoryChunkQuery { id?: string; text?: string; kind?: MemoryChunkKind; entityPath?: string; day?: string; from?: string; to?: string; limit?: number; offset?: number; }
+export interface MemoryChunkQuery { text?: string; kind?: MemoryChunkKind; entityPath?: string; day?: string; from?: string; to?: string; limit?: number; offset?: number; }
 export interface MemoryChunkEmbeddingTask { id: string; content_hash: string; content: string; }
 export interface MemoryChunkSemanticMatch { chunk: MemoryChunk; score: number; }
-
-export type MemoryLeafKind = MemoryChunkKind | 'observation' | 'note';
-export type MemoryLeafStatus = 'pending' | 'admitted' | 'dropped' | 'superseded';
-export type MemoryScope = 'source' | 'topic' | 'day' | 'global';
-export type MemoryNodeStatus = 'open' | 'sealed';
-export type MemoryJobKind = 'rebuild_tree' | 'seal_nodes' | 'flush_stale';
-export type MemoryJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
-export interface MemoryLeaf {
-  id: string; kind: MemoryLeafKind; sourceId: string; sourceKind: string | null; scope: MemoryScope; scopeId: string;
-  title: string; body: string; entityPath: string | null; entityKind: EntityKind | null; day: string | null;
-  timestamp: string | null; timeStart: string | null; timeEnd: string | null; evidenceRefs: string[];
-  contentHash: string; status: MemoryLeafStatus; confidence: number | null; importance: number | null; createdAt: string; updatedAt: string;
-}
-export interface MemoryLeafQuery { id?: string; text?: string; kind?: MemoryLeafKind; status?: MemoryLeafStatus; scope?: MemoryScope; scopeId?: string; entityPath?: string; day?: string; from?: string; to?: string; limit?: number; offset?: number; }
-export interface MemoryNode {
-  id: string; scope: MemoryScope; scopeId: string; level: number; title: string; summary: string;
-  entityPath: string | null; entityKind: EntityKind | null; day: string | null; timeStart: string | null; timeEnd: string | null;
-  childRefs: string[]; evidenceRefs: string[]; contentHash: string; status: MemoryNodeStatus; createdAt: string; updatedAt: string;
-}
-export interface MemoryNodeQuery { id?: string; text?: string; scope?: MemoryScope; scopeId?: string; level?: number; status?: MemoryNodeStatus; entityPath?: string; day?: string; from?: string; to?: string; limit?: number; offset?: number; }
-export interface MemoryJob {
-  id: string; kind: MemoryJobKind; status: MemoryJobStatus; dedupeKey: string; payload: Record<string, unknown>;
-  runAfter: string; attempts: number; lockedAt: string | null; lastError: string | null; createdAt: string; updatedAt: string;
-}
-export interface MemoryJobQuery { kind?: MemoryJobKind; status?: MemoryJobStatus; limit?: number; offset?: number; }
-export interface MemoryIndexStats {
-  chunks: number; chunksByKind: Partial<Record<MemoryChunkKind, number>>; chunkEmbeddings: number; chunkEmbeddingsByModel: Record<string, number>; chunksMissingEmbedding: number;
-  leaves: number; leavesByKind: Partial<Record<MemoryLeafKind, number>>; leavesByStatus: Partial<Record<MemoryLeafStatus, number>>;
-  nodes: number; nodesByScope: Partial<Record<MemoryScope, number>>; nodesByStatus: Partial<Record<MemoryNodeStatus, number>>;
-  jobs: number; jobsByKind: Partial<Record<MemoryJobKind, number>>; jobsByStatus: Partial<Record<MemoryJobStatus, number>>;
-  framesWithEmbeddings: number; framesMissingEmbeddings: number;
-}
+export interface MemoryIndexStats { chunks: number; chunksByKind: Partial<Record<MemoryChunkKind, number>>; chunkEmbeddings: number; chunkEmbeddingsByModel: Record<string, number>; chunksMissingEmbedding: number; framesWithEmbeddings: number; framesMissingEmbeddings: number; }
 
 export interface FrameOcrTask { id: string; asset_path: string; existing_text: string | null; existing_source: FrameTextSource | null; perceptual_hash?: string | null; }
 export type FrameAssetTier = 'original' | 'compressed' | 'thumbnail' | 'deleted';
@@ -116,8 +85,6 @@ export interface IStorage {
   upsertFrame(frame: Frame): Promise<void>; searchFrames(query: FrameQuery): Promise<Frame[]>; getFrameContext(frameId: string, before: number, after: number): Promise<{ anchor: Frame; before: Frame[]; after: Frame[] } | null>; getJournal(day: string): Promise<Frame[]>; listFramesNeedingOcr(limit: number): Promise<FrameOcrTask[]>; setFrameText(frameId: string, text: string, source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'>): Promise<void>; findOcrTextByPerceptualHash?(perceptualHash: string, excludeFrameId?: string): Promise<{ text: string; source: Extract<FrameTextSource, 'ocr' | 'accessibility' | 'ocr_accessibility'> } | null>; markFramed(eventIds: string[]): Promise<void>; resetFrameDerivatives(query?: { from?: string; to?: string }): Promise<void>;
   listFramesNeedingEmbedding(model: string, limit: number): Promise<FrameEmbeddingTask[]>; upsertFrameEmbedding(frameId: string, model: string, contentHash: string, vector: number[]): Promise<void>; upsertFrameEmbeddings?(embeddings: Array<{ frameId: string; model: string; contentHash: string; vector: number[] }>): Promise<void>; findExistingFrameEmbedding?(model: string, contentHash: string): Promise<{ vector: number[]; dims: number } | null>; findExistingFrameEmbeddings?(model: string, contentHashes: string[]): Promise<Map<string, { vector: number[]; dims: number }>>; searchFrameEmbeddings(vector: number[], query?: Omit<FrameQuery, 'text' | 'embedding' | 'embeddingModel'> & { model?: string }): Promise<FrameSemanticMatch[]>; clearFrameEmbeddings(model?: string): Promise<void>;
   replaceMemoryChunks(generatedKinds: MemoryChunkKind[], chunks: MemoryChunk[]): Promise<void>; upsertMemoryChunks(chunks: MemoryChunk[]): Promise<void>; searchMemoryChunks(query: MemoryChunkQuery): Promise<MemoryChunk[]>; listMemoryChunksNeedingEmbedding(model: string, limit: number): Promise<MemoryChunkEmbeddingTask[]>; upsertMemoryChunkEmbeddings(embeddings: Array<{ chunkId: string; model: string; contentHash: string; vector: number[] }>): Promise<void>; findExistingMemoryChunkEmbeddings?(model: string, contentHashes: string[]): Promise<Map<string, { vector: number[]; dims: number }>>; searchMemoryChunkEmbeddings(vector: number[], query?: Omit<MemoryChunkQuery, 'text'> & { model?: string }): Promise<MemoryChunkSemanticMatch[]>; getMemoryIndexStats?(model?: string): Promise<MemoryIndexStats>;
-  replaceMemoryLeaves?(generatedKinds: MemoryLeafKind[], leaves: MemoryLeaf[]): Promise<void>; upsertMemoryLeaves?(leaves: MemoryLeaf[]): Promise<void>; listMemoryLeaves?(query?: MemoryLeafQuery): Promise<MemoryLeaf[]>; replaceMemoryNodes?(scopes: MemoryScope[], nodes: MemoryNode[]): Promise<void>; upsertMemoryNodes?(nodes: MemoryNode[]): Promise<void>; listMemoryNodes?(query?: MemoryNodeQuery): Promise<MemoryNode[]>;
-  enqueueMemoryJob?(kind: MemoryJobKind, payload?: Record<string, unknown>, options?: { dedupeKey?: string; runAfter?: string }): Promise<MemoryJob>; claimMemoryJobs?(limit: number, now?: string): Promise<MemoryJob[]>; completeMemoryJob?(id: string): Promise<void>; failMemoryJob?(id: string, error: string, runAfter?: string): Promise<void>; listMemoryJobs?(query?: MemoryJobQuery): Promise<MemoryJob[]>;
   listFramesNeedingResolution(limit: number): Promise<Frame[]>; resolveFrameToEntity(frameId: string, entity: EntityRef): Promise<void>; resolveFramesToEntities(items: ReadonlyArray<{ frameId: string; entity: EntityRef }>): Promise<void>; rebuildEntityCounts(): Promise<void>; getEntity(path: string): Promise<EntityRecord | null>; listEntities(query?: ListEntitiesQuery): Promise<EntityRecord[]>; searchEntities(query: SearchEntitiesQuery): Promise<EntityRecord[]>; getEntityFrames(path: string, limit?: number): Promise<Frame[]>; listEntityCoOccurrences(entityPath: string, limit?: number): Promise<EntityCoOccurrence[]>; getEntityTimeline(entityPath: string, query?: EntityTimelineQuery): Promise<EntityTimelineBucket[]>; reattributeFrames(input: { frameIds: string[]; fromAppPaths: string[]; target: EntityRef }): Promise<{ moved: number; refreshedEntities: string[] }>;
   listFramesForVacuum(currentTier: FrameAssetTier, olderThanIso: string, limit: number): Promise<FrameAsset[]>; updateFrameAsset(frameId: string, update: { assetPath?: string | null; tier: FrameAssetTier }): Promise<void>; deleteAssetIfUnreferenced(assetPath: string): Promise<void>; countFramesByTier(): Promise<Record<FrameAssetTier, number>>;
   upsertSession(session: ActivitySession): Promise<void>; getSession(id: string): Promise<ActivitySession | null>; listSessions(query?: ListSessionsQuery): Promise<ActivitySession[]>; listFramesNeedingSessionAssignment(limit: number): Promise<Frame[]>; assignFramesToSession(frameIds: string[], sessionId: string): Promise<void>; getSessionFrames(sessionId: string): Promise<Frame[]>; clearAllSessions(): Promise<void>;
@@ -150,7 +117,7 @@ export interface IIndexStrategy { readonly name: string; readonly description: s
 
 export interface ExportStatus { name: string; running: boolean; lastSync: string | null; pendingUpdates: number; errorCount: number; }
 export interface ExportServices { storage: IStorage; strategy: IIndexStrategy; model: IModelAdapter; embeddingModelName?: string; embeddingSearchWeight?: number; dataDir: string; triggerReindex: (full?: boolean) => Promise<void>; summarizeMeeting?: (meetingId: string, opts?: { force?: boolean }) => Promise<{ status: 'ok' | 'failed' | 'not_found' | 'deferred'; message?: string; }>; }
-export interface IExport { readonly name: string; start(): Promise<void>; stop(): Promise<void>; onPageUpdate(page: IndexPage): Promise<void>; onPageDelete(pagePath: string): Promise<void>; onReorganisation(summary: ReorganisationSummary): Promise<void>; onMemoryUpdate?(): Promise<void>; fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>; getStatus(): ExportStatus; bindServices?(services: ExportServices): void; }
+export interface IExport { readonly name: string; start(): Promise<void>; stop(): Promise<void>; onPageUpdate(page: IndexPage): Promise<void>; onPageDelete(pagePath: string): Promise<void>; onReorganisation(summary: ReorganisationSummary): Promise<void>; fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>; getStatus(): ExportStatus; bindServices?(services: ExportServices): void; }
 
 export type PluginLayer = 'capture' | 'storage' | 'model' | 'index' | 'export' | 'hook';
 export type PluginInterfaceName = 'ICapture' | 'IStorage' | 'IModelAdapter' | 'IIndexStrategy' | 'IExport' | 'IHookPlugin';

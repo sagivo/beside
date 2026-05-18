@@ -5,29 +5,39 @@ import type {
   IStorage,
   Logger,
   FrameAsset,
+  FrameAssetTier,
 } from '@beside/interfaces';
 
 /**
  * StorageVacuum — sliding-window retention for screenshot assets.
  *
- * Two monotonic stages:
+ * Three monotonic stages:
  *
- *   original   →   compressed   →   deleted
- *   (capture)      (lower q)        (gone)
+ *   original   →   compressed   →   thumbnail   →   deleted
+ *   (capture)      (lower q)        (downscaled)     (gone)
  *
  * Frame metadata + OCR text stay in SQLite forever; only the on-disk
  * image evolves. Each stage is idempotent and resumable: if a vacuum
  * tick is interrupted halfway through, the next tick picks up where it
  * left off because we promote the `vacuum_tier` column atomically with
  * the file write.
+ *
+ * The worker mirrors `OcrWorker`'s shape — small batches, throttled,
+ * never blocks indexing.
  */
 
 export interface StorageVacuumConfig {
   storageRoot: string;
-  /** Days before each stage runs. 0 disables the stage. */
-  compressAfterDays: number;
+  /**
+   * Window in **milliseconds** before each stage runs. 0 disables the
+   * stage. Expressed in ms (rather than days) so callers can tune
+   * vacuum at minute-granularity for testing / tight retention.
+   */
+  compressAfterMs: number;
   compressQuality: number;
-  deleteAfterDays: number;
+  thumbnailAfterMs: number;
+  thumbnailMaxDim: number;
+  deleteAfterMs: number;
   batchSize: number;
 }
 
@@ -46,14 +56,21 @@ export class StorageVacuum {
    * Run one vacuum pass across all enabled stages. Returns counts so
    * the orchestrator can log a one-line summary.
    */
-  async tick(): Promise<{ compressed: number; deleted: number }> {
+  async tick(): Promise<{
+    compressed: number;
+    thumbnailed: number;
+    deleted: number;
+  }> {
     const now = Date.now();
     const compressed = await this.runCompressPass(now);
+    const thumbnailed = await this.runThumbnailPass(now);
     const deleted = await this.runDeletePass(now);
-    if (compressed + deleted > 0) {
-      this.logger.info(`vacuum: compressed ${compressed}, deleted ${deleted}`);
+    if (compressed + thumbnailed + deleted > 0) {
+      this.logger.info(
+        `vacuum: compressed ${compressed}, thumbnailed ${thumbnailed}, deleted ${deleted}`,
+      );
     }
-    return { compressed, deleted };
+    return { compressed, thumbnailed, deleted };
   }
 
   /**
@@ -61,13 +78,14 @@ export class StorageVacuum {
    * `--full-reindex` so a long-running install can pull all the way down
    * to its retention floor in one shot.
    */
-  async drain(): Promise<{ compressed: number; deleted: number }> {
-    const totals = { compressed: 0, deleted: 0 };
+  async drain(): Promise<{ compressed: number; thumbnailed: number; deleted: number }> {
+    const totals = { compressed: 0, thumbnailed: 0, deleted: 0 };
     for (let i = 0; i < 1000; i++) {
       const r = await this.tick();
       totals.compressed += r.compressed;
+      totals.thumbnailed += r.thumbnailed;
       totals.deleted += r.deleted;
-      if (r.compressed + r.deleted === 0) break;
+      if (r.compressed + r.thumbnailed + r.deleted === 0) break;
     }
     return totals;
   }
@@ -77,8 +95,8 @@ export class StorageVacuum {
   // ---------------------------------------------------------------------------
 
   private async runCompressPass(nowMs: number): Promise<number> {
-    if (this.config.compressAfterDays <= 0) return 0;
-    const olderThan = isoMsAgo(nowMs, this.config.compressAfterDays * 86400000);
+    if (this.config.compressAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.compressAfterMs);
     const candidates = await this.storage.listFramesForVacuum(
       'original',
       olderThan,
@@ -103,10 +121,33 @@ export class StorageVacuum {
     return n;
   }
 
+  private async runThumbnailPass(nowMs: number): Promise<number> {
+    if (this.config.thumbnailAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.thumbnailAfterMs);
+    const candidates = await this.storage.listFramesForVacuum(
+      'compressed',
+      olderThan,
+      this.config.batchSize,
+    );
+    let n = 0;
+    for (const c of candidates) {
+      try {
+        await this.thumbnailOne(c);
+        await this.storage.updateFrameAsset(c.id, { tier: 'thumbnail' });
+        n += 1;
+      } catch (err) {
+        this.logger.warn('thumbnail failed', { err: String(err), id: c.id });
+        await this.storage.updateFrameAsset(c.id, { tier: 'thumbnail' });
+      }
+    }
+    return n;
+  }
+
   private async runDeletePass(nowMs: number): Promise<number> {
-    if (this.config.deleteAfterDays <= 0) return 0;
-    const olderThan = isoMsAgo(nowMs, this.config.deleteAfterDays * 86400000);
-    // Compressed and (legacy) thumbnail tiers are both eligible for deletion.
+    if (this.config.deleteAfterMs <= 0) return 0;
+    const olderThan = isoMsAgo(nowMs, this.config.deleteAfterMs);
+    // Both compressed and thumbnail tiers are eligible for deletion once
+    // they're old enough — query both in turn.
     let n = 0;
     for (const tier of ['thumbnail', 'compressed'] as const) {
       const candidates = await this.storage.listFramesForVacuum(
@@ -168,6 +209,26 @@ export class StorageVacuum {
     return newRel;
   }
 
+  /**
+   * Downscale the asset to `thumbnailMaxDim` on its longest edge, in
+   * place. We don't change the format here — the file is already WebP
+   * after the compress pass.
+   */
+  private async thumbnailOne(asset: FrameAsset): Promise<void> {
+    const abs = path.join(this.config.storageRoot, asset.asset_path);
+    const buf = await fs.readFile(abs);
+    const out = await sharp(buf)
+      .resize({
+        width: this.config.thumbnailMaxDim,
+        height: this.config.thumbnailMaxDim,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 70 })
+      .toBuffer();
+    await fs.writeFile(abs, out);
+  }
+
   private async deleteOne(asset: FrameAsset): Promise<void> {
     await this.storage.deleteAssetIfUnreferenced(asset.asset_path);
   }
@@ -175,7 +236,8 @@ export class StorageVacuum {
   /**
    * If a compress fails (file missing, corrupt, etc.) we still want to
    * mark the frame as "moved past original" so the worker doesn't
-   * retry it on every tick.
+   * retry it on every tick. We do not promote past compressed because
+   * a future thumbnail pass would also fail and produce noise.
    */
   private async tryMarkBrokenAsCompressed(asset: FrameAsset): Promise<void> {
     try {

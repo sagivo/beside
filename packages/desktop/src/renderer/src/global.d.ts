@@ -126,12 +126,11 @@ export interface ChatTurnInput {
 
 export type ChatStreamEvent =
   | { kind: 'phase'; turnId: string; phase: 'classify' | 'plan' | 'execute' | 'compose' }
-  | { kind: 'reasoning'; turnId: string; text: string; partId?: string }
+  | { kind: 'reasoning'; turnId: string; text: string }
   | { kind: 'intent'; turnId: string; intent: string; anchor: unknown }
   | { kind: 'tool-call'; turnId: string; tool: string; args: Record<string, unknown>; callId: string }
   | { kind: 'tool-result'; turnId: string; callId: string; tool: string; summary: string }
   | { kind: 'content'; turnId: string; delta: string }
-  | { kind: 'content-reset'; turnId: string }
   | { kind: 'done'; turnId: string }
   | { kind: 'error'; turnId: string; message: string };
 
@@ -391,8 +390,13 @@ export interface BesideConfig {
       retention_days: number;
       vacuum: {
         compress_after_days: number;
+        compress_after_minutes?: number;
         compress_quality: number;
+        thumbnail_after_days: number;
+        thumbnail_after_minutes?: number;
+        thumbnail_max_dim: number;
         delete_after_days: number;
+        delete_after_minutes?: number;
         tick_interval_min: number;
         batch_size: number;
       };

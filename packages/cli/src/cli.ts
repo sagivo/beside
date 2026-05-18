@@ -102,7 +102,7 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
   const runtime = createRuntime(configFromArgs(args)), checks: DoctorCheck[] = await runtime.runDoctor();
   const n = Number(process.versions.node.split('.')[0] ?? 0);
   checks.unshift({ area: 'runtime', status: n >= 20 ? 'ok' : 'fail', message: `Node ${process.versions.node}`, detail: n >= 20 ? 'meets >=20' : 'install Node >=20' }, { area: 'runtime', status: 'info', message: `${process.platform} ${os.release()} (${process.arch})` });
-  checks.push(...await Promise.all([checkImport('native', 'sharp', 'image encoding', 'fail'), checkSqliteNative(), checkImport('capture', 'active-win', 'active window metadata', 'warn'), checkImport('capture', 'screenshot-desktop', 'screen capture', 'warn')]));
+  checks.push(...await Promise.all([checkImport('native', 'sharp', 'image encoding', 'fail'), checkImport('native', 'better-sqlite3', 'local SQLite storage', 'fail'), checkImport('capture', 'active-win', 'active window metadata', 'warn'), checkImport('capture', 'screenshot-desktop', 'screen capture', 'warn')]));
 
   if (process.platform === 'darwin') {
     checks.push(await checkCommand('capture', 'screencapture', 'macOS screen capture CLI'), await checkCommand('capture', 'osascript', 'macOS browser fallback'), { area: 'permissions', status: 'info', message: 'macOS requires permissions' });
@@ -121,24 +121,6 @@ async function cmdDoctor(args: ParsedArgs): Promise<void> {
 async function checkImport(area: string, spec: string, purpose: string, failStatus: Extract<DoctorStatus, 'warn' | 'fail'>): Promise<DoctorCheck> {
   try { await import(spec); return { area, status: 'ok', message: `${spec} importable`, detail: purpose }; }
   catch (e) { return { area, status: failStatus, message: `${spec} failed`, detail: `${purpose}; ${e}` }; }
-}
-
-async function checkSqliteNative(): Promise<DoctorCheck> {
-  try {
-    const mod = await import('better-sqlite3');
-    const Database = (mod.default ?? mod) as any;
-    const db = new Database(':memory:');
-    db.prepare('SELECT 1 AS ok').get();
-    db.close();
-    return { area: 'native', status: 'ok', message: 'better-sqlite3 opened SQLite', detail: 'local SQLite storage' };
-  } catch (e) {
-    return {
-      area: 'native',
-      status: 'fail',
-      message: 'better-sqlite3 failed to open SQLite',
-      detail: `local SQLite storage; Node ${process.version} ABI ${process.versions.modules}; ${e}`,
-    };
-  }
 }
 
 async function checkCommand(area: string, cmd: string, purpose: string): Promise<DoctorCheck> {

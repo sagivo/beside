@@ -1,20 +1,19 @@
 # Beside
 
-> Beside is your private AI, right beside you.
+> AI-powered device capture, knowledge indexing, and agent memory system.
 
 Beside runs silently in the background, records how you interact with your
 computer, and continuously organises that data into a living, self-reorganising
-knowledge base. It is a private, local-first memory layer for the AI agents you
-already use: your screenshots, transcripts, notes, memory tree, and Markdown
-wiki stay on your own machine unless you explicitly export them.
+knowledge base. It is the persistent memory layer your AI agents have been
+missing.
 
 The system has six pluggable layers:
 
 1. **Capture** — records raw inputs (screenshots, window focus, URL changes, idle).
-2. **Storage** — persists raw events, assets, memory, and hook records locally in SQLite + files.
+2. **Storage** — persists raw data locally as JSONL + SQLite (immutable).
 3. **Model** — the LLM adapter used by the index layer (Ollama, OpenAI, …).
-4. **Index** — turns raw data into memory chunks, a persistent leaf/node tree, and a self-reorganising wiki.
-5. **Export** — surfaces indexed knowledge to humans and AI agents (Markdown, MCP, memory evidence).
+4. **Index** — turns raw data into a structured, self-reorganising wiki.
+5. **Export** — surfaces indexed knowledge to humans and AI agents (Markdown, MCP).
 6. **Hook** — post-capture extensibility: runs custom logic on each screenshot + OCR or audio + transcript and powers dashboard widgets ([see below](#capture-hooks--widgets)).
 
 Every layer is a defined interface; defaults ship out of the box; everything is
@@ -391,7 +390,7 @@ self-bounded footprint by combining four levers — tweak any of them in
 | `capture.screenshot_diff_threshold` | capture | `0.15` | Soft-trigger floor on perceptual-hash distance. Higher = fewer near-duplicate frames. |
 | `capture.focus_settle_delay_ms` | capture | `900` | Delay after a focus change before taking the screenshot, so transient switcher UI such as Cmd+Tab is not captured. |
 | `capture.content_change_min_interval_ms` | capture | `60000` | Minimum delay between two soft-trigger captures of the same display. Hard triggers (window focus, URL change, idle end) bypass this. |
-| `storage.local.vacuum.*` | storage | 365 d / disabled | Sliding-window retention: re-encode at lower quality after `compress_after_days`; delete asset bytes after `delete_after_days`. `0` disables a stage, and deletion is disabled by default. SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
+| `storage.local.vacuum.*` | storage | 1 h / 30 d / 180 d | Sliding-window retention: re-encode at lower quality after `compress_after_days`, downscale after `thumbnail_after_days`, delete after `delete_after_days`. Each accepts `*_minutes` for finer-grained tuning (e.g. `compress_after_minutes: 30` for testing). SQLite metadata + OCR text is kept forever — only the on-disk image evolves. |
 
 For tight retention while testing scale:
 
@@ -399,9 +398,9 @@ For tight retention while testing scale:
 storage:
   local:
     vacuum:
-      compress_after_days: 7
-      compress_quality: 35
-      delete_after_days: 14        # 0 = never delete asset bytes
+      compress_after_minutes: 30   # re-encode within 30 min
+      thumbnail_after_minutes: 360 # downscale after 6 h
+      delete_after_days: 14
 ```
 
 ---
@@ -417,7 +416,7 @@ search as first-class tools — agents don't need to read files directly.
 
 | Tool | What it does |
 |------|--------------|
-| `search_memory` | Default entrypoint. Blended search across keyword frames, semantic frame embeddings, memory chunks, persistent memory nodes/leaves, and wiki pages. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
+| `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
 | `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. Same `exclude_self` default. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
@@ -438,8 +437,6 @@ search as first-class tools — agents don't need to read files directly.
 | `get_entity_timeline` | Per-day or per-hour attention buckets for an entity — frame count, focused minutes, distinct sessions per bucket. |
 | `get_page` | Read a wiki page by relative path. |
 | `get_index` | Read the wiki root `index.md`. |
-| `get_memory_tree` | Inspect persistent memory nodes plus admitted leaves by query, scope, scope id, or day. |
-| `get_memory_evidence` | Resolve the frames, raw events, meetings, day events, notes, or wiki pages behind a memory node, leaf, or chunk. |
 | `query_raw_events` | Raw event log query (bypasses the index). |
 | `get_session` | Reconstruct events + screenshot paths over a time range (raw-event time slice). |
 | `trigger_reindex` | Queue an incremental or full re-index. |
@@ -459,10 +456,9 @@ include them.
 V2 semantic search runs locally by default with Ollama's
 `nomic-embed-text` model. A background worker embeds each frame's
 searchable content (app, title, URL, resolved entity, OCR/accessibility
-text, and audio transcripts), keeps memory chunks fresh, and builds a
-persistent memory tree from chunks, admitted observations, and user notes.
-`search_memory` and `search_frames` still use FTS5 for exact keyword
-precision, but now blend in conceptual matches when wording differs.
+text, and audio transcripts) and stores normalised vectors in SQLite. `search_memory` and
+`search_frames` still use FTS5 for exact keyword precision, but now blend
+in conceptual matches when wording differs.
 
 ```yaml
 index:
@@ -922,7 +918,7 @@ beside/
 │   ├── interfaces/             Shared types: ICapture, IStorage, IModelAdapter,
 │   │                           IIndexStrategy, IExport, RawEvent schema.
 │   ├── core/                   Config loader, plugin loader, event bus, scheduler.
-│   ├── runtime/                Shared lifecycle, workers, memory tree, journals, search.
+│   ├── runtime/                Shared lifecycle, workers, status, journals, search.
 │   ├── cli/                    Terminal interface (beside ...).
 │   └── desktop/                Electron desktop interface over the runtime.
 └── plugins/                    Drop-in plugins. No package.json needed.
@@ -930,13 +926,13 @@ beside/
     │   ├── node/               Default capture: event-driven Node recorder.
     │   └── native/             Experimental native sidecar capture plugin.
     ├── storage/
-    │   └── local/              Default storage: ~/.beside/raw + SQLite memory tables.
+    │   └── local/              Default storage: ~/.beside/raw + SQLite.
     ├── model/
     │   └── ollama/             Default model adapter (Ollama / Gemma).
     ├── index/
     │   └── karpathy/           Default index strategy (Karpathy LLM wiki).
     ├── export/
-    │   ├── markdown/           Default export — mirror wiki + _memory/tree.md.
+    │   ├── markdown/           Default export — mirror to ~/.beside/export/markdown.
     │   └── mcp/                Built-in MCP server on 127.0.0.1:3456.
     └── hook/
         ├── calendar/           Extract calendar events from calendar surfaces.
@@ -987,9 +983,9 @@ Beside is usable today as a local-first desktop app plus CLI/runtime:
 |------|---------------------|
 | Desktop app | Electron tray + renderer are implemented in `packages/desktop/`, with local runtime management, dashboard/search/settings screens, auto-update checks, and packaging via `electron-builder`. |
 | Capture | `plugins/capture/node/` is the default cross-platform capture plugin. `plugins/capture/native/` adds an experimental macOS sidecar for richer metadata, AX text, content-change screenshots, and live audio chunks. |
-| Storage | `plugins/storage/local/` is the default local SQLite + asset store under `~/.beside`, including frames, chunks, memory leaves/nodes/jobs, and hook records. |
+| Storage | `plugins/storage/local/` is the default local JSONL + SQLite store under `~/.beside`. |
 | Models | Ollama is the default local model adapter; OpenAI-compatible hosted APIs are available through the `openai` plugin. |
-| Index/export | The Karpathy wiki strategy, persistent memory tree, Markdown export, built-in MCP server, semantic embeddings, full re-index, and raw-event replay are implemented. |
+| Index/export | The Karpathy wiki strategy, Markdown export, built-in MCP server, semantic embeddings, full re-index, and raw-event replay are implemented. |
 | Hooks/widgets | Capture hooks and dashboard widgets ship with calendar and follow-up examples under `plugins/hook/`. |
 | Cloud storage | The `IStorage` interface is stable, but this repo currently ships only the local storage plugin. |
 

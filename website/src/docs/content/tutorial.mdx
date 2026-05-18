@@ -196,13 +196,14 @@ storage:
   local:
     retention_days: 180
     vacuum:
-      compress_after_days: 7
+      compress_after_minutes: 30
       compress_quality: 35
+      thumbnail_after_days: 14
       delete_after_days: 60
 ```
 
-Memory chunks, admitted leaves, rollup nodes, and the wiki on disk are
-unaffected; you’re just compressing or removing the older raw screenshot bytes.
+Memory chunks (the agent-facing rows) and the wiki on disk are unaffected;
+you’re just compressing or removing the older raw screenshot bytes.
 
 ## Step 8 — Make it durable
 

@@ -1,9 +1,9 @@
 # Beside, in one page
 
-Beside is **your private AI, right beside you**. It silently captures what you
-do across apps, indexes that activity into a self-organising Markdown wiki plus
-a persistent memory tree, and exposes the result to every AI agent you already
-use through the Model Context Protocol (MCP).
+Beside is a **local-first AI memory layer** for your day. It silently
+captures what you do across apps, indexes that activity into a self-organising
+Markdown wiki, and exposes the result to every AI agent you already use through
+the Model Context Protocol (MCP).
 
 The product runs entirely on your machine. Every line of code is open source
 under MIT, the model can be local (Ollama) or hosted (OpenAI / OpenAI-compatible),
@@ -16,12 +16,10 @@ explicitly export them.
   idle/active state, and (optionally) audio with on-device transcription.
 - **A self-organising wiki** at `~/.beside/index/` and a stable mirror at
   `~/.beside/export/markdown/` — readable, greppable, and diff-friendly.
-- **A persistent memory tree** of admitted leaves and scoped rollup nodes, so
-  recall has durable structure behind the Markdown pages.
 - **Sessions, meetings, and day events**, automatically derived from raw
   activity so the agent gets durable nouns, not just frames.
-- **Semantic search** over raw frames, higher-level memory chunks, and the
-  persistent memory tree, via local embeddings and FTS.
+- **Semantic search** over both raw frames and the higher-level memory chunks,
+  via local embeddings.
 - **An MCP server on `127.0.0.1:3456`** that any compatible agent — Claude
   Desktop, Cursor, Windsurf, ChatGPT desktop with MCP — can call into.
 - **A CLI** (`beside`) for status, doctor, init, capture, indexing, MCP, and
@@ -48,9 +46,8 @@ The unique selling points worth keeping in mind as you read these docs:
 3. **Replaceable layers.** Capture, storage, model, index, hooks, export — each
    one is a typed interface (`ICapture`, `IStorage`, `IModelAdapter`,
    `IIndexStrategy`, `IHookPlugin`, `IExport`) backed by drop-in plugins.
-4. **MCP-native private AI.** Beside is not another inbox or chat silo. The
-   product surface is your existing agent, augmented with private memory that
-   stays beside your work.
+4. **MCP-native.** Beside is not a chat UI. The product surface is your existing
+   agent, augmented with persistent memory.
 
 ## Where to go from here
 

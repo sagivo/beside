@@ -64,9 +64,9 @@ The MCP exporter is the most common way Beside ends up integrated with a
 hosted agent (Claude Desktop, Cursor, ChatGPT desktop). Even then the privacy
 boundary is preserved by design:
 
-- The MCP server **does not return raw screenshots**. It returns bounded text
-  from `MemoryChunk`s, memory nodes/leaves, wiki excerpts, summaries, and
-  structured day events — capped at `text_excerpt_chars` (default `5000`).
+- The MCP server **does not return raw screenshots**. It returns
+  `MemoryChunk`s — wiki excerpts, summaries, structured day events — capped at
+  `text_excerpt_chars` (default `5000`).
 - Frame access is gated through queries that return text and metadata, not
   asset bytes. An agent never sees your image files unless you explicitly
   build a tool that exposes them.
@@ -163,14 +163,14 @@ storage:
   local:
     retention_days: 365
     vacuum:
-      compress_after_days: 365
-      delete_after_days: 0
+      compress_after_minutes: 60
+      thumbnail_after_days: 30
+      delete_after_days: 180
 ```
 
-`compress_after_days` re-encodes old screenshots at lower quality. After
-`delete_after_days`, the asset bytes for old frames are removed from disk; only
-the metadata (timestamp, app, OCR text, memory refs) stays. A value of `0`
-disables that stage, so deletion is off by default.
+After `delete_after_days`, the asset bytes for old frames are removed from
+disk; only the metadata (timestamp, app, OCR text) stays. Drop these numbers
+to keep less raw data on disk.
 
 ## Process & identity guarantees
 
@@ -249,7 +249,7 @@ under `index.model.plugin: my-adapter`.)
 
 Beside is engineered around one default: nothing leaves your machine unless
 you explicitly opt in. Local capture, local Tesseract OCR, local Whisper
-transcription, local Ollama models, local SQLite, local memory tree, local
-Markdown wiki, and a loopback-only MCP server are not a configuration — they’re
-the shape of the product. Every knob this page describes is there to make that
-boundary *stricter*, never to soften it.
+transcription, local Ollama models, local SQLite, local Markdown wiki, and a
+loopback-only MCP server are not a configuration — they’re the shape of the
+product. Every knob this page describes is there to make that boundary
+*stricter*, never to soften it.

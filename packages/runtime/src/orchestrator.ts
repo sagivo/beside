@@ -115,13 +115,6 @@ async function startPassiveExports(exports: IExport[], logger: Logger) {
   for (const exp of exports) if (exp.name !== 'mcp' && !exp.getStatus().running) await exp.start().catch((err) => logger.warn(`failed to start ${exp.name}`, { err: String(err) }));
 }
 
-async function refreshMemoryExports(exports: IExport[], logger: Logger) {
-  for (const exp of exports) {
-    if (exp.name === 'mcp' || typeof exp.onMemoryUpdate !== 'function') continue;
-    await exp.onMemoryUpdate().catch((err) => logger.warn(`failed to refresh ${exp.name} memory export`, { err: String(err) }));
-  }
-}
-
 export async function buildOrchestrator(logger: Logger, opts: OrchestratorOptions = {}): Promise<OrchestratorHandles> {
   const loaded = await loadConfig(opts.configPath);
   const { config, dataDir } = loaded;
@@ -174,7 +167,7 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
       }
       if (opts?.force || ['failed', 'skipped_short'].includes(m.summary_status)) await storage.setMeetingSummary(id, { status: 'pending', failureReason: null });
       try {
-        const r = await handlesRef!.meetingSummarizer.tick({ ignoreCooldown: Boolean(opts?.force) });
+        const r = await handlesRef!.meetingSummarizer.tick();
         return r.failed > 0 && r.succeeded === 0 ? { status: 'failed', message: 'failed' } : { status: 'ok', message: 'ok' };
       } catch (err) { return { status: 'failed', message: String(err) }; }
     }
@@ -192,8 +185,9 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
   const eventsCfg = (config.index as any).events;
   const eventExtractor = new EventExtractor(storage, model, logger, { dataDir, lookbackDays: eventsCfg.lookback_days, minTextChars: eventsCfg.min_text_chars, maxFramesPerBucket: eventsCfg.max_frames_per_bucket, llmEnabled: eventsCfg.llm_enabled });
   const embeddingWorker = new EmbeddingWorker(storage, model, logger, { enabled: config.index.embeddings.enabled, batchSize: config.index.embeddings.batch_size, modelName: getEmbeddingModelName(config), strategy });
+  const stageMs = (d: number, m?: number) => typeof m === 'number' ? m * 60000 : d * 86400000;
   const vCfg = config.storage.local.vacuum;
-  const vacuum = new StorageVacuum(storage, logger, { storageRoot: storage.getRoot(), compressAfterDays: vCfg.compress_after_days, compressQuality: vCfg.compress_quality, deleteAfterDays: vCfg.delete_after_days, batchSize: vCfg.batch_size });
+  const vacuum = new StorageVacuum(storage, logger, { storageRoot: storage.getRoot(), compressAfterMs: stageMs(vCfg.compress_after_days, vCfg.compress_after_minutes), compressQuality: vCfg.compress_quality, thumbnailAfterMs: stageMs(vCfg.thumbnail_after_days, vCfg.thumbnail_after_minutes), thumbnailMaxDim: vCfg.thumbnail_max_dim, deleteAfterMs: stageMs(vCfg.delete_after_days, vCfg.delete_after_minutes), batchSize: vCfg.batch_size });
 
   const activityCoalescer = new ActivityCoalescer(bus, logger.child('coalescer'), async () => {
     if (await hasActiveIndexMaintenanceLock(dataDir)) return;
@@ -276,16 +270,14 @@ async function resolveHookWidgetBundle(
 
 export async function runIncremental(h: OrchestratorHandles) {
   const log = h.logger.child('index');
-  await startPassiveExports(h.exports, log);
   try {
     const aud = await h.audioTranscriptWorker.drain(), fb = await h.frameBuilder.drain(), er = await h.entityResolver.drain(), sb = await h.sessionBuilder.drain(), mb = await h.meetingBuilder.drain();
-    await h.meetingSummarizer.drain().catch((err) => log.warn('meeting summary refresh failed before memory refresh', { err: String(err) }));
     try { await h.eventExtractor.tick(); } catch {}
     await h.embeddingWorker.drain();
-    await refreshMemoryExports(h.exports, log);
     await h.model.unload?.().catch(() => {});
   } catch {}
   
+  await startPassiveExports(h.exports, log);
   let totalEvents = 0, totalCreated = 0, totalUpdated = 0;
 
   for (let batch = 0; batch < 1000; batch++) {
@@ -304,10 +296,7 @@ export async function runIncremental(h: OrchestratorHandles) {
   }
 
   await h.indexerModel.unload?.().catch(() => {});
-  if (totalCreated + totalUpdated > 0) {
-    await h.embeddingWorker.tick().catch(() => {});
-    await refreshMemoryExports(h.exports, log);
-  }
+  if (totalCreated + totalUpdated > 0) await h.embeddingWorker.tick().catch(() => {});
   return { eventsProcessed: totalEvents, pagesCreated: totalCreated, pagesUpdated: totalUpdated };
 }
 
@@ -315,7 +304,6 @@ export async function runReorganisation(h: OrchestratorHandles) {
   await startPassiveExports(h.exports, h.logger.child('reorg'));
   const update = await h.strategy.reorganise(await h.strategy.getState(), h.indexerModel);
   await h.strategy.applyUpdate(update);
-  await h.embeddingWorker.tick().catch((err) => h.logger.child('reorg').warn('memory tree refresh failed after reorganisation', { err: String(err) }));
   for (const exp of h.exports) {
     for (const p of update.pagesToCreate) await exp.onPageUpdate(p);
     for (const d of update.pagesToDelete) await exp.onPageDelete(d);
@@ -337,10 +325,8 @@ export async function runFullReindex(h: OrchestratorHandles, opts: { from?: stri
       await Promise.all([h.audioTranscriptWorker.drain(), h.storage.resetFrameDerivatives(opts)]);
       await h.frameBuilder.drain(); await h.entityResolver.drain(); await h.storage.rebuildEntityCounts();
       await Promise.all([h.storage.clearAllSessions(), h.storage.clearAllMeetings(), h.storage.clearAllDayEvents().catch(() => {}), h.storage.clearFrameEmbeddings(getEmbeddingModelName(h.config))]);
-      await Promise.all([h.sessionBuilder.drain(), h.meetingBuilder.drain()]);
-      await h.meetingSummarizer.drain({ ignoreCooldown: true }).catch((err) => log.warn('meeting summary refresh failed during full reindex', { err: String(err) }));
+      await Promise.all([h.sessionBuilder.drain(), h.meetingBuilder.drain(), h.embeddingWorker.drain()]);
       await h.eventExtractor.tick().catch(() => {});
-      await h.embeddingWorker.drain();
       await checkpointWalIfSupported(h.storage, 'TRUNCATE');
       await unloadEmbeddingsOnly(h.model); if (h.indexerModel !== h.model) await unloadEmbeddingsOnly(h.indexerModel);
       await startPassiveExports(h.exports, log);
@@ -361,7 +347,6 @@ export async function runFullReindex(h: OrchestratorHandles, opts: { from?: stri
         offset += events.length; totalProcessed += events.length;
         if (events.length < batchSize) break;
       }
-      await h.embeddingWorker.tick().catch((err) => log.warn('memory tree refresh failed after full reindex', { err: String(err) }));
       for (const exp of h.exports) if (exp.name !== 'mcp') await exp.fullSync(await h.strategy.getState(), h.strategy);
       await h.indexerModel.unload?.().catch(() => {});
       await checkpointWalIfSupported(h.storage, 'TRUNCATE'); await vacuumDbIfSupported(h.storage); await checkpointWalIfSupported(h.storage, 'TRUNCATE');

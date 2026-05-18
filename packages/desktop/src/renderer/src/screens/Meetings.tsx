@@ -177,7 +177,8 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   const meetingsById = React.useMemo(() => new Map<string, Meeting>(meetings.map((m: Meeting) => [m.id, m])), [meetings]);
   const daysFromProps = React.useMemo(() => Array.from(new Set(events.map((e: DayEvent) => e.day))).sort((a: any, b: any) => compareDays(b, a)) as string[], [events]);
 
-  const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0);
+  const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0), ajRef = React.useRef(false);
+  React.useEffect(() => { if (!ajRef.current && !pfRef.current && daysFromProps.length) { ajRef.current = true; if (!events.some((e: DayEvent) => e.day === today)) setSelectedDay(daysFromProps[0]!); } }, [daysFromProps, events, today]);
 
   const visibleEvents = React.useMemo(() => reconcileCalendarMeetingItems(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).filter(isAgendaWorthyEvent).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
@@ -186,7 +187,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
     if (!focusRequest || focusRequest.id === hfRef.current) return;
     hfRef.current = focusRequest.id;
     if (!focusRequest.target) { pfRef.current = null; return; }
-    pfRef.current = focusRequest.target.eventId; setSelectedDay(focusRequest.target.day);
+    ajRef.current = true; pfRef.current = focusRequest.target.eventId; setSelectedDay(focusRequest.target.day);
   }, [focusRequest]);
 
   React.useEffect(() => {

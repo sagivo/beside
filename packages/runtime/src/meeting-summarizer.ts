@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import type { IStorage, IModelAdapter, Logger, Meeting, MeetingTurn, MeetingSummaryJson, Frame, MeetingPlatform } from '@beside/interfaces';
 
 export interface MeetingSummarizerOptions { dataDir: string; cooldownMs?: number; batchSize?: number; maxTranscriptChars?: number; visionAttachments?: number; enabled?: boolean; }
-export interface MeetingSummarizerTickOptions { ignoreCooldown?: boolean; }
 export interface MeetingSummarizerResult { attempted: number; succeeded: number; failed: number; skipped: number; }
 
 const SUMMARY_SYSTEM_PROMPT = `You are a meeting note-taker. Produce a strict JSON object from the fused timeline:
@@ -33,15 +32,10 @@ export class MeetingSummarizer {
     this.maxTranscriptChars = opts.maxTranscriptChars ?? 24000; this.visionAttachments = opts.visionAttachments ?? 4; this.enabled = opts.enabled ?? true;
   }
 
-  async tick(opts: MeetingSummarizerTickOptions = {}): Promise<MeetingSummarizerResult> {
+  async tick(): Promise<MeetingSummarizerResult> {
     const res = { attempted: 0, succeeded: 0, failed: 0, skipped: 0 };
     await this.invalidateCannedFallbackSummaries().catch((err) => this.logger.warn('canned fallback cleanup failed', { err: String(err) }));
-    const pending = await this.storage.listMeetings({ summaryStatus: 'pending', limit: this.batchSize * 4, order: 'recent' });
-    const eligible = opts.ignoreCooldown
-      ? pending
-      : pending.filter(x => Date.parse(x.ended_at) <= Date.now() - this.cooldownMs);
-    res.skipped += Math.max(0, pending.length - eligible.length);
-    for (const m of eligible.slice(0, this.batchSize)) {
+    for (const m of await this.storage.listMeetings({ summaryStatus: 'pending', limit: this.batchSize * 4, order: 'recent' }).then(p => p.filter(x => Date.parse(x.ended_at) <= Date.now() - this.cooldownMs).slice(0, this.batchSize))) {
       res.attempted++;
       try {
         await this.storage.setMeetingSummary(m.id, { status: 'running' });
@@ -65,9 +59,9 @@ export class MeetingSummarizer {
     return res;
   }
 
-  async drain(opts: MeetingSummarizerTickOptions = {}): Promise<MeetingSummarizerResult> {
+  async drain(): Promise<MeetingSummarizerResult> {
     const tot = { attempted: 0, succeeded: 0, failed: 0, skipped: 0 };
-    for (let i = 0; i < 1000; i++) { const r = await this.tick(opts); tot.attempted += r.attempted; tot.succeeded += r.succeeded; tot.failed += r.failed; tot.skipped += r.skipped; if (r.attempted === 0) break; }
+    for (let i = 0; i < 1000; i++) { const r = await this.tick(); tot.attempted += r.attempted; tot.succeeded += r.succeeded; tot.failed += r.failed; tot.skipped += r.skipped; if (r.attempted === 0) break; }
     return tot;
   }
 
