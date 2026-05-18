@@ -173,7 +173,7 @@ export interface PeopleSynthesisResult {
  */
 export type ChatStreamEvent =
   | { kind: 'phase'; turnId: string; phase: 'classify' | 'plan' | 'execute' | 'compose' }
-  | { kind: 'reasoning'; turnId: string; text: string }
+  | { kind: 'reasoning'; turnId: string; text: string; partId?: string }
   | { kind: 'intent'; turnId: string; intent: ChatIntent; anchor: DateAnchor }
   | {
       kind: 'tool-call';
@@ -190,6 +190,7 @@ export type ChatStreamEvent =
       summary: string;
     }
   | { kind: 'content'; turnId: string; delta: string }
+  | { kind: 'content-reset'; turnId: string }
   | { kind: 'done'; turnId: string }
   | { kind: 'error'; turnId: string; message: string };
 

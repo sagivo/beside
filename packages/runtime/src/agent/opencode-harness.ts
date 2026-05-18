@@ -25,6 +25,42 @@ interface SessionMessageSnapshot {
 
 interface EmitOptions {
   emitContent?: boolean;
+  /**
+   * Part-ids that the live SSE subscriber has already streamed to the
+   * renderer. The post-prompt batch emit skips these so the renderer
+   * doesn't see duplicate reasoning / tool / content events.
+   */
+  streamed?: StreamedPartTracker;
+}
+
+/**
+ * Tracks which OpenCode message parts have already been emitted live by
+ * the SSE subscription, so the post-prompt batch reconciliation pass
+ * doesn't double-emit them. Tool-calls and tool-results are tracked
+ * separately because they fire as the tool state transitions.
+ */
+interface StreamedPartTracker {
+  reasoningPartIds: Set<string>;
+  textPartIds: Set<string>;
+  toolCallIds: Set<string>;
+  toolResultCallIds: Set<string>;
+}
+
+interface StreamSubscription {
+  stop: () => void;
+  readonly streamed: StreamedPartTracker;
+  /**
+   * True once the SSE subscriber emitted text that survived the
+   * non-answer filter — i.e. the live stream already delivered a real
+   * answer to the renderer.
+   */
+  readonly emittedRealText: boolean;
+  /**
+   * Called before a retry prompt: clears `emittedRealText` and the
+   * accumulated text-part state so the next prompt can stream fresh
+   * content without colliding with the discarded draft.
+   */
+  resetEmittedText: () => void;
 }
 
 export class OpenCodeHarness {
@@ -51,6 +87,8 @@ export class OpenCodeHarness {
 
     emit({ kind: 'phase', phase: 'execute' });
 
+    let streamSubscription: StreamSubscription | null = null;
+
     try {
       const runtime = await this.getRuntime(handles);
       const directory = await ensureOpenCodeDirectory(handles.loaded.dataDir, input.conversationId);
@@ -58,6 +96,19 @@ export class OpenCodeHarness {
       const model = getOllamaModel(handles);
       const beforeMessageIds = await listSessionMessageIds(runtime.client, directory, sessionId);
       const tools = BESIDE_AGENT_TOOLS;
+
+      // Subscribe to the SSE event stream so reasoning, tool calls, and text
+      // tokens reach the renderer as they happen instead of in a single
+      // batch after the prompt resolves. The subscription tracks which
+      // parts it has already streamed so the post-prompt batch emit below
+      // can avoid double-emitting.
+      streamSubscription = await startStreamSubscription(
+        runtime.client,
+        sessionId,
+        input.turnId,
+        onEvent,
+        this.logger,
+      );
 
       const response = await runtime.client.session.prompt({
         path: { id: sessionId },
@@ -83,9 +134,20 @@ export class OpenCodeHarness {
         response.data?.parts ?? [],
       );
       const evidence = collectToolEvidence(parts, input.message);
-      let emittedText = emitParts(parts, input.turnId, onEvent, { emitContent: !evidence });
+      let emittedText = emitParts(parts, input.turnId, onEvent, {
+        emitContent: !evidence,
+        streamed: streamSubscription.streamed,
+      });
+      // If the streaming subscription already emitted real text, treat
+      // this turn as having produced text — no need to retry.
+      if (streamSubscription.emittedRealText) emittedText = true;
       let gatheredEvidence = evidence;
       for (let attempt = 0; !emittedText && attempt < 2; attempt += 1) {
+        // The first prompt either produced no text or only generic filler.
+        // Wipe any garbage we may have streamed live so the user sees a
+        // clean continuation answer rather than the discarded draft.
+        onEvent({ kind: 'content-reset', turnId: input.turnId });
+        streamSubscription.resetEmittedText();
         const continuationTools = continuationToolsFor(input.message, gatheredEvidence);
         const retryBeforeMessageIds = await listSessionMessageIds(runtime.client, directory, sessionId);
         const retry = await runtime.client.session.prompt({
@@ -112,7 +174,8 @@ export class OpenCodeHarness {
           retry.data?.parts ?? [],
         );
         gatheredEvidence = [gatheredEvidence, collectToolEvidence(retryParts, input.message)].filter(Boolean).join('\n\n');
-        emittedText = emitParts(retryParts, input.turnId, onEvent);
+        emittedText = emitParts(retryParts, input.turnId, onEvent, { streamed: streamSubscription.streamed });
+        if (streamSubscription.emittedRealText) emittedText = true;
       }
       if (!emittedText) {
         onEvent({
@@ -129,6 +192,8 @@ export class OpenCodeHarness {
         turnId: input.turnId,
         message: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      streamSubscription?.stop();
     }
   }
 
@@ -167,7 +232,10 @@ export class OpenCodeHarness {
     input: ChatTurnInput,
   ): Promise<string> {
     const existing = this.sessions.get(input.conversationId);
-    if (existing) return existing;
+    if (existing) {
+      this.logger.info('reusing opencode session', { conversationId: input.conversationId, sessionId: existing });
+      return existing;
+    }
 
     const title = input.message.trim().replace(/\s+/g, ' ').slice(0, 80) || 'Beside memory chat';
     const created = await client.session.create({
@@ -175,6 +243,7 @@ export class OpenCodeHarness {
       body: { title },
     });
     if (!created.data?.id) throw new Error('OpenCode did not return a session id.');
+    this.logger.info('created opencode session', { conversationId: input.conversationId, sessionId: created.data.id });
     this.sessions.set(input.conversationId, created.data.id);
     return created.data.id;
   }
@@ -189,7 +258,7 @@ function buildOpenCodeConfig(handles: OrchestratorHandles, mcpUrl: string): Reco
     `Use exact tool names only: ${BESIDE_AGENT_TOOLS.join(', ')}.`,
     'Answer personal-memory questions by choosing and calling the needed Beside tools yourself.',
     'Use the user question, the tool names, and the tool descriptions to choose the MCP calls. Typical routes: day summary questions use daily summary; follow-up/task questions use open loops; meeting questions use meeting tools; Slack/chat questions use Slack activity or memory search; person/topic/date recall uses memory or frame search.',
-    'Treat each turn as a single isolated user question. Do not substitute examples, previous probe questions, or another date/topic.',
+    'Answer the most recent User question. Resolve pronouns and references like "this user", "that meeting", or "the one above" against the prior messages in this conversation — those are the user\'s real history with you. If a previous Beside response named or hinted at an entity (person, meeting, topic), follow up about *that same entity* when the user asks for more detail. Do not substitute training-data examples or unrelated dates/topics for the actual question.',
     'Use the fewest MCP calls needed. Once a tool returns non-empty evidence for the current question, stop calling unrelated tools and answer from that evidence.',
     'For meeting discussion details, locate the meeting id with beside_list_meetings, then call beside_get_meeting before answering from the discussion content. If there is no exact title match, use the closest summarized meeting and say it is the closest captured meeting.',
     'After a tool returns JSON, answer only from that JSON. Prefer the returned totals, top_apps, top_entities, sessions, open_loops, meeting summary, and transcript fields.',
@@ -256,7 +325,7 @@ function buildTurnSystemPrompt(tools: readonly string[]): string {
     'When a Beside tool asks for a day, pass dates as YYYY-MM-DD.',
     'For questions about the user, their captures, work, meetings, messages, or tasks, call at least one Beside MCP tool before answering.',
     'Pick tools yourself. Do not wait for the app to route you.',
-    'This turn is only about the current User question. Do not answer or tool-call for a different imagined question.',
+    'Answer the most recent User question. Resolve references like "this user", "that meeting", "the one above" against the prior messages in this conversation — they are the user\'s real history with you, not test probes. If a follow-up references something from the previous Beside response (a person, meeting, doc, topic), search for *that same thing* (use the unique details mentioned earlier as your search query). Do not invent or substitute an unrelated imagined question.',
     'Use the fewest MCP calls needed. If one tool returns enough evidence for the current question, stop tool use and answer.',
     'Use compact=true on tools that support it unless the user asks for raw detail.',
     'If a meeting question only asks which meetings happened, listing meetings is enough. If it asks what was discussed, fetch the chosen meeting details after listing.',
@@ -346,6 +415,139 @@ async function collectNewAssistantParts(
   }
 }
 
+async function startStreamSubscription(
+  client: OpencodeClient,
+  sessionId: string,
+  turnId: string,
+  onEvent: ChatStreamHandler,
+  logger: Logger,
+): Promise<StreamSubscription> {
+  const streamed: StreamedPartTracker = {
+    reasoningPartIds: new Set(),
+    textPartIds: new Set(),
+    toolCallIds: new Set(),
+    toolResultCallIds: new Set(),
+  };
+  // Text accumulator per part-id. The OpenCode SSE stream delivers
+  // `message.part.updated` events whose `part.text` carries the *cumulative*
+  // text-so-far, so we compute the delta against what we've already
+  // streamed instead of relying on the optional `delta` field (which only
+  // some providers populate).
+  const textAccumulated = new Map<string, string>();
+  let emittedRealText = false;
+  let stopped = false;
+  const abort = new AbortController();
+  let subscription: { stream: AsyncGenerator<unknown, unknown, unknown> } | null = null;
+
+  try {
+    subscription = await (client as unknown as {
+      event: {
+        subscribe: (options?: { signal?: AbortSignal }) =>
+          Promise<{ stream: AsyncGenerator<unknown, unknown, unknown> }>;
+      };
+    }).event.subscribe({ signal: abort.signal });
+  } catch (err) {
+    logger.warn('opencode SSE subscribe failed; falling back to batch emit', { err: String(err) });
+    return {
+      stop: () => {},
+      streamed,
+      get emittedRealText() { return false; },
+      resetEmittedText: () => {},
+    };
+  }
+
+  const stopFn = () => {
+    if (stopped) return;
+    stopped = true;
+    // Closes the underlying SSE fetch — the async-generator loop unwinds
+    // and the reader task exits cleanly.
+    try { abort.abort(); } catch {}
+  };
+
+  void (async () => {
+    try {
+      for await (const raw of subscription.stream) {
+        if (stopped) break;
+        const event = raw as { type?: string; properties?: Record<string, unknown> };
+        if (event?.type !== 'message.part.updated') continue;
+        const part = (event.properties?.part ?? {}) as
+          | { id?: string; sessionID?: string; type?: string; text?: string; tool?: string; callID?: string; state?: { status?: string; input?: Record<string, unknown>; output?: string; title?: string; error?: string } }
+          | undefined;
+        if (!part || part.sessionID !== sessionId || !part.id) continue;
+
+        if (part.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
+          // The reasoning event semantics in the renderer accept the full
+          // current text — partId lets it update the same step in place
+          // instead of appending a new one each tick.
+          streamed.reasoningPartIds.add(part.id);
+          onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+          continue;
+        }
+
+        if (part.type === 'tool' && part.tool && part.callID && isBesideAgentTool(part.tool)) {
+          const callId = `${turnId}:opencode:${part.callID}`;
+          const status = part.state?.status;
+          if (!streamed.toolCallIds.has(callId)) {
+            streamed.toolCallIds.add(callId);
+            onEvent({
+              kind: 'tool-call',
+              turnId,
+              tool: part.tool,
+              args: (part.state?.input ?? {}) as Record<string, unknown>,
+              callId,
+            });
+          }
+          if (status === 'completed' && !streamed.toolResultCallIds.has(callId)) {
+            streamed.toolResultCallIds.add(callId);
+            onEvent({
+              kind: 'tool-result',
+              turnId,
+              callId,
+              tool: part.tool,
+              summary: summariseToolOutput(part.state?.title || part.state?.output || ''),
+            });
+          } else if (status === 'error' && !streamed.toolResultCallIds.has(callId)) {
+            streamed.toolResultCallIds.add(callId);
+            onEvent({
+              kind: 'tool-result',
+              turnId,
+              callId,
+              tool: part.tool,
+              summary: truncate(part.state?.error || 'tool failed', 500),
+            });
+          }
+          continue;
+        }
+
+        if (part.type === 'text' && typeof part.text === 'string') {
+          const next = part.text;
+          const prev = textAccumulated.get(part.id) ?? '';
+          if (next.length <= prev.length) continue;
+          const delta = next.slice(prev.length);
+          textAccumulated.set(part.id, next);
+          if (!delta.trim() && !prev) continue;
+          streamed.textPartIds.add(part.id);
+          emittedRealText = true;
+          onEvent({ kind: 'content', turnId, delta });
+        }
+      }
+    } catch (err) {
+      if (!stopped) logger.warn('opencode SSE reader ended', { err: String(err) });
+    }
+  })();
+
+  return {
+    stop: () => stopFn?.(),
+    streamed,
+    get emittedRealText() { return emittedRealText; },
+    resetEmittedText: () => {
+      emittedRealText = false;
+      textAccumulated.clear();
+      streamed.textPartIds.clear();
+    },
+  };
+}
+
 function emitParts(
   parts: Part[],
   turnId: string,
@@ -353,18 +555,25 @@ function emitParts(
   options: EmitOptions = {},
 ): boolean {
   const emitContent = options.emitContent !== false;
+  const streamed = options.streamed;
   let text = '';
+  let textStreamed = false;
   for (const part of parts) {
     if (part.type === 'reasoning' && part.text.trim()) {
-      onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600) });
+      if (streamed?.reasoningPartIds.has(part.id)) continue;
+      onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+      streamed?.reasoningPartIds.add(part.id);
       continue;
     }
     if (part.type === 'tool') {
       if (!isBesideAgentTool(part.tool)) continue;
       const callId = `${turnId}:opencode:${part.callID}`;
-      const input = 'input' in part.state ? part.state.input : {};
-      onEvent({ kind: 'tool-call', turnId, tool: part.tool, args: input, callId });
-      if (part.state.status === 'completed') {
+      if (!streamed?.toolCallIds.has(callId)) {
+        const input = 'input' in part.state ? part.state.input : {};
+        onEvent({ kind: 'tool-call', turnId, tool: part.tool, args: input, callId });
+        streamed?.toolCallIds.add(callId);
+      }
+      if (part.state.status === 'completed' && !streamed?.toolResultCallIds.has(callId)) {
         onEvent({
           kind: 'tool-result',
           turnId,
@@ -372,7 +581,8 @@ function emitParts(
           tool: part.tool,
           summary: summariseToolOutput(part.state.title || part.state.output),
         });
-      } else if (part.state.status === 'error') {
+        streamed?.toolResultCallIds.add(callId);
+      } else if (part.state.status === 'error' && !streamed?.toolResultCallIds.has(callId)) {
         onEvent({
           kind: 'tool-result',
           turnId,
@@ -380,14 +590,20 @@ function emitParts(
           tool: part.tool,
           summary: truncate(part.state.error, 500),
         });
+        streamed?.toolResultCallIds.add(callId);
       }
       continue;
     }
     if (part.type === 'text' && part.text) {
       text += part.text;
+      if (streamed?.textPartIds.has(part.id)) textStreamed = true;
     }
   }
   if (!emitContent || !text.trim() || isGenericNonAnswer(text)) return false;
+  // Whatever made it past the non-answer filter is the real answer. If
+  // the live subscriber already streamed it, the renderer already has
+  // it — don't emit again.
+  if (textStreamed) return true;
   onEvent({ kind: 'content', turnId, delta: text });
   return true;
 }
