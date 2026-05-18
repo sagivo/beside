@@ -1,7 +1,7 @@
 # Configuration reference
 
 All of Beside is driven by **one** YAML file at `~/.beside/config.yaml` (or a
-custom path via `beside --config`). The schema is defined and validated by
+custom path via `beside <command> --config <path>`). The schema is defined and validated by
 `@beside/core` — every value below has a Zod default, so you only need to set
 what you want to change. An empty file gives you a sensible local-first,
 battery-aware install with the local Markdown export and the local MCP server
@@ -29,11 +29,13 @@ app:
   name: Beside
   data_dir: ~/.beside           # all on-disk state lives here
   log_level: info               # debug | info | warn | error
-  session_id:                   # optional — set to pin the install id
+  # session_id: my-install       # optional — set to pin the install id
 ```
 
-`data_dir` is the root for everything: raw events, assets, the index, exports,
-the SQLite database. Move it onto an external drive by changing this one line.
+`data_dir` is the root for the stock paths: raw events, assets, the index,
+exports, and the SQLite database. Move it onto an external drive by changing
+this one line, or set `BESIDE_DATA_DIR` to re-root the defaults without editing
+the file. Any path you explicitly customize in YAML is left alone.
 
 ## `capture`
 
@@ -60,7 +62,7 @@ capture:
     min_audio_rate_check_ms: 5000
     live_recording:
       enabled: true
-      activation: other_process_input        # 'other_process_input' | 'always'
+      activation: other_process_input        # starts only when another process uses audio input
       system_audio_backend: core_audio_tap   # 'core_audio_tap' | 'screencapturekit' | 'off'
       poll_interval_sec: 3
       chunk_seconds: 300
@@ -78,6 +80,7 @@ capture:
     - Keychain Access
   excluded_url_patterns: []
   multi_screen: false
+  # screens: [0, 1]              # optional display whitelist
   capture_mode: active           # 'active' | 'all'
   accessibility:
     enabled: true
@@ -101,11 +104,14 @@ storage:
     max_size_gb: 50
     retention_days: 365
     vacuum:
+      compress_after_days: 1
       compress_after_minutes: 60
       compress_quality: 40
       thumbnail_after_days: 30
+      # thumbnail_after_minutes: 360
       thumbnail_max_dim: 480
       delete_after_days: 180
+      # delete_after_minutes: 1440
       tick_interval_min: 15
       batch_size: 50
 ```
@@ -149,22 +155,28 @@ index:
       model: gemma4:e4b
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
-      vision_model:                  # optional override
-      indexer_model:                 # optional override for indexing-only calls
+      # vision_model: gemma4:e4b     # optional override
+      # indexer_model: gemma4:e2b    # optional override for indexing-only calls
       keep_alive: "30s"
       unload_after_idle_min: 0
       auto_install: true
+      num_ctx: 262144
       model_revision: 3
     openai:
-      api_key: ${OPENAI_API_KEY}
+      # api_key: sk-...              # omit to read OPENAI_API_KEY
       base_url: https://api.openai.com/v1
       model: gpt-4o-mini
-      vision_model:                  # optional
+      # vision_model: gpt-4o         # optional
       embedding_model: text-embedding-3-small
-    claude:
-      api_key:
-      model: claude-sonnet-4-6
+    # claude:
+    #   api_key: ...
+    #   model: claude-sonnet-4-6
 ```
+
+This repository ships `ollama` and `openai` model plugins. The `claude` block
+is preserved in the schema and desktop Settings UI for custom/future adapters;
+setting `plugin: claude` only works once a matching `plugins/model/claude`
+drop-in exists.
 
 ## `hooks`
 
@@ -186,23 +198,21 @@ hooks:
 ```yaml
 export:
   plugins:
-    - { name: markdown, enabled: true }
-    - { name: mcp, enabled: true }
+    - name: markdown
+      enabled: true
+      path: ~/.beside/export/markdown
+    - name: mcp
+      enabled: true
+      host: 127.0.0.1
+      port: 3456
+      transport: http
+      text_excerpt_chars: 5000
 ```
 
-Each plugin reads its own block from the top level of the YAML
-(see the `plugin.json` `config_schema` for each plugin). For example:
-
-```yaml
-mcp:
-  host: 127.0.0.1
-  port: 3456
-  transport: http
-  text_excerpt_chars: 5000
-
-markdown:
-  path: ~/.beside/export/markdown
-```
+Export plugin settings live inline on each `export.plugins[]` entry. The
+runtime passes the whole entry to the plugin factory, so `path`, `host`, `port`,
+`transport`, and `text_excerpt_chars` stay next to the `enabled` flag you use
+from the desktop Settings screen.
 
 ## `system`
 
@@ -226,7 +236,7 @@ next tick. Capture itself is never deferred.
 
 | Scenario | What to change |
 | --- | --- |
-| **Strict privacy / regulated team** | `capture.plugin: node`, narrow `excluded_apps`, set `excluded_url_patterns`, keep `index.model.plugin: ollama`, disable `mcp` export until ready, lower `storage.local.retention_days`. |
+| **Strict privacy / regulated team** | `capture.plugin: node`, narrow `excluded_apps`, set `excluded_url_patterns`, keep `index.model.plugin: ollama`, set the MCP export entry to `enabled: false` until ready, lower `storage.local.retention_days`. |
 | **Pure local performance** | `capture.plugin: native`, `index.model.plugin: ollama`, `index.embeddings.tick_interval_min: 1`, `system.load_guard.threshold: 0.85`. |
 | **Hosted-model quality** | `index.model.plugin: openai`, set a real `embedding_model`, raise `index.batch_size` for fewer hosted calls. |
 | **Always-on, minimal disk** | `screenshot_quality: 35`, `screenshot_max_dim: 900`, `vacuum.compress_after_minutes: 30`, `vacuum.delete_after_days: 60`. |

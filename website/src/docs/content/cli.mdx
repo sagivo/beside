@@ -93,7 +93,7 @@ disk is rebuilt deterministically.
 ```bash
 beside status
 beside stats
-beside stats --json | jq '.storage.eventsByApp'
+beside stats --json | jq '.events, .frames.pending, .mcp'
 beside plugin list
 ```
 

@@ -103,7 +103,7 @@ on demand is fine.
 Confirm the MCP server is up:
 
 ```bash
-curl http://127.0.0.1:3456/mcp/healthz
+curl http://127.0.0.1:3456/health
 ```
 
 For Cursor / Claude Desktop / Windsurf, add Beside to the MCP servers section
@@ -112,7 +112,7 @@ of your client config:
 ```json
 {
   "mcpServers": {
-    "beside": { "url": "http://127.0.0.1:3456/mcp" }
+    "beside": { "url": "http://127.0.0.1:3456" }
   }
 }
 ```

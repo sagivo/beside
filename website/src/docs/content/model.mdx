@@ -29,7 +29,7 @@ specific provider — it just calls `complete`, `completeWithVision`, and `embed
 
 ## `ollama` — local-first by default
 
-The default. Beside runs Gemma 3 (and friends) through a local
+The default. Beside runs Gemma 4 (and friends) through a local
 [Ollama](https://ollama.com) server, with an optional auto-install path that
 keeps `init` friendly.
 
@@ -46,20 +46,28 @@ index:
       keep_alive: "30s"
       unload_after_idle_min: 0
       auto_install: true
+      num_ctx: 262144
       model_revision: 3
 ```
 
 Highlights:
 
 - **Auto-bootstrap** — `beside init` and the desktop app can install Ollama
-  (`brew`, `winget`, or curl install script) and pull the configured model.
+  (macOS app download, Linux install script, or Windows `winget`) and pull the
+  configured model.
   Streaming progress is surfaced via the `ModelBootstrapHandler` events
   (`install_started`, `pull_progress`, `ready`, …).
-- **Vision-capable** when the model supports it (Gemma 3 vision, Llama vision,
+- **Vision-capable** when the model supports it (Gemma 4 vision, Llama vision,
   etc.). The orchestrator routes to `completeWithVision` whenever it has image
   evidence.
+- **Long context by default** — `num_ctx` is passed to Ollama on every call.
+  The default is large enough for tool-heavy agent prompts; Ollama clamps it to
+  the selected model’s real maximum.
 - **Embeddings via the same daemon** — by default `nomic-embed-text`, but you
   can swap to `mxbai-embed-large` or any embedding model Ollama supports.
+- **Floating tag refreshes** — `beside model:update` force re-pulls the
+  configured model, and bumping `model_revision` refreshes weights on the next
+  start.
 - **Offline fallback** — when Ollama is unreachable, the runtime drops down to
   a deterministic offline indexer so the pipeline still produces output. You
   can opt in explicitly with `beside start --offline`.
@@ -95,6 +103,11 @@ Notes:
 - The runtime uses `getModelInfo().costPerMillionTokens` for the cost-aware
   scheduler in the orchestrator, so it knows when not to fire a hosted model
   during a reorganisation pass.
+
+The config schema also preserves provider-specific blocks such as
+`index.model.claude` for custom adapters. This repository currently ships
+`ollama` and `openai`; selecting another `plugin` name requires a matching
+drop-in plugin under `plugins/model/`.
 
 ## How the runtime uses your model
 

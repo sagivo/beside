@@ -22,22 +22,28 @@ storage:
     max_size_gb: 50
     retention_days: 365
     vacuum:
+      compress_after_days: 1
       compress_after_minutes: 60
       compress_quality: 40
       thumbnail_after_days: 30
+      thumbnail_after_minutes:
       thumbnail_max_dim: 480
       delete_after_days: 180
+      delete_after_minutes:
       tick_interval_min: 15
       batch_size: 50
 ```
 
 What lives where:
 
-- **`~/.beside/raw/events.sqlite`** — a single SQLite database with WAL,
+- **`~/.beside/beside.db`** — a single SQLite database with WAL,
   embedded FTS5 search, vector tables for embeddings, and indexes for sessions,
   meetings, day events, memory chunks, and hook records.
-- **`~/.beside/raw/frames/<day>/<id>.webp`** — screenshot assets, written once
-  and tiered later by the vacuum (compressed → thumbnail → deleted).
+- **`~/.beside/raw/<day>/events.jsonl`** — append-only raw-event replay logs,
+  one file per local day.
+- **`~/.beside/raw/<day>/screenshots/<sha256>.webp`** — content-addressed
+  screenshot assets, written once and tiered later by the vacuum (compressed →
+  thumbnail → deleted).
 - **`~/.beside/raw/audio/{inbox,processed,failed}/`** — audio chunks moving
   through the transcription worker.
 - **`~/.beside/index/`** — the wiki the index strategy emits.

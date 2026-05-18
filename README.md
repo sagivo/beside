@@ -84,8 +84,15 @@ Beside.
 |----------|--------------|
 | `BESIDE_CONFIG` | Path to the YAML config file. Overrides the `~/.beside/config.yaml` lookup. |
 | `BESIDE_DATA_DIR` | Re-roots all stock paths (raw capture, SQLite db, index, exports) under this directory. Use it to point at `$XDG_DATA_HOME/beside` on Linux or `%APPDATA%\beside` on Windows without editing config. Paths the user has explicitly customised in `config.yaml` are left alone. |
+| `BESIDE_USE_PLATFORM_DATA_DIR` | Set to `1` to use the OS-conventional app data directory when `BESIDE_DATA_DIR` is not set. Packaged desktop builds enable this automatically. |
+| `BESIDE_RESOURCE_ROOT` | Runtime/plugin resource root. Packaged desktop builds set this to their bundled `resources/beside` directory. |
 | `BESIDE_DEV` | Set by `pnpm dev` to enable the auto-reindex-on-stable behaviour. |
 | `BESIDE_CAPTURE_FIXTURE` | Set to `1` to replace desktop APIs with deterministic in-process fakes. Useful for smoke tests and headless automation. |
+| `BESIDE_DESKTOP_AUTOSTART` | Set to `0` to launch the desktop app without starting the runtime automatically. |
+| `BESIDE_DESKTOP_SHOW_ON_START` | Set to `0` to suppress the initial desktop status window. |
+| `BESIDE_DESKTOP_SHOW_DOCK` | Set to `1` on macOS to show the Dock icon instead of running as an accessory/tray-style app. |
+| `BESIDE_DISABLE_AUTO_UPDATES` | Set to `1` to disable packaged desktop update checks. |
+| `BESIDE_DB_SLOW_QUERY_MS` | Log local-storage SQLite queries slower than this many milliseconds. |
 | `NO_COLOR` | Disable ANSI colour output (logs + status). |
 | `FORCE_COLOR` | Force ANSI colour output even when stdout isn't a TTY. |
 
@@ -151,9 +158,9 @@ What `beside init` (and `start` / `index` on first launch) does:
 
 1. **Probes** the configured Ollama host. If reachable and the model is
    already pulled, it does nothing.
-2. **Auto-installs Ollama** using the platform path below (macOS / Linux:
-   official shell installer; Windows: `winget`). Inherits your TTY so any
-   `sudo` / UAC prompt surfaces directly. Live installer output is mirrored.
+2. **Auto-installs Ollama** using the platform path below (macOS: downloads
+   `Ollama.app`; Linux: official shell installer; Windows: `winget`). Live
+   installer output is mirrored, and Linux/Windows prompts surface directly.
 3. **Starts the Ollama daemon** if it isn't already serving.
 4. **Pulls the configured model** (default: `gemma4:e4b`, ~9.6 GB — the
    recommended variant of Google's latest Gemma 4 with vision + audio
@@ -236,8 +243,8 @@ There are currently no GitHub Actions release jobs in this repository.
 
 | Platform | How `init` installs Ollama |
 |----------|----------------------------|
-| **macOS** | `curl -fsSL https://ollama.com/install.sh \| sh` (drops the .app + CLI). |
-| **Linux** | Same as macOS. The installer registers a systemd unit on distros that have it. |
+| **macOS** | Downloads `Ollama-darwin.zip`, extracts `Ollama.app`, and installs it into `/Applications` or `~/Applications` if `/Applications` is not writable. |
+| **Linux** | `curl -fsSL https://ollama.com/install.sh \| sh`. The installer registers a systemd unit on distros that have it. |
 | **Windows** | `winget install --id Ollama.Ollama` (built into Windows 10 1809+ / Windows 11). A UAC prompt appears in a separate dialog. If `winget` is missing, you'll see a manual hint pointing at https://ollama.com/download. |
 
 ### Swapping the model later
@@ -267,7 +274,7 @@ republishes improved weights under the same name. Two ways to pick them up:
 2. **On next start** — bump `model_revision` in `config.yaml`. The
    orchestrator compares it against `~/.beside/.model-revision`
    and force-re-pulls when the configured value is higher, then writes
-   the new value to the marker. Default ships at `2`; bumping to `3`
+   the new value to the marker. Default ships at `3`; bumping to `4`
    later refreshes every install once.
 
 ```yaml
@@ -414,6 +421,8 @@ search as first-class tools — agents don't need to read files directly.
 | Tool | What it does |
 |------|--------------|
 | `search_memory` | Default entrypoint. Blended search across keyword frames + semantic frame embeddings + wiki pages. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them. |
+| `remember_memory` | Add a manual memory chunk with explicit source references. Useful for durable facts that should join generated memory. |
+| `memory_status` | Report generated/manual memory counts, embedding coverage, stale chunks, and frame embedding coverage. |
 | `search_frames` | FTS5 search over OCR / accessibility text, window titles, and URLs, optionally blended with semantic embedding matches. Same `exclude_self` default. |
 | `get_frame_context` | Chronological neighbourhood around a specific frame. |
 | `get_journal` | All frames captured on a given day, grouped by activity session, as a markdown timeline. |
@@ -437,6 +446,7 @@ search as first-class tools — agents don't need to read files directly.
 | `query_raw_events` | Raw event log query (bypasses the index). |
 | `get_session` | Reconstruct events + screenshot paths over a time range (raw-event time slice). |
 | `trigger_reindex` | Queue an incremental or full re-index. |
+| `get_reindex_status` | Check whether a manual re-index request is pending, running, done, or failed. |
 
 The digest tools (`get_daily_summary`, `get_calendar_events`, `get_open_loops`,
 `get_slack_activity`, `get_entity_summary`) compose existing storage primitives
@@ -888,7 +898,8 @@ Once configured, ask the agent something like:
 
 The agent should call `get_journal` or `search_memory` and stream back a
 synthesised answer grounded in your captured frames. If a tool call fails,
-check `pnpm cli status` — the MCP `url` row should show `http://127.0.0.1:3456`.
+check `pnpm cli stats` — the MCP line should say `listening` when
+`http://127.0.0.1:3456` is ready.
 
 ### Changing the port / host / preview size
 

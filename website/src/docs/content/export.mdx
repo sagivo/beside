@@ -61,39 +61,46 @@ AI agent — Claude Desktop, Cursor, Windsurf, and increasingly ChatGPT desktop.
 ```yaml
 export:
   plugins:
-    - { name: mcp, enabled: true }
-
-# (under the plugin's config_schema in plugin.json)
-mcp:
-  host: 127.0.0.1
-  port: 3456
-  transport: http       # 'http' | 'stdio'
-  text_excerpt_chars: 5000
+    - name: mcp
+      enabled: true
+      host: 127.0.0.1
+      port: 3456
+      transport: http       # 'http' | 'stdio'
+      text_excerpt_chars: 5000
 ```
 
 Two transports:
 
 - **HTTP** (default, `http://127.0.0.1:3456`). Good for Cursor / Windsurf /
-  Claude Desktop’s MCP-over-HTTP clients, and easy to confirm with `curl`.
+  Claude Desktop’s MCP-over-HTTP clients, and easy to confirm with
+  `curl http://127.0.0.1:3456/health`.
 - **stdio**. Used when an agent spawns Beside as a subprocess (the way Claude
   Desktop’s built-in MCP launcher works).
 
 ### What the MCP server exposes
 
-Conceptually, agents get four kinds of tools:
+The current server exposes concrete, citation-friendly tools:
 
-1. **`recall`** — semantic + keyword search over `MemoryChunk`s with optional
-   filters (`kind`, `entityPath`, `day`, `from/to`). Returns excerpts capped at
-   `text_excerpt_chars`.
-2. **`journal`** — daily timeline for a given day, including sessions and
-   meetings, in agent-friendly Markdown.
-3. **`entities` / `sessions` / `meetings` / `day_events`** — structured listings
-   so an agent can navigate by noun.
-4. **`frames`** — fine-grained access to the underlying `Frame`s when an agent
-   needs the raw screen context behind a chunk.
+| Tool | Use it for |
+| --- | --- |
+| `search_memory` | Default blended recall across wiki memory chunks, keyword frame search, and semantic embeddings. |
+| `remember_memory` | Add a manual memory chunk with explicit source refs. |
+| `memory_status` | Inspect generated/manual chunk counts, embedding coverage, stale chunks, and frame embedding coverage. |
+| `search_frames` | Precise "when did I see X?" search over OCR/accessibility text, titles, URLs, and optional semantic matches. |
+| `get_frame_context` | Neighbouring frames around one screenshot/frame id. |
+| `get_journal` | Day timeline grouped by sessions, meetings, and events. |
+| `get_daily_summary` | Fresh daily digest: totals, top apps/entities/hosts, sessions, calendar events, Slack/code-review/open-loop signals. |
+| `list_meetings`, `get_meeting`, `summarize_meeting` | Meeting detection, fused transcripts, screenshot manifests, and structured summaries. |
+| `get_calendar_events`, `get_open_loops`, `get_slack_activity` | Heuristic digest extractors that return source frame ids for follow-up. |
+| `list_entities`, `get_entity`, `get_entity_frames`, `list_entity_neighbours`, `get_entity_timeline` | Entity graph navigation. |
+| `list_sessions`, `get_activity_session` | Activity-session listing and drill-down. |
+| `get_page`, `get_index` | Read wiki pages directly. |
+| `query_raw_events`, `get_session` | Raw event-log and time-slice access. |
+| `trigger_reindex`, `get_reindex_status` | Queue and observe incremental/full reindex work. |
 
-Plus resources: the live `index/README.md`, individual wiki pages, and meeting
-summaries.
+MCP clients also see resources for the live index root and individual wiki
+pages. Tools return bounded text/JSON payloads by default; screenshot bytes stay
+on disk unless a local client follows an explicit asset path.
 
 ### Hooking it into your agent
 
@@ -104,7 +111,7 @@ Cursor / Claude Desktop:
 {
   "mcpServers": {
     "beside": {
-      "url": "http://127.0.0.1:3456/mcp"
+      "url": "http://127.0.0.1:3456"
     }
   }
 }

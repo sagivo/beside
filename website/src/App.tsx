@@ -344,7 +344,7 @@ function LandingPage() {
               <Feature
                 badge="01"
                 title="100% local-first"
-                body="Captures, embeddings, and indexes live on your disk as JSONL + SQLite. Bring your own model — Ollama, llama.cpp, OpenAI, Anthropic — or run fully offline."
+                body="Captures, embeddings, and indexes live on your disk as JSONL + SQLite. Bring your own model — Ollama locally, OpenAI-compatible hosted endpoints, or a custom adapter — or run fully offline."
                 accent="local"
                 viz="vault"
               />
@@ -395,7 +395,7 @@ function LandingPage() {
               <h2>How beside turns activity into living memory.</h2>
               <p>
                 The same four loops, in technical detail. Each stage is a
-                swappable plugin — capture, storage, model, index, export.
+                swappable plugin — capture, storage, model, index, hook, export.
               </p>
             </div>
             <div className="how">
@@ -418,7 +418,7 @@ function LandingPage() {
                 <Step
                   n="4"
                   title="Recall"
-                  body="Expose your memory to any AI agent over MCP, Markdown, or a simple API. Context engineering, finally automated."
+                  body="Expose your memory to any AI agent over MCP or Markdown. Context engineering, finally automated."
                 />
               </ol>
 
@@ -441,7 +441,7 @@ function LandingPage() {
                 <DownloadDropdown />
               </div>
               <p className="os-hint" style={{ marginTop: 22 }}>
-                Windows &amp; Linux — coming soon.
+                Mac desktop today. The headless runtime also runs from source on Windows and Linux.
               </p>
             </div>
           </div>
@@ -1021,7 +1021,7 @@ function AskDemo() {
               <div className="ask-tool">
                 <span className="ask-tool-spinner" />
                 <span>
-                  Calling <code>beside.recall</code> via MCP — pulling local
+                  Calling <code>search_memory</code> via MCP — pulling local
                   context…
                 </span>
               </div>

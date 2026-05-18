@@ -157,9 +157,11 @@ A typical install looks like this:
 ```text
 ~/.beside/
 ├── config.yaml                  # the source of truth
-├── raw/                         # storage plugin owns this
-│   ├── events.sqlite            # SQLite metadata + FTS + vector tables
-│   ├── frames/2026-05-13/…      # screenshots (webp/jpeg, tiered)
+├── beside.db                    # SQLite metadata + FTS + vector tables
+├── raw/                         # append-only event logs + assets
+│   ├── 2026-05-13/
+│   │   ├── events.jsonl         # replayable raw events for the day
+│   │   └── screenshots/…        # content-addressed webp/jpeg assets
 │   └── audio/{inbox,processed,failed}/
 ├── index/                       # index strategy owns this (default: karpathy)
 │   ├── README.md                # the auto-generated root index

@@ -18,6 +18,8 @@ Best when you want a default that runs anywhere Node 20+ runs.
   `screenshot-desktop`, and resolves browser URLs through OS-specific helpers.
 - Diff-rejects nearly identical screens via `screenshot_diff_threshold` and a
   perceptual hash so storage stays small.
+- Supports optional multi-display capture with `multi_screen`, `screens`, and
+  `capture_mode: active | all`.
 - Falls back gracefully on Linux Wayland (window metadata only) and warns
   cleanly when permissions are missing.
 
@@ -32,6 +34,9 @@ capture:
   screenshot_format: webp
   screenshot_quality: 45
   screenshot_max_dim: 1100
+  content_change_min_interval_ms: 60000
+  multi_screen: false
+  screens: null             # optional, e.g. [0, 1]
   capture_mode: active     # 'active' | 'all'
   excluded_apps:
     - 1Password
@@ -57,9 +62,11 @@ Notable extras over `node`:
 - **Live audio recording** with chunked m4a output, sample-rate / channel
   control, and a choice between `core_audio_tap` and `screencapturekit`
   backends.
-- **Activation modes** — `other_process_input` records system audio only when
-  another process is producing input (so silent meetings don’t fill your disk).
-- **Multi-screen** support via `screens: [0, 1]`.
+- **Input-aware activation** — `other_process_input` starts live recording only
+  while another process is already using audio input (so silent meetings don’t
+  fill your disk).
+- **Multi-screen** support via `multi_screen: true`, optional `screens: [0, 1]`,
+  and `capture_mode: active | all`.
 - **Content-change throttling** through `content_change_min_interval_ms` so a
   noisy app can’t monopolise the capture queue.
 
