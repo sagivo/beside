@@ -53,6 +53,8 @@ interface Message {
   thoughtForMs?: number;
   startedAtMs?: number;
   pending?: boolean;
+  /** Latest phase reported by the harness — drives the thinking-indicator copy. */
+  phase?: 'classify' | 'plan' | 'execute' | 'compose';
 }
 
 interface Conversation {
@@ -451,15 +453,47 @@ function ThinkingBubble() {
   );
 }
 
-function ThinkingDots() {
+function ThinkingDots({
+  startedAtMs,
+  phase,
+}: {
+  startedAtMs?: number;
+  phase?: Message['phase'];
+}) {
+  const [, force] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => {
+    if (!startedAtMs) return;
+    const id = setInterval(force, 1000);
+    return () => clearInterval(id);
+  }, [startedAtMs]);
+  const elapsedSec = startedAtMs ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)) : 0;
+  const label = phaseLabel(phase);
   return (
     <div className="inline-flex items-center gap-1.5 rounded-2xl rounded-tl-md bg-card px-4 py-3 shadow-xs">
       <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-300ms]" />
       <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-150ms]" />
       <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50" />
-      <span className="ml-1 text-[11px] text-muted-foreground">Thinking...</span>
+      <span className="ml-1 text-[11px] text-muted-foreground tabular-nums">
+        {label}
+        {elapsedSec > 0 && <span className="ml-1 opacity-70">{elapsedSec}s</span>}
+      </span>
     </div>
   );
+}
+
+function phaseLabel(phase: Message['phase']): string {
+  switch (phase) {
+    case 'classify':
+      return 'Picking a strategy...';
+    case 'plan':
+      return 'Planning...';
+    case 'compose':
+      return 'Drafting answer...';
+    case 'execute':
+      return 'Asking the local model...';
+    default:
+      return 'Thinking...';
+  }
 }
 
 function StreamingCaret() {
@@ -562,7 +596,9 @@ function AssistantMessage({ message }: { message: Message }) {
             pending={message.pending}
           />
         )}
-        {showThinkingBubble && <ThinkingDots />}
+        {showThinkingBubble && (
+          <ThinkingDots startedAtMs={message.startedAtMs} phase={message.phase} />
+        )}
         {message.content && (
           <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-sm shadow-xs">
             <Markdown content={message.content} />
@@ -851,7 +887,7 @@ function applyChatEvent(
 function applyEventToMessage(message: Message, event: ChatStreamEvent): Message {
   switch (event.kind) {
     case 'phase':
-      return message;
+      return { ...message, phase: event.phase };
     case 'reasoning':
       return appendThought(message, event.text, event.partId);
     case 'tool-call':

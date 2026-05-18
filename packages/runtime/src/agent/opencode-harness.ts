@@ -464,11 +464,25 @@ async function startStreamSubscription(
     try { abort.abort(); } catch {}
   };
 
+  logger.info('opencode SSE subscription opened', { sessionId, turnId });
+  let eventCount = 0;
   void (async () => {
     try {
       for await (const raw of subscription.stream) {
         if (stopped) break;
         const event = raw as { type?: string; properties?: Record<string, unknown> };
+        eventCount += 1;
+        if (eventCount <= 20 || eventCount % 50 === 0) {
+          // Log the first 20 events plus every 50th after, so the stderr
+          // shows the live SSE traffic without flooding on long runs.
+          logger.info('opencode SSE event', {
+            turnId,
+            n: eventCount,
+            type: event?.type,
+            partType: (event?.properties as { part?: { type?: string } } | undefined)?.part?.type,
+            sessionMatch: (event?.properties as { part?: { sessionID?: string } } | undefined)?.part?.sessionID === sessionId,
+          });
+        }
         if (event?.type !== 'message.part.updated') continue;
         const part = (event.properties?.part ?? {}) as
           | { id?: string; sessionID?: string; type?: string; text?: string; tool?: string; callID?: string; state?: { status?: string; input?: Record<string, unknown>; output?: string; title?: string; error?: string } }
