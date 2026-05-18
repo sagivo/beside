@@ -25,7 +25,7 @@ export interface SettingsDraft {
   meetingsAudioGraceSec: number; meetingsSummarize: boolean; meetingsSummarizeCooldownSec: number; meetingsVisionAttachments: number;
   embeddingsEnabled: boolean; embeddingsBatchSize: number; embeddingsTickIntervalMin: number; embeddingsSearchWeight: number;
   modelPlugin: string; ollamaHost: string; ollamaAutoInstall: boolean; ollamaEmbeddingModel: string; ollamaVisionModel: string;
-  ollamaIndexerModel: string; ollamaKeepAlive: string; ollamaUnloadAfterIdleMin: number; ollamaModelRevision: number;
+  ollamaIndexerModel: string; ollamaKeepAlive: string; ollamaUnloadAfterIdleMin: number; ollamaNumCtx: number; ollamaModelRevision: number;
   openaiApiKey: string; openaiBaseUrl: string; openaiModel: string; openaiVisionModel: string; openaiEmbeddingModel: string;
   claudeApiKey: string; claudeModel: string; markdownEnabled: boolean; markdownPath: string; mcpEnabled: boolean;
   mcpHost: string; mcpPort: number; mcpTransport: McpTransport; mcpTextExcerptChars: number; extraExportPlugins: any[];
@@ -71,7 +71,8 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     embeddingsSearchWeight: c.index.embeddings.search_weight, modelPlugin: c.index.model.plugin, ollamaHost: ol?.host ?? 'http://127.0.0.1:11434',
     ollamaAutoInstall: ol?.auto_install ?? true, ollamaEmbeddingModel: ol?.embedding_model ?? 'nomic-embed-text',
     ollamaVisionModel: ol?.vision_model ?? '', ollamaIndexerModel: ol?.indexer_model ?? '', ollamaKeepAlive: String(ol?.keep_alive ?? '30s'),
-    ollamaUnloadAfterIdleMin: ol?.unload_after_idle_min ?? 0, ollamaModelRevision: ol?.model_revision ?? 0, openaiApiKey: oa?.api_key ?? '',
+    ollamaUnloadAfterIdleMin: ol?.unload_after_idle_min ?? 0, ollamaNumCtx: (ol as { num_ctx?: number } | undefined)?.num_ctx ?? 262144,
+    ollamaModelRevision: ol?.model_revision ?? 0, openaiApiKey: oa?.api_key ?? '',
     openaiBaseUrl: oa?.base_url ?? 'https://api.openai.com/v1', openaiModel: oa?.model ?? 'gpt-4o-mini', openaiVisionModel: oa?.vision_model ?? '',
     openaiEmbeddingModel: oa?.embedding_model ?? 'text-embedding-3-small', claudeApiKey: cl?.api_key ?? '', claudeModel: cl?.model ?? 'claude-sonnet-4-6',
     markdownEnabled: md?.enabled ?? true, markdownPath: typeof md?.path === 'string' ? md.path : '', mcpEnabled: mcp?.enabled ?? true,
@@ -127,7 +128,7 @@ export function configPatchFromDraft(d: SettingsDraft) {
       embeddings: { enabled: d.embeddingsEnabled, batch_size: clampInt(d.embeddingsBatchSize, 1), tick_interval_min: clampInt(d.embeddingsTickIntervalMin, 1), search_weight: clampNumber(d.embeddingsSearchWeight, 0.01) },
       model: {
         plugin: d.modelPlugin.trim() || 'ollama',
-        ollama: { host: d.ollamaHost.trim(), auto_install: d.ollamaAutoInstall, embedding_model: d.ollamaEmbeddingModel.trim() || 'nomic-embed-text', vision_model: optionalString(d.ollamaVisionModel), indexer_model: optionalString(d.ollamaIndexerModel), keep_alive: d.ollamaKeepAlive.trim() || '30s', unload_after_idle_min: clampNumber(d.ollamaUnloadAfterIdleMin, 0), model_revision: clampInt(d.ollamaModelRevision, 0) },
+        ollama: { host: d.ollamaHost.trim(), auto_install: d.ollamaAutoInstall, embedding_model: d.ollamaEmbeddingModel.trim() || 'nomic-embed-text', vision_model: optionalString(d.ollamaVisionModel), indexer_model: optionalString(d.ollamaIndexerModel), keep_alive: d.ollamaKeepAlive.trim() || '30s', unload_after_idle_min: clampNumber(d.ollamaUnloadAfterIdleMin, 0), num_ctx: clampInt(d.ollamaNumCtx, 1), model_revision: clampInt(d.ollamaModelRevision, 0) },
         openai: { api_key: optionalString(d.openaiApiKey), base_url: d.openaiBaseUrl.trim() || 'https://api.openai.com/v1', model: d.openaiModel.trim() || 'gpt-4o-mini', vision_model: optionalString(d.openaiVisionModel), embedding_model: d.openaiEmbeddingModel.trim() || 'text-embedding-3-small' },
         claude: { api_key: optionalString(d.claudeApiKey), model: d.claudeModel.trim() || 'claude-sonnet-4-6' }
       }

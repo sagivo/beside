@@ -27,6 +27,13 @@ interface OllamaModelConfig {
   unload_after_idle_min?: number;
   /** Skip the auto-install + auto-pull bootstrap on first run. */
   auto_install?: boolean;
+  /**
+   * Context window passed to every `/api/chat` call via `options.num_ctx`.
+   * Ollama defaults to 4096, which is too small for tool-calling agents
+   * (the tool registry alone fills the window). 0 means "do not set;
+   * fall back to OLLAMA_CONTEXT_LENGTH or the Ollama default."
+   */
+  num_ctx?: number;
 }
 
 // Ollama itself binds to 127.0.0.1 by default. Using the same literal
@@ -114,6 +121,7 @@ class OllamaAdapter implements IModelAdapter {
   private readonly defaultKeepAlive: string | number;
   private readonly unloadAfterIdleMs: number;
   private readonly autoInstall: boolean;
+  private readonly numCtx: number;
   private readonly client: Ollama;
   private readyPromise: Promise<void> | null = null;
   private unloadTimer: NodeJS.Timeout | null = null;
@@ -131,7 +139,25 @@ class OllamaAdapter implements IModelAdapter {
       (config.unload_after_idle_min ?? DEFAULT_UNLOAD_AFTER_IDLE_MIN) * 60_000,
     );
     this.autoInstall = config.auto_install ?? true;
+    this.numCtx = Math.max(0, Math.floor(config.num_ctx ?? 0));
     this.client = new Ollama({ host: this.host });
+  }
+
+  /**
+   * Build the `options` block shared by every `/api/chat` call. Always
+   * includes temperature + num_predict; conditionally includes num_ctx
+   * when configured so Ollama loads the model with our requested
+   * context window. Without this, Ollama uses its 4096-token default
+   * regardless of what the model supports, which is too tight for
+   * tool-calling agents (the tool registry alone fills the window).
+   */
+  private chatOptions(opts: CompletionOptions): Record<string, unknown> {
+    const out: Record<string, unknown> = {
+      temperature: opts.temperature ?? 0.2,
+      num_predict: opts.maxTokens ?? 1024,
+    };
+    if (this.numCtx > 0) out.num_ctx = this.numCtx;
+    return out;
   }
 
   getModelInfo(): ModelInfo {
@@ -169,10 +195,7 @@ class OllamaAdapter implements IModelAdapter {
         stream: false,
         format: options.responseFormat === 'json' ? 'json' : undefined,
         keep_alive: this.keepAlive,
-        options: {
-          temperature: options.temperature ?? 0.2,
-          num_predict: options.maxTokens ?? 1024,
-        },
+        options: this.chatOptions(options),
       }),
       COMPLETE_TIMEOUT_MS,
       'ollama /api/chat',
@@ -203,10 +226,7 @@ class OllamaAdapter implements IModelAdapter {
       stream: true,
       format: options.responseFormat === 'json' ? 'json' : undefined,
       keep_alive: this.keepAlive,
-      options: {
-        temperature: options.temperature ?? 0.2,
-        num_predict: options.maxTokens ?? 1024,
-      },
+      options: this.chatOptions(options),
     });
 
     let full = '';
@@ -266,10 +286,7 @@ class OllamaAdapter implements IModelAdapter {
         stream: false,
         format: options.responseFormat === 'json' ? 'json' : undefined,
         keep_alive: this.keepAlive,
-        options: {
-          temperature: options.temperature ?? 0.2,
-          num_predict: options.maxTokens ?? 1024,
-        },
+        options: this.chatOptions(options),
       }),
       COMPLETE_TIMEOUT_MS,
       'ollama vision /api/chat',

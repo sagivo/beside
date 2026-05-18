@@ -140,6 +140,23 @@ const SEARCH_EXPLANATION_TIMEOUT_MS = 20_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
 
+// Short-circuit greetings and obvious thanks/acks so we don't spin up
+// the full OpenCode agent loop for "hi". Anything that doesn't match
+// here falls through to the agent and lets it decide.
+const GREETING_PATTERN = /^(hi|hello|hey|yo|sup|good (morning|afternoon|evening|night)|thanks|thank you|thx|ty|ok|okay|cool|nice|great|got it|sure)[\s!.?]*$/i;
+
+function handleTrivialTurn(input: ChatTurnInput, onEvent: ChatStreamHandler): boolean {
+  const message = input.message.trim();
+  if (!GREETING_PATTERN.test(message)) return false;
+  onEvent({
+    kind: 'content',
+    turnId: input.turnId,
+    delta: 'Hi — ask me anything about your captured activity: your day, meetings, projects, follow-ups, or anyone you talked to.',
+  });
+  onEvent({ kind: 'done', turnId: input.turnId });
+  return true;
+}
+
 export class BesideRuntime {
   private readonly logger: Logger;
   private readonly opts: OrchestratorOptions;
@@ -348,6 +365,7 @@ export class BesideRuntime {
   }
 
   async chatTurn(input: ChatTurnInput, onEvent: ChatStreamHandler): Promise<void> {
+    if (handleTrivialTurn(input, onEvent)) return;
     if (this.status !== 'running') await this.start({ bootstrap: false });
     const handles = await this.getOrCreateHandles();
     this.opencodeHarness ??= new OpenCodeHarness(this.logger.child('opencode-harness'));
