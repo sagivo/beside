@@ -41,8 +41,8 @@ index:
       model: gemma4:e4b           # primary chat / index model
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
-      vision_model: gemma4:e4b    # optional override
-      indexer_model:              # optional override for indexing-only calls
+      # vision_model: gemma4:e4b   # optional override
+      # indexer_model: gemma4:e2b  # optional override for indexing-only calls
       keep_alive: "30s"
       unload_after_idle_min: 0
       auto_install: true
@@ -86,7 +86,7 @@ index:
   model:
     plugin: openai
     openai:
-      api_key: ${OPENAI_API_KEY}
+      # api_key: sk-...            # omit to read OPENAI_API_KEY
       base_url: https://api.openai.com/v1
       model: gpt-4o-mini
       vision_model: gpt-4o          # optional

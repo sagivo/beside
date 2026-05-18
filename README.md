@@ -494,7 +494,7 @@ index:
   model:
     plugin: openai
     openai:
-      api_key: ${OPENAI_API_KEY}      # or set OPENAI_API_KEY in the environment
+      # api_key: sk-...               # omit to read OPENAI_API_KEY
       base_url: https://api.openai.com/v1
       model: gpt-4o-mini
       embedding_model: text-embedding-3-small
