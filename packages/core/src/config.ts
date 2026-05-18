@@ -130,11 +130,16 @@ const IndexSchema = z.object({
       keep_alive: z.union([z.string(), z.number()]).default('30s'),
       unload_after_idle_min: z.number().nonnegative().default(0),
       auto_install: z.boolean().default(true),
+      // Context window passed to every Ollama call via `options.num_ctx`.
+      // Ollama's default (4096) is too tight for tool-calling agents:
+      // the tool registry alone fills the window. We default to gemma4's
+      // max (256K) — Ollama clamps to the model's actual max if smaller.
+      num_ctx: z.number().int().positive().default(262144),
       model_revision: z.number().int().nonnegative().default(3),
-    }).default({ model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', keep_alive: '30s', unload_after_idle_min: 0, auto_install: true, model_revision: 3 }),
+    }).default({ model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', keep_alive: '30s', unload_after_idle_min: 0, auto_install: true, num_ctx: 262144, model_revision: 3 }),
     claude: z.object({ api_key: z.string().optional(), model: z.string().default('claude-sonnet-4-6') }).optional(),
     openai: z.object({ api_key: z.string().optional(), base_url: z.string().default('https://api.openai.com/v1'), model: z.string().default('gpt-4o-mini'), vision_model: z.string().optional(), embedding_model: z.string().default('text-embedding-3-small') }).optional(),
-  }).default({ plugin: 'ollama', ollama: { model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434' } }),
+  }).default({ plugin: 'ollama', ollama: { model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', num_ctx: 262144 } }),
 }).passthrough();
 
 const SystemSchema = z.object({
@@ -322,6 +327,7 @@ index:
       keep_alive: 30s
       unload_after_idle_min: 0
       auto_install: true
+      num_ctx: 262144
       model_revision: 3
 
 system:

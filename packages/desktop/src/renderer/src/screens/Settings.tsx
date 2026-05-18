@@ -161,6 +161,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
               <TextField label="Indexer model" value={draft.ollamaIndexerModel} onChange={(v: any) => set('ollamaIndexerModel', v)} typeLabel="string" placeholder="optional" />
               <TextField label="Ollama keep alive" value={draft.ollamaKeepAlive} onChange={(v: any) => set('ollamaKeepAlive', v)} typeLabel="string | number" />
               <NumberField label="Unload after idle" value={draft.ollamaUnloadAfterIdleMin} onChange={(v: any) => set('ollamaUnloadAfterIdleMin', v)} min={0} step={1} unit="min" typeLabel="number" />
+              <NumberField label="Context window" value={draft.ollamaNumCtx} onChange={(v: any) => set('ollamaNumCtx', v)} min={1} step={1024} unit="tokens" typeLabel="integer" hint="Passed as num_ctx on every Ollama call. Ollama clamps to the model's max (gemma4: 128K)." />
               <NumberField label="Model revision" value={draft.ollamaModelRevision} onChange={(v: any) => set('ollamaModelRevision', v)} min={0} step={1} typeLabel="integer" />
               <TextField label="OpenAI API key" value={draft.openaiApiKey} onChange={(v: any) => set('openaiApiKey', v)} typeLabel="secret string" inputType="password" placeholder="optional" />
               <TextField label="OpenAI base URL" value={draft.openaiBaseUrl} onChange={(v: any) => set('openaiBaseUrl', v)} typeLabel="URL" />
