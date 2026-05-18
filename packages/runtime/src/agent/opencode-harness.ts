@@ -93,17 +93,23 @@ export class OpenCodeHarness {
       const sessionId = await this.getSessionId(runtime.client, directory, input);
       const model = getOllamaModel(handles);
       // Track which assistant messages already existed so we can collect
-      // only the parts produced by this turn afterwards. The prompt
-      // response only returns the final step's parts; tool calls and
-      // intermediate reasoning live in earlier assistant messages within
-      // the same turn.
+      // only the parts produced by this turn afterwards. `promptAsync`
+      // returns 204 with no body, so we rely on the SSE stream for events
+      // AND on a final message-list diff as a safety net for anything
+      // the live stream might have missed (e.g. dropped events).
       const beforeMessageIds = await listAssistantMessageIds(runtime.client, directory, sessionId);
 
-      // Subscribe to the OpenCode SSE event stream before sending the
+      // Subscribe to the OpenCode SSE event stream BEFORE sending the
       // prompt so reasoning, tool calls, and text tokens reach the
-      // renderer as they happen rather than in a single batch at the end.
-      // The post-prompt `emitParts` call still runs to reconcile anything
-      // the live stream missed, and skips parts already streamed.
+      // renderer as they happen. The subscription resolves a promise on
+      // `session.idle` (success) or `session.error` (failure) so we can
+      // wait for completion without blocking on the prompt's HTTP call.
+      //
+      // Why `promptAsync` instead of `prompt`: the blocking `prompt`
+      // endpoint kept the SSE stream from delivering events in real time
+      // (the user saw "thinking…" for the whole turn, then everything at
+      // once). `promptAsync` returns 204 immediately and lets the SSE
+      // stream drive the UI live.
       streamSubscription = await startStreamSubscription(
         runtime.client,
         sessionId,
@@ -112,7 +118,42 @@ export class OpenCodeHarness {
         this.logger,
       );
 
-      const response = await runtime.client.session.prompt({
+      if (!streamSubscription.usingLiveStream) {
+        // SSE failed to open — fall back to the blocking prompt so the
+        // user still gets *an* answer, even if not streamed.
+        const response = await runtime.client.session.prompt({
+          path: { id: sessionId },
+          query: { directory },
+          body: {
+            agent: AGENT_NAME,
+            model,
+            system: buildTurnContext(),
+            parts: [{ type: 'text', text: renderUserPrompt(input) }],
+          },
+        });
+        const error = response.data?.info.error;
+        if (error) throw new Error(formatOpenCodeError(error));
+        const parts = await collectNewAssistantParts(
+          runtime.client,
+          directory,
+          sessionId,
+          beforeMessageIds,
+          response.data?.parts ?? [],
+        );
+        const summary = emitParts(parts, input.turnId, onEvent, streamSubscription.streamed);
+        this.logger.info('opencode turn done (batch fallback)', {
+          turnId: input.turnId,
+          tools: summary.toolCalls,
+          textChars: summary.textChars,
+          durationMs: Date.now() - startedAt,
+        });
+        onEvent({ kind: 'done', turnId: input.turnId });
+        return;
+      }
+
+      // Fire-and-forget — server returns 204 as soon as the prompt is
+      // accepted. All token/tool/reasoning updates flow back over SSE.
+      await runtime.client.session.promptAsync({
         path: { id: sessionId },
         query: { directory },
         body: {
@@ -123,15 +164,47 @@ export class OpenCodeHarness {
         },
       });
 
-      const error = response.data?.info.error;
-      if (error) throw new Error(formatOpenCodeError(error));
+      // Belt-and-suspenders: even with SSE we poll the session messages
+      // periodically and emit any new parts via the same dedup tracker.
+      // Some local-model providers (Ollama via @ai-sdk/openai-compatible)
+      // hand OpenCode the full step output at once instead of streaming
+      // tokens, which means SSE may go quiet for tens of seconds even
+      // while the model is making real progress. Polling surfaces parts
+      // the instant they're persisted to the session.
+      const poller = startMessagePoller({
+        client: runtime.client,
+        directory,
+        sessionId,
+        turnId: input.turnId,
+        beforeMessageIds,
+        onEvent,
+        streamed: streamSubscription.streamed,
+        logger: this.logger,
+        intervalMs: 600,
+      });
 
+      // Wait for the SSE stream to report `session.idle` for our
+      // sessionID, or a `session.error`. A long ceiling guards against
+      // SSE silently stalling (e.g. server crash mid-turn).
+      let completion: Completion;
+      try {
+        completion = await streamSubscription.waitForCompletion(10 * 60_000);
+      } finally {
+        poller.stop();
+      }
+      if (completion.kind === 'error') throw new Error(completion.message);
+      if (completion.kind === 'timeout') {
+        throw new Error('Timed out waiting for the local model to finish. The SSE stream went quiet.');
+      }
+
+      // Reconcile from message history — emits anything SSE missed.
+      // Pre-streamed parts are deduplicated by `streamSubscription.streamed`.
       const parts = await collectNewAssistantParts(
         runtime.client,
         directory,
         sessionId,
         beforeMessageIds,
-        response.data?.parts ?? [],
+        [],
       );
       const summary = emitParts(parts, input.turnId, onEvent, streamSubscription.streamed);
       this.logger.info('opencode turn done', {
@@ -341,14 +414,37 @@ interface EmitSummary {
  */
 interface StreamedPartTracker {
   reasoningPartIds: Set<string>;
-  textPartIds: Set<string>;
+  /**
+   * Per text-part cumulative text already emitted to the renderer. The
+   * renderer appends `content` deltas, so we must only emit `(current -
+   * already_emitted)` for each part. Both the SSE handler and the
+   * polling/batch reconciler use this same map — if they didn't, the
+   * poll would re-emit the entire text every tick and the renderer
+   * would show the same response duplicated over and over.
+   */
+  textEmittedByPart: Map<string, string>;
   toolCallIds: Set<string>;
   toolResultCallIds: Set<string>;
 }
 
+type Completion =
+  | { kind: 'idle' }
+  | { kind: 'error'; message: string }
+  | { kind: 'timeout' };
+
 interface StreamSubscription {
   stop: () => void;
   readonly streamed: StreamedPartTracker;
+  /**
+   * False when the SSE subscription failed to open. In that case the
+   * caller should fall back to the blocking `session.prompt` path.
+   */
+  readonly usingLiveStream: boolean;
+  /**
+   * Resolves with `idle` when `session.idle` arrives for the watched
+   * sessionID, `error` on `session.error`, or `timeout` after `ms`.
+   */
+  waitForCompletion(ms: number): Promise<Completion>;
 }
 
 function emitParts(
@@ -358,17 +454,22 @@ function emitParts(
   streamed?: StreamedPartTracker,
 ): EmitSummary {
   const toolCalls: string[] = [];
-  let text = '';
-  let textAlreadyStreamed = false;
+  let totalTextChars = 0;
   for (const part of parts) {
     if (part.type === 'reasoning' && part.text.trim()) {
-      if (streamed?.reasoningPartIds.has(part.id)) continue;
-      onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+      // Reasoning supports in-place replacement on the renderer via
+      // `partId`, so emit the full current text and let the renderer
+      // dedup. We still track which partIds were seen so SSE and batch
+      // paths don't race a redundant emit.
+      const next = part.text.trim();
+      const prev = streamed?.textEmittedByPart.get(part.id) ?? '';
+      if (next === prev) continue;
       streamed?.reasoningPartIds.add(part.id);
+      streamed?.textEmittedByPart.set(part.id, next);
+      onEvent({ kind: 'reasoning', turnId, text: truncate(next, 1600), partId: part.id });
       continue;
     }
     if (part.type === 'tool') {
-      if (!isBesideAgentTool(part.tool)) continue;
       const callId = `${turnId}:opencode:${part.callID}`;
       if (!streamed?.toolCallIds.has(callId)) {
         const args = 'input' in part.state ? part.state.input : {};
@@ -383,6 +484,8 @@ function emitParts(
           callId,
           tool: part.tool,
           summary: summariseToolOutput(part.state.title || part.state.output),
+          output: truncate(part.state.output ?? '', 4000),
+          durationMs: durationFrom(part.state.time),
         });
         streamed?.toolResultCallIds.add(callId);
       } else if (part.state.status === 'error' && !streamed?.toolResultCallIds.has(callId)) {
@@ -392,20 +495,28 @@ function emitParts(
           callId,
           tool: part.tool,
           summary: truncate(part.state.error, 500),
+          output: truncate(part.state.error ?? '', 4000),
+          durationMs: durationFrom(part.state.time),
+          isError: true,
         });
         streamed?.toolResultCallIds.add(callId);
       }
       continue;
     }
-    if (part.type === 'text' && part.text) {
-      text += part.text;
-      if (streamed?.textPartIds.has(part.id)) textAlreadyStreamed = true;
+    if (part.type === 'text' && typeof part.text === 'string') {
+      const next = part.text;
+      const prev = streamed?.textEmittedByPart.get(part.id) ?? '';
+      if (next.length <= prev.length) {
+        totalTextChars += next.length;
+        continue;
+      }
+      const delta = next.slice(prev.length);
+      streamed?.textEmittedByPart.set(part.id, next);
+      if (delta) onEvent({ kind: 'content', turnId, delta });
+      totalTextChars += next.length;
     }
   }
-  // If the live stream already delivered the final text, the renderer
-  // already has it — don't emit again.
-  if (text.trim() && !textAlreadyStreamed) onEvent({ kind: 'content', turnId, delta: text });
-  return { toolCalls, textChars: text.length };
+  return { toolCalls, textChars: totalTextChars };
 }
 
 async function startStreamSubscription(
@@ -417,18 +528,34 @@ async function startStreamSubscription(
 ): Promise<StreamSubscription> {
   const streamed: StreamedPartTracker = {
     reasoningPartIds: new Set(),
-    textPartIds: new Set(),
+    textEmittedByPart: new Map(),
     toolCallIds: new Set(),
     toolResultCallIds: new Set(),
   };
   // `message.part.updated` events carry the *cumulative* part text, so
-  // we compute the delta against what we've already streamed instead of
-  // relying on the optional `delta` field (not populated by every
-  // provider).
-  const textAccumulated = new Map<string, string>();
+  // both this SSE handler and the batch reconciler compute deltas
+  // against `streamed.textEmittedByPart`. Sharing one map is what keeps
+  // them from double-emitting the same content.
   let stopped = false;
   const abort = new AbortController();
   let subscription: { stream: AsyncGenerator<unknown, unknown, unknown> } | null = null;
+
+  let resolveCompletion: ((c: Completion) => void) | null = null;
+  const completionPromise: Promise<Completion> = new Promise((resolve) => {
+    resolveCompletion = resolve;
+  });
+  // `session.idle` can fire spuriously right after the SSE connects
+  // (it can carry the *last* known session state). Only honor idle once
+  // the new prompt has begun emitting parts — otherwise we'd cut the
+  // turn off before the model even starts.
+  let sawActivity = false;
+  const settle = (c: Completion) => {
+    if (resolveCompletion) {
+      const r = resolveCompletion;
+      resolveCompletion = null;
+      r(c);
+    }
+  };
 
   try {
     subscription = await (client as unknown as {
@@ -439,7 +566,12 @@ async function startStreamSubscription(
     }).event.subscribe({ signal: abort.signal });
   } catch (err) {
     logger.warn('opencode SSE subscribe failed; falling back to batch emit', { err: String(err) });
-    return { stop: () => {}, streamed };
+    return {
+      stop: () => {},
+      streamed,
+      usingLiveStream: false,
+      waitForCompletion: async () => ({ kind: 'timeout' as const }),
+    };
   }
 
   logger.info('opencode SSE subscription opened', { sessionId, turnId });
@@ -461,6 +593,28 @@ async function startStreamSubscription(
             partType: (event?.properties as { part?: { type?: string } } | undefined)?.part?.type,
           });
         }
+        // Completion signals: resolve the promise the caller is awaiting.
+        if (event?.type === 'session.idle') {
+          const idle = event.properties as { sessionID?: string } | undefined;
+          if (idle?.sessionID === sessionId) {
+            if (!sawActivity) {
+              logger.info('opencode SSE ignoring pre-activity session.idle', { turnId, sessionId });
+              continue;
+            }
+            logger.info('opencode SSE session.idle received', { turnId, sessionId });
+            settle({ kind: 'idle' });
+          }
+          continue;
+        }
+        if (event?.type === 'session.error') {
+          const errProps = event.properties as { sessionID?: string; error?: unknown } | undefined;
+          if (!errProps?.sessionID || errProps.sessionID === sessionId) {
+            const message = formatOpenCodeError(errProps?.error);
+            logger.warn('opencode SSE session.error received', { turnId, sessionId, message });
+            settle({ kind: 'error', message });
+          }
+          continue;
+        }
         if (event?.type !== 'message.part.updated') continue;
         const part = (event.properties?.part ?? {}) as {
           id?: string;
@@ -475,21 +629,34 @@ async function startStreamSubscription(
             output?: string;
             title?: string;
             error?: string;
+            time?: { start?: number; end?: number };
           };
         };
         if (!part || part.sessionID !== sessionId || !part.id) continue;
+        sawActivity = true;
 
         if (part.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
+          const next = part.text.trim();
+          const prev = streamed.textEmittedByPart.get(part.id) ?? '';
+          if (next === prev) continue;
           streamed.reasoningPartIds.add(part.id);
-          onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+          streamed.textEmittedByPart.set(part.id, next);
+          onEvent({ kind: 'reasoning', turnId, text: truncate(next, 1600), partId: part.id });
           continue;
         }
 
-        if (part.type === 'tool' && part.tool && part.callID && isBesideAgentTool(part.tool)) {
+        if (part.type === 'tool' && part.tool && part.callID) {
           const callId = `${turnId}:opencode:${part.callID}`;
           const status = part.state?.status;
           if (!streamed.toolCallIds.has(callId)) {
             streamed.toolCallIds.add(callId);
+            if (!isBesideAgentTool(part.tool)) {
+              logger.warn('opencode emitted a non-Beside tool — surfacing it anyway', {
+                turnId,
+                tool: part.tool,
+                callId,
+              });
+            }
             onEvent({
               kind: 'tool-call',
               turnId,
@@ -506,6 +673,8 @@ async function startStreamSubscription(
               callId,
               tool: part.tool,
               summary: summariseToolOutput(part.state?.title || part.state?.output || ''),
+              output: truncate(part.state?.output ?? '', 4000),
+              durationMs: durationFrom(part.state?.time),
             });
           } else if (status === 'error' && !streamed.toolResultCallIds.has(callId)) {
             streamed.toolResultCallIds.add(callId);
@@ -515,6 +684,9 @@ async function startStreamSubscription(
               callId,
               tool: part.tool,
               summary: truncate(part.state?.error || 'tool failed', 500),
+              output: truncate(part.state?.error ?? 'tool failed', 4000),
+              durationMs: durationFrom(part.state?.time),
+              isError: true,
             });
           }
           continue;
@@ -522,17 +694,21 @@ async function startStreamSubscription(
 
         if (part.type === 'text' && typeof part.text === 'string') {
           const next = part.text;
-          const prev = textAccumulated.get(part.id) ?? '';
+          const prev = streamed.textEmittedByPart.get(part.id) ?? '';
           if (next.length <= prev.length) continue;
           const delta = next.slice(prev.length);
-          textAccumulated.set(part.id, next);
+          streamed.textEmittedByPart.set(part.id, next);
           if (!delta.trim() && !prev) continue;
-          streamed.textPartIds.add(part.id);
           onEvent({ kind: 'content', turnId, delta });
         }
       }
     } catch (err) {
       if (!stopped) logger.warn('opencode SSE reader ended', { err: String(err) });
+    } finally {
+      // Whether the stream ended cleanly, errored, or was aborted — wake
+      // any caller still waiting on `waitForCompletion`. They'll fall
+      // through to the post-prompt reconciliation either way.
+      settle({ kind: 'idle' });
     }
   })();
 
@@ -541,14 +717,98 @@ async function startStreamSubscription(
       if (stopped) return;
       stopped = true;
       try { abort.abort(); } catch {}
+      settle({ kind: 'timeout' });
     },
     streamed,
+    usingLiveStream: true,
+    waitForCompletion: (ms: number) =>
+      new Promise<Completion>((resolve) => {
+        const timer = setTimeout(() => resolve({ kind: 'timeout' }), ms);
+        void completionPromise.then((c) => {
+          clearTimeout(timer);
+          resolve(c);
+        });
+      }),
+  };
+}
+
+interface MessagePollerOptions {
+  client: OpencodeClient;
+  directory: string;
+  sessionId: string;
+  turnId: string;
+  beforeMessageIds: Set<string>;
+  onEvent: ChatStreamHandler;
+  streamed: StreamedPartTracker;
+  logger: Logger;
+  intervalMs: number;
+}
+
+/**
+ * Polls `session.messages` on a loop while the turn is in flight and
+ * emits any newly-discovered parts via the shared dedup tracker. This
+ * is a safety net for the case where OpenCode's SSE stream goes quiet
+ * for long stretches — common with local Ollama models, which often
+ * generate a full step in one shot rather than streaming tokens. With
+ * the poller, the user sees reasoning/tool activity within a second of
+ * each step landing in storage, instead of waiting for the entire turn.
+ */
+function startMessagePoller(options: MessagePollerOptions): { stop: () => void } {
+  let stopped = false;
+  let inFlight = false;
+  let consecutiveFailures = 0;
+
+  const tick = async () => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      const parts = await collectNewAssistantParts(
+        options.client,
+        options.directory,
+        options.sessionId,
+        options.beforeMessageIds,
+        [],
+      );
+      if (parts.length) {
+        emitParts(parts, options.turnId, options.onEvent, options.streamed);
+      }
+      consecutiveFailures = 0;
+    } catch (err) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures <= 2) {
+        options.logger.warn('opencode message poller tick failed', { err: String(err) });
+      }
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const handle = setInterval(() => {
+    if (stopped) return;
+    void tick();
+  }, options.intervalMs);
+
+  // Fire one immediately so the user doesn't wait a whole interval for
+  // the first poll.
+  void tick();
+
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(handle);
+    },
   };
 }
 
 function summariseToolOutput(output: string): string {
   const collapsed = output.replace(/\s+/g, ' ').trim();
   return truncate(collapsed || 'done', 700);
+}
+
+function durationFrom(time: { start?: number; end?: number } | undefined): number | undefined {
+  if (!time || typeof time.start !== 'number' || typeof time.end !== 'number') return undefined;
+  const ms = time.end - time.start;
+  return ms >= 0 ? ms : undefined;
 }
 
 function besideToolPermission(): Record<string, 'allow' | 'deny'> {

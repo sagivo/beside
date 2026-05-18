@@ -497,6 +497,48 @@ function phaseLabel(phase: Message['phase']): string {
   }
 }
 
+function ActivityIndicator({
+  steps,
+  startedAtMs,
+}: {
+  steps: AgentStep[];
+  startedAtMs?: number;
+}) {
+  // The local model can spend tens of seconds between step boundaries
+  // (tool finished → answer being composed). Show what it's currently
+  // doing instead of leaving the bubble looking frozen.
+  const [, force] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => {
+    const id = setInterval(force, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const last = steps[steps.length - 1];
+  const runningTool = steps.find(
+    (s): s is ToolCallStep => s.kind === 'tool' && s.status === 'running',
+  );
+  const label = (() => {
+    if (runningTool) return `Running ${prettyToolName(runningTool.tool)}...`;
+    if (last?.kind === 'tool' && last.status === 'done') return 'Composing answer...';
+    if (last?.kind === 'tool' && last.status === 'error') return 'Recovering from tool error...';
+    if (last?.kind === 'thought') return 'Reasoning...';
+    return 'Working...';
+  })();
+  const elapsedSec = startedAtMs ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)) : 0;
+
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-2xl rounded-tl-md bg-card px-4 py-2.5 shadow-xs">
+      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-300ms]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:-150ms]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/50" />
+      <span className="ml-1 text-[11px] text-muted-foreground tabular-nums">
+        {label}
+        {elapsedSec > 0 && <span className="ml-1 opacity-70">{elapsedSec}s</span>}
+      </span>
+    </div>
+  );
+}
+
 function StreamingCaret() {
   return (
     <span
@@ -582,6 +624,12 @@ function MessageView({ message }: { message: Message }) {
 function AssistantMessage({ message }: { message: Message }) {
   const hasSteps = (message.steps?.length ?? 0) > 0;
   const showThinkingDots = message.pending && !hasSteps && !message.content;
+  // Between step boundaries (e.g. the model finished its tool call and is
+  // now composing the final answer) the reasoning block has steps but no
+  // assistant text has streamed yet. Without this indicator the UI looks
+  // frozen — the local model can spend 30s+ here.
+  const showActivityIndicator =
+    message.pending && hasSteps && !message.content;
   return (
     <div className="flex gap-3">
       <div className="grid size-7 shrink-0 place-items-center rounded-full bg-gradient-brand-soft">
@@ -597,6 +645,9 @@ function AssistantMessage({ message }: { message: Message }) {
         )}
         {showThinkingDots && (
           <ThinkingDots startedAtMs={message.startedAtMs} phase={message.phase} />
+        )}
+        {showActivityIndicator && (
+          <ActivityIndicator steps={message.steps!} startedAtMs={message.startedAtMs} />
         )}
         {message.content && (
           <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-sm shadow-xs">
@@ -647,30 +698,30 @@ function ReasoningBlock({
   totalMs?: number;
   pending?: boolean;
 }) {
+  const tools = steps.filter((s): s is ToolCallStep => s.kind === 'tool');
+  const hasErrors = tools.some((t) => t.status === 'error');
+  const runningTool = tools.find((t) => t.status === 'running');
   // Auto-expand while the turn is live so the user can watch the model
-  // reason in real time. Once the turn finishes, collapse to get out of
-  // the way — they can re-open with the chevron.
+  // reason in real time. After the turn finishes, collapse — unless any
+  // tool errored, in which case keep it open so the user sees what went
+  // wrong without having to hunt for it.
   const [open, setOpen] = React.useState(pending ?? false);
   const wasPendingRef = React.useRef(pending ?? false);
   React.useEffect(() => {
-    if (wasPendingRef.current && !pending) setOpen(false);
+    if (wasPendingRef.current && !pending) setOpen(hasErrors);
     wasPendingRef.current = pending ?? false;
-  }, [pending]);
+  }, [pending, hasErrors]);
 
   const seconds = totalMs != null ? (totalMs / 1000).toFixed(1) : null;
   const summary = (() => {
-    const tools = steps.filter((s): s is ToolCallStep => s.kind === 'tool');
-    const thoughts = steps.filter((s): s is ReasoningStep => s.kind === 'thought');
     if (pending) {
-      if (tools.some((t) => t.status === 'running')) return 'Checking sources...';
-      if (thoughts.length) return 'Thinking...';
+      if (runningTool) return `Calling ${prettyToolName(runningTool.tool)}...`;
+      if (tools.length) return `Used ${describeToolList(tools)}`;
+      if (steps.some((s) => s.kind === 'thought')) return 'Thinking...';
       return 'Working...';
     }
-    if (tools.length && thoughts.length) {
-      return `Checked ${tools.length} source${tools.length === 1 ? '' : 's'}${seconds ? ` in ${seconds}s` : ''}`;
-    }
     if (tools.length) {
-      return `Used ${tools.length} source${tools.length === 1 ? '' : 's'}${seconds ? ` in ${seconds}s` : ''}`;
+      return `${describeToolList(tools)}${seconds ? ` · ${seconds}s` : ''}`;
     }
     return `Reasoning${seconds ? ` for ${seconds}s` : ''}`;
   })();
@@ -897,7 +948,12 @@ function applyEventToMessage(message: Message, event: ChatStreamEvent): Message 
         args: event.args,
       });
     case 'tool-result':
-      return finishTool(message, event.callId, event.summary);
+      return finishTool(message, event.callId, {
+        summary: event.summary,
+        output: event.output,
+        durationMs: event.durationMs,
+        isError: event.isError,
+      });
     case 'content':
       return { ...message, content: `${message.content}${event.delta}` };
     case 'done':
@@ -951,15 +1007,40 @@ function upsertTool(message: Message, step: ToolCallStep): Message {
   };
 }
 
-function finishTool(message: Message, callId: string, result: string): Message {
+function finishTool(
+  message: Message,
+  callId: string,
+  payload: { summary: string; output?: string; durationMs?: number; isError?: boolean },
+): Message {
   const steps = message.steps ?? [];
   return {
     ...message,
     steps: steps.map((step) => {
       if (step.kind !== 'tool' || step.callId !== callId) return step;
-      return { ...step, status: 'done', result };
+      return {
+        ...step,
+        status: payload.isError ? 'error' : 'done',
+        // Prefer the full output (the MCP response body) when present, falling
+        // back to the short title-style summary so the expanded view still has
+        // *something* to show.
+        result: payload.output && payload.output.trim() ? payload.output : payload.summary,
+        durationMs: payload.durationMs ?? step.durationMs,
+      };
     }),
   };
+}
+
+function prettyToolName(tool: string): string {
+  // Strip the MCP `beside_` namespace so the user sees the tool itself,
+  // not the boilerplate prefix.
+  return tool.replace(/^beside[_.]/, '').replace(/_/g, ' ');
+}
+
+function describeToolList(tools: ToolCallStep[]): string {
+  const names = tools.map((t) => prettyToolName(t.tool));
+  const shown = names.slice(0, 2).join(', ');
+  const extra = names.length > 2 ? ` +${names.length - 2}` : '';
+  return `${shown}${extra}`;
 }
 
 function formatClockTime(iso: string): string {

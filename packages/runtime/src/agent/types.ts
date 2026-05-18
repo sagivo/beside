@@ -187,7 +187,14 @@ export type ChatStreamEvent =
       turnId: string;
       callId: string;
       tool: string;
+      /** Short one-line label for the collapsed tool row. */
       summary: string;
+      /** Full tool output (truncated) for the expanded view — this is the MCP response body. */
+      output?: string;
+      /** Wall-clock duration of the tool call, in ms. */
+      durationMs?: number;
+      /** True when the tool ended in error. */
+      isError?: boolean;
     }
   | { kind: 'content'; turnId: string; delta: string }
   | { kind: 'done'; turnId: string }

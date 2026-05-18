@@ -129,7 +129,16 @@ export type ChatStreamEvent =
   | { kind: 'reasoning'; turnId: string; text: string; partId?: string }
   | { kind: 'intent'; turnId: string; intent: string; anchor: unknown }
   | { kind: 'tool-call'; turnId: string; tool: string; args: Record<string, unknown>; callId: string }
-  | { kind: 'tool-result'; turnId: string; callId: string; tool: string; summary: string }
+  | {
+      kind: 'tool-result';
+      turnId: string;
+      callId: string;
+      tool: string;
+      summary: string;
+      output?: string;
+      durationMs?: number;
+      isError?: boolean;
+    }
   | { kind: 'content'; turnId: string; delta: string }
   | { kind: 'done'; turnId: string }
   | { kind: 'error'; turnId: string; message: string };
