@@ -34,10 +34,10 @@ interface NavItem {
  */
 const NAV_PRIMARY: NavItem[] = [
   { id: 'dashboard', label: 'Today', icon: LayoutDashboard, shortcut: '1' },
-  { id: 'meetings', label: 'Journal', icon: NotebookPen, shortcut: '2' },
-  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '3' },
-  { id: 'search', label: 'Search', icon: Search, shortcut: '4' },
-  { id: 'ai', label: 'AI', icon: Sparkles, shortcut: '5' },
+  { id: 'ai', label: 'Ask AI', icon: Sparkles, shortcut: '2' },
+  { id: 'meetings', label: 'Journal', icon: NotebookPen, shortcut: '3' },
+  { id: 'privacy', label: 'Privacy', icon: ShieldCheck, shortcut: '4' },
+  { id: 'search', label: 'Search', icon: Search, shortcut: '5' },
 ];
 
 const NAV_SECONDARY: NavItem[] = [
