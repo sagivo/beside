@@ -86,6 +86,9 @@ export function CommandPalette({
           <CommandItem onSelect={() => run(() => onJump('dashboard'))}>
             <LayoutDashboard /> Dashboard
           </CommandItem>
+          <CommandItem onSelect={() => run(() => onJump('ai'))}>
+            <Sparkles /> Ask AI
+          </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('meetings'))}>
             <NotebookPen /> Journal
           </CommandItem>
@@ -94,9 +97,6 @@ export function CommandPalette({
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('search'))}>
             <Search /> Search
-          </CommandItem>
-          <CommandItem onSelect={() => run(() => onJump('ai'))}>
-            <Sparkles /> AI
           </CommandItem>
           <CommandItem onSelect={() => run(() => onJump('connect'))}>
             <Plug /> Connect AI
