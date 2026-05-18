@@ -126,11 +126,12 @@ export interface ChatTurnInput {
 
 export type ChatStreamEvent =
   | { kind: 'phase'; turnId: string; phase: 'classify' | 'plan' | 'execute' | 'compose' }
-  | { kind: 'reasoning'; turnId: string; text: string }
+  | { kind: 'reasoning'; turnId: string; text: string; partId?: string }
   | { kind: 'intent'; turnId: string; intent: string; anchor: unknown }
   | { kind: 'tool-call'; turnId: string; tool: string; args: Record<string, unknown>; callId: string }
   | { kind: 'tool-result'; turnId: string; callId: string; tool: string; summary: string }
   | { kind: 'content'; turnId: string; delta: string }
+  | { kind: 'content-reset'; turnId: string }
   | { kind: 'done'; turnId: string }
   | { kind: 'error'; turnId: string; message: string };
 
