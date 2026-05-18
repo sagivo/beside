@@ -489,18 +489,67 @@
   filter: none;
 }
 
-/* Brand mark "thinking" state — used while the runtime is doing
-   intensive background work (indexing, reorganising, full re-index).
-   The container gets a slow breathing violet halo and the logo itself
-   floats with a gentle bob + tilt, evoking a small creature at work
-   beside you. Both animations are GPU-cheap (transform + box-shadow on
-   a single element) and pause for `prefers-reduced-motion`. */
+/* Brand mark animations.
+   Idle: the mascot quietly floats and breathes a soft violet glow.
+   A glassy sheen sweeps across every ~7s. On hover it pops + wobbles.
+   Busy: stronger halo + faster, livelier bob — used while the runtime
+   is doing intensive background work. All transforms/box-shadows are
+   GPU-cheap and pause for `prefers-reduced-motion`. */
+.brand-mark {
+  isolation: isolate;
+}
+.brand-mark-img {
+  transform-origin: 50% 60%;
+  animation:
+    brand-mark-float 5.2s ease-in-out infinite,
+    brand-mark-glow 4.4s ease-in-out infinite;
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform, filter;
+}
+.brand-mark::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    115deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.55) 48%,
+    rgba(255, 255, 255, 0.0) 60%
+  );
+  transform: translateX(-120%);
+  animation: brand-mark-sheen 7s ease-in-out 1.5s infinite;
+  mix-blend-mode: overlay;
+}
+.brand-mark:hover .brand-mark-img {
+  animation:
+    brand-mark-wobble 0.9s cubic-bezier(0.34, 1.56, 0.64, 1) infinite,
+    brand-mark-glow 2.2s ease-in-out infinite;
+  transform: scale(1.08);
+}
 .brand-mark-busy {
   animation: brand-mark-halo 2.6s ease-in-out infinite;
 }
 .brand-mark-img-busy {
-  transform-origin: 50% 60%;
-  animation: brand-mark-bob 2.6s ease-in-out infinite;
+  animation:
+    brand-mark-bob 2.6s ease-in-out infinite,
+    brand-mark-glow 2.6s ease-in-out infinite !important;
+}
+@keyframes brand-mark-float {
+  0%, 100% { transform: translateY(0)    rotate(0deg); }
+  50%      { transform: translateY(-1.5px) rotate(0.6deg); }
+}
+@keyframes brand-mark-glow {
+  0%, 100% { filter: drop-shadow(0 0 2px rgba(139, 140, 245, 0.25)); }
+  50%      { filter: drop-shadow(0 0 7px rgba(139, 140, 245, 0.7)); }
+}
+@keyframes brand-mark-sheen {
+  0%       { transform: translateX(-120%); }
+  18%, 100% { transform: translateX(140%); }
+}
+@keyframes brand-mark-wobble {
+  0%, 100% { transform: scale(1.08) rotate(-4deg) translateY(-1px); }
+  50%      { transform: scale(1.10) rotate(4deg)  translateY(-2px); }
 }
 @keyframes brand-mark-halo {
   0%, 100% {
@@ -510,18 +559,20 @@
   }
   50% {
     box-shadow:
-      0 0 0 3px rgba(107, 108, 240, 0.18),
-      0 6px 22px rgba(107, 108, 240, 0.35);
+      0 0 0 3px rgba(107, 108, 240, 0.22),
+      0 6px 22px rgba(107, 108, 240, 0.45);
   }
 }
 @keyframes brand-mark-bob {
-  0%   { transform: translateY(0)    rotate(0deg);   }
-  25%  { transform: translateY(-1.5px) rotate(-3deg); }
-  50%  { transform: translateY(-2.5px) rotate(0deg);  }
-  75%  { transform: translateY(-1.5px) rotate(3deg);  }
-  100% { transform: translateY(0)    rotate(0deg);   }
+  0%   { transform: translateY(0)      rotate(0deg);  }
+  25%  { transform: translateY(-1.5px) rotate(-4deg); }
+  50%  { transform: translateY(-3px)   rotate(0deg);  }
+  75%  { transform: translateY(-1.5px) rotate(4deg);  }
+  100% { transform: translateY(0)      rotate(0deg);  }
 }
 @media (prefers-reduced-motion: reduce) {
+  .brand-mark::after,
+  .brand-mark-img,
   .brand-mark-busy,
   .brand-mark-img-busy { animation: none; }
 }

@@ -29,6 +29,7 @@
     "desktop:dev": "pnpm --filter @beside/desktop run dev",
     "desktop:package": "pnpm --filter @beside/desktop run package",
     "desktop:dist": "pnpm --filter @beside/desktop run dist",
+    "release:desktop": "node scripts/release-desktop.mjs",
     "daemon": "pnpm cli start",
     "cli": "node packages/cli/dist/cli.js",
     "index:run": "pnpm cli index --once",

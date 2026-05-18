@@ -1,39 +1,59 @@
 # Releasing Beside Desktop
 
-Desktop releases are currently built, signed, notarized, and published from a
-local macOS machine with `electron-builder`. GitHub Actions release jobs are
-disabled for now. Published artifacts are uploaded to GitHub Releases, which
-also provides the updater metadata consumed by the app at runtime.
+Desktop releases are currently built, signed, notarized, verified, and
+published from a local macOS machine. GitHub Actions release jobs are disabled
+for now. Published artifacts are uploaded to GitHub Releases, which also
+provides the updater metadata consumed by the app at runtime.
 
 ## Release Flow
 
 1. Update the app version in `package.json` and `packages/desktop/package.json`.
 2. Commit the release change to `main`.
-3. Configure the local signing/notarization environment:
+3. Configure the local signing/notarization environment. The release script can
+   use either a `notarytool` keychain profile or raw Apple credentials:
 
    ```sh
-   export CSC_LINK=/path/to/developer-id-application.p12
-   export CSC_KEY_PASSWORD='...'
+   export APPLE_KEYCHAIN_PROFILE=beside
+
+   # Or, instead of a keychain profile:
    export APPLE_API_KEY=/path/to/AuthKey_XXXXXXXXXX.p8
    export APPLE_API_KEY_ID=XXXXXXXXXX
    export APPLE_API_ISSUER=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   export GH_TOKEN=ghp_...
    ```
 
-4. Create and push a tag that matches the package version:
+   `gh` must also be authenticated for `sagivo/beside`:
 
    ```sh
-   git tag v0.2.1
-   git push origin main --tags
+   gh auth status
    ```
 
-5. Build and publish the macOS Apple Silicon release:
+4. Build, verify, tag, and publish the macOS Apple Silicon release:
 
    ```sh
-   pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish always
+   pnpm release:desktop
    ```
 
-   This produces and publishes the `.dmg`, `.zip`, and `latest-mac.yml`.
+   This produces and publishes the `.dmg`, `.zip`, blockmaps, and
+   `latest-mac.yml`.
+
+   To replace an existing release tag, such as rebuilding `v0.0.1`, use:
+
+   ```sh
+   pnpm release:desktop -- --force-tag
+   ```
+
+   To build and verify locally without touching GitHub:
+
+   ```sh
+   pnpm release:desktop -- --no-upload
+   ```
+
+The script verifies the packaged app, validates stapled notarization tickets,
+runs the packaged plugin smoke test, checks Gatekeeper acceptance, mounts the
+DMG to confirm it contains `Beside.app`, and verifies GitHub asset digests
+after upload. If `electron-builder` produces a DMG without the app payload, the
+script rebuilds the DMG from the verified app bundle, then signs, notarizes,
+staples, and regenerates update metadata before uploading.
 
 Packaged apps check GitHub Releases on startup, then every six hours, and when
 the user chooses **Check for Updates...** from the tray menu.
@@ -42,15 +62,13 @@ the user chooses **Check for Updates...** from the tray menu.
 
 Production releases must be signed and notarized before users install them.
 
-- `CSC_LINK`: path or base64 value for a Developer ID Application certificate export.
-- `CSC_KEY_PASSWORD`: password for the macOS certificate export.
-- `APPLE_API_KEY`: path to the App Store Connect API key file.
-- `APPLE_API_KEY_ID`: App Store Connect API key ID.
-- `APPLE_API_ISSUER`: App Store Connect issuer UUID.
-- `GH_TOKEN`: GitHub token used by `electron-builder` to create or update the release.
+- Developer ID Application signing identity in Keychain.
+- `APPLE_KEYCHAIN_PROFILE`: `notarytool` keychain profile used for notarization.
+- `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`: App Store Connect API credentials, if not using a keychain profile.
+- Authenticated `gh` CLI session with permission to push tags and upload release assets.
 
 To test packaging without publishing:
 
 ```sh
-pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish never
+pnpm release:desktop -- --no-upload
 ```

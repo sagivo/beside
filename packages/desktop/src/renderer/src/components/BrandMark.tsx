@@ -19,7 +19,7 @@ export function BrandMark({
   return (
     <div
       className={cn(
-        'relative grid size-9 place-items-center overflow-hidden rounded-xl',
+        'brand-mark group relative grid size-9 place-items-center overflow-hidden rounded-xl',
         busy && 'brand-mark-busy',
         className,
       )}
@@ -29,7 +29,7 @@ export function BrandMark({
         src={logoUrl}
         alt=""
         className={cn(
-          'size-full object-contain p-1',
+          'brand-mark-img size-full object-contain p-1',
           busy && 'brand-mark-img-busy',
         )}
       />

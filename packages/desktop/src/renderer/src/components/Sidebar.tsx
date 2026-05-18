@@ -74,18 +74,20 @@ export function Sidebar({
       {/* Brand */}
       <div
         className={cn(
-          'flex items-center pt-12 pb-5',
-          collapsed ? 'justify-center px-2' : 'gap-3 px-4',
+          'flex pt-10 pb-5',
+          collapsed
+            ? 'items-center justify-center px-2'
+            : 'flex-col items-center gap-2 px-4 text-center',
         )}
       >
-        <BrandMark busy={busy} />
+        <BrandMark busy={busy} className={collapsed ? undefined : 'size-16 rounded-2xl'} />
         {!collapsed && (
           <div className="min-w-0">
             <div className="brand-wordmark text-[20px] leading-none truncate">
               beside
             </div>
-            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
-              Your AI memory,<br />beside you
+            <div className="text-[11px] text-muted-foreground mt-1">
+              Your local AI memory
             </div>
           </div>
         )}

@@ -205,33 +205,30 @@ the tray menu's **Check for Updates...** action. The release artifacts include
 the DMG/ZIP plus `latest-mac.yml`; `electron-updater` reads that metadata to
 decide whether to download and install a newer build.
 
-Releases are built and signed locally for now. Configure these environment
-variables before producing a macOS release:
+Releases are built, signed, notarized, verified, and uploaded locally for now.
+Configure local notarization before producing a macOS release:
 
 | Variable | Purpose |
 |----------|---------|
-| `CSC_LINK` | Path or base64 value for a `.p12` exported from Keychain with the `Developer ID Application` certificate and private key. |
-| `CSC_KEY_PASSWORD` | Password for the exported `.p12`. |
-| `APPLE_API_KEY` | Path to the App Store Connect `AuthKey_*.p8` file. |
-| `APPLE_API_KEY_ID` | The App Store Connect API key ID. |
-| `APPLE_API_ISSUER` | The App Store Connect issuer UUID. |
-| `GH_TOKEN` | GitHub token used by `electron-builder` when publishing artifacts to GitHub Releases. |
+| Developer ID Application identity | Signing certificate and private key in Keychain. |
+| `APPLE_KEYCHAIN_PROFILE` | `notarytool` keychain profile, for example `beside`. |
+| `APPLE_API_KEY`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER` | Alternative App Store Connect API credentials if not using a keychain profile. |
+| `gh` auth | GitHub CLI session with permission to push tags and upload release assets. |
 
 To create a local signed/notarized macOS build without publishing:
 
 ```bash
-pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish never
+pnpm release:desktop -- --no-upload
 ```
 
-To publish an update, bump `packages/desktop/package.json`'s version, commit
-the change, tag the same version, then build and publish from your local
-machine:
+To publish an update, bump the package versions, commit the change to `main`,
+then run:
 
 ```bash
-git tag v0.2.1
-git push origin main --tags
-pnpm --filter @beside/desktop run dist -- --mac --arm64 --publish always
+pnpm release:desktop
 ```
+
+To rebuild an existing tag/release, use `pnpm release:desktop -- --force-tag`.
 
 There are currently no GitHub Actions release jobs in this repository.
 
