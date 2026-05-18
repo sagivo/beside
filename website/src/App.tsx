@@ -153,10 +153,10 @@ function LandingPage() {
               <h1 className="hero-title">
                 <span className="grad">
                   <span className="hero-title-beside">
-                    <img className="hero-title-mark" src="/images/logo.png" alt="Beside logo" aria-hidden="true" />
-                    beside <br />
+                    beside <img className="hero-title-mark" src="/images/logo.png" alt="Beside logo" aria-hidden="true" />
                   </span>
-                  Your private AI
+                  <br />
+                  Your local AI memory
                 </span>
               </h1>
          
@@ -195,6 +195,16 @@ function LandingPage() {
             <div className="hero-viz" aria-hidden>
               <div className="grid-bg" />
               <AmbientAINetwork />
+
+              <video
+                className="hero-video"
+                src="/videos/hero.mp4"
+                autoPlay
+                muted
+                loop
+                playsInline
+                preload="auto"
+              />
 
               <div className="hero-status" aria-hidden>
                 <span className="live-dot" />
@@ -586,39 +596,7 @@ function AmbientAINetwork() {
           <circle cx={center.x} cy={center.y} r="50" fill="none" stroke="#6b6cf0" strokeWidth="1" className="ai-ripple delay3" />
         </g>
 
-        {/* central AI core — actual logo artwork split into two animated SVG bubbles */}
-        <g className="ai-core">
-          {/* subtle guide ring behind the artwork */}
-          <circle cx={center.x} cy={center.y} r="46" fill="none" stroke="#ffffff" strokeOpacity="0.24" strokeWidth="0.7" />
-          {/* soft bloom behind the pair */}
-          <circle cx={center.x} cy={center.y} r="62" fill="#ffffff" opacity="0.14" filter="url(#aiSoft)" />
-          <g filter="url(#logoDrop)">
-            <g className="logo-orb-b">
-              <g className="logo-orb-art-b" clipPath="url(#logoBottomBubbleClip)">
-                <image
-                  href="/images/logo.png"
-                  x="168"
-                  y="150"
-                  width="68"
-                  height="101"
-                  preserveAspectRatio="xMidYMid meet"
-                />
-              </g>
-            </g>
-            <g className="logo-orb-t">
-              <g className="logo-orb-art-t" clipPath="url(#logoTopBubbleClip)">
-                <image
-                  href="/images/logo.png"
-                  x="168"
-                  y="150"
-                  width="68"
-                  height="101"
-                  preserveAspectRatio="xMidYMid meet"
-                />
-              </g>
-            </g>
-          </g>
-        </g>
+        {/* central core position is now filled by the .hero-video element */}
       </svg>
 
       {/* HTML overlay: app chips around the ring + floating "indexed" tooltips */}
@@ -821,6 +799,7 @@ function CaptureCard() {
     <div className="p-card">
       <div className="p-card-head">
         <span className="p-step"><span className="n">1</span>Capture</span>
+        <img className="p-mascot p-mascot-capture" src="/images/mascot-capture.png" alt="" aria-hidden="true" />
       </div>
       <h3>Watches every app, quietly.</h3>
       <p>Screenshots, active window, URLs, idle state — appended locally with negligible overhead.</p>
@@ -853,6 +832,7 @@ function IndexCard() {
     <div className="p-card">
       <div className="p-card-head">
         <span className="p-step"><span className="n">2</span>Index</span>
+        <img className="p-mascot p-mascot-index" src="/images/mascot-index.png" alt="" aria-hidden="true" />
       </div>
       <h3>Shapes raw signals into knowledge.</h3>
       <p>A local model extracts entities and topics, then continuously refactors the wiki.</p>
@@ -883,6 +863,7 @@ function SurfaceCard() {
     <div className="p-card">
       <div className="p-card-head">
         <span className="p-step"><span className="n">3</span>Surface</span>
+        <img className="p-mascot p-mascot-surface" src="/images/mascot-surface.png" alt="" aria-hidden="true" />
       </div>
       <h3>Pins the moments that matter.</h3>
       <p>Patterns, follow-ups, half-finished threads — beside surfaces them when you'll need them.</p>
@@ -908,6 +889,7 @@ function RecallCard() {
     <div className="p-card">
       <div className="p-card-head">
         <span className="p-step"><span className="n">4</span>Recall</span>
+        <img className="p-mascot p-mascot-recall" src="/images/mascot-recall.png" alt="" aria-hidden="true" />
       </div>
       <h3>Remembers it — for every AI you use.</h3>
       <p>Claude, Cursor, ChatGPT — any MCP agent — gets persistent context, on demand.</p>
