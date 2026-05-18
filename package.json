@@ -30,7 +30,7 @@
     "desktop:package": "pnpm --filter @beside/desktop run package",
     "desktop:dist": "pnpm --filter @beside/desktop run dist",
     "daemon": "pnpm cli start",
-    "cli": "node packages/cli/dist/cli.js",
+    "cli": "node scripts/run-cli.mjs",
     "index:run": "pnpm cli index --once",
     "index:reorg": "pnpm cli index --reorganise",
     "index:reindex": "pnpm cli index --full-reindex",

@@ -101,11 +101,9 @@ storage:
     max_size_gb: 50
     retention_days: 365
     vacuum:
-      compress_after_minutes: 60
+      compress_after_days: 365
       compress_quality: 40
-      thumbnail_after_days: 30
-      thumbnail_max_dim: 480
-      delete_after_days: 180
+      delete_after_days: 0             # 0 disables deletion
       tick_interval_min: 15
       batch_size: 50
 ```
@@ -229,7 +227,7 @@ next tick. Capture itself is never deferred.
 | **Strict privacy / regulated team** | `capture.plugin: node`, narrow `excluded_apps`, set `excluded_url_patterns`, keep `index.model.plugin: ollama`, disable `mcp` export until ready, lower `storage.local.retention_days`. |
 | **Pure local performance** | `capture.plugin: native`, `index.model.plugin: ollama`, `index.embeddings.tick_interval_min: 1`, `system.load_guard.threshold: 0.85`. |
 | **Hosted-model quality** | `index.model.plugin: openai`, set a real `embedding_model`, raise `index.batch_size` for fewer hosted calls. |
-| **Always-on, minimal disk** | `screenshot_quality: 35`, `screenshot_max_dim: 900`, `vacuum.compress_after_minutes: 30`, `vacuum.delete_after_days: 60`. |
+| **Always-on, minimal disk** | `screenshot_quality: 35`, `screenshot_max_dim: 900`, `vacuum.compress_after_days: 7`, `vacuum.delete_after_days: 60`. |
 | **Meetings-first** | `capture_audio: true`, `audio.live_recording.enabled: true`, `index.meetings.summarize: true`, `vision_attachments: 6`. |
 
 Every Beside install is reproducible from this one YAML — back it up, version

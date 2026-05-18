@@ -8,6 +8,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
+import mascotCaptureUrl from '@/assets/mascot-capture.png';
 import { buildInstallPhases, formatBootstrapLine, pullPercent, type InstallPhase } from '@/lib/bootstrap-phases';
 import { formatBytes } from '@/lib/format';
 import { MODEL_CHOICES } from '@/lib/model-catalog';
@@ -96,7 +97,16 @@ function WelcomeStep({ onContinue }: any) {
     <Card className="relative overflow-hidden border-primary/15 py-0">
       <div aria-hidden className="pointer-events-none absolute inset-0 bg-gradient-ambient opacity-90" />
       <CardContent className="relative p-0"><div className="flex flex-col items-center px-6 pb-10 pt-14 text-center sm:px-12 sm:pt-20 sm:pb-14">
-        <div className="relative grid place-items-center"><div className="absolute size-40 rounded-full bg-primary/25 blur-3xl" /><BrandMark className="size-20 rounded-2xl shadow-glow" /></div>
+        <div className="relative grid place-items-center">
+          <div aria-hidden className="absolute size-56 rounded-full bg-gradient-brand-soft blur-3xl opacity-90" />
+          <img
+            src={mascotCaptureUrl}
+            alt=""
+            aria-hidden
+            className="relative size-40 select-none object-contain drop-shadow-[0_22px_44px_rgba(107,108,240,0.42)] mascot-bob"
+            draggable={false}
+          />
+        </div>
         <Badge variant="outline" className="mt-7 gap-1.5 border-primary/30 bg-primary/10 px-3 py-1 text-[11px] font-medium uppercase text-primary"><Sparkles className="size-3" />Private memory</Badge>
         <h1 className="mt-5 max-w-3xl text-balance text-4xl font-semibold sm:text-6xl">Your work, <span className="text-gradient-brand">perfectly remembered.</span></h1>
         <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">An ambient second brain that sits quietly beside you — capturing what you do, so you can focus on doing it. Local, encrypted, and private.</p>

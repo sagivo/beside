@@ -27,6 +27,7 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/Markdown';
 import { cn } from '@/lib/utils';
 import type { ChatStreamEvent } from '@/global';
+import mascotRecallUrl from '@/assets/mascot-recall.png';
 
 interface ReasoningStep {
   kind: 'thought';
@@ -457,10 +458,20 @@ function ThinkingBubble() {
 
 function EmptyState({ onPick }: { onPick: (text: string) => void }) {
   return (
-    <div className="mx-auto flex max-w-3xl flex-col items-center gap-8 px-6 pt-16 pb-12 text-center">
-      <div className="flex flex-col items-center gap-3">
-        <div className="grid size-12 place-items-center rounded-2xl border border-border bg-gradient-brand-soft">
-          <Sparkles className="size-6" />
+    <div className="mx-auto flex max-w-3xl flex-col items-center gap-8 px-6 pt-12 pb-12 text-center">
+      <div className="flex flex-col items-center gap-4">
+        <div className="relative grid place-items-center">
+          <div
+            aria-hidden
+            className="absolute size-40 rounded-full bg-gradient-brand-soft blur-3xl opacity-90"
+          />
+          <img
+            src={mascotRecallUrl}
+            alt=""
+            aria-hidden
+            className="relative size-28 select-none object-contain drop-shadow-[0_14px_28px_rgba(107,108,240,0.35)] mascot-bob"
+            draggable={false}
+          />
         </div>
         <h2 className="text-2xl font-semibold tracking-tight">
           Ask your memory anything

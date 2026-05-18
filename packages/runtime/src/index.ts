@@ -9,6 +9,7 @@ export { MeetingSummarizer, buildStageA, renderSummaryMarkdown } from './meeting
 export type {
   MeetingSummarizerOptions,
   MeetingSummarizerResult,
+  MeetingSummarizerTickOptions,
 } from './meeting-summarizer.js';
 export { EventExtractor } from './event-extractor.js';
 export type {

@@ -390,13 +390,8 @@ export interface BesideConfig {
       retention_days: number;
       vacuum: {
         compress_after_days: number;
-        compress_after_minutes?: number;
         compress_quality: number;
-        thumbnail_after_days: number;
-        thumbnail_after_minutes?: number;
-        thumbnail_max_dim: number;
         delete_after_days: number;
-        delete_after_minutes?: number;
         tick_interval_min: number;
         batch_size: number;
       };

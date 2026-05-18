@@ -22,7 +22,19 @@ import type {
   MemoryChunkKind,
   MemoryChunkQuery,
   MemoryChunkSemanticMatch,
+  MemoryLeaf,
+  MemoryLeafKind,
+  MemoryLeafQuery,
+  MemoryLeafStatus,
   MemoryIndexStats,
+  MemoryJob,
+  MemoryJobKind,
+  MemoryJobQuery,
+  MemoryJobStatus,
+  MemoryNode,
+  MemoryNodeQuery,
+  MemoryNodeStatus,
+  MemoryScope,
   EntityRef,
   EntityRecord,
   EntityKind,
@@ -219,6 +231,64 @@ interface MemoryChunkRow {
   updated_at: string;
 }
 
+interface MemoryLeafRow {
+  id: string;
+  kind: string;
+  source_id: string;
+  source_kind: string | null;
+  scope: string;
+  scope_id: string;
+  title: string;
+  body: string;
+  entity_path: string | null;
+  entity_kind: string | null;
+  day: string | null;
+  timestamp: string | null;
+  time_start: string | null;
+  time_end: string | null;
+  evidence_refs_json: string;
+  content_hash: string;
+  status: string;
+  confidence: number | null;
+  importance: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemoryNodeRow {
+  id: string;
+  scope: string;
+  scope_id: string;
+  level: number;
+  title: string;
+  summary: string;
+  entity_path: string | null;
+  entity_kind: string | null;
+  day: string | null;
+  time_start: string | null;
+  time_end: string | null;
+  child_refs_json: string;
+  evidence_refs_json: string;
+  content_hash: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MemoryJobRow {
+  id: string;
+  kind: string;
+  status: string;
+  dedupe_key: string;
+  payload_json: string;
+  run_after: string;
+  attempts: number;
+  locked_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 function memoryChunkFromRow(row: MemoryChunkRow): MemoryChunk {
   let sourceRefs: string[] = [];
   try {
@@ -241,6 +311,79 @@ function memoryChunkFromRow(row: MemoryChunkRow): MemoryChunk {
     timestamp: row.timestamp,
     sourceRefs,
     contentHash: row.content_hash,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function memoryLeafFromRow(row: MemoryLeafRow): MemoryLeaf {
+  return {
+    id: row.id,
+    kind: row.kind as MemoryLeafKind,
+    sourceId: row.source_id,
+    sourceKind: row.source_kind,
+    scope: row.scope as MemoryScope,
+    scopeId: row.scope_id,
+    title: row.title,
+    body: row.body,
+    entityPath: row.entity_path,
+    entityKind: (row.entity_kind as EntityKind) ?? null,
+    day: row.day,
+    timestamp: row.timestamp,
+    timeStart: row.time_start,
+    timeEnd: row.time_end,
+    evidenceRefs: parseJsonStringArray(row.evidence_refs_json),
+    contentHash: row.content_hash,
+    status: row.status as MemoryLeafStatus,
+    confidence: row.confidence,
+    importance: row.importance,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function memoryNodeFromRow(row: MemoryNodeRow): MemoryNode {
+  return {
+    id: row.id,
+    scope: row.scope as MemoryScope,
+    scopeId: row.scope_id,
+    level: row.level,
+    title: row.title,
+    summary: row.summary,
+    entityPath: row.entity_path,
+    entityKind: (row.entity_kind as EntityKind) ?? null,
+    day: row.day,
+    timeStart: row.time_start,
+    timeEnd: row.time_end,
+    childRefs: parseJsonStringArray(row.child_refs_json),
+    evidenceRefs: parseJsonStringArray(row.evidence_refs_json),
+    contentHash: row.content_hash,
+    status: row.status as MemoryNodeStatus,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function memoryJobFromRow(row: MemoryJobRow): MemoryJob {
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(row.payload_json);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      payload = parsed as Record<string, unknown>;
+    }
+  } catch {
+    payload = {};
+  }
+  return {
+    id: row.id,
+    kind: row.kind as MemoryJobKind,
+    status: row.status as MemoryJobStatus,
+    dedupeKey: row.dedupe_key,
+    payload,
+    runAfter: row.run_after,
+    attempts: row.attempts,
+    lockedAt: row.locked_at,
+    lastError: row.last_error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1382,6 +1525,10 @@ class LocalStorage implements IStorage {
     const offset = Math.max(0, Math.floor(query.offset ?? 0));
 
     const addFilters = (prefix = 'memory_chunks'): void => {
+      if (query.id) {
+        where.push(`${prefix}.id = @id`);
+        params.id = query.id;
+      }
       if (query.kind) {
         where.push(`${prefix}.kind = @kind`);
         params.kind = query.kind;
@@ -1665,12 +1812,48 @@ class LocalStorage implements IStorage {
         )
         .get(model ? { model } : {}) as { n: number }
     ).n;
+    const leaves = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM memory_leaves').get() as { n: number }
+    ).n;
+    const leavesByKindRows = this.db
+      .prepare('SELECT kind, COUNT(*) AS n FROM memory_leaves GROUP BY kind')
+      .all() as Array<{ kind: MemoryLeafKind; n: number }>;
+    const leavesByStatusRows = this.db
+      .prepare('SELECT status, COUNT(*) AS n FROM memory_leaves GROUP BY status')
+      .all() as Array<{ status: MemoryLeafStatus; n: number }>;
+    const nodes = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM memory_nodes').get() as { n: number }
+    ).n;
+    const nodesByScopeRows = this.db
+      .prepare('SELECT scope, COUNT(*) AS n FROM memory_nodes GROUP BY scope')
+      .all() as Array<{ scope: MemoryScope; n: number }>;
+    const nodesByStatusRows = this.db
+      .prepare('SELECT status, COUNT(*) AS n FROM memory_nodes GROUP BY status')
+      .all() as Array<{ status: MemoryNodeStatus; n: number }>;
+    const jobs = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM memory_jobs').get() as { n: number }
+    ).n;
+    const jobsByKindRows = this.db
+      .prepare('SELECT kind, COUNT(*) AS n FROM memory_jobs GROUP BY kind')
+      .all() as Array<{ kind: MemoryJobKind; n: number }>;
+    const jobsByStatusRows = this.db
+      .prepare('SELECT status, COUNT(*) AS n FROM memory_jobs GROUP BY status')
+      .all() as Array<{ status: MemoryJobStatus; n: number }>;
     return {
       chunks,
       chunksByKind: Object.fromEntries(byKindRows.map((row) => [row.kind, row.n])),
       chunkEmbeddings,
       chunkEmbeddingsByModel: Object.fromEntries(byModelRows.map((row) => [row.model, row.n])),
       chunksMissingEmbedding: missingChunkRows.length,
+      leaves,
+      leavesByKind: Object.fromEntries(leavesByKindRows.map((row) => [row.kind, row.n])),
+      leavesByStatus: Object.fromEntries(leavesByStatusRows.map((row) => [row.status, row.n])),
+      nodes,
+      nodesByScope: Object.fromEntries(nodesByScopeRows.map((row) => [row.scope, row.n])),
+      nodesByStatus: Object.fromEntries(nodesByStatusRows.map((row) => [row.status, row.n])),
+      jobs,
+      jobsByKind: Object.fromEntries(jobsByKindRows.map((row) => [row.kind, row.n])),
+      jobsByStatus: Object.fromEntries(jobsByStatusRows.map((row) => [row.status, row.n])),
       framesWithEmbeddings,
       framesMissingEmbeddings,
     };
@@ -1695,6 +1878,469 @@ class LocalStorage implements IStorage {
          content_hash = excluded.content_hash,
          updated_at = excluded.updated_at`,
     );
+  }
+
+  async replaceMemoryLeaves(
+    generatedKinds: MemoryLeafKind[],
+    leaves: MemoryLeaf[],
+  ): Promise<void> {
+    const kinds = [...new Set(generatedKinds)];
+    if (kinds.length === 0) return;
+    const upsert = this.memoryLeafUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_leaf_text WHERE leaf_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_leaf_text (leaf_id, title, body, entity_search, scope_search, kind) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const leaf of leaves) {
+        this.runMemoryLeafUpsert(upsert, leaf);
+        this.runMemoryLeafFtsUpsert(ftsDelete, ftsInsert, leaf);
+      }
+
+      const kindPlaceholders = kinds.map((_, i) => `@kind_${i}`).join(',');
+      const params: Record<string, unknown> = Object.fromEntries(
+        kinds.map((kind, i) => [`kind_${i}`, kind]),
+      );
+      const keepIds = new Set(leaves.map((leaf) => leaf.id));
+      const stale = this.db
+        .prepare(`SELECT id FROM memory_leaves WHERE kind IN (${kindPlaceholders})`)
+        .all(params) as Array<{ id: string }>;
+      const staleIds = stale.map((row) => row.id).filter((id) => !keepIds.has(id));
+      for (let i = 0; i < staleIds.length; i += 500) {
+        const batch = staleIds.slice(i, i + 500);
+        const placeholders = batch.map((_, idx) => `@id_${idx}`).join(',');
+        const idParams = Object.fromEntries(batch.map((id, idx) => [`id_${idx}`, id]));
+        this.db.prepare(`DELETE FROM memory_leaf_text WHERE leaf_id IN (${placeholders})`).run(idParams);
+        this.db.prepare(`DELETE FROM memory_leaves WHERE id IN (${placeholders})`).run(idParams);
+      }
+    });
+    tx();
+  }
+
+  async upsertMemoryLeaves(leaves: MemoryLeaf[]): Promise<void> {
+    if (leaves.length === 0) return;
+    const upsert = this.memoryLeafUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_leaf_text WHERE leaf_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_leaf_text (leaf_id, title, body, entity_search, scope_search, kind) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const leaf of leaves) {
+        this.runMemoryLeafUpsert(upsert, leaf);
+        this.runMemoryLeafFtsUpsert(ftsDelete, ftsInsert, leaf);
+      }
+    });
+    tx();
+  }
+
+  async listMemoryLeaves(query: MemoryLeafQuery = {}): Promise<MemoryLeaf[]> {
+    const params: Record<string, unknown> = {};
+    const where: string[] = ['1=1'];
+    const addFilters = (prefix = 'memory_leaves'): void => {
+      if (query.id) { where.push(`${prefix}.id = @id`); params.id = query.id; }
+      if (query.kind) { where.push(`${prefix}.kind = @kind`); params.kind = query.kind; }
+      if (query.status) { where.push(`${prefix}.status = @status`); params.status = query.status; }
+      if (query.scope) { where.push(`${prefix}.scope = @scope`); params.scope = query.scope; }
+      if (query.scopeId) { where.push(`${prefix}.scope_id = @scope_id`); params.scope_id = query.scopeId; }
+      if (query.entityPath) { where.push(`${prefix}.entity_path = @entity_path`); params.entity_path = query.entityPath; }
+      if (query.day) { where.push(`${prefix}.day = @day`); params.day = query.day; }
+      if (query.from) { where.push(`COALESCE(${prefix}.timestamp, ${prefix}.time_end, ${prefix}.updated_at) >= @from_ts`); params.from_ts = query.from; }
+      if (query.to) { where.push(`COALESCE(${prefix}.timestamp, ${prefix}.time_start, ${prefix}.updated_at) <= @to_ts`); params.to_ts = query.to; }
+    };
+    const limit = Math.max(1, Math.floor(query.limit ?? 500));
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+
+    if (query.text && query.text.trim()) {
+      const ftsQuery = sanitiseFtsQuery(query.text);
+      if (ftsQuery !== '""') {
+        params.text = ftsQuery;
+        where.push('memory_leaf_text MATCH @text');
+        addFilters('memory_leaves');
+        const rows = this.db
+          .prepare(
+            `SELECT memory_leaves.*
+             FROM memory_leaves
+             JOIN memory_leaf_text ON memory_leaf_text.leaf_id = memory_leaves.id
+             WHERE ${where.join(' AND ')}
+             ORDER BY bm25(memory_leaf_text, 4.0, 2.0, 1.0, 1.0) ASC,
+                      COALESCE(memory_leaves.importance, 0) DESC,
+                      COALESCE(memory_leaves.timestamp, memory_leaves.time_end, memory_leaves.updated_at) DESC
+             LIMIT @limit OFFSET @offset`,
+          )
+          .all({ ...params, limit, offset }) as MemoryLeafRow[];
+        return rows.map(memoryLeafFromRow);
+      }
+    }
+
+    addFilters('memory_leaves');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_leaves
+         WHERE ${where.join(' AND ')}
+         ORDER BY COALESCE(timestamp, time_end, updated_at) DESC
+         LIMIT @limit OFFSET @offset`,
+      )
+      .all({ ...params, limit, offset }) as MemoryLeafRow[];
+    return rows.map(memoryLeafFromRow);
+  }
+
+  async replaceMemoryNodes(scopes: MemoryScope[], nodes: MemoryNode[]): Promise<void> {
+    const uniqueScopes = [...new Set(scopes)];
+    if (uniqueScopes.length === 0) return;
+    const upsert = this.memoryNodeUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_node_text WHERE node_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_node_text (node_id, title, summary, entity_search, scope_search, status) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const node of nodes) {
+        this.runMemoryNodeUpsert(upsert, node);
+        this.runMemoryNodeFtsUpsert(ftsDelete, ftsInsert, node);
+      }
+
+      const scopePlaceholders = uniqueScopes.map((_, i) => `@scope_${i}`).join(',');
+      const params: Record<string, unknown> = Object.fromEntries(
+        uniqueScopes.map((scope, i) => [`scope_${i}`, scope]),
+      );
+      const keepIds = new Set(nodes.map((node) => node.id));
+      const stale = this.db
+        .prepare(`SELECT id FROM memory_nodes WHERE scope IN (${scopePlaceholders})`)
+        .all(params) as Array<{ id: string }>;
+      const staleIds = stale.map((row) => row.id).filter((id) => !keepIds.has(id));
+      for (let i = 0; i < staleIds.length; i += 500) {
+        const batch = staleIds.slice(i, i + 500);
+        const placeholders = batch.map((_, idx) => `@id_${idx}`).join(',');
+        const idParams = Object.fromEntries(batch.map((id, idx) => [`id_${idx}`, id]));
+        this.db.prepare(`DELETE FROM memory_node_text WHERE node_id IN (${placeholders})`).run(idParams);
+        this.db.prepare(`DELETE FROM memory_nodes WHERE id IN (${placeholders})`).run(idParams);
+      }
+    });
+    tx();
+  }
+
+  async upsertMemoryNodes(nodes: MemoryNode[]): Promise<void> {
+    if (nodes.length === 0) return;
+    const upsert = this.memoryNodeUpsertStatement();
+    const ftsDelete = this.db.prepare('DELETE FROM memory_node_text WHERE node_id = ?');
+    const ftsInsert = this.db.prepare(
+      'INSERT INTO memory_node_text (node_id, title, summary, entity_search, scope_search, status) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const tx = this.db.transaction(() => {
+      for (const node of nodes) {
+        this.runMemoryNodeUpsert(upsert, node);
+        this.runMemoryNodeFtsUpsert(ftsDelete, ftsInsert, node);
+      }
+    });
+    tx();
+  }
+
+  async listMemoryNodes(query: MemoryNodeQuery = {}): Promise<MemoryNode[]> {
+    const params: Record<string, unknown> = {};
+    const where: string[] = ['1=1'];
+    const addFilters = (prefix = 'memory_nodes'): void => {
+      if (query.id) { where.push(`${prefix}.id = @id`); params.id = query.id; }
+      if (query.scope) { where.push(`${prefix}.scope = @scope`); params.scope = query.scope; }
+      if (query.scopeId) { where.push(`${prefix}.scope_id = @scope_id`); params.scope_id = query.scopeId; }
+      if (query.level != null) { where.push(`${prefix}.level = @level`); params.level = query.level; }
+      if (query.status) { where.push(`${prefix}.status = @status`); params.status = query.status; }
+      if (query.entityPath) { where.push(`${prefix}.entity_path = @entity_path`); params.entity_path = query.entityPath; }
+      if (query.day) { where.push(`${prefix}.day = @day`); params.day = query.day; }
+      if (query.from) { where.push(`COALESCE(${prefix}.time_end, ${prefix}.updated_at) >= @from_ts`); params.from_ts = query.from; }
+      if (query.to) { where.push(`COALESCE(${prefix}.time_start, ${prefix}.updated_at) <= @to_ts`); params.to_ts = query.to; }
+    };
+    const limit = Math.max(1, Math.floor(query.limit ?? 500));
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+
+    if (query.text && query.text.trim()) {
+      const ftsQuery = sanitiseFtsQuery(query.text);
+      if (ftsQuery !== '""') {
+        params.text = ftsQuery;
+        where.push('memory_node_text MATCH @text');
+        addFilters('memory_nodes');
+        const rows = this.db
+          .prepare(
+            `SELECT memory_nodes.*
+             FROM memory_nodes
+             JOIN memory_node_text ON memory_node_text.node_id = memory_nodes.id
+             WHERE ${where.join(' AND ')}
+             ORDER BY bm25(memory_node_text, 4.0, 2.0, 1.0, 1.0) ASC,
+                      memory_nodes.level ASC,
+                      COALESCE(memory_nodes.time_end, memory_nodes.updated_at) DESC
+             LIMIT @limit OFFSET @offset`,
+          )
+          .all({ ...params, limit, offset }) as MemoryNodeRow[];
+        return rows.map(memoryNodeFromRow);
+      }
+    }
+
+    addFilters('memory_nodes');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM memory_nodes
+         WHERE ${where.join(' AND ')}
+         ORDER BY level ASC, COALESCE(time_end, updated_at) DESC
+         LIMIT @limit OFFSET @offset`,
+      )
+      .all({ ...params, limit, offset }) as MemoryNodeRow[];
+    return rows.map(memoryNodeFromRow);
+  }
+
+  private memoryLeafUpsertStatement(): Database.Statement {
+    return this.db.prepare(
+      `INSERT INTO memory_leaves (
+         id, kind, source_id, source_kind, scope, scope_id, title, body,
+         entity_path, entity_kind, day, timestamp, time_start, time_end,
+         evidence_refs_json, content_hash, status, confidence, importance,
+         created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         kind = excluded.kind,
+         source_id = excluded.source_id,
+         source_kind = excluded.source_kind,
+         scope = excluded.scope,
+         scope_id = excluded.scope_id,
+         title = excluded.title,
+         body = excluded.body,
+         entity_path = excluded.entity_path,
+         entity_kind = excluded.entity_kind,
+         day = excluded.day,
+         timestamp = excluded.timestamp,
+         time_start = excluded.time_start,
+         time_end = excluded.time_end,
+         evidence_refs_json = excluded.evidence_refs_json,
+         content_hash = excluded.content_hash,
+         status = excluded.status,
+         confidence = excluded.confidence,
+         importance = excluded.importance,
+         updated_at = excluded.updated_at`,
+    );
+  }
+
+  private runMemoryLeafUpsert(stmt: Database.Statement, leaf: MemoryLeaf): void {
+    stmt.run(
+      leaf.id,
+      leaf.kind,
+      leaf.sourceId,
+      leaf.sourceKind,
+      leaf.scope,
+      leaf.scopeId,
+      leaf.title,
+      leaf.body,
+      leaf.entityPath,
+      leaf.entityKind,
+      leaf.day,
+      leaf.timestamp,
+      leaf.timeStart,
+      leaf.timeEnd,
+      JSON.stringify(leaf.evidenceRefs ?? []),
+      leaf.contentHash,
+      leaf.status,
+      leaf.confidence,
+      leaf.importance,
+      leaf.createdAt,
+      leaf.updatedAt,
+    );
+  }
+
+  private runMemoryLeafFtsUpsert(
+    deleteStmt: Database.Statement,
+    insertStmt: Database.Statement,
+    leaf: MemoryLeaf,
+  ): void {
+    deleteStmt.run(leaf.id);
+    insertStmt.run(
+      leaf.id,
+      leaf.title,
+      leaf.body,
+      entityToFtsText(leaf.entityPath, leaf.entityKind),
+      memoryScopeToFtsText(leaf.scope, leaf.scopeId),
+      leaf.kind,
+    );
+  }
+
+  private memoryNodeUpsertStatement(): Database.Statement {
+    return this.db.prepare(
+      `INSERT INTO memory_nodes (
+         id, scope, scope_id, level, title, summary, entity_path, entity_kind,
+         day, time_start, time_end, child_refs_json, evidence_refs_json,
+         content_hash, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         scope = excluded.scope,
+         scope_id = excluded.scope_id,
+         level = excluded.level,
+         title = excluded.title,
+         summary = excluded.summary,
+         entity_path = excluded.entity_path,
+         entity_kind = excluded.entity_kind,
+         day = excluded.day,
+         time_start = excluded.time_start,
+         time_end = excluded.time_end,
+         child_refs_json = excluded.child_refs_json,
+         evidence_refs_json = excluded.evidence_refs_json,
+         content_hash = excluded.content_hash,
+         status = excluded.status,
+         updated_at = excluded.updated_at`,
+    );
+  }
+
+  private runMemoryNodeUpsert(stmt: Database.Statement, node: MemoryNode): void {
+    stmt.run(
+      node.id,
+      node.scope,
+      node.scopeId,
+      node.level,
+      node.title,
+      node.summary,
+      node.entityPath,
+      node.entityKind,
+      node.day,
+      node.timeStart,
+      node.timeEnd,
+      JSON.stringify(node.childRefs ?? []),
+      JSON.stringify(node.evidenceRefs ?? []),
+      node.contentHash,
+      node.status,
+      node.createdAt,
+      node.updatedAt,
+    );
+  }
+
+  private runMemoryNodeFtsUpsert(
+    deleteStmt: Database.Statement,
+    insertStmt: Database.Statement,
+    node: MemoryNode,
+  ): void {
+    deleteStmt.run(node.id);
+    insertStmt.run(
+      node.id,
+      node.title,
+      node.summary,
+      entityToFtsText(node.entityPath, node.entityKind),
+      memoryScopeToFtsText(node.scope, node.scopeId),
+      node.status,
+    );
+  }
+
+  async enqueueMemoryJob(
+    kind: MemoryJobKind,
+    payload: Record<string, unknown> = {},
+    options: { dedupeKey?: string; runAfter?: string } = {},
+  ): Promise<MemoryJob> {
+    const now = new Date().toISOString();
+    const dedupeKey = options.dedupeKey ?? kind;
+    const id = `job_${kind}_${sha256(dedupeKey).slice(0, 20)}`;
+    const runAfter = options.runAfter ?? now;
+    this.db.prepare(
+      `INSERT INTO memory_jobs (
+         id, kind, status, dedupe_key, payload_json, run_after,
+         attempts, locked_at, last_error, created_at, updated_at
+       ) VALUES (?, ?, 'queued', ?, ?, ?, 0, NULL, NULL, ?, ?)
+       ON CONFLICT(dedupe_key) DO UPDATE SET
+         kind = excluded.kind,
+         payload_json = excluded.payload_json,
+         run_after = excluded.run_after,
+         status = CASE
+           WHEN memory_jobs.status IN ('running') THEN memory_jobs.status
+           ELSE 'queued'
+         END,
+         locked_at = CASE
+           WHEN memory_jobs.status IN ('running') THEN memory_jobs.locked_at
+           ELSE NULL
+         END,
+         last_error = CASE
+           WHEN memory_jobs.status IN ('running') THEN memory_jobs.last_error
+           ELSE NULL
+         END,
+         updated_at = excluded.updated_at`,
+    ).run(id, kind, dedupeKey, JSON.stringify(payload), runAfter, now, now);
+    const row = this.db
+      .prepare('SELECT * FROM memory_jobs WHERE dedupe_key = ?')
+      .get(dedupeKey) as MemoryJobRow;
+    return memoryJobFromRow(row);
+  }
+
+  async claimMemoryJobs(limit: number, now = new Date().toISOString()): Promise<MemoryJob[]> {
+    const cap = Math.max(1, Math.floor(limit));
+    const tx = this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM memory_jobs
+           WHERE status = 'queued' AND run_after <= ?
+           ORDER BY run_after ASC, updated_at ASC
+           LIMIT ?`,
+        )
+        .all(now, cap) as MemoryJobRow[];
+      if (rows.length === 0) return [] as MemoryJob[];
+      const update = this.db.prepare(
+        `UPDATE memory_jobs
+         SET status = 'running',
+             attempts = attempts + 1,
+             locked_at = ?,
+             updated_at = ?
+         WHERE id = ?`,
+      );
+      for (const row of rows) update.run(now, now, row.id);
+      return rows.map((row) => memoryJobFromRow({
+        ...row,
+        status: 'running',
+        attempts: row.attempts + 1,
+        locked_at: now,
+        updated_at: now,
+      }));
+    });
+    return tx();
+  }
+
+  async completeMemoryJob(id: string): Promise<void> {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `UPDATE memory_jobs
+       SET status = 'succeeded',
+           locked_at = NULL,
+           last_error = NULL,
+           updated_at = ?
+       WHERE id = ?`,
+    ).run(now, id);
+  }
+
+  async failMemoryJob(id: string, error: string, runAfter?: string): Promise<void> {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare('SELECT attempts FROM memory_jobs WHERE id = ?')
+      .get(id) as { attempts: number } | undefined;
+    const failed = (row?.attempts ?? 0) >= 5;
+    this.db.prepare(
+      `UPDATE memory_jobs
+       SET status = ?,
+           run_after = ?,
+           locked_at = NULL,
+           last_error = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    ).run(
+      failed ? 'failed' : 'queued',
+      runAfter ?? new Date(Date.now() + 5 * 60_000).toISOString(),
+      error.slice(0, 2000),
+      now,
+      id,
+    );
+  }
+
+  async listMemoryJobs(query: MemoryJobQuery = {}): Promise<MemoryJob[]> {
+    const params: Record<string, unknown> = {};
+    const where = ['1=1'];
+    if (query.kind) { where.push('kind = @kind'); params.kind = query.kind; }
+    if (query.status) { where.push('status = @status'); params.status = query.status; }
+    const limit = Math.max(1, Math.floor(query.limit ?? 100));
+    const offset = Math.max(0, Math.floor(query.offset ?? 0));
+    const rows = this.db.prepare(
+      `SELECT * FROM memory_jobs
+       WHERE ${where.join(' AND ')}
+       ORDER BY run_after ASC, updated_at DESC
+       LIMIT @limit OFFSET @offset`,
+    ).all({ ...params, limit, offset }) as MemoryJobRow[];
+    return rows.map(memoryJobFromRow);
   }
 
   // -------------------------------------------------------------------------
@@ -3220,6 +3866,14 @@ class LocalStorage implements IStorage {
         )
       `).run(frameRef);
       this.db.prepare('DELETE FROM memory_chunks WHERE source_refs_json LIKE ?').run(frameRef);
+      this.db
+        .prepare('DELETE FROM memory_leaf_text WHERE leaf_id IN (SELECT id FROM memory_leaves WHERE evidence_refs_json LIKE ?)')
+        .run(frameRef);
+      this.db.prepare('DELETE FROM memory_leaves WHERE evidence_refs_json LIKE ?').run(frameRef);
+      this.db
+        .prepare('DELETE FROM memory_node_text WHERE node_id IN (SELECT id FROM memory_nodes WHERE evidence_refs_json LIKE ?)')
+        .run(frameRef);
+      this.db.prepare('DELETE FROM memory_nodes WHERE evidence_refs_json LIKE ?').run(frameRef);
       this.db.prepare('DELETE FROM frames WHERE id = ?').run(frameId);
     });
     tx();
@@ -3432,6 +4086,28 @@ class LocalStorage implements IStorage {
       this.db
         .prepare('DELETE FROM memory_chunks WHERE COALESCE(timestamp, updated_at) < ?')
         .run(cutoff);
+      this.db
+        .prepare(`
+          DELETE FROM memory_leaf_text WHERE leaf_id IN (
+            SELECT id FROM memory_leaves
+            WHERE COALESCE(timestamp, time_end, updated_at) < ?
+          )
+        `)
+        .run(cutoff);
+      this.db
+        .prepare('DELETE FROM memory_leaves WHERE COALESCE(timestamp, time_end, updated_at) < ?')
+        .run(cutoff);
+      this.db
+        .prepare(`
+          DELETE FROM memory_node_text WHERE node_id IN (
+            SELECT id FROM memory_nodes
+            WHERE COALESCE(time_end, updated_at) < ?
+          )
+        `)
+        .run(cutoff);
+      this.db
+        .prepare('DELETE FROM memory_nodes WHERE COALESCE(time_end, updated_at) < ?')
+        .run(cutoff);
       // Entities aren't time-series rows but their last_seen tracks
       // the most recent frame that resolved to them. If that's before
       // the cutoff, the entity has no surviving frames. Drop it; if
@@ -3480,6 +4156,11 @@ class LocalStorage implements IStorage {
       'calendar_captures',
       'calendar_sources',
       'day_events',
+      'memory_jobs',
+      'memory_node_text',
+      'memory_nodes',
+      'memory_leaf_text',
+      'memory_leaves',
       'memory_chunk_text',
       'memory_chunk_embeddings',
       'memory_chunks',
@@ -3553,6 +4234,14 @@ class LocalStorage implements IStorage {
         DELETE FROM memory_chunk_embeddings WHERE chunk_id IN (${selectSql})
       `).run(ref);
       this.db.prepare('DELETE FROM memory_chunks WHERE source_refs_json LIKE ?').run(ref);
+      this.db
+        .prepare('DELETE FROM memory_leaf_text WHERE leaf_id IN (SELECT id FROM memory_leaves WHERE evidence_refs_json LIKE ?)')
+        .run(ref);
+      this.db.prepare('DELETE FROM memory_leaves WHERE evidence_refs_json LIKE ?').run(ref);
+      this.db
+        .prepare('DELETE FROM memory_node_text WHERE node_id IN (SELECT id FROM memory_nodes WHERE evidence_refs_json LIKE ?)')
+        .run(ref);
+      this.db.prepare('DELETE FROM memory_nodes WHERE evidence_refs_json LIKE ?').run(ref);
     }
   }
 
@@ -3574,6 +4263,18 @@ class LocalStorage implements IStorage {
     this.db
       .prepare(`DELETE FROM memory_chunks WHERE kind = 'day_event' AND source_id IN (${placeholders})`)
       .run(...dayEventIds);
+    this.db
+      .prepare(`DELETE FROM memory_leaf_text WHERE leaf_id IN (SELECT id FROM memory_leaves WHERE kind = 'day_event' AND source_id IN (${placeholders}))`)
+      .run(...dayEventIds);
+    this.db
+      .prepare(`DELETE FROM memory_leaves WHERE kind = 'day_event' AND source_id IN (${placeholders})`)
+      .run(...dayEventIds);
+    this.db
+      .prepare(`DELETE FROM memory_node_text WHERE node_id IN (SELECT id FROM memory_nodes WHERE evidence_refs_json LIKE '%day_event:%')`)
+      .run();
+    this.db
+      .prepare(`DELETE FROM memory_nodes WHERE evidence_refs_json LIKE '%day_event:%'`)
+      .run();
     this.db
       .prepare(`DELETE FROM day_events WHERE id IN (${placeholders})`)
       .run(...dayEventIds);
@@ -3604,6 +4305,18 @@ class LocalStorage implements IStorage {
     this.db
       .prepare(`DELETE FROM memory_chunks WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})`)
       .run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM memory_leaf_text WHERE leaf_id IN (SELECT id FROM memory_leaves WHERE kind = 'meeting_summary' AND source_id IN (${placeholders}))`)
+      .run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM memory_leaves WHERE kind = 'meeting_summary' AND source_id IN (${placeholders})`)
+      .run(...meetingIds);
+    this.db
+      .prepare(`DELETE FROM memory_node_text WHERE node_id IN (SELECT id FROM memory_nodes WHERE evidence_refs_json LIKE '%meeting:%')`)
+      .run();
+    this.db
+      .prepare(`DELETE FROM memory_nodes WHERE evidence_refs_json LIKE '%meeting:%'`)
+      .run();
     this.db
       .prepare(`UPDATE calendar_events SET meeting_id = NULL, actual_started_at = NULL, actual_ended_at = NULL, meeting_platform = NULL, meeting_summary_status = NULL WHERE meeting_id IN (${placeholders})`)
       .run(...meetingIds);
@@ -3972,6 +4685,118 @@ class LocalStorage implements IStorage {
         ON memory_chunk_embeddings(model);
       CREATE INDEX IF NOT EXISTS idx_memory_chunk_embeddings_model_hash
         ON memory_chunk_embeddings(model, content_hash);
+
+      -- memory_leaves: rebuildable, content-addressed memory leaves derived
+      -- from evidence-backed chunks/manual facts. This is the durable layer
+      -- below summary nodes; chunks remain the retrieval surface.
+      CREATE TABLE IF NOT EXISTS memory_leaves (
+        id                 TEXT PRIMARY KEY,
+        kind               TEXT NOT NULL,
+        source_id          TEXT NOT NULL,
+        source_kind        TEXT,
+        scope              TEXT NOT NULL,
+        scope_id           TEXT NOT NULL,
+        title              TEXT NOT NULL,
+        body               TEXT NOT NULL,
+        entity_path        TEXT,
+        entity_kind        TEXT,
+        day                TEXT,
+        timestamp          TEXT,
+        time_start         TEXT,
+        time_end           TEXT,
+        evidence_refs_json TEXT NOT NULL,
+        content_hash       TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        confidence         REAL,
+        importance         REAL,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_kind
+        ON memory_leaves(kind);
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_status
+        ON memory_leaves(status);
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_scope
+        ON memory_leaves(scope, scope_id);
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_entity
+        ON memory_leaves(entity_path);
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_day
+        ON memory_leaves(day);
+      CREATE INDEX IF NOT EXISTS idx_memory_leaves_timestamp
+        ON memory_leaves(timestamp DESC);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_leaf_text USING fts5(
+        leaf_id UNINDEXED,
+        title,
+        body,
+        entity_search,
+        scope_search,
+        kind UNINDEXED,
+        tokenize='porter unicode61 remove_diacritics 2'
+      );
+
+      -- memory_nodes: scoped summary-tree nodes over leaves. Level 1 nodes
+      -- are currently deterministic rollups; future sealing can add higher
+      -- levels without changing the table shape.
+      CREATE TABLE IF NOT EXISTS memory_nodes (
+        id                 TEXT PRIMARY KEY,
+        scope              TEXT NOT NULL,
+        scope_id           TEXT NOT NULL,
+        level              INTEGER NOT NULL,
+        title              TEXT NOT NULL,
+        summary            TEXT NOT NULL,
+        entity_path        TEXT,
+        entity_kind        TEXT,
+        day                TEXT,
+        time_start         TEXT,
+        time_end           TEXT,
+        child_refs_json    TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL,
+        content_hash       TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        updated_at         TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_nodes_scope
+        ON memory_nodes(scope, scope_id, level);
+      CREATE INDEX IF NOT EXISTS idx_memory_nodes_status
+        ON memory_nodes(status);
+      CREATE INDEX IF NOT EXISTS idx_memory_nodes_entity
+        ON memory_nodes(entity_path);
+      CREATE INDEX IF NOT EXISTS idx_memory_nodes_day
+        ON memory_nodes(day);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_node_text USING fts5(
+        node_id UNINDEXED,
+        title,
+        summary,
+        entity_search,
+        scope_search,
+        status UNINDEXED,
+        tokenize='porter unicode61 remove_diacritics 2'
+      );
+
+      -- memory_jobs: durable maintenance queue for memory lifecycle work
+      -- such as rebuilding rollups, sealing stable nodes, and marking old
+      -- raw observations as superseded. Dedupe keys keep recurring jobs
+      -- idempotent across restarts.
+      CREATE TABLE IF NOT EXISTS memory_jobs (
+        id            TEXT PRIMARY KEY,
+        kind          TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        dedupe_key    TEXT NOT NULL UNIQUE,
+        payload_json  TEXT NOT NULL,
+        run_after     TEXT NOT NULL,
+        attempts      INTEGER NOT NULL DEFAULT 0,
+        locked_at     TEXT,
+        last_error    TEXT,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_status_run
+        ON memory_jobs(status, run_after);
+      CREATE INDEX IF NOT EXISTS idx_memory_jobs_kind
+        ON memory_jobs(kind);
 
       CREATE TABLE IF NOT EXISTS entities (
         path             TEXT PRIMARY KEY,
@@ -4592,6 +5417,8 @@ class LocalStorage implements IStorage {
       this.logger.info(`migrated: backfilled entities_fts with ${entCount} entity row(s)`);
     }
 
+    this.maybeBackfillMemoryTreeFts();
+
     // 8. One-shot reclaim & re-stats. Driven by PRAGMA user_version so
     //    we only pay the VACUUM cost once across all installs that
     //    upgrade through this migration. ANALYZE is cheap and updates
@@ -4619,6 +5446,54 @@ class LocalStorage implements IStorage {
         this.logger.debug('ANALYZE failed', { err: String(err) });
       }
       this.db.pragma(`user_version = ${TARGET_VERSION}`);
+    }
+  }
+
+  private maybeBackfillMemoryTreeFts(): void {
+    if (this.tableExists('memory_leaves') && this.tableExists('memory_leaf_text')) {
+      const leafCount = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM memory_leaves').get() as { n: number }
+      ).n;
+      const leafFtsCount = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM memory_leaf_text').get() as { n: number }
+      ).n;
+      if (leafCount > 0 && leafFtsCount !== leafCount) {
+        const rows = this.db.prepare('SELECT * FROM memory_leaves').all() as MemoryLeafRow[];
+        const del = this.db.prepare('DELETE FROM memory_leaf_text WHERE leaf_id = ?');
+        const ins = this.db.prepare(
+          'INSERT INTO memory_leaf_text (leaf_id, title, body, entity_search, scope_search, kind) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        const clear = this.db.prepare('DELETE FROM memory_leaf_text');
+        const tx = this.db.transaction(() => {
+          clear.run();
+          for (const row of rows) this.runMemoryLeafFtsUpsert(del, ins, memoryLeafFromRow(row));
+        });
+        tx();
+        this.logger.info(`migrated: backfilled memory_leaf_text with ${leafCount} row(s)`);
+      }
+    }
+
+    if (this.tableExists('memory_nodes') && this.tableExists('memory_node_text')) {
+      const nodeCount = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM memory_nodes').get() as { n: number }
+      ).n;
+      const nodeFtsCount = (
+        this.db.prepare('SELECT COUNT(*) AS n FROM memory_node_text').get() as { n: number }
+      ).n;
+      if (nodeCount > 0 && nodeFtsCount !== nodeCount) {
+        const rows = this.db.prepare('SELECT * FROM memory_nodes').all() as MemoryNodeRow[];
+        const del = this.db.prepare('DELETE FROM memory_node_text WHERE node_id = ?');
+        const ins = this.db.prepare(
+          'INSERT INTO memory_node_text (node_id, title, summary, entity_search, scope_search, status) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        const clear = this.db.prepare('DELETE FROM memory_node_text');
+        const tx = this.db.transaction(() => {
+          clear.run();
+          for (const row of rows) this.runMemoryNodeFtsUpsert(del, ins, memoryNodeFromRow(row));
+        });
+        tx();
+        this.logger.info(`migrated: backfilled memory_node_text with ${nodeCount} row(s)`);
+      }
     }
   }
 
@@ -5569,6 +6444,11 @@ function entityToFtsText(
   const tail = path.split('/').slice(-1)[0] ?? path;
   const tokens = tail.replace(/[-_/]+/g, ' ').trim();
   return kind ? `${tokens} ${kind}` : tokens;
+}
+
+function memoryScopeToFtsText(scope: string, scopeId: string): string {
+  const scopeTokens = scopeId.replace(/[-_/.:]+/g, ' ').trim();
+  return [scope, scopeId, scopeTokens].filter(Boolean).join(' ');
 }
 
 function ftsBodyText(text: string, url: string | null | undefined): string {

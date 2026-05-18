@@ -103,7 +103,7 @@ export default function DocsPage({ pathname }: { pathname?: string }) {
 
       <footer>
         <div className="container footer-inner">
-          <div>© {new Date().getFullYear()} beside · Local-first AI memory.</div>
+          <div>© {new Date().getFullYear()} beside · Private AI memory.</div>
           <div style={{ display: "flex", gap: 22 }}>
             <a href="https://github.com/sagivo/beside">GitHub</a>
             <a href="/privacy">Privacy</a>

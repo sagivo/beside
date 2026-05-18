@@ -76,18 +76,13 @@ const StorageSchema = z.object({
     max_size_gb: z.number().positive().default(50),
     retention_days: z.number().int().nonnegative().default(365),
     vacuum: z.object({
-      compress_after_days: z.number().int().nonnegative().default(1),
-      compress_after_minutes: z.number().int().nonnegative().optional(),
+      compress_after_days: z.number().int().nonnegative().default(365),
       compress_quality: z.number().int().min(1).max(100).default(40),
-      thumbnail_after_days: z.number().int().nonnegative().default(30),
-      thumbnail_after_minutes: z.number().int().nonnegative().optional(),
-      thumbnail_max_dim: z.number().int().min(64).max(2048).default(480),
-      delete_after_days: z.number().int().nonnegative().default(180),
-      delete_after_minutes: z.number().int().nonnegative().optional(),
+      delete_after_days: z.number().int().nonnegative().default(0),
       tick_interval_min: z.number().int().positive().default(15),
       batch_size: z.number().int().positive().default(50),
-    }).default({ compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 }),
-  }).default({ path: '~/.beside', max_size_gb: 50, retention_days: 365, vacuum: { compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 } }),
+    }).default({ compress_after_days: 365, compress_quality: 40, delete_after_days: 0, tick_interval_min: 15, batch_size: 50 }),
+  }).default({ path: '~/.beside', max_size_gb: 50, retention_days: 365, vacuum: { compress_after_days: 365, compress_quality: 40, delete_after_days: 0, tick_interval_min: 15, batch_size: 50 } }),
 }).passthrough();
 
 const IndexSchema = z.object({
@@ -288,11 +283,9 @@ storage:
     max_size_gb: 50
     retention_days: 365
     vacuum:
-      compress_after_minutes: 60
+      compress_after_days: 365
       compress_quality: 40
-      thumbnail_after_days: 30
-      thumbnail_max_dim: 480
-      delete_after_days: 180
+      delete_after_days: 0
       tick_interval_min: 15
       batch_size: 50
 

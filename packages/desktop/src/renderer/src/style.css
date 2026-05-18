@@ -80,11 +80,20 @@
   --aurora-sage: #c7dccb;
   --aurora-blush: #ecd5d5;
 
-  --gradient-brand: linear-gradient(135deg, #6b6cf0 0%, #4a4be0 100%);
+  --gradient-brand: linear-gradient(
+    135deg,
+    #3ad6ff 0%,
+    #6b6cf0 32%,
+    #8a5bff 58%,
+    #c84df0 80%,
+    #ff5fa8 100%
+  );
   --gradient-brand-soft: linear-gradient(
     135deg,
-    rgba(107, 108, 240, 0.14) 0%,
-    rgba(74, 75, 224, 0.10) 100%
+    rgba(58, 214, 255, 0.14) 0%,
+    rgba(107, 108, 240, 0.14) 38%,
+    rgba(200, 77, 240, 0.12) 72%,
+    rgba(255, 95, 168, 0.12) 100%
   );
   --gradient-page:
     radial-gradient(120% 80% at 50% -10%, #eef1fa 0%, transparent 60%),
@@ -170,11 +179,20 @@
   --aurora-sage: #4f7159;
   --aurora-blush: #8a4f5e;
 
-  --gradient-brand: linear-gradient(135deg, #8b8cf5 0%, #6b6cf0 100%);
+  --gradient-brand: linear-gradient(
+    135deg,
+    #5fdcff 0%,
+    #8b8cf5 32%,
+    #a380ff 58%,
+    #d96bf0 80%,
+    #ff7fb5 100%
+  );
   --gradient-brand-soft: linear-gradient(
     135deg,
-    rgba(139, 140, 245, 0.18) 0%,
-    rgba(107, 108, 240, 0.12) 100%
+    rgba(95, 220, 255, 0.18) 0%,
+    rgba(139, 140, 245, 0.18) 38%,
+    rgba(217, 107, 240, 0.16) 72%,
+    rgba(255, 127, 181, 0.16) 100%
   );
   --gradient-page:
     radial-gradient(120% 80% at 50% -10%, rgba(46, 42, 96, 0.55) 0%, transparent 60%),
@@ -560,6 +578,22 @@
 }
 .pulse-soft {
   animation: pulse-soft 2s ease-in-out infinite;
+}
+
+/* Mascot idle bob — gentle float + slight rotation, ~6s loop.
+   Used by mascot images in onboarding and empty states so they
+   feel alive without being distracting. */
+@keyframes mascot-bob {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50%      { transform: translateY(-6px) rotate(2deg); }
+}
+.mascot-bob {
+  animation: mascot-bob 6s ease-in-out infinite;
+  transform-origin: 50% 90%;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mascot-bob { animation: none; }
 }
 
 @keyframes shimmer {

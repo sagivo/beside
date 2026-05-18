@@ -29,7 +29,7 @@ export const DOC_PAGES: DocPage[] = [
     path: "/docs/",
     title: "Overview",
     group: "Start here",
-    description: "Why Beside exists and how the pieces fit together.",
+    description: "Why Beside is your private AI, and how the pieces fit together.",
     Component: Overview,
   },
   {
@@ -77,7 +77,7 @@ export const DOC_PAGES: DocPage[] = [
     path: "/docs/index-layer/",
     title: "Index strategies",
     group: "Layers",
-    description: "Turn raw signals into a self-organising Markdown wiki and memory chunks.",
+    description: "Turn raw signals into a self-organising Markdown wiki, chunks, and memory tree.",
     Component: Index,
   },
   {
@@ -93,7 +93,7 @@ export const DOC_PAGES: DocPage[] = [
     path: "/docs/export/",
     title: "Export & MCP",
     group: "Layers",
-    description: "Make Beside memory available to Claude, Cursor, ChatGPT, and any MCP agent.",
+    description: "Make Beside memory, memory trees, and evidence available to any MCP agent.",
     Component: Export,
   },
   {

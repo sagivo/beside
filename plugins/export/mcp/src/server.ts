@@ -5,12 +5,14 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import http from 'node:http';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   IStorage,
   IIndexStrategy,
   IModelAdapter,
   Logger,
+  RawEvent,
   RawEventType,
   Frame,
   EntityKind,
@@ -19,6 +21,13 @@ import type {
   MemoryChunk,
   MemoryChunkKind,
   MemoryChunkSemanticMatch,
+  MemoryLeaf,
+  MemoryNode,
+  MemoryScope,
+  Meeting,
+  DayEvent,
+  CalendarEvent,
+  IndexPage,
 } from '@beside/interfaces';
 import { renderJournalMarkdown } from '@beside/interfaces';
 import { isSelfFrame } from './parsers.js';
@@ -60,6 +69,16 @@ type MemoryChunkMatch = {
   chunk: MemoryChunk;
   retrieval: 'keyword' | 'semantic' | 'keyword+semantic';
   semanticScore?: number;
+};
+
+type MemoryLeafMatch = {
+  leaf: MemoryLeaf;
+  score: number;
+};
+
+type MemoryNodeMatch = {
+  node: MemoryNode;
+  score: number;
 };
 
 type StoredMeeting = NonNullable<Awaited<ReturnType<IStorage['getMeeting']>>>;
@@ -150,7 +169,7 @@ export function createMcpServer(
     'search_memory',
     {
       description:
-        'Blended search: returns the best matching frames (specific moments), memory chunks, and wiki pages (synthesised summaries). Use this as the default entrypoint. Natural date phrases such as "today", "yesterday", "last week", and "May 7" constrain frame/chunk retrieval. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
+        'Blended search: returns the best matching frames (specific moments), memory chunks, persistent memory nodes/leaves, and wiki pages (synthesised summaries). Use this as the default entrypoint. Natural date phrases such as "today", "yesterday", "last week", and "May 7" constrain retrieval. Beside dashboard frames are filtered out by default — pass `exclude_self: false` to include them.',
       inputSchema: {
         query: z.string().describe('Natural-language search query.'),
         limit: z.number().int().min(1).max(50).optional().describe('Max results per category, default 5.'),
@@ -223,7 +242,38 @@ export function createMcpServer(
         query: rankingQuery,
       });
 
-      // 3. Legacy wiki page retrieval remains in the response for
+      // 3. Memory-tree retrieval searches the persistent leaf/node layer
+      // above chunks. Chunks remain the semantic vector surface; nodes
+      // provide the durable rollups that survive export/re-index cycles.
+      let leafMatches: MemoryLeafMatch[] = [];
+      let nodeMatches: MemoryNodeMatch[] = [];
+      if (services.storage.listMemoryLeaves) {
+        try {
+          const leaves = await services.storage.listMemoryLeaves({
+            text: retrievalQuery ?? undefined,
+            status: 'admitted',
+            ...dateFilters,
+            limit: fetchCap * 3,
+          });
+          leafMatches = rankMemoryLeaves(leaves, cap, rankingQuery);
+        } catch (err) {
+          log.debug('listMemoryLeaves unavailable', { err: String(err) });
+        }
+      }
+      if (services.storage.listMemoryNodes) {
+        try {
+          const nodes = await services.storage.listMemoryNodes({
+            text: retrievalQuery ?? undefined,
+            ...dateFilters,
+            limit: fetchCap * 2,
+          });
+          nodeMatches = rankMemoryNodes(nodes, cap, rankingQuery);
+        } catch (err) {
+          log.debug('listMemoryNodes unavailable', { err: String(err) });
+        }
+      }
+
+      // 4. Legacy wiki page retrieval remains in the response for
       // clients that still consume page_matches directly. Most callers
       // should prefer memory_chunk_matches because chunks include pages
       // plus non-page summaries and manual memories.
@@ -246,6 +296,8 @@ export function createMcpServer(
           semantic_score: m.semanticScore,
         })),
         memory_chunk_matches: blendedChunks.map((m) => memoryChunkPreview(m, rankingQuery)),
+        memory_node_matches: nodeMatches.map((m) => memoryNodePreview(m, rankingQuery)),
+        memory_leaf_matches: leafMatches.map((m) => memoryLeafPreview(m, rankingQuery)),
         page_matches: ranked.map((r) => ({
           path: r.page.path,
           score: r.score,
@@ -255,7 +307,7 @@ export function createMcpServer(
         })),
       };
       log.debug(
-        `search_memory "${query}" → ${blendedFrames.length} frames, ${blendedChunks.length} chunks, ${ranked.length} pages`,
+        `search_memory "${query}" → ${blendedFrames.length} frames, ${blendedChunks.length} chunks, ${nodeMatches.length} nodes, ${leafMatches.length} leaves, ${ranked.length} pages`,
       );
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -298,6 +350,9 @@ export function createMcpServer(
         sourceRefs: source_refs ?? ['manual:mcp'],
       });
       await services.storage.upsertMemoryChunks([chunk]);
+      if (services.storage.upsertMemoryLeaves) {
+        await services.storage.upsertMemoryLeaves([memoryLeafFromManualChunk(chunk)]);
+      }
 
       let embedded = false;
       if (services.model && typeof services.model.embed === 'function') {
@@ -348,6 +403,9 @@ export function createMcpServer(
       }
       const modelName = model ?? services.embeddingModelName;
       const stats = await services.storage.getMemoryIndexStats(modelName);
+      const recentJobs = services.storage.listMemoryJobs
+        ? await services.storage.listMemoryJobs({ limit: 20 }).catch(() => [])
+        : [];
       return {
         content: [{
           type: 'text',
@@ -357,6 +415,121 @@ export function createMcpServer(
             embedding_search_weight: normaliseSemanticWeight(services.embeddingSearchWeight),
             last_reindex: lastReindex,
             ...stats,
+            recent_memory_jobs: recentJobs.map((job) => ({
+              id: job.id,
+              kind: job.kind,
+              status: job.status,
+              run_after: job.runAfter,
+              attempts: job.attempts,
+              last_error: job.lastError,
+              updated_at: job.updatedAt,
+            })),
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_memory_tree',
+    {
+      description:
+        'Inspect the persistent memory tree: scoped rollup nodes plus admitted evidence-backed leaves. Use this when you need the durable memory structure behind search results.',
+      inputSchema: {
+        query: z.string().optional().describe('Optional keyword query across node summaries and leaf bodies.'),
+        scope: z.enum(['source', 'topic', 'day', 'global']).optional().describe('Restrict nodes/leaves to a memory scope.'),
+        scope_id: z.string().optional().describe('Restrict to a specific scope id, e.g. projects/beside or 2026-05-17.'),
+        day: z.string().optional().describe('Restrict to one YYYY-MM-DD day.'),
+        include_leaves: z.boolean().optional().describe('Include supporting leaves. Default true.'),
+        limit: z.number().int().min(1).max(100).optional().describe('Max nodes/leaves returned per category. Default 25.'),
+      },
+    },
+    async ({ query, scope, scope_id, day, include_leaves, limit }) => {
+      if (!services.storage.listMemoryNodes) {
+        return {
+          content: [{ type: 'text', text: 'Storage plugin does not expose memory nodes.' }],
+          isError: true,
+        };
+      }
+      const cap = limit ?? 25;
+      const nodeQuery = {
+        text: query,
+        scope: scope as MemoryScope | undefined,
+        scopeId: scope_id,
+        day,
+        limit: cap,
+      };
+      const nodes = await services.storage.listMemoryNodes(nodeQuery);
+      const leaves = include_leaves === false || !services.storage.listMemoryLeaves
+        ? []
+        : await services.storage.listMemoryLeaves({
+          text: query,
+          status: 'admitted',
+          scope: scope as MemoryScope | undefined,
+          scopeId: scope_id,
+          day,
+          limit: cap,
+        });
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            query: query ?? null,
+            scope: scope ?? null,
+            scope_id: scope_id ?? null,
+            day: day ?? null,
+            nodes: nodes.map((node) => memoryNodePreview({ node, score: memoryNodeQuerySupport(node, query) }, query ?? '')),
+            leaves: leaves.map((leaf) => memoryLeafPreview({ leaf, score: memoryLeafQuerySupport(leaf, query) }, query ?? '')),
+          }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    'get_memory_evidence',
+    {
+      description:
+        'Resolve the evidence behind a memory leaf, memory node, or memory chunk. Returns source frames with nearby context, raw events, meetings, day events, and wiki pages so a memory can be verified or re-indexed from proof.',
+      inputSchema: {
+        memory_id: z.string().optional().describe('Memory leaf/node/chunk id to inspect.'),
+        memory_type: z.enum(['leaf', 'node', 'chunk']).optional().describe('Type of memory_id. Defaults by id prefix when possible.'),
+        evidence_refs: z
+          .array(z.string())
+          .optional()
+          .describe('Explicit evidence refs such as frame:<id>, event:<id>, meeting:<id>, day_event:<id>, or index:<path>.'),
+        include_context: z.boolean().optional().describe('Include nearby frames around frame refs. Default true.'),
+        before: z.number().int().min(0).max(20).optional().describe('Frames before each frame ref. Default 3.'),
+        after: z.number().int().min(0).max(20).optional().describe('Frames after each frame ref. Default 3.'),
+        limit: z.number().int().min(1).max(200).optional().describe('Max evidence refs to resolve. Default 50.'),
+      },
+    },
+    async ({ memory_id, memory_type, evidence_refs, include_context, before, after, limit }) => {
+      const resolved = await resolveMemoryEvidenceTarget(services, {
+        memoryId: memory_id,
+        memoryType: memory_type,
+        evidenceRefs: evidence_refs,
+        limit: limit ?? 50,
+      });
+      if (!resolved.ok) {
+        return {
+          content: [{ type: 'text', text: resolved.message }],
+          isError: true,
+        };
+      }
+      const evidence = await resolveEvidenceRefs(services, resolved.refs, {
+        includeContext: include_context !== false,
+        before: before ?? 3,
+        after: after ?? 3,
+        textExcerptChars,
+      });
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            target: resolved.target,
+            evidence_refs: resolved.refs,
+            ...evidence,
           }, null, 2),
         }],
       };
@@ -2037,6 +2210,389 @@ function memoryChunkRecord(chunk: MemoryChunk): Record<string, unknown> {
   };
 }
 
+function memoryLeafPreview(match: MemoryLeafMatch, query: string): Record<string, unknown> {
+  const leaf = match.leaf;
+  return {
+    id: leaf.id,
+    kind: leaf.kind,
+    scope: leaf.scope,
+    scope_id: leaf.scopeId,
+    source_id: leaf.sourceId,
+    source_kind: leaf.sourceKind,
+    title: leaf.title,
+    entity_path: leaf.entityPath,
+    entity_kind: leaf.entityKind,
+    day: leaf.day,
+    timestamp: leaf.timestamp,
+    time_start: leaf.timeStart,
+    time_end: leaf.timeEnd,
+    status: leaf.status,
+    confidence: leaf.confidence,
+    importance: leaf.importance,
+    evidence_refs: leaf.evidenceRefs,
+    content_hash: leaf.contentHash,
+    score: match.score,
+    excerpt: extractRelevantTextExcerpt(leaf.body, query, 1200),
+  };
+}
+
+function memoryNodePreview(match: MemoryNodeMatch, query: string): Record<string, unknown> {
+  const node = match.node;
+  return {
+    id: node.id,
+    scope: node.scope,
+    scope_id: node.scopeId,
+    level: node.level,
+    title: node.title,
+    entity_path: node.entityPath,
+    entity_kind: node.entityKind,
+    day: node.day,
+    time_start: node.timeStart,
+    time_end: node.timeEnd,
+    status: node.status,
+    child_count: node.childRefs.length,
+    evidence_refs: node.evidenceRefs.slice(0, 40),
+    content_hash: node.contentHash,
+    score: match.score,
+    excerpt: extractRelevantTextExcerpt(node.summary, query, 1400),
+  };
+}
+
+type EvidenceRef = {
+  raw: string;
+  kind: string;
+  id: string;
+};
+
+type MemoryEvidenceTargetResult =
+  | { ok: true; target: Record<string, unknown>; refs: string[] }
+  | { ok: false; message: string };
+
+async function resolveMemoryEvidenceTarget(
+  services: McpServices,
+  input: {
+    memoryId?: string;
+    memoryType?: 'leaf' | 'node' | 'chunk';
+    evidenceRefs?: string[];
+    limit: number;
+  },
+): Promise<MemoryEvidenceTargetResult> {
+  const explicitRefs = uniqueRefs(input.evidenceRefs ?? []).slice(0, input.limit);
+  if (explicitRefs.length > 0 && !input.memoryId) {
+    return {
+      ok: true,
+      target: { type: 'evidence_refs' },
+      refs: explicitRefs,
+    };
+  }
+
+  if (!input.memoryId) {
+    return {
+      ok: false,
+      message: 'Provide memory_id or evidence_refs.',
+    };
+  }
+
+  const type = input.memoryType ?? inferMemoryIdType(input.memoryId);
+  if (!type) {
+    return {
+      ok: false,
+      message: 'Unable to infer memory_type. Pass one of: leaf, node, chunk.',
+    };
+  }
+
+  if (type === 'leaf') {
+    if (!services.storage.listMemoryLeaves) {
+      return { ok: false, message: 'Storage plugin does not expose memory leaves.' };
+    }
+    const [leaf] = await services.storage.listMemoryLeaves({ id: input.memoryId, limit: 1 });
+    if (!leaf) return { ok: false, message: `No memory leaf found with id "${input.memoryId}".` };
+    return {
+      ok: true,
+      target: { type: 'leaf', ...memoryLeafPreview({ leaf, score: 1 }, '') },
+      refs: uniqueRefs([...explicitRefs, ...leaf.evidenceRefs]).slice(0, input.limit),
+    };
+  }
+
+  if (type === 'node') {
+    if (!services.storage.listMemoryNodes) {
+      return { ok: false, message: 'Storage plugin does not expose memory nodes.' };
+    }
+    const [node] = await services.storage.listMemoryNodes({ id: input.memoryId, limit: 1 });
+    if (!node) return { ok: false, message: `No memory node found with id "${input.memoryId}".` };
+    return {
+      ok: true,
+      target: { type: 'node', ...memoryNodePreview({ node, score: 1 }, '') },
+      refs: uniqueRefs([...explicitRefs, ...node.evidenceRefs]).slice(0, input.limit),
+    };
+  }
+
+  const [chunk] = await services.storage.searchMemoryChunks({ id: input.memoryId, limit: 1 });
+  if (!chunk) return { ok: false, message: `No memory chunk found with id "${input.memoryId}".` };
+  return {
+    ok: true,
+    target: { type: 'chunk', ...memoryChunkRecord(chunk) },
+    refs: uniqueRefs([...explicitRefs, ...chunk.sourceRefs]).slice(0, input.limit),
+  };
+}
+
+function inferMemoryIdType(id: string): 'leaf' | 'node' | 'chunk' | null {
+  if (id.startsWith('leaf_')) return 'leaf';
+  if (id.startsWith('node_')) return 'node';
+  if (id.startsWith('mem_')) return 'chunk';
+  return null;
+}
+
+function uniqueRefs(refs: string[]): string[] {
+  return [...new Set(refs.map((ref) => ref.trim()).filter(Boolean))];
+}
+
+function parseEvidenceRef(ref: string): EvidenceRef {
+  const idx = ref.indexOf(':');
+  if (idx === -1) return { raw: ref, kind: 'unknown', id: ref };
+  return {
+    raw: ref,
+    kind: ref.slice(0, idx).trim(),
+    id: ref.slice(idx + 1).trim(),
+  };
+}
+
+async function resolveEvidenceRefs(
+  services: McpServices,
+  refs: string[],
+  options: {
+    includeContext: boolean;
+    before: number;
+    after: number;
+    textExcerptChars: number;
+  },
+): Promise<Record<string, unknown>> {
+  const parsed = uniqueRefs(refs).map(parseEvidenceRef);
+  const frames: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
+  const meetings: Record<string, unknown>[] = [];
+  const dayEvents: Record<string, unknown>[] = [];
+  const calendarEvents: Record<string, unknown>[] = [];
+  const indexPages: Record<string, unknown>[] = [];
+  const unresolved: EvidenceRef[] = [];
+
+  for (const ref of parsed) {
+    try {
+      if (ref.kind === 'frame') {
+        const ctx = await services.storage.getFrameContext(
+          ref.id,
+          options.includeContext ? options.before : 0,
+          options.includeContext ? options.after : 0,
+        );
+        if (!ctx) {
+          unresolved.push(ref);
+          continue;
+        }
+        frames.push({
+          ref: ref.raw,
+          anchor: framePreview(ctx.anchor, options.textExcerptChars),
+          before: options.includeContext
+            ? ctx.before.map((frame) => framePreview(frame, options.textExcerptChars))
+            : [],
+          after: options.includeContext
+            ? ctx.after.map((frame) => framePreview(frame, options.textExcerptChars))
+            : [],
+        });
+        continue;
+      }
+
+      if (ref.kind === 'event') {
+        const [event] = await services.storage.readEvents({ ids: [ref.id], limit: 1 });
+        if (event) events.push({ ref: ref.raw, ...rawEventEvidenceRecord(event) });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      if (ref.kind === 'meeting') {
+        const meeting = await services.storage.getMeeting(ref.id);
+        if (meeting) meetings.push({ ref: ref.raw, ...meetingEvidenceRecord(meeting) });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      if (ref.kind === 'day_event') {
+        const event = await services.storage.getDayEvent(ref.id);
+        if (event) dayEvents.push({ ref: ref.raw, ...dayEventEvidenceRecord(event) });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      if (ref.kind === 'calendar_event') {
+        const event = await services.storage.getCalendarEvent(ref.id);
+        if (event) calendarEvents.push({ ref: ref.raw, ...calendarEventEvidenceRecord(event) });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      if (ref.kind === 'index') {
+        const page = await services.strategy.readPage(ref.id);
+        if (page) indexPages.push({ ref: ref.raw, ...indexPageEvidenceRecord(page) });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      if (ref.kind === 'note') {
+        const note = await readUserMemoryNote(services.strategy, ref.id);
+        if (note) indexPages.push({ ref: ref.raw, ...note });
+        else unresolved.push(ref);
+        continue;
+      }
+
+      unresolved.push(ref);
+    } catch {
+      unresolved.push(ref);
+    }
+  }
+
+  return {
+    frames,
+    events,
+    meetings,
+    day_events: dayEvents,
+    calendar_events: calendarEvents,
+    index_pages: indexPages,
+    unresolved_refs: unresolved.map((ref) => ref.raw),
+  };
+}
+
+async function readUserMemoryNote(strategy: IIndexStrategy, notePath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const state = await strategy.getState();
+    const roots = [...new Set([
+      path.join(state.rootPath, 'notes'),
+      path.join(path.dirname(state.rootPath), 'notes'),
+    ])];
+    for (const root of roots) {
+      const abs = path.resolve(root, notePath);
+      if (!abs.startsWith(path.resolve(root) + path.sep) && abs !== path.resolve(root)) continue;
+      try {
+        const [content, stat] = await Promise.all([
+          fs.readFile(abs, 'utf8'),
+          fs.stat(abs),
+        ]);
+        return {
+          path: notePath,
+          kind: 'note',
+          updated_at: stat.mtime.toISOString(),
+          excerpt: truncate(content, 2400),
+        };
+      } catch {
+        // try next root
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function rawEventEvidenceRecord(event: RawEvent): Record<string, unknown> {
+  return {
+    id: event.id,
+    timestamp: event.timestamp,
+    type: event.type,
+    app: event.app,
+    app_bundle_id: event.app_bundle_id,
+    window_title: event.window_title,
+    url: event.url,
+    asset_path: event.asset_path,
+    duration_ms: event.duration_ms,
+    idle_before_ms: event.idle_before_ms,
+    screen_index: event.screen_index,
+    privacy_filtered: event.privacy_filtered,
+    capture_plugin: event.capture_plugin,
+    content_excerpt: event.content ? truncate(event.content, 1200) : null,
+    metadata: event.metadata,
+  };
+}
+
+function meetingEvidenceRecord(meeting: Meeting): Record<string, unknown> {
+  return {
+    id: meeting.id,
+    entity_path: meeting.entity_path,
+    title: meeting.title,
+    platform: meeting.platform,
+    started_at: meeting.started_at,
+    ended_at: meeting.ended_at,
+    day: meeting.day,
+    duration_ms: meeting.duration_ms,
+    frame_count: meeting.frame_count,
+    screenshot_count: meeting.screenshot_count,
+    audio_chunk_count: meeting.audio_chunk_count,
+    transcript_chars: meeting.transcript_chars,
+    summary_status: meeting.summary_status,
+    summary: meeting.summary_json,
+    summary_md_excerpt: meeting.summary_md ? truncate(meeting.summary_md, 1600) : null,
+    attendees: meeting.attendees,
+    links: meeting.links,
+    failure_reason: meeting.failure_reason,
+    updated_at: meeting.updated_at,
+  };
+}
+
+function dayEventEvidenceRecord(event: DayEvent): Record<string, unknown> {
+  return {
+    id: event.id,
+    day: event.day,
+    starts_at: event.starts_at,
+    ends_at: event.ends_at,
+    kind: event.kind,
+    source: event.source,
+    title: event.title,
+    source_app: event.source_app,
+    context_md: event.context_md,
+    attendees: event.attendees,
+    links: event.links,
+    meeting_id: event.meeting_id,
+    evidence_frame_ids: event.evidence_frame_ids,
+    content_hash: event.content_hash,
+    status: event.status,
+    failure_reason: event.failure_reason,
+    created_at: event.created_at,
+    updated_at: event.updated_at,
+  };
+}
+
+function calendarEventEvidenceRecord(event: CalendarEvent): Record<string, unknown> {
+  return {
+    id: event.id,
+    source_key: event.source_key,
+    provider: event.provider,
+    day: event.day,
+    starts_at: event.starts_at,
+    ends_at: event.ends_at,
+    title: event.title,
+    location: event.location,
+    attendees: event.attendees,
+    links: event.links,
+    notes: event.notes,
+    source_app: event.source_app,
+    source_url: event.source_url,
+    evidence_frame_ids: event.evidence_frame_ids,
+    status: event.status,
+    meeting_id: event.meeting_id,
+    content_hash: event.content_hash,
+    created_at: event.created_at,
+    updated_at: event.updated_at,
+  };
+}
+
+function indexPageEvidenceRecord(page: IndexPage): Record<string, unknown> {
+  return {
+    path: page.path,
+    last_updated: page.lastUpdated,
+    source_event_ids: page.sourceEventIds,
+    backlinks: page.backlinks,
+    evidence_hash: page.evidenceHash,
+    excerpt: truncate(page.content, 2400),
+  };
+}
+
 function buildManualMemoryChunk(input: {
   body: string;
   title?: string;
@@ -2074,6 +2630,47 @@ function buildManualMemoryChunk(input: {
   };
   chunk.contentHash = hashText(memoryChunkEmbeddingContent(chunk));
   return chunk;
+}
+
+function memoryLeafScope(chunk: MemoryChunk): { scope: MemoryScope; scopeId: string } {
+  if (chunk.entityPath) return { scope: 'topic', scopeId: chunk.entityPath };
+  if (chunk.day) return { scope: 'day', scopeId: chunk.day };
+  return { scope: 'global', scopeId: 'manual' };
+}
+
+function memoryLeafFromManualChunk(chunk: MemoryChunk): MemoryLeaf {
+  const scope = memoryLeafScope(chunk);
+  const body = chunk.body.trim();
+  const identity = [
+    chunk.id,
+    chunk.kind,
+    chunk.sourceId,
+    chunk.contentHash,
+    body,
+  ].join('\n');
+  return {
+    id: `leaf_${hashText(identity).slice(0, 24)}`,
+    kind: chunk.kind,
+    sourceId: chunk.sourceId,
+    sourceKind: chunk.kind,
+    scope: scope.scope,
+    scopeId: scope.scopeId,
+    title: chunk.title,
+    body,
+    entityPath: chunk.entityPath,
+    entityKind: chunk.entityKind,
+    day: chunk.day,
+    timestamp: chunk.timestamp,
+    timeStart: chunk.timestamp,
+    timeEnd: chunk.timestamp,
+    evidenceRefs: chunk.sourceRefs,
+    contentHash: chunk.contentHash,
+    status: 'admitted',
+    confidence: 1,
+    importance: chunk.kind === 'procedure' ? 0.95 : 0.9,
+    createdAt: chunk.createdAt,
+    updatedAt: chunk.updatedAt,
+  };
 }
 
 function inferMemoryTitle(body: string): string {
@@ -2550,6 +3147,66 @@ function blendMemoryChunkMatches(
     }));
 }
 
+function rankMemoryLeaves(
+  leaves: MemoryLeaf[],
+  limit: number,
+  query: string | undefined,
+): MemoryLeafMatch[] {
+  const ranked = leaves
+    .map((leaf, idx) => {
+      const support = memoryLeafQuerySupport(leaf, query);
+      const recency = 0.05 * recencyScore(leaf.timestamp ?? leaf.timeEnd ?? leaf.updatedAt);
+      const importance = 0.12 * clamp01(leaf.importance ?? 0);
+      const confidence = 0.08 * clamp01(leaf.confidence ?? 0);
+      const evidence = Math.min(0.08, leaf.evidenceRefs.length * 0.015);
+      const rankHint = 1 / Math.sqrt(idx + 2);
+      const score = 0.46 * support + 0.18 * rankHint + recency + importance + confidence + evidence;
+      return {
+        leaf,
+        score,
+        rankScore: score,
+        support,
+      };
+    })
+    .filter((m) => !query || m.support >= 0.24)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.leaf.timestamp ?? b.leaf.updatedAt).localeCompare(a.leaf.timestamp ?? a.leaf.updatedAt);
+    });
+  return diverseSelect(ranked, limit, (a, b) => memoryLeafSimilarity(a.leaf, b.leaf))
+    .map(({ leaf, score }) => ({ leaf, score }));
+}
+
+function rankMemoryNodes(
+  nodes: MemoryNode[],
+  limit: number,
+  query: string | undefined,
+): MemoryNodeMatch[] {
+  const ranked = nodes
+    .map((node, idx) => {
+      const support = memoryNodeQuerySupport(node, query);
+      const recency = 0.04 * recencyScore(node.timeEnd ?? node.updatedAt);
+      const breadth = Math.min(0.12, node.childRefs.length * 0.01);
+      const evidence = Math.min(0.08, node.evidenceRefs.length * 0.006);
+      const level = Math.max(0, 0.05 - Math.max(0, node.level - 1) * 0.02);
+      const rankHint = 1 / Math.sqrt(idx + 2);
+      const score = 0.5 * support + 0.16 * rankHint + recency + breadth + evidence + level;
+      return {
+        node,
+        score,
+        rankScore: score,
+        support,
+      };
+    })
+    .filter((m) => !query || m.support >= 0.2)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.node.timeEnd ?? b.node.updatedAt).localeCompare(a.node.timeEnd ?? a.node.updatedAt);
+    });
+  return diverseSelect(ranked, limit, (a, b) => memoryNodeSimilarity(a.node, b.node))
+    .map(({ node, score }) => ({ node, score }));
+}
+
 function normaliseSemanticWeight(value: number | undefined): number {
   if (!Number.isFinite(value ?? NaN)) return 0.35;
   return Math.max(0, Math.min(0.85, value!));
@@ -2595,6 +3252,48 @@ function memoryChunkQuerySupport(chunk: MemoryChunk, query: string | undefined):
     chunk.entityPath ?? '',
     chunk.kind,
     ...chunk.sourceRefs,
+  ].join('\n').toLowerCase();
+  let hits = 0;
+  for (const term of terms) {
+    if (containsQueryTerm(body, term)) hits += 1;
+  }
+  const exact = query.trim().length > 2 && body.includes(query.trim().toLowerCase()) ? 0.2 : 0;
+  return clamp01(hits / terms.length + exact);
+}
+
+function memoryLeafQuerySupport(leaf: MemoryLeaf, query: string | undefined): number {
+  if (!query) return 1;
+  const terms = meaningfulQueryTerms(query);
+  if (terms.length === 0) return 1;
+  const body = [
+    leaf.title,
+    leaf.body,
+    leaf.entityPath ?? '',
+    leaf.scope,
+    leaf.scopeId,
+    leaf.kind,
+    ...leaf.evidenceRefs,
+  ].join('\n').toLowerCase();
+  let hits = 0;
+  for (const term of terms) {
+    if (containsQueryTerm(body, term)) hits += 1;
+  }
+  const exact = query.trim().length > 2 && body.includes(query.trim().toLowerCase()) ? 0.2 : 0;
+  return clamp01(hits / terms.length + exact);
+}
+
+function memoryNodeQuerySupport(node: MemoryNode, query: string | undefined): number {
+  if (!query) return 1;
+  const terms = meaningfulQueryTerms(query);
+  if (terms.length === 0) return 1;
+  const body = [
+    node.title,
+    node.summary,
+    node.entityPath ?? '',
+    node.scope,
+    node.scopeId,
+    node.day ?? '',
+    ...node.evidenceRefs,
   ].join('\n').toLowerCase();
   let hits = 0;
   for (const term of terms) {
@@ -2822,6 +3521,27 @@ function memoryChunkSimilarity(a: MemoryChunk, b: MemoryChunk): number {
   if (a.entityPath && a.entityPath === b.entityPath) score += 0.42;
   if (a.day && a.day === b.day) score += 0.14;
   score += 0.2 * tokenOverlap(a.title, b.title);
+  return clamp01(score);
+}
+
+function memoryLeafSimilarity(a: MemoryLeaf, b: MemoryLeaf): number {
+  let score = 0;
+  if (a.id === b.id) return 1;
+  if (a.kind === b.kind) score += 0.14;
+  if (a.scope === b.scope && a.scopeId === b.scopeId) score += 0.36;
+  if (a.entityPath && a.entityPath === b.entityPath) score += 0.26;
+  if (a.day && a.day === b.day) score += 0.12;
+  score += 0.18 * tokenOverlap(a.title, b.title);
+  return clamp01(score);
+}
+
+function memoryNodeSimilarity(a: MemoryNode, b: MemoryNode): number {
+  let score = 0;
+  if (a.id === b.id) return 1;
+  if (a.scope === b.scope && a.scopeId === b.scopeId) score += 0.52;
+  if (a.entityPath && a.entityPath === b.entityPath) score += 0.22;
+  if (a.day && a.day === b.day) score += 0.12;
+  score += 0.18 * tokenOverlap(a.title, b.title);
   return clamp01(score);
 }
 

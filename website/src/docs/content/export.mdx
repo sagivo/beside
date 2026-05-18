@@ -2,8 +2,8 @@
 
 Exports are how Beside’s memory **leaves the runtime** — into Markdown on disk,
 into Claude or Cursor or ChatGPT via MCP, or into anything else you wire up.
-Every page write, page delete, and reorganisation summary is fanned out to
-every active export plugin.
+Every page write, page delete, reorganisation summary, and memory-tree refresh
+is fanned out to every active export plugin that cares about it.
 
 Both shipped exports run locally: the Markdown mirror writes to your own disk,
 and the MCP server binds to `127.0.0.1` so only processes on your machine can
@@ -19,6 +19,7 @@ interface IExport {
   onPageUpdate(page: IndexPage): Promise<void>;
   onPageDelete(pagePath: string): Promise<void>;
   onReorganisation(summary: ReorganisationSummary): Promise<void>;
+  onMemoryUpdate?(): Promise<void>;
   fullSync(index: IndexState, strategy: IIndexStrategy): Promise<void>;
   getStatus(): ExportStatus;
   bindServices?(services: ExportServices): void;
@@ -48,6 +49,8 @@ What it does:
   next page write rebuilds it.
 - Strips internal-only fields, renders `[[wikilinks]]` to plain relative paths,
   and writes a top-level `README.md` mirroring the index strategy’s root.
+- Writes `_memory/tree.md`, a readable snapshot of persistent memory nodes and
+  recent admitted leaves, whenever the memory tree refreshes.
 
 This is the export to point your existing tools at: Obsidian, Logseq, your own
 note-taking flow, a `git` repo, anything that consumes Markdown.
@@ -82,18 +85,26 @@ Two transports:
 
 Conceptually, agents get four kinds of tools:
 
-1. **`recall`** — semantic + keyword search over `MemoryChunk`s with optional
-   filters (`kind`, `entityPath`, `day`, `from/to`). Returns excerpts capped at
-   `text_excerpt_chars`.
+1. **`recall`** — `search_memory` blends frames, frame embeddings,
+   `MemoryChunk`s, persistent memory nodes/leaves, and wiki pages with optional
+   date filters. Returns excerpts capped at `text_excerpt_chars`.
 2. **`journal`** — daily timeline for a given day, including sessions and
    meetings, in agent-friendly Markdown.
 3. **`entities` / `sessions` / `meetings` / `day_events`** — structured listings
    so an agent can navigate by noun.
-4. **`frames`** — fine-grained access to the underlying `Frame`s when an agent
-   needs the raw screen context behind a chunk.
+4. **`frames` / `memory evidence`** — fine-grained access to the underlying
+   `Frame`s and evidence refs when an agent needs to verify a chunk, node, or
+   leaf.
 
 Plus resources: the live `index/README.md`, individual wiki pages, and meeting
 summaries.
+
+The memory-specific tools are:
+
+| Tool | What it does |
+| --- | --- |
+| `get_memory_tree` | Inspect scoped rollup nodes and admitted leaves by query, scope, scope id, or day. |
+| `get_memory_evidence` | Resolve evidence refs behind a memory node, leaf, or chunk: frames with context, raw events, meetings, day events, notes, and wiki pages. |
 
 ### Hooking it into your agent
 
@@ -158,6 +169,9 @@ const factory: PluginFactory<IExport> = ({ dataDir, config, logger }) => {
     async onPageDelete(pagePath: string) { /* archive remote */ },
     async onReorganisation(summary: ReorganisationSummary) {
       logger.info(`reorg: merged=${summary.merged.length} split=${summary.split.length}`);
+    },
+    async onMemoryUpdate() {
+      // Refresh any export surface backed by leaves / nodes / jobs.
     },
     async fullSync(state, strategy) {
       const root = await strategy.readRootIndex();

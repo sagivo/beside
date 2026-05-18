@@ -2,9 +2,10 @@
 
 The index layer turns raw frames and hook records into something an agent can
 **recall** — a hierarchical Markdown wiki on your own disk, plus typed
-`MemoryChunk` rows that power semantic search and the MCP API. The wiki is
-intentionally plain Markdown so you can read it in any editor, version it with
-git, fix things by hand, or wipe it and let Beside reconverge from raw events.
+`MemoryChunk` rows and a persistent memory tree that power semantic search and
+the MCP API. The wiki is intentionally plain Markdown so you can read it in any
+editor, version it with git, fix things by hand, or wipe it and let Beside
+reconverge from raw events.
 
 The interface (`IIndexStrategy`) is intentionally small so different strategies
 can take wildly different shapes. The default is `karpathy`, a self-organising
@@ -86,8 +87,9 @@ gated by the same load guard and cron:
 - **Event extractor** — produces `DayEvent`s for the daily journal
   (`index.events.{lookback_days, min_text_chars, max_frames_per_bucket}`).
 - **Embedding worker** — fills `searchFrameEmbeddings` /
-  `searchMemoryChunkEmbeddings` in batches of `embeddings.batch_size`, on a
-  `embeddings.tick_interval_min` cadence.
+  `searchMemoryChunkEmbeddings` in batches of `embeddings.batch_size`, builds
+  memory leaves/nodes/jobs from chunks, observations, meetings, day events, and
+  user notes, and runs on a `embeddings.tick_interval_min` cadence.
 - **Entity resolver** — resolves frames to entities (`project`, `repo`,
   `meeting`, `contact`, `channel`, `doc`, `webpage`, `app`) so the wiki can
   cluster work around real nouns.
@@ -135,7 +137,8 @@ You can trigger it on demand: `beside index --reorganise`.
 
 In parallel with the wiki on disk, the index strategy emits `MemoryChunk` rows
 into storage. These are what the MCP exporter actually serves — they’re the
-agent-facing form of the wiki:
+agent-facing form of the wiki and the semantic-vector layer beneath the memory
+tree:
 
 ```ts
 type MemoryChunkKind =
@@ -150,6 +153,42 @@ type MemoryChunkKind =
 Every chunk has a `contentHash` so embeddings can be cached and replayed; the
 runtime calls `replaceMemoryChunks` with the kinds it just regenerated, so old
 versions get cleanly evicted.
+
+## Persistent memory tree
+
+The runtime now keeps a second structure above chunks: admitted `MemoryLeaf`
+rows and scoped `MemoryNode` rollups. Leaves are evidence-backed facts,
+procedures, meeting summaries, day events, observations, and user notes. Nodes
+group those leaves by source, topic/entity, day, or global scope so recall can
+answer from a durable structure rather than a flat list of excerpts.
+
+The tree is rebuilt locally by the embedding worker and stored in SQLite:
+
+```ts
+type MemoryLeafKind =
+  | 'index_page'
+  | 'entity_summary'
+  | 'meeting_summary'
+  | 'day_event'
+  | 'fact'
+  | 'procedure'
+  | 'observation'
+  | 'note';
+
+type MemoryScope = 'source' | 'topic' | 'day' | 'global';
+```
+
+User-authored Markdown notes are admitted as `note` leaves from either
+`~/.beside/notes/` or `~/.beside/index/notes/`. Add frontmatter such as
+`entity_path: projects/acme` or `day: 2026-05-17` when you want a note grouped
+into a specific topic or day.
+
+Exports can refresh from this tree without waiting for a wiki-page diff. The
+Markdown export writes a readable snapshot to
+`~/.beside/export/markdown/_memory/tree.md`, while MCP exposes
+`search_memory`, `get_memory_tree`, and `get_memory_evidence` so an agent can
+retrieve a memory and chase it back to the underlying frames, events, meetings,
+notes, or pages.
 
 ## Writing a custom index strategy
 
@@ -191,7 +230,8 @@ Things to remember:
 - Use `storage.markIndexed('my-strategy', ids)` after each batch so you don’t
   reprocess events on restart.
 - Emit `MemoryChunk` rows alongside Markdown pages if you want MCP recall to
-  work — the wiki on disk is for humans, the chunks are for agents.
+  work — the wiki on disk is for humans, chunks are for vector recall, and the
+  runtime can promote chunks into leaves/nodes for durable memory.
 - Honour idempotence: the runtime may call `indexBatch` with the same events
   twice (network glitch, restart) and the wiki shouldn’t corrupt.
 

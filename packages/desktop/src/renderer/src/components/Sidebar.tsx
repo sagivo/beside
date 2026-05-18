@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { BrandMark } from '@/components/BrandMark';
 import { StatusFooter } from '@/components/StatusFooter';
+import logoUrl from '@/assets/logo.png';
 import type { Screen } from '@/types';
 import type { RuntimeOverview } from '@/global';
 import { useSidebar } from '@/lib/sidebar-state';
@@ -74,17 +75,38 @@ export function Sidebar({
       {/* Brand */}
       <div
         className={cn(
-          'flex items-center pt-12 pb-5',
-          collapsed ? 'justify-center px-2' : 'gap-3 px-4',
+          'flex pt-10 pb-5',
+          collapsed
+            ? 'items-center justify-center px-2'
+            : 'flex-col items-center gap-3 px-4 text-center',
         )}
       >
-        <BrandMark busy={busy} />
+        {collapsed ? (
+          <BrandMark busy={busy} />
+        ) : (
+          <div className="relative grid place-items-center">
+            <div
+              aria-hidden
+              className="absolute size-32 rounded-full bg-gradient-brand-soft blur-3xl opacity-90"
+            />
+            <img
+              src={logoUrl}
+              alt=""
+              aria-hidden
+              draggable={false}
+              className={cn(
+                'relative size-24 select-none object-contain drop-shadow-[0_14px_28px_rgba(107,108,240,0.42)] mascot-bob',
+                busy && 'brand-mark-img-busy',
+              )}
+            />
+          </div>
+        )}
         {!collapsed && (
           <div className="min-w-0">
-            <div className="brand-wordmark text-[20px] leading-none truncate">
+            <div className="brand-wordmark text-[22px] leading-none truncate">
               beside
             </div>
-            <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+            <div className="text-[11px] text-muted-foreground truncate mt-1.5">
               Your AI memory,<br />beside you
             </div>
           </div>

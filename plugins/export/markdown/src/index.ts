@@ -85,6 +85,7 @@ class MarkdownExport implements IExport {
         this.prepareMarkdownForExport(page.content, target),
       );
       await this.refreshRootIndex();
+      await this.refreshMemoryTree();
       this.lastSync = new Date().toISOString();
     } catch (err) {
       this.errorCount += 1;
@@ -99,6 +100,7 @@ class MarkdownExport implements IExport {
     try {
       await fs.unlink(path.join(this.outDir, pagePath));
       await this.refreshRootIndex();
+      await this.refreshMemoryTree();
     } catch {
       // ignore
     }
@@ -122,6 +124,12 @@ class MarkdownExport implements IExport {
     }
   }
 
+  async onMemoryUpdate(): Promise<void> {
+    if (!this.running) return;
+    await this.refreshMemoryTree();
+    this.lastSync = new Date().toISOString();
+  }
+
   async fullSync(_state: IndexState, strategy: IIndexStrategy): Promise<void> {
     if (!this.running) await this.start();
     await ensureDir(this.outDir);
@@ -130,6 +138,7 @@ class MarkdownExport implements IExport {
     this.rootIndexCache = null;
     await this.copyTree(_state.rootPath, this.outDir);
     await this.refreshRootIndex(strategy);
+    await this.refreshMemoryTree();
 
     // Day journals are now first-class index pages (`days/<day>.md`)
     // owned by the karpathy strategy, so they get mirrored by `copyTree`
@@ -212,6 +221,23 @@ class MarkdownExport implements IExport {
     }
   }
 
+  private async refreshMemoryTree(): Promise<void> {
+    const storage = this.services?.storage;
+    if (!storage?.listMemoryNodes || !storage?.listMemoryLeaves) return;
+    try {
+      const [nodes, leaves] = await Promise.all([
+        storage.listMemoryNodes({ limit: 500 }),
+        storage.listMemoryLeaves({ status: 'admitted', limit: 500 }),
+      ]);
+      const target = path.join(this.outDir, '_memory', 'tree.md');
+      await ensureDir(path.dirname(target));
+      await this.writeTextIfChanged(target, renderMemoryTreeMarkdown(nodes, leaves));
+    } catch (err) {
+      this.errorCount += 1;
+      this.logger.warn('memory tree export failed', { err: String(err) });
+    }
+  }
+
   private async writeTextIfChanged(target: string, text: string): Promise<boolean> {
     try {
       if ((await fs.readFile(target, 'utf8')) === text) return false;
@@ -241,6 +267,115 @@ function rewriteRawAssetLinks(text: string, target: string, dataDir?: string): s
   const relToData = path.relative(path.dirname(target), dataDir).replace(/\\/g, '/');
   const prefix = relToData ? `${relToData}/` : '';
   return text.replace(/(!\[[^\]]*\]\()raw\//g, `$1${prefix}raw/`);
+}
+
+function renderMemoryTreeMarkdown(
+  nodes: Awaited<ReturnType<NonNullable<IStorage['listMemoryNodes']>>>,
+  leaves: Awaited<ReturnType<NonNullable<IStorage['listMemoryLeaves']>>>,
+): string {
+  const lines = [
+    '# Memory Tree',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    '',
+    `Nodes: ${nodes.length}`,
+    `Leaves: ${leaves.length}`,
+    '',
+  ];
+  for (const node of nodes) {
+    lines.push(
+      `## ${escapeMarkdownHeading(node.title)}`,
+      '',
+      `- id: \`${node.id}\``,
+      `- scope: ${node.scope}/${node.scopeId}`,
+      `- level: ${node.level}`,
+      `- status: ${node.status}`,
+      `- child_refs: ${formatRefs(node.childRefs, 24)}`,
+      `- evidence_refs: ${formatRefs(node.evidenceRefs, 24)}`,
+      `- content_hash: \`${node.contentHash}\``,
+    );
+    if (node.timeStart || node.timeEnd) {
+      lines.push(`- time: ${node.timeStart ?? '?'} to ${node.timeEnd ?? '?'}`);
+    }
+    lines.push('', node.summary || '_No summary yet._', '');
+  }
+  if (leaves.length) {
+    lines.push('## Recent Leaves', '');
+    for (const leaf of leaves.slice(0, 100)) {
+      lines.push(
+        `### ${escapeMarkdownHeading(leaf.title)}`,
+        '',
+        `- id: \`${leaf.id}\``,
+        `- kind: ${leaf.kind}`,
+        `- scope: ${leaf.scope}/${leaf.scopeId}`,
+        `- source: ${leaf.sourceKind ?? 'unknown'}/${leaf.sourceId}`,
+        `- status: ${leaf.status}`,
+        `- confidence: ${leaf.confidence ?? 'unknown'}`,
+        `- importance: ${leaf.importance ?? 'unknown'}`,
+        `- evidence_refs: ${formatRefs(leaf.evidenceRefs, 24)}`,
+        `- content_hash: \`${leaf.contentHash}\``,
+        '',
+        renderLeafPreview(leaf, 720),
+        '',
+      );
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function formatRefs(refs: string[], max: number): string {
+  if (refs.length === 0) return '_none_';
+  const shown = refs.slice(0, max).map((ref) => `\`${ref.replace(/`/g, '')}\``).join(', ');
+  const remaining = refs.length - max;
+  return remaining > 0 ? `${shown}, ... +${remaining}` : shown;
+}
+
+function escapeMarkdownHeading(value: string): string {
+  return value.replace(/\r?\n/g, ' ').replace(/^#+\s*/, '').trim() || 'Untitled';
+}
+
+function escapeInlineMarkdown(value: string): string {
+  return value.replace(/\r?\n/g, ' ').replace(/\*/g, '\\*').trim() || 'Untitled';
+}
+
+function renderLeafPreview(leaf: Awaited<ReturnType<NonNullable<IStorage['listMemoryLeaves']>>>[number], maxChars: number): string {
+  if (leaf.kind === 'observation') {
+    const fields = parseFieldLines(leaf.body);
+    const frameRef = leaf.evidenceRefs.find((ref) => ref.startsWith('frame:'));
+    const parts = [
+      fields.get('window') ? `Window: ${trimToWord(fields.get('window')!, 220)}` : null,
+      fields.get('url') ? `URL: ${trimToWord(fields.get('url')!, 220)}` : null,
+      leaf.entityPath ? `Entity: ${leaf.entityPath}` : null,
+      frameRef ? `Evidence: ${frameRef}` : null,
+    ].filter(Boolean) as string[];
+    return trimToWord(parts.join('; ') || `Observed screen evidence ${leaf.sourceId}.`, maxChars);
+  }
+  return trimToWord(cleanMemoryBody(leaf.body), maxChars);
+}
+
+function parseFieldLines(body: string): Map<string, string> {
+  const fields = new Map<string, string>();
+  for (const line of body.replace(/\r\n/g, '\n').split('\n')) {
+    const match = line.match(/^([A-Za-z][A-Za-z0-9 _-]{0,32}):\s*(.+)$/);
+    if (!match) continue;
+    fields.set(match[1].trim().toLowerCase(), match[2].replace(/\s+/g, ' ').trim());
+  }
+  return fields;
+}
+
+function cleanMemoryBody(body: string): string {
+  return body
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/^---\n[\s\S]*?\n---\n?/u, ' ')
+    .replace(/^#+\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function trimToWord(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const clipped = value.slice(0, maxChars - 3).replace(/\s+\S*$/, '').trim();
+  return `${clipped || value.slice(0, maxChars - 3).trim()}...`;
 }
 
 const factory: PluginFactory<IExport> = async (ctx) => {

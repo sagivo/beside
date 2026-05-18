@@ -1,11 +1,13 @@
 # Beside — Website
 
-Marketing site for [Beside](../README.md), built as a small **React + Vite**
+Marketing and docs site for [Beside](../README.md), built as a small **React + Vite**
 app with **SSR (build-time prerender)** so every page ships fully-rendered
 HTML to crawlers, OCR pipelines, and AI search indexers.
 
-The content is intentionally keyword-rich around **AI**, **memory**, and
-**context** — Beside's core value props — so it indexes well.
+The content is intentionally keyword-rich around **private AI**, **memory**,
+**context**, and **local-first agent recall** — Beside's core value props — so
+it indexes well while staying aligned with the hero promise: "Beside is your
+private AI, right beside you."
 
 ## Stack
 

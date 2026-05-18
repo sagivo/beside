@@ -7,7 +7,9 @@ control plane and no required network call: every command runs against the
 same `~/.beside/` directory, on the same machine.
 
 Install it via the desktop bundle (`/Applications/Beside.app/Contents/Resources/bin/beside`)
-or by running it in dev (`pnpm cli …`).
+or by running it in dev (`pnpm cli …`). In the workspace, `pnpm cli` routes
+through `scripts/run-cli.mjs`, so source/dev runs and built-package runs share
+one entrypoint.
 
 ## Commands at a glance
 
@@ -121,7 +123,7 @@ Sample output:
 - [info] runtime: darwin 24.3.0 (arm64)
 - [ok]   native: sharp
     image encoding
-- [ok]   native: better-sqlite3
+- [ok]   native: better-sqlite3 opened SQLite
     local SQLite storage
 - [ok]   capture: active-win
     active window metadata
@@ -133,9 +135,10 @@ Sample output:
 summary: 0 fail, 0 warn, 7 ok/info
 ```
 
-`doctor` also checks the native capture helper, the import-ability of every
-native module, and (on macOS) the screencapture/osascript availability. Any
-`fail` is exit code 1, so you can wire it into pre-flight scripts.
+`doctor` also checks the native capture helper, the import-ability of native
+modules, that `better-sqlite3` can actually open an in-memory database, and
+(on macOS) the screencapture/osascript availability. Any `fail` is exit code 1,
+so you can wire it into pre-flight scripts.
 
 Because the CLI shares the runtime with the desktop app, the same load guard
 and battery thresholds apply: a `beside index --reorganise` you kick off on
