@@ -85,6 +85,8 @@ export class OpenCodeHarness {
     const startedAt = Date.now();
     emit({ kind: 'phase', phase: 'execute' });
 
+    let streamSubscription: StreamSubscription | null = null;
+
     try {
       const runtime = await this.getRuntime(handles);
       const directory = await ensureOpenCodeDirectory(handles.loaded.dataDir, input.conversationId);
@@ -96,6 +98,19 @@ export class OpenCodeHarness {
       // intermediate reasoning live in earlier assistant messages within
       // the same turn.
       const beforeMessageIds = await listAssistantMessageIds(runtime.client, directory, sessionId);
+
+      // Subscribe to the OpenCode SSE event stream before sending the
+      // prompt so reasoning, tool calls, and text tokens reach the
+      // renderer as they happen rather than in a single batch at the end.
+      // The post-prompt `emitParts` call still runs to reconcile anything
+      // the live stream missed, and skips parts already streamed.
+      streamSubscription = await startStreamSubscription(
+        runtime.client,
+        sessionId,
+        input.turnId,
+        onEvent,
+        this.logger,
+      );
 
       const response = await runtime.client.session.prompt({
         path: { id: sessionId },
@@ -118,7 +133,7 @@ export class OpenCodeHarness {
         beforeMessageIds,
         response.data?.parts ?? [],
       );
-      const summary = emitParts(parts, input.turnId, onEvent);
+      const summary = emitParts(parts, input.turnId, onEvent, streamSubscription.streamed);
       this.logger.info('opencode turn done', {
         turnId: input.turnId,
         tools: summary.toolCalls,
@@ -133,6 +148,8 @@ export class OpenCodeHarness {
         turnId: input.turnId,
         message: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      streamSubscription?.stop();
     }
   }
 
@@ -185,7 +202,10 @@ export class OpenCodeHarness {
     input: ChatTurnInput,
   ): Promise<string> {
     const existing = this.sessions.get(input.conversationId);
-    if (existing) return existing;
+    if (existing) {
+      this.logger.info('reusing opencode session', { conversationId: input.conversationId, sessionId: existing });
+      return existing;
+    }
 
     const title = input.message.trim().replace(/\s+/g, ' ').slice(0, 80) || 'Beside memory chat';
     const created = await client.session.create({
@@ -193,6 +213,7 @@ export class OpenCodeHarness {
       body: { title },
     });
     if (!created.data?.id) throw new Error('OpenCode did not return a session id.');
+    this.logger.info('created opencode session', { conversationId: input.conversationId, sessionId: created.data.id });
     this.sessions.set(input.conversationId, created.data.id);
     return created.data.id;
   }
@@ -312,21 +333,50 @@ interface EmitSummary {
   textChars: number;
 }
 
-function emitParts(parts: Part[], turnId: string, onEvent: ChatStreamHandler): EmitSummary {
+/**
+ * Tracks which OpenCode parts the live SSE subscriber has already
+ * forwarded to the renderer so the post-prompt batch reconciliation
+ * doesn't double-emit them. Tool-calls and tool-results are tracked
+ * separately because they fire on different state transitions.
+ */
+interface StreamedPartTracker {
+  reasoningPartIds: Set<string>;
+  textPartIds: Set<string>;
+  toolCallIds: Set<string>;
+  toolResultCallIds: Set<string>;
+}
+
+interface StreamSubscription {
+  stop: () => void;
+  readonly streamed: StreamedPartTracker;
+}
+
+function emitParts(
+  parts: Part[],
+  turnId: string,
+  onEvent: ChatStreamHandler,
+  streamed?: StreamedPartTracker,
+): EmitSummary {
   const toolCalls: string[] = [];
   let text = '';
+  let textAlreadyStreamed = false;
   for (const part of parts) {
     if (part.type === 'reasoning' && part.text.trim()) {
-      onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600) });
+      if (streamed?.reasoningPartIds.has(part.id)) continue;
+      onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+      streamed?.reasoningPartIds.add(part.id);
       continue;
     }
     if (part.type === 'tool') {
       if (!isBesideAgentTool(part.tool)) continue;
       const callId = `${turnId}:opencode:${part.callID}`;
-      const args = 'input' in part.state ? part.state.input : {};
-      onEvent({ kind: 'tool-call', turnId, tool: part.tool, args, callId });
+      if (!streamed?.toolCallIds.has(callId)) {
+        const args = 'input' in part.state ? part.state.input : {};
+        onEvent({ kind: 'tool-call', turnId, tool: part.tool, args, callId });
+        streamed?.toolCallIds.add(callId);
+      }
       toolCalls.push(part.tool);
-      if (part.state.status === 'completed') {
+      if (part.state.status === 'completed' && !streamed?.toolResultCallIds.has(callId)) {
         onEvent({
           kind: 'tool-result',
           turnId,
@@ -334,7 +384,8 @@ function emitParts(parts: Part[], turnId: string, onEvent: ChatStreamHandler): E
           tool: part.tool,
           summary: summariseToolOutput(part.state.title || part.state.output),
         });
-      } else if (part.state.status === 'error') {
+        streamed?.toolResultCallIds.add(callId);
+      } else if (part.state.status === 'error' && !streamed?.toolResultCallIds.has(callId)) {
         onEvent({
           kind: 'tool-result',
           turnId,
@@ -342,15 +393,157 @@ function emitParts(parts: Part[], turnId: string, onEvent: ChatStreamHandler): E
           tool: part.tool,
           summary: truncate(part.state.error, 500),
         });
+        streamed?.toolResultCallIds.add(callId);
       }
       continue;
     }
     if (part.type === 'text' && part.text) {
       text += part.text;
+      if (streamed?.textPartIds.has(part.id)) textAlreadyStreamed = true;
     }
   }
-  if (text.trim()) onEvent({ kind: 'content', turnId, delta: text });
+  // If the live stream already delivered the final text, the renderer
+  // already has it — don't emit again.
+  if (text.trim() && !textAlreadyStreamed) onEvent({ kind: 'content', turnId, delta: text });
   return { toolCalls, textChars: text.length };
+}
+
+async function startStreamSubscription(
+  client: OpencodeClient,
+  sessionId: string,
+  turnId: string,
+  onEvent: ChatStreamHandler,
+  logger: Logger,
+): Promise<StreamSubscription> {
+  const streamed: StreamedPartTracker = {
+    reasoningPartIds: new Set(),
+    textPartIds: new Set(),
+    toolCallIds: new Set(),
+    toolResultCallIds: new Set(),
+  };
+  // `message.part.updated` events carry the *cumulative* part text, so
+  // we compute the delta against what we've already streamed instead of
+  // relying on the optional `delta` field (not populated by every
+  // provider).
+  const textAccumulated = new Map<string, string>();
+  let stopped = false;
+  const abort = new AbortController();
+  let subscription: { stream: AsyncGenerator<unknown, unknown, unknown> } | null = null;
+
+  try {
+    subscription = await (client as unknown as {
+      event: {
+        subscribe: (options?: { signal?: AbortSignal }) =>
+          Promise<{ stream: AsyncGenerator<unknown, unknown, unknown> }>;
+      };
+    }).event.subscribe({ signal: abort.signal });
+  } catch (err) {
+    logger.warn('opencode SSE subscribe failed; falling back to batch emit', { err: String(err) });
+    return { stop: () => {}, streamed };
+  }
+
+  logger.info('opencode SSE subscription opened', { sessionId, turnId });
+  let eventCount = 0;
+
+  void (async () => {
+    try {
+      for await (const raw of subscription.stream) {
+        if (stopped) break;
+        const event = raw as { type?: string; properties?: Record<string, unknown> };
+        eventCount += 1;
+        if (eventCount <= 20 || eventCount % 50 === 0) {
+          // Log the first 20 events plus every 50th to expose live SSE
+          // traffic on stderr without flooding for long sessions.
+          logger.info('opencode SSE event', {
+            turnId,
+            n: eventCount,
+            type: event?.type,
+            partType: (event?.properties as { part?: { type?: string } } | undefined)?.part?.type,
+          });
+        }
+        if (event?.type !== 'message.part.updated') continue;
+        const part = (event.properties?.part ?? {}) as {
+          id?: string;
+          sessionID?: string;
+          type?: string;
+          text?: string;
+          tool?: string;
+          callID?: string;
+          state?: {
+            status?: string;
+            input?: Record<string, unknown>;
+            output?: string;
+            title?: string;
+            error?: string;
+          };
+        };
+        if (!part || part.sessionID !== sessionId || !part.id) continue;
+
+        if (part.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
+          streamed.reasoningPartIds.add(part.id);
+          onEvent({ kind: 'reasoning', turnId, text: truncate(part.text.trim(), 1600), partId: part.id });
+          continue;
+        }
+
+        if (part.type === 'tool' && part.tool && part.callID && isBesideAgentTool(part.tool)) {
+          const callId = `${turnId}:opencode:${part.callID}`;
+          const status = part.state?.status;
+          if (!streamed.toolCallIds.has(callId)) {
+            streamed.toolCallIds.add(callId);
+            onEvent({
+              kind: 'tool-call',
+              turnId,
+              tool: part.tool,
+              args: (part.state?.input ?? {}) as Record<string, unknown>,
+              callId,
+            });
+          }
+          if (status === 'completed' && !streamed.toolResultCallIds.has(callId)) {
+            streamed.toolResultCallIds.add(callId);
+            onEvent({
+              kind: 'tool-result',
+              turnId,
+              callId,
+              tool: part.tool,
+              summary: summariseToolOutput(part.state?.title || part.state?.output || ''),
+            });
+          } else if (status === 'error' && !streamed.toolResultCallIds.has(callId)) {
+            streamed.toolResultCallIds.add(callId);
+            onEvent({
+              kind: 'tool-result',
+              turnId,
+              callId,
+              tool: part.tool,
+              summary: truncate(part.state?.error || 'tool failed', 500),
+            });
+          }
+          continue;
+        }
+
+        if (part.type === 'text' && typeof part.text === 'string') {
+          const next = part.text;
+          const prev = textAccumulated.get(part.id) ?? '';
+          if (next.length <= prev.length) continue;
+          const delta = next.slice(prev.length);
+          textAccumulated.set(part.id, next);
+          if (!delta.trim() && !prev) continue;
+          streamed.textPartIds.add(part.id);
+          onEvent({ kind: 'content', turnId, delta });
+        }
+      }
+    } catch (err) {
+      if (!stopped) logger.warn('opencode SSE reader ended', { err: String(err) });
+    }
+  })();
+
+  return {
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      try { abort.abort(); } catch {}
+    },
+    streamed,
+  };
 }
 
 function summariseToolOutput(output: string): string {
