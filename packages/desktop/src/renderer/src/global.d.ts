@@ -154,10 +154,25 @@ export interface RuntimeOverview {
     eventsToday: number;
     eventsLastHour?: number;
     storageBytesToday?: number;
+    audioRecording?: boolean;
+    audioEnabled?: boolean;
+    audioLiveRecordingEnabled?: boolean;
+    audioBackend?: string;
+    audioModel?: string;
   };
   storage: {
     totalEvents: number;
     totalAssetBytes: number;
+    totalBytes: number;
+    bytesByCategory?: {
+      raw: number;
+      assets: number;
+      database: number;
+      index: number;
+      export: number;
+      backups: number;
+      other: number;
+    };
   };
   index: {
     strategy?: string;
@@ -169,7 +184,10 @@ export interface RuntimeOverview {
   indexing: RuntimeIndexingStatus;
   model: {
     name: string;
+    isLocal?: boolean;
     ready: boolean;
+    provider?: string;
+    roles?: RuntimeModelRole[];
   };
   exports: Array<{
     name: string;
@@ -198,6 +216,14 @@ export interface RuntimeOverview {
     overviewMode?: 'full' | 'fast';
     overviewTimings?: Record<string, number>;
   };
+}
+
+export interface RuntimeModelRole {
+  key: 'primary' | 'vision' | 'indexer' | 'embedding' | 'audio';
+  label: string;
+  name: string;
+  provider: string;
+  detail?: string;
 }
 
 export type OpenPathTarget =

@@ -286,26 +286,18 @@
     margin: 0;
     background-color: var(--background);
     background-image: var(--gradient-page);
-    background-attachment: fixed;
+    background-attachment: scroll;
     background-repeat: no-repeat;
     background-size: 100% 100%;
     position: relative;
     isolation: isolate;
   }
-  /* Drifting aurora — the website's signature ambient backdrop, ported to
-     the app shell. Four soft pastel orbs float behind the canvas; each one
-     is GPU-cheap (transform + opacity), and `prefers-reduced-motion`
-     freezes them in place. They sit at z-index 0 so all content stays on
-     top via the `body > #root` rule below. */
+  /* Keep the desktop shell static. Fixed blurred pseudo-elements looked
+     subtle, but they kept Electron's GPU process busy on battery. */
   body::before,
   body::after {
-    content: "";
-    position: fixed;
-    pointer-events: none;
-    z-index: 0;
-    border-radius: 50%;
-    filter: blur(80px);
-    will-change: transform;
+    content: none;
+    display: none;
   }
   body::before {
     width: 60vw;
@@ -331,18 +323,10 @@
     body::before,
     body::after { animation: none; }
   }
-  /* Faint film grain so gradients feel material, not plastic. Layered on
-     a fixed pseudo-element of #root so it tracks with content but stays
-     behind everything interactive. */
+  /* The previous fixed grain layer was another full-window compositing cost. */
   body > #root::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.04 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    opacity: 0.5;
-    mix-blend-mode: multiply;
+    content: none;
+    display: none;
   }
   .dark body > #root::before {
     mix-blend-mode: screen;
@@ -491,10 +475,9 @@
 
 /* Brand mark animations.
    Idle: the mascot quietly floats and breathes a soft violet glow.
-   A glassy sheen sweeps across every ~7s. On hover it pops + wobbles.
-   Busy: stronger halo + faster, livelier bob — used while the runtime
-   is doing intensive background work. All transforms/box-shadows are
-   GPU-cheap and pause for `prefers-reduced-motion`. */
+   Capture/listening/busy modes give an ambient status cue without adding
+   more sidebar chrome. All transforms/box-shadows are GPU-cheap and pause
+   for `prefers-reduced-motion`. */
 .brand-mark {
   isolation: isolate;
 }
@@ -527,6 +510,46 @@
     brand-mark-glow 2.2s ease-in-out infinite;
   transform: scale(1.08);
 }
+.brand-mark-capture {
+  animation: brand-mark-capture-halo 1.7s ease-in-out infinite;
+}
+.brand-mark-capture::before {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  opacity: 0;
+  animation: brand-mark-capture-flash 1.7s ease-in-out infinite;
+  mix-blend-mode: screen;
+  z-index: 1;
+}
+.brand-mark-img-capture {
+  animation:
+    brand-mark-capture-snap 1.7s ease-in-out infinite,
+    brand-mark-glow 1.7s ease-in-out infinite !important;
+}
+.brand-mark-audio {
+  animation: brand-mark-audio-halo 1.9s ease-in-out infinite;
+}
+.brand-mark-audio::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 50%, transparent 46%, rgba(107, 108, 240, 0.30) 48%, transparent 53%),
+    radial-gradient(circle at 50% 50%, transparent 60%, rgba(184, 208, 230, 0.34) 62%, transparent 68%);
+  animation: brand-mark-audio-rings 1.9s ease-out infinite;
+  z-index: 1;
+}
+.brand-mark-img-audio {
+  animation:
+    brand-mark-listen 1.35s ease-in-out infinite,
+    brand-mark-glow 1.9s ease-in-out infinite !important;
+}
 .brand-mark-busy {
   animation: brand-mark-halo 2.6s ease-in-out infinite;
 }
@@ -551,6 +574,36 @@
   0%, 100% { transform: scale(1.08) rotate(-4deg) translateY(-1px); }
   50%      { transform: scale(1.10) rotate(4deg)  translateY(-2px); }
 }
+@keyframes brand-mark-capture-halo {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(184, 208, 230, 0), 0 0 0 0 rgba(107, 108, 240, 0); }
+  40%      { box-shadow: 0 0 0 4px rgba(184, 208, 230, 0.22), 0 8px 24px rgba(107, 108, 240, 0.34); }
+}
+@keyframes brand-mark-capture-flash {
+  0%, 68%, 100% { opacity: 0; transform: scale(0.86); }
+  8%            { opacity: 0.95; transform: scale(1); }
+  16%           { opacity: 0; transform: scale(1.04); }
+}
+@keyframes brand-mark-capture-snap {
+  0%, 100% { transform: translateY(0) scale(1) rotate(0deg); }
+  8%       { transform: translateY(-1px) scale(1.06) rotate(-1deg); }
+  16%      { transform: translateY(0) scale(1) rotate(0deg); }
+  56%      { transform: translateY(-1px) scale(1.02) rotate(1deg); }
+}
+@keyframes brand-mark-audio-halo {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(107, 108, 240, 0), 0 0 0 0 rgba(184, 208, 230, 0); }
+  50%      { box-shadow: 0 0 0 5px rgba(107, 108, 240, 0.18), 0 8px 26px rgba(184, 208, 230, 0.38); }
+}
+@keyframes brand-mark-audio-rings {
+  0%   { opacity: 0.25; transform: scale(0.82); }
+  45%  { opacity: 0.9; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.18); }
+}
+@keyframes brand-mark-listen {
+  0%, 100% { transform: translateY(0) scale(1); }
+  25%      { transform: translateY(-1px) scale(1.03); }
+  50%      { transform: translateY(0) scale(0.99); }
+  75%      { transform: translateY(-1px) scale(1.02); }
+}
 @keyframes brand-mark-halo {
   0%, 100% {
     box-shadow:
@@ -571,8 +624,13 @@
   100% { transform: translateY(0)      rotate(0deg);  }
 }
 @media (prefers-reduced-motion: reduce) {
+  .brand-mark::before,
   .brand-mark::after,
   .brand-mark-img,
+  .brand-mark-capture,
+  .brand-mark-img-capture,
+  .brand-mark-audio,
+  .brand-mark-img-audio,
   .brand-mark-busy,
   .brand-mark-img-busy { animation: none; }
 }

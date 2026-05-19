@@ -4,7 +4,7 @@ export interface RawEvent {
   id: string; timestamp: string; session_id: string; type: RawEventType; app: string; app_bundle_id: string; window_title: string; url: string | null; content: string | null; asset_path: string | null; duration_ms: number | null; idle_before_ms: number | null; screen_index: number; metadata: Record<string, unknown>; privacy_filtered: boolean; capture_plugin: string;
 }
 
-export interface CaptureStatus { running: boolean; paused: boolean; eventsToday: number; eventsLastHour?: number; storageBytesToday: number; cpuPercent: number; memoryMB: number; }
+export interface CaptureStatus { running: boolean; paused: boolean; eventsToday: number; eventsLastHour?: number; storageBytesToday: number; cpuPercent: number; memoryMB: number; audioRecording?: boolean; audioEnabled?: boolean; audioLiveRecordingEnabled?: boolean; audioBackend?: string; audioModel?: string; }
 
 export interface CaptureConfig {
   pluginName: string; screenshot_diff_threshold: number; idle_threshold_sec: number; screenshot_format: 'webp' | 'jpeg'; screenshot_quality: number; screenshot_max_dim: number; content_change_min_interval_ms: number; jpeg_quality: number; excluded_apps: string[]; excluded_url_patterns: string[]; capture_audio: boolean; privacy: { blur_password_fields: boolean; pause_on_screen_lock: boolean; sensitive_keywords: string[]; }; poll_interval_ms: number; focus_settle_delay_ms: number; raw_root: string;
@@ -77,7 +77,24 @@ export interface ListCalendarEventsQuery { sourceKey?: string; day?: string; fro
 export interface CalendarReconcileInput { source: CalendarSource; capture: CalendarCapture; events: CalendarEvent[]; markMissingStale?: boolean; }
 export interface CalendarReconcileResult { upserted: number; stale: number; }
 
-export interface StorageStats { totalEvents: number; totalAssetBytes: number; oldestEvent: string | null; newestEvent: string | null; eventsByType: Record<string, number>; eventsByApp: Record<string, number>; }
+export interface StorageStats {
+  totalEvents: number;
+  totalAssetBytes: number;
+  totalBytes: number;
+  bytesByCategory: {
+    raw: number;
+    assets: number;
+    database: number;
+    index: number;
+    export: number;
+    backups: number;
+    other: number;
+  };
+  oldestEvent: string | null;
+  newestEvent: string | null;
+  eventsByType: Record<string, number>;
+  eventsByApp: Record<string, number>;
+}
 
 export interface IStorage {
   init(): Promise<void>; write(event: RawEvent): Promise<void>; writeAsset(assetPath: string, data: Buffer): Promise<void>; readEvents(query: StorageQuery): Promise<RawEvent[]>; countEvents(query: StorageQuery): Promise<number>; readAsset(assetPath: string): Promise<Buffer>; listDays(): Promise<string[]>; getStats(): Promise<StorageStats>; isAvailable(): Promise<boolean>;

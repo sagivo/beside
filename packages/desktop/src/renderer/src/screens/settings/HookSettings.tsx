@@ -105,10 +105,21 @@ export function HookSettings({ config, onSaved }: HookSettingsProps): React.JSX.
     };
     void loadStatic();
     void loadDiagnostics();
-    const handle = setInterval(loadDiagnostics, 3000);
+    let handle: number | null = null;
+    const scheduleDiagnostics = () => {
+      if (handle !== null) window.clearTimeout(handle);
+      handle = window.setTimeout(async () => {
+        await loadDiagnostics();
+        if (!cancelled) scheduleDiagnostics();
+      }, document.hidden ? 15000 : 3000);
+    };
+    const onVisibilityChange = () => scheduleDiagnostics();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    scheduleDiagnostics();
     return () => {
       cancelled = true;
-      clearInterval(handle);
+      if (handle !== null) window.clearTimeout(handle);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [config]);
 

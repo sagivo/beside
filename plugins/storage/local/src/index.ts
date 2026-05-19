@@ -350,6 +350,10 @@ class LocalStorage implements IStorage {
   // shifts when the row mutates -- no separate invalidation needed.
   private readonly meetingParseCache = new Map<string, Meeting>();
   private assetBytesCache: { value: number; expiresAt: number } | null = null;
+  private storageUsageCache: {
+    value: Pick<StorageStats, 'totalBytes' | 'bytesByCategory'>;
+    expiresAt: number;
+  } | null = null;
 
   constructor(root: string, logger: Logger) {
     this.root = root;
@@ -563,10 +567,13 @@ class LocalStorage implements IStorage {
     }, {});
 
     const totalAssetBytes = await this.getCachedAssetBytes();
+    const usage = await this.getCachedStorageUsage(totalAssetBytes);
 
     return {
       totalEvents: totals.count,
       totalAssetBytes,
+      totalBytes: usage.totalBytes,
+      bytesByCategory: usage.bytesByCategory,
       oldestEvent: totals.oldest,
       newestEvent: totals.newest,
       eventsByType: byType,
@@ -5075,6 +5082,86 @@ class LocalStorage implements IStorage {
 
   private invalidateAssetBytesCache(): void {
     this.assetBytesCache = null;
+    this.storageUsageCache = null;
+  }
+
+  private async getCachedStorageUsage(
+    totalAssetBytes: number,
+  ): Promise<Pick<StorageStats, 'totalBytes' | 'bytesByCategory'>> {
+    const now = Date.now();
+    if (this.storageUsageCache && this.storageUsageCache.expiresAt > now) {
+      return this.storageUsageCache.value;
+    }
+
+    const raw = await this.measurePathBytes(path.join(this.root, 'raw'));
+    const database = await this.measureFiles([
+      path.join(this.root, 'beside.db'),
+      path.join(this.root, 'beside.db-wal'),
+      path.join(this.root, 'beside.db-shm'),
+    ]);
+    const index = await this.measurePathBytes(path.join(this.root, 'index'));
+    const exportBytes = await this.measurePathBytes(path.join(this.root, 'export'));
+    const backups = await this.measurePathBytes(path.join(this.root, 'backups'));
+    const totalBytes = await this.measurePathBytes(this.root);
+    const known = raw + database + index + exportBytes + backups;
+    const value = {
+      totalBytes,
+      bytesByCategory: {
+        raw,
+        assets: totalAssetBytes,
+        database,
+        index,
+        export: exportBytes,
+        backups,
+        other: Math.max(0, totalBytes - known),
+      },
+    };
+    this.storageUsageCache = {
+      value,
+      expiresAt: now + ASSET_BYTES_CACHE_TTL_MS,
+    };
+    return value;
+  }
+
+  private async measureFiles(files: string[]): Promise<number> {
+    let total = 0;
+    for (const file of files) {
+      try {
+        total += (await fsp.stat(file)).size;
+      } catch {
+        // ignore missing sidecar files
+      }
+    }
+    return total;
+  }
+
+  private async measurePathBytes(target: string): Promise<number> {
+    let total = 0;
+    const walk = async (entryPath: string): Promise<void> => {
+      let stat: fs.Stats;
+      try {
+        stat = await fsp.stat(entryPath);
+      } catch {
+        return;
+      }
+      if (stat.isFile()) {
+        total += stat.size;
+        return;
+      }
+      if (!stat.isDirectory()) return;
+
+      let entries: fs.Dirent[];
+      try {
+        entries = await fsp.readdir(entryPath, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        await walk(path.join(entryPath, entry.name));
+      }
+    };
+    await walk(target);
+    return total;
   }
 }
 

@@ -18,7 +18,7 @@ const AppSchema = z.object({
 
 const CaptureSchema = z.object({
   plugin: z.string().default('node'),
-  poll_interval_ms: z.number().int().positive().default(3000),
+  poll_interval_ms: z.number().int().positive().default(5000),
   idle_poll_interval_ms: z.number().int().positive().default(30_000),
   focus_settle_delay_ms: z.number().int().nonnegative().default(900),
   screenshot_diff_threshold: z.number().min(0).max(1).default(0.15),
@@ -127,7 +127,7 @@ const IndexSchema = z.object({
   model: z.object({
     plugin: z.string().default('ollama'),
     ollama: z.object({
-      model: z.string().default('gemma4:e4b'),
+      model: z.string().default('gemma4:e2b'),
       embedding_model: z.string().default('nomic-embed-text'),
       host: z.string().default('http://127.0.0.1:11434'),
       vision_model: z.string().optional(),
@@ -141,10 +141,10 @@ const IndexSchema = z.object({
       // max (256K) — Ollama clamps to the model's actual max if smaller.
       num_ctx: z.number().int().positive().default(262144),
       model_revision: z.number().int().nonnegative().default(3),
-    }).default({ model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', keep_alive: '30s', unload_after_idle_min: 0, auto_install: true, num_ctx: 262144, model_revision: 3 }),
+    }).default({ model: 'gemma4:e2b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', keep_alive: '30s', unload_after_idle_min: 0, auto_install: true, num_ctx: 262144, model_revision: 3 }),
     claude: z.object({ api_key: z.string().optional(), model: z.string().default('claude-sonnet-4-6') }).optional(),
     openai: z.object({ api_key: z.string().optional(), base_url: z.string().default('https://api.openai.com/v1'), model: z.string().default('gpt-4o-mini'), vision_model: z.string().optional(), embedding_model: z.string().default('text-embedding-3-small') }).optional(),
-  }).default({ plugin: 'ollama', ollama: { model: 'gemma4:e4b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', num_ctx: 262144 } }),
+  }).default({ plugin: 'ollama', ollama: { model: 'gemma4:e2b', embedding_model: 'nomic-embed-text', host: 'http://127.0.0.1:11434', num_ctx: 262144 } }),
 }).passthrough();
 
 const SystemSchema = z.object({
@@ -213,6 +213,7 @@ const HooksSchema = z.object({
   max_image_bytes: z.number().int().positive().default(2 * 1024 * 1024),
   max_prompt_chars: z.number().int().positive().default(14_000),
   max_records_per_hook: z.number().int().positive().default(2000),
+  model_requires_ac_power: z.boolean().default(true),
 }).passthrough();
 
 export const ConfigSchema = z.object({
@@ -236,7 +237,7 @@ export const DEFAULT_CONFIG_YAML = `app:
 
 capture:
   plugin: node
-  poll_interval_ms: 3000
+  poll_interval_ms: 5000
   idle_poll_interval_ms: 30000
   focus_settle_delay_ms: 900
   screenshot_diff_threshold: 0.15
@@ -328,7 +329,7 @@ index:
   model:
     plugin: ollama
     ollama:
-      model: gemma4:e4b
+      model: gemma4:e2b
       embedding_model: nomic-embed-text
       host: http://127.0.0.1:11434
       keep_alive: 30s
@@ -381,6 +382,7 @@ hooks:
   #       defaultCollection: items
   definitions: []
   throttle_ms_default: 60000
+  model_requires_ac_power: true
 `;
 
 export interface LoadedConfig {

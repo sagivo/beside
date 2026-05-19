@@ -162,9 +162,8 @@ What `beside init` (and `start` / `index` on first launch) does:
    `Ollama.app`; Linux: official shell installer; Windows: `winget`). Live
    installer output is mirrored, and Linux/Windows prompts surface directly.
 3. **Starts the Ollama daemon** if it isn't already serving.
-4. **Pulls the configured model** (default: `gemma4:e4b`, ~9.6 GB — the
-   recommended variant of Google's latest Gemma 4 with vision + audio
-   and 128K context) with a live download progress bar — phase,
+4. **Pulls the configured model** (default: `gemma4:e2b`, ~7.2 GB — the
+   lower-power Gemma 4 variant with vision support) with a live download progress bar — phase,
    percentage, bytes downloaded.
 
 ```
@@ -177,9 +176,9 @@ You may be prompted for your password.
   ✓ ollama installed
   ✓ Ollama daemon ready at http://localhost:11434
 
-Downloading model gemma4:e4b (~9.6 GB) …
-  pulling c6eb396dbd59  [██████████████████████████████]  100% (9.6GB / 9.6GB)
-  ✓ gemma4:e4b ready
+Downloading model gemma4:e2b (~7.2 GB) …
+  pulling 7fbdbf8f5e45  [██████████████████████████████]  100% (7.2GB / 7.2GB)
+  ✓ gemma4:e2b ready
 ```
 
 ### Opting out
@@ -249,8 +248,8 @@ There are currently no GitHub Actions release jobs in this repository.
 
 ### Swapping the model later
 
-The model is just one config line. To switch to a smaller variant
-(`gemma4:e2b`) for faster responses, a larger one (`gemma4:26b`,
+The model is just one config line. To switch to a larger variant
+(`gemma4:e4b`, `gemma4:26b`,
 `gemma4:31b`) for more capability, or any other Ollama model:
 
 ```yaml
@@ -264,7 +263,7 @@ Then run `beside init` again — it will pull just the new weights.
 
 ### Refreshing weights under a floating tag
 
-Ollama tags like `gemma4:e4b` are *floating* — Google occasionally
+Ollama tags like `gemma4:e2b` are *floating* — Google occasionally
 republishes improved weights under the same name. Two ways to pick them up:
 
 1. **On demand** — run `beside model:update` to force a re-pull
@@ -281,7 +280,7 @@ republishes improved weights under the same name. Two ways to pick them up:
 index:
   model:
     ollama:
-      model: gemma4:e4b
+      model: gemma4:e2b
       model_revision: 3      # bump to force a refresh on next start
 ```
 

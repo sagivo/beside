@@ -25,7 +25,7 @@ const STRATEGY_NAME = 'karpathy';
 
 /**
  * How many entity-page renders run concurrently against the model
- * during `indexBatch`. `model.complete()` is the wall — gemma4:e4b
+ * during `indexBatch`. `model.complete()` is the wall — local Gemma
  * takes 5–10s per call on Apple Silicon — and Ollama serves up to
  * `OLLAMA_NUM_PARALLEL` (default 4 on systems with ≥6 GB free RAM)
  * concurrent requests for the same model. Sequential renders left

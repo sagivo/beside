@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   createLogger,
+  type BesideConfig,
   defaultDataDir,
   loadConfig,
   validateConfig,
@@ -10,7 +11,7 @@ import {
 } from '@beside/core';
 import type {
   ActivitySession, CaptureStatus, CaptureHookDefinition, DayEvent, DayEventKind, ExportStatus, Frame,
-  FrameQuery, HookRecord, HookRecordQuery, IndexState, Logger, Meeting, RawEvent, StorageStats,
+  FrameQuery, HookRecord, HookRecordQuery, IndexState, Logger, Meeting, ModelInfo, RawEvent, StorageStats,
 } from '@beside/interfaces';
 import { renderJournalMarkdown } from '@beside/interfaces';
 import {
@@ -40,7 +41,7 @@ export interface RuntimeOverview {
   storage: StorageStats;
   index: IndexState & { categories: RuntimeIndexCategory[] };
   indexing: RuntimeIndexingStatus;
-  model: { name: string; isLocal: boolean; ready: boolean };
+  model: { name: string; isLocal: boolean; ready: boolean; provider: string; roles: RuntimeModelRole[] };
   exports: ExportStatus[];
   backgroundJobs: RuntimeBackgroundJobStatus[];
   system: {
@@ -55,6 +56,14 @@ export interface RuntimeOverview {
     overviewMode: 'full' | 'fast';
     overviewTimings: Record<string, number>;
   };
+}
+
+export interface RuntimeModelRole {
+  key: 'primary' | 'vision' | 'indexer' | 'embedding' | 'audio';
+  label: string;
+  name: string;
+  provider: string;
+  detail?: string;
 }
 
 export interface RuntimeIndexingStatus {
@@ -139,6 +148,90 @@ const EXPLAIN_SEARCH_CACHE_MAX = 256;
 const SEARCH_EXPLANATION_TIMEOUT_MS = 20_000;
 const MANUAL_EVENT_SCAN_OCR_TICKS = 6;
 const MANUAL_EVENT_SCAN_LOOKBACK_DAYS = 2;
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function modelBlockFor(config: BesideConfig): Record<string, unknown> {
+  const byProvider = (config.index.model as unknown as Record<string, unknown>)[config.index.model.plugin];
+  return byProvider && typeof byProvider === 'object' ? byProvider as Record<string, unknown> : {};
+}
+
+function buildRuntimeModelOverview(
+  config: BesideConfig,
+  modelInfo: ModelInfo,
+  ready: boolean,
+): RuntimeOverview['model'] {
+  const provider = config.index.model.plugin;
+  const block = modelBlockFor(config);
+  const primary = stringValue(block.model) ?? modelInfo.name;
+  const roles: RuntimeModelRole[] = [
+    {
+      key: 'primary',
+      label: 'Primary AI',
+      name: modelInfo.name || primary,
+      provider,
+      detail: modelInfo.supportsVision ? 'Text and vision capable' : 'Text generation',
+    },
+  ];
+
+  const vision = stringValue(block.vision_model) ?? (modelInfo.supportsVision ? primary : null);
+  if (vision) {
+    roles.push({
+      key: 'vision',
+      label: 'Vision',
+      name: vision,
+      provider,
+      detail: 'Screenshots and visual context',
+    });
+  }
+
+  const indexer = stringValue(block.indexer_model) ?? primary;
+  if (indexer) {
+    roles.push({
+      key: 'indexer',
+      label: 'Indexing',
+      name: indexer,
+      provider,
+      detail: indexer === primary ? 'same as primary AI' : 'separate indexing model',
+    });
+  }
+
+  const embedding = config.index.embeddings.enabled ? stringValue(block.embedding_model) : null;
+  if (embedding) {
+    roles.push({
+      key: 'embedding',
+      label: 'Semantic search',
+      name: embedding,
+      provider,
+      detail: 'Embeddings',
+    });
+  }
+
+  if (config.capture.capture_audio) {
+    roles.push({
+      key: 'audio',
+      label: 'Audio transcription',
+      name: `Whisper ${config.capture.whisper_model ?? 'base'}`,
+      provider: 'whisper',
+      detail: config.capture.audio?.live_recording?.enabled ? 'Live audio' : 'Audio inbox',
+    });
+  }
+
+  return { name: modelInfo.name, isLocal: modelInfo.isLocal, ready, provider, roles };
+}
+
+function enrichCaptureStatus(capture: CaptureStatus, config: BesideConfig): CaptureStatus {
+  const liveRecording = config.capture.audio?.live_recording;
+  return {
+    ...capture,
+    audioEnabled: config.capture.capture_audio,
+    audioLiveRecordingEnabled: !!liveRecording?.enabled && liveRecording.system_audio_backend !== 'off',
+    audioBackend: liveRecording?.system_audio_backend,
+    audioModel: config.capture.capture_audio ? config.capture.whisper_model ?? 'base' : undefined,
+  };
+}
 
 // Short-circuit greetings and obvious thanks/acks so we don't spin up
 // the full OpenCode agent loop for "hi". Anything that doesn't match
@@ -239,7 +332,7 @@ export class BesideRuntime {
         try { return await fn(); } finally { timings[name] = Date.now() - startedAt; }
       };
 
-      const capture = handles.capture.getStatus();
+      const capture = enrichCaptureStatus(handles.capture.getStatus(), handles.config);
       try {
         const today = new Date(); today.setHours(0, 0, 0, 0);
         const hourAgo = new Date(Date.now() - 3600000);
@@ -266,7 +359,7 @@ export class BesideRuntime {
       return {
         status: this.status, configPath: handles.loaded.sourcePath, dataDir: handles.loaded.dataDir,
         storageRoot: handles.storage.getRoot(), capture, storage, index: { ...index, categories },
-        indexing, model: { name: modelInfo.name, isLocal: modelInfo.isLocal, ready }, exports, backgroundJobs,
+        indexing, model: buildRuntimeModelOverview(handles.config, modelInfo, ready), exports, backgroundJobs,
         system: {
           load: loadSnapshot.normalised, memory: loadSnapshot.memory, power: loadSnapshot.power,
           loadGuardEnabled: handles.config.system.load_guard.enabled,
@@ -292,7 +385,7 @@ export class BesideRuntime {
     const startedAt = Date.now();
     return await this.withHandles(async (handles) => {
       const cached = this.overviewCache!.value;
-      const capture = handles.capture.getStatus();
+      const capture = enrichCaptureStatus(handles.capture.getStatus(), handles.config);
       capture.eventsToday = cached.capture.eventsToday; capture.eventsLastHour = cached.capture.eventsLastHour; capture.storageBytesToday = cached.capture.storageBytesToday;
       const snapshot = handles.loadGuard.snapshot();
       const overviewDurationMs = Date.now() - startedAt;

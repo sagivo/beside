@@ -371,7 +371,7 @@ class NodeCapture implements ICapture {
     const quality =
       explicitQuality ?? fallbackQuality ?? (format === 'webp' ? 45 : 80);
     this.config = {
-      poll_interval_ms: config.poll_interval_ms ?? 3000,
+      poll_interval_ms: config.poll_interval_ms ?? 5000,
       idle_poll_interval_ms: config.idle_poll_interval_ms ?? 30_000,
       focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.15,

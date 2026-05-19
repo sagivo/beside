@@ -46,8 +46,6 @@ function AppInner() {
       try { const ov = await window.beside?.getOverview(); if (!ov || ov.status === 'stopped') await window.beside?.startRuntime(); } catch {}
     })();
   }, [showOnboarding]);
-  React.useEffect(() => { const t = window.setInterval(() => window.beside?.getOverview().then(setOverview).catch(() => {}), 60000); return () => window.clearInterval(t); }, []);
-
   React.useEffect(() => {
     if (screen !== 'meetings' || !overview) return;
     const k = (overview.backgroundJobs ?? []).filter(j => ['audio-transcript-worker', 'meeting-builder', 'meeting-summarizer', 'event-extractor'].includes(j.name)).map(j => `${j.name}:${j.lastCompletedAt ?? ''}:${j.runCount}`).join('|');

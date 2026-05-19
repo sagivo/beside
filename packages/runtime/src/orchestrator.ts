@@ -200,7 +200,7 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
     if (handlesRef) await runIdlePowerCatchup(handlesRef);
   });
 
-  const captureHooks = new CaptureHookEngine({ bus, storage, model, logger, config, dataDir });
+  const captureHooks = new CaptureHookEngine({ bus, storage, model, logger, config, dataDir, loadGuard });
   const hookWidgetManifests: HookWidgetManifestRuntime[] = [];
 
   if (config.hooks?.enabled !== false) {

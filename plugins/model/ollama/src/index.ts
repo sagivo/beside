@@ -40,7 +40,7 @@ interface OllamaModelConfig {
 // (rather than 'localhost') avoids surprises on hosts where 'localhost'
 // resolves to ::1 first while Ollama is only listening on v4.
 const DEFAULT_HOST = 'http://127.0.0.1:11434';
-const DEFAULT_MODEL = 'gemma4:e4b';
+const DEFAULT_MODEL = 'gemma4:e2b';
 const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
 const DEFAULT_KEEP_ALIVE = '30s';
 const DEFAULT_UNLOAD_AFTER_IDLE_MIN = 2;

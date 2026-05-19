@@ -11,7 +11,7 @@ import {
   Sparkles,
   type LucideIcon,
 } from 'lucide-react';
-import { BrandMark } from '@/components/BrandMark';
+import { BrandMark, type BrandMarkActivity } from '@/components/BrandMark';
 import { StatusFooter } from '@/components/StatusFooter';
 import type { Screen } from '@/types';
 import type { RuntimeOverview } from '@/global';
@@ -63,6 +63,15 @@ export function Sidebar({
   // of these as "the brand is thinking" and let BrandMark animate so the
   // user has an ambient cue even when the runtime is working off-screen.
   const busy = !!overview?.indexing.running;
+  const captureLive = !!overview?.capture.running && !overview.capture.paused;
+  const audioRecording = captureLive && !!overview?.capture.audioRecording;
+  const mascotActivity: BrandMarkActivity = audioRecording
+    ? 'audio'
+    : captureLive
+      ? 'capture'
+      : busy
+        ? 'busy'
+        : 'idle';
 
   return (
     <aside
@@ -80,7 +89,7 @@ export function Sidebar({
             : 'flex-col items-center gap-2 px-4 text-center',
         )}
       >
-        <BrandMark busy={busy} className={collapsed ? undefined : 'size-16 rounded-2xl'} />
+        <BrandMark activity={mascotActivity} className={collapsed ? undefined : 'size-16 rounded-2xl'} />
         {!collapsed && (
           <div className="min-w-0">
             <div className="brand-wordmark text-[20px] leading-none truncate">

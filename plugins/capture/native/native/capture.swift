@@ -290,12 +290,38 @@ func runMacCapture(config: HelperConfig) {
   // Throttle the periodic status emit. Previously fired every poll
   // (every 3 s when active = 20/min), waking the Node-side stdout
   // reader and recomputing memory via mach_task_basic_info each time.
-  // The status payload only carries memoryMB; the Node side already
-  // has its own status sources for capture counters. Cap to one emit
-  // every ~10 s plus one on memory delta > 8 MB.
+  // Memory still caps at every ~10s unless it moves by >8MB. Audio
+  // recording changes emit immediately so the sidebar mascot can react.
   var lastStatusEmitAt = Date.distantPast
   var lastStatusMemoryMB = 0
+  var lastAudioRecordingStatus = false
   let statusEmitMinInterval: TimeInterval = 10
+
+  func emitCaptureStatusIfNeeded(force: Bool = false) {
+    let audioRecording = audioChunker.isRecording || (sysAudio?.isRecording() ?? false)
+    let audioChanged = audioRecording != lastAudioRecordingStatus
+    let nowTs = Date()
+    let shouldSampleMemory = force || nowTs.timeIntervalSince(lastStatusEmitAt) >= statusEmitMinInterval
+    guard audioChanged || shouldSampleMemory else { return }
+
+    var payload: [String: Any] = [
+      "kind": "status",
+      "cpuPercent": 0,
+      "audioRecording": audioRecording
+    ]
+
+    if shouldSampleMemory {
+      let memMB = currentMemoryMB()
+      if force || abs(memMB - lastStatusMemoryMB) >= 8 || lastStatusEmitAt == Date.distantPast {
+        payload["memoryMB"] = memMB
+        lastStatusMemoryMB = memMB
+      }
+      lastStatusEmitAt = nowTs
+    }
+
+    emit(payload)
+    lastAudioRecordingStatus = audioRecording
+  }
 
   // Outer iteration is wrapped in an autoreleasepool below. Swift's
   // `continue` / `return` keywords can't cross a closure boundary, so
@@ -309,12 +335,14 @@ func runMacCapture(config: HelperConfig) {
       if command.contains("\"kind\":\"stop\"") {
         audioChunker.stop()
         sysAudio?.stop()
+        emitCaptureStatusIfNeeded(force: true)
         return .stop
       }
       if command.contains("\"kind\":\"pause\"") {
         paused = true
         audioChunker.stop()
         sysAudio?.stop()
+        emitCaptureStatusIfNeeded(force: true)
         pendingFocusCapture = nil
       }
       if command.contains("\"kind\":\"resume\"") { paused = false }
@@ -322,6 +350,7 @@ func runMacCapture(config: HelperConfig) {
 
     if paused {
       audioChunker.tick(paused: true)
+      emitCaptureStatusIfNeeded(force: true)
       // sysAudio is already stopped on pause; nothing to tick
       Thread.sleep(forTimeInterval: idlePollInterval)
       return .next
@@ -487,17 +516,9 @@ func runMacCapture(config: HelperConfig) {
       pendingFocusCapture = nil
     }
 
-    let nowTs = Date()
-    if nowTs.timeIntervalSince(lastStatusEmitAt) >= statusEmitMinInterval {
-      let memMB = currentMemoryMB()
-      if abs(memMB - lastStatusMemoryMB) >= 8 || lastStatusEmitAt == Date.distantPast {
-        emit(["kind": "status", "cpuPercent": 0, "memoryMB": memMB, "storageBytesToday": 0])
-        lastStatusMemoryMB = memMB
-      }
-      lastStatusEmitAt = nowTs
-    }
     audioChunker.tick(paused: false)
     sysAudio?.tick()
+    emitCaptureStatusIfNeeded()
     Thread.sleep(forTimeInterval: idle ? idlePollInterval : pollInterval)
     return .next
     }
@@ -1270,8 +1291,10 @@ struct BrowserUrlCacheEntry {
   let url: String?
   let queriedAt: Date
 }
-var browserUrlCache: [pid_t: BrowserUrlCacheEntry] = [:]
+var browserUrlCache: [String: BrowserUrlCacheEntry] = [:]
+let browserUrlMinQueryInterval: TimeInterval = 10
 let browserUrlBackstopTtl: TimeInterval = 30
+let browserUrlQueryTimeout: TimeInterval = 1.5
 
 func browserUrl(appName: String, pid: pid_t, title: String) -> String? {
   let script: String?
@@ -1286,36 +1309,51 @@ func browserUrl(appName: String, pid: pid_t, title: String) -> String? {
   guard let script else { return nil }
 
   let now = Date()
-  if let cached = browserUrlCache[pid],
-     cached.title == title,
-     now.timeIntervalSince(cached.queriedAt) < browserUrlBackstopTtl {
-    return cached.url
+  let cacheKey = String(pid)
+  if let cached = browserUrlCache[cacheKey] {
+    if now.timeIntervalSince(cached.queriedAt) < browserUrlMinQueryInterval {
+      return cached.url
+    }
+    if cached.title == title,
+       now.timeIntervalSince(cached.queriedAt) < browserUrlBackstopTtl {
+      return cached.url
+    }
   }
 
   let process = Process()
   let pipe = Pipe()
+  let done = DispatchSemaphore(value: 0)
   process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
   process.arguments = ["-e", script]
   process.standardOutput = pipe
   process.standardError = Pipe()
+  process.terminationHandler = { _ in done.signal() }
   do {
     try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else { return nil }
+    if done.wait(timeout: .now() + browserUrlQueryTimeout) == .timedOut {
+      process.terminate()
+      browserUrlCache[cacheKey] = BrowserUrlCacheEntry(title: title, url: nil, queriedAt: now)
+      return nil
+    }
+    guard process.terminationStatus == 0 else {
+      browserUrlCache[cacheKey] = BrowserUrlCacheEntry(title: title, url: nil, queriedAt: now)
+      return nil
+    }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     let out = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     let resolved = (out?.isEmpty == false) ? out : nil
-    browserUrlCache[pid] = BrowserUrlCacheEntry(title: title, url: resolved, queriedAt: now)
+    browserUrlCache[cacheKey] = BrowserUrlCacheEntry(title: title, url: resolved, queriedAt: now)
     if browserUrlCache.count > 8 {
-      let expired = browserUrlCache.compactMap { (p, e) in
-        now.timeIntervalSince(e.queriedAt) > browserUrlBackstopTtl * 4 ? p : nil
+      let expired = browserUrlCache.compactMap { (key, entry) in
+        now.timeIntervalSince(entry.queriedAt) > browserUrlBackstopTtl * 4 ? key : nil
       }
-      for p in expired {
-        browserUrlCache.removeValue(forKey: p)
+      for key in expired {
+        browserUrlCache.removeValue(forKey: key)
       }
     }
     return resolved
   } catch {
+    browserUrlCache[cacheKey] = BrowserUrlCacheEntry(title: title, url: nil, queriedAt: now)
     return nil
   }
 }
@@ -1375,6 +1413,10 @@ final class AudioChunker: NSObject, AVAudioRecorderDelegate {
     self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
     self.sampleRate = live?.sample_rate ?? 16_000
     self.channels = live?.channels ?? 1
+  }
+
+  var isRecording: Bool {
+    recorder != nil
   }
 
   func startIfEnabled() {
@@ -1786,6 +1828,7 @@ final class OtherProcessAudioInputDetector {
 struct SystemAudioHandle {
   let tick: () -> Void
   let stop: () -> Void
+  let isRecording: () -> Bool
 }
 
 func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
@@ -1812,7 +1855,8 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     chunker.startIfEnabled()
     return SystemAudioHandle(
       tick: { chunker.tick() },
-      stop: { chunker.stop() }
+      stop: { chunker.stop() },
+      isRecording: { chunker.isRecording }
     )
   case "screencapturekit":
     guard #available(macOS 13.0, *) else {
@@ -1824,7 +1868,8 @@ func makeSystemAudioHandle(config: HelperConfig) -> SystemAudioHandle? {
     chunker.startIfEnabled()
     return SystemAudioHandle(
       tick: { chunker.tick() },
-      stop: { chunker.stop() }
+      stop: { chunker.stop() },
+      isRecording: { chunker.isRecording }
     )
   default:
     emit(["kind": "error", "code": "system_audio_backend_unsupported",
@@ -1874,6 +1919,10 @@ final class CoreAudioSystemAudioChunker {
     self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-coreaudio")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
     self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
+  }
+
+  var isRecording: Bool {
+    running
   }
 
   func startIfEnabled() {
@@ -2190,6 +2239,10 @@ final class SystemAudioChunker: NSObject, SCStreamOutput, SCStreamDelegate {
     self.partialPath = (inboxPath as NSString).appendingPathComponent(".partial-sys")
     self.chunkSeconds = TimeInterval(max(1, live?.chunk_seconds ?? 300))
     self.pollInterval = TimeInterval(max(1, live?.poll_interval_sec ?? 3))
+  }
+
+  var isRecording: Bool {
+    capturing
   }
 
   func startIfEnabled() {

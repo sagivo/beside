@@ -17,6 +17,7 @@ import type {
   RawEvent,
 } from '@beside/interfaces';
 import type { BesideConfig, RawEventBus } from '@beside/core';
+import type { LoadGuard } from '@beside/core';
 
 const SCREEN_INPUT_KINDS: ReadonlyArray<'screen' | 'audio'> = ['screen'];
 
@@ -27,6 +28,7 @@ export interface CaptureHookEngineOptions {
   logger: Logger;
   config: BesideConfig;
   dataDir: string;
+  loadGuard?: LoadGuard;
 }
 
 interface RegisteredHook {
@@ -105,6 +107,7 @@ export class CaptureHookEngine {
   private readonly bus: RawEventBus;
   private readonly storage: IStorage;
   private readonly model: IModelAdapter;
+  private readonly loadGuard?: LoadGuard;
   private readonly logger: Logger;
   private readonly config: BesideConfig;
   private readonly hooks: RegisteredHook[] = [];
@@ -125,6 +128,7 @@ export class CaptureHookEngine {
     this.bus = opts.bus;
     this.storage = opts.storage;
     this.model = opts.model;
+    this.loadGuard = opts.loadGuard;
     this.logger = opts.logger.child('capture-hooks');
     this.config = opts.config;
     this.maxImageBytes = opts.config.hooks?.max_image_bytes ?? 2 * 1024 * 1024;
@@ -418,12 +422,16 @@ export class CaptureHookEngine {
   private async runJob(job: QueueJob): Promise<void> {
     const { hook, input } = job;
     const namespace = this.namespaceFor(hook.definition.id);
+    const modelDeferredReason = this.modelDeferredReasonFor(hook.definition.id);
     const ctx: CaptureHookContext = {
       hookId: hook.definition.id,
       storage: namespace,
-      model: this.model,
+      model: this.modelForHook(hook.definition.id, modelDeferredReason),
       logger: this.logger.child(hook.definition.id),
-      config: { catchup: job.catchup === true },
+      config: {
+        catchup: job.catchup === true,
+        ...(modelDeferredReason ? { modelDeferredReason } : {}),
+      },
       readAsset: (assetPath: string) => this.storage.readAsset(assetPath),
       skip: (reason: string) => this.recordSkip(hook.definition.id, reason),
     };
@@ -462,6 +470,12 @@ export class CaptureHookEngine {
     input: CaptureHookInput,
     ctx: CaptureHookContext,
   ): Promise<void> {
+    const modelDeferredReason =
+      typeof ctx.config.modelDeferredReason === 'string' ? ctx.config.modelDeferredReason : null;
+    if (modelDeferredReason) {
+      this.recordSkip(definition.id, modelDeferredReason);
+      return;
+    }
     const ready = await this.model.isAvailable().catch(() => false);
     if (!ready) {
       this.recordSkip(definition.id, 'model unavailable');
@@ -544,6 +558,38 @@ export class CaptureHookEngine {
       contentHash,
     });
     // ctx.storage.put already increments `stored` and logs success.
+  }
+
+  private modelDeferredReasonFor(hookId: string): string | null {
+    if (!this.loadGuard) return null;
+    const requireAcPower = (this.config.hooks as any)?.model_requires_ac_power !== false;
+    const decision = this.loadGuard.check(`capture-hook:${hookId}`, {
+      requireAcPower,
+      allowForced: false,
+    });
+    if (decision.proceed) return null;
+    return `model deferred by load guard: ${decision.reason}`;
+  }
+
+  private modelForHook(hookId: string, deferredReason: string | null): IModelAdapter {
+    if (!deferredReason) return this.model;
+    const throwDeferred = async (): Promise<never> => {
+      throw new Error(deferredReason);
+    };
+    return {
+      getModelInfo: () => this.model.getModelInfo(),
+      isAvailable: async () => false,
+      complete: throwDeferred,
+      completeWithVision: throwDeferred,
+      ...(this.model.completeStream
+        ? { completeStream: throwDeferred as IModelAdapter['completeStream'] }
+        : {}),
+      ...(this.model.embed
+        ? { embed: throwDeferred as IModelAdapter['embed'] }
+        : {}),
+      unload: this.model.unload?.bind(this.model),
+      ensureReady: this.model.ensureReady?.bind(this.model),
+    };
   }
 
   // ---------------------------------------------------------------------

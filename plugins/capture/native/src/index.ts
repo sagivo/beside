@@ -15,6 +15,13 @@ import type {
 import { expandPath } from '@beside/core';
 import { dHash, hashDiff } from './perceptual-hash.js';
 
+const BASE_RESTART_DELAY_MS = 2_000;
+const MAX_RESTART_DELAY_MS = 60_000;
+const STABLE_HELPER_UPTIME_MS = 60_000;
+const CRASH_WINDOW_MS = 5 * 60_000;
+const CRASH_WINDOW_LIMIT = 5;
+const CRASH_CIRCUIT_DELAY_MS = 5 * 60_000;
+
 interface NativeCaptureConfig {
   helper_path?: string;
   fixture?: boolean;
@@ -66,7 +73,7 @@ interface NativeCaptureConfig {
 type HelperMessage =
   | { kind: 'ready'; platform?: string; arch?: string; capabilities?: string[] }
   | { kind: 'event'; event: RawEvent }
-  | { kind: 'status'; cpuPercent?: number; memoryMB?: number; storageBytesToday?: number }
+  | { kind: 'status'; cpuPercent?: number; memoryMB?: number; storageBytesToday?: number; audioRecording?: boolean }
   | { kind: 'error'; code?: string; message: string; fatal?: boolean }
   | { kind: 'log'; level?: 'debug' | 'info' | 'warn' | 'error'; message: string; data?: unknown };
 
@@ -90,7 +97,12 @@ class NativeCapture implements ICapture {
   private storageBytesToday = 0;
   private cpuPercent = 0;
   private memoryMB = 0;
+  private audioRecording = false;
   private readonly lastHashByScreen = new Map<number, string>();
+  private helperStartedAt = 0;
+  private restartAttempts = 0;
+  private readonly recentCrashTimes: number[] = [];
+  private lastHelperLaunchEventAt = 0;
 
   constructor(config: NativeCaptureConfig, logger: Logger) {
     this.logger = logger.child('capture-native');
@@ -101,7 +113,7 @@ class NativeCapture implements ICapture {
       helper_path: config.helper_path ? expandPath(config.helper_path) : undefined,
       fixture: config.fixture ?? process.env.BESIDE_CAPTURE_FIXTURE === '1',
       restart_on_crash: config.restart_on_crash ?? true,
-      poll_interval_ms: config.poll_interval_ms ?? 3000,
+      poll_interval_ms: config.poll_interval_ms ?? 5000,
       idle_poll_interval_ms: config.idle_poll_interval_ms ?? 30_000,
       focus_settle_delay_ms: config.focus_settle_delay_ms ?? 900,
       screenshot_diff_threshold: config.screenshot_diff_threshold ?? 0.15,
@@ -158,6 +170,7 @@ class NativeCapture implements ICapture {
       storageBytesToday: this.storageBytesToday,
       cpuPercent: this.cpuPercent,
       memoryMB: this.memoryMB || Math.round(process.memoryUsage().rss / (1024 * 1024)),
+      audioRecording: this.audioRecording,
     };
   }
 
@@ -186,8 +199,15 @@ class NativeCapture implements ICapture {
   }
 
   async start(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.child) return;
     this.stopping = false;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    this.restartAttempts = 0;
+    this.recentCrashTimes.length = 0;
+    this.lastHelperLaunchEventAt = 0;
     this.spawnHelper();
     this.running = true;
     this.paused = false;
@@ -201,6 +221,9 @@ class NativeCapture implements ICapture {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
+    this.restartAttempts = 0;
+    this.recentCrashTimes.length = 0;
+    this.lastHelperLaunchEventAt = 0;
     const child = this.child;
     this.child = null;
     if (!child) return;
@@ -243,6 +266,7 @@ class NativeCapture implements ICapture {
     });
     this.child = child;
     this.stdoutBuffer = '';
+    this.helperStartedAt = Date.now();
 
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
@@ -261,15 +285,50 @@ class NativeCapture implements ICapture {
       this.running = false;
       this.logger.warn(`native capture helper exited (code=${code}, signal=${signal})`);
       if (this.config.restart_on_crash) {
+        const delayMs = this.nextRestartDelay(code, signal);
+        this.logger.warn(`native capture helper restart scheduled in ${delayMs}ms`);
         this.restartTimer = setTimeout(() => {
           this.restartTimer = null;
           if (!this.stopping) {
             this.spawnHelper();
             this.running = true;
           }
-        }, 2000);
+        }, delayMs);
       }
     });
+  }
+
+  private nextRestartDelay(code: number | null, signal: NodeJS.Signals | null): number {
+    const now = Date.now();
+    const uptimeMs = this.helperStartedAt > 0 ? now - this.helperStartedAt : 0;
+    const crashed = code !== 0 || signal !== null;
+
+    if (!crashed || uptimeMs >= STABLE_HELPER_UPTIME_MS) {
+      this.restartAttempts = 0;
+      this.recentCrashTimes.length = 0;
+      return BASE_RESTART_DELAY_MS;
+    }
+
+    this.restartAttempts += 1;
+    this.recentCrashTimes.push(now);
+    while (this.recentCrashTimes.length && now - this.recentCrashTimes[0]! > CRASH_WINDOW_MS) {
+      this.recentCrashTimes.shift();
+    }
+
+    if (this.recentCrashTimes.length >= CRASH_WINDOW_LIMIT) {
+      this.logger.error('native capture helper crash circuit opened', {
+        crashes: this.recentCrashTimes.length,
+        windowMs: CRASH_WINDOW_MS,
+        delayMs: CRASH_CIRCUIT_DELAY_MS,
+      });
+      this.recentCrashTimes.length = 0;
+      return CRASH_CIRCUIT_DELAY_MS;
+    }
+
+    return Math.min(
+      MAX_RESTART_DELAY_MS,
+      BASE_RESTART_DELAY_MS * 2 ** Math.min(this.restartAttempts - 1, 5),
+    );
   }
 
   private onStdout(chunk: string): void {
@@ -311,6 +370,7 @@ class NativeCapture implements ICapture {
       case 'status':
         if (typeof msg.cpuPercent === 'number') this.cpuPercent = msg.cpuPercent;
         if (typeof msg.memoryMB === 'number') this.memoryMB = msg.memoryMB;
+        if (typeof msg.audioRecording === 'boolean') this.audioRecording = msg.audioRecording;
         if (typeof msg.storageBytesToday === 'number') {
           this.storageBytesToday = msg.storageBytesToday;
         }
@@ -338,6 +398,15 @@ class NativeCapture implements ICapture {
   }
 
   private async prepareEvent(event: RawEvent): Promise<RawEvent | null> {
+    if (
+      event.type === 'app_launch' &&
+      event.app === 'Beside' &&
+      event.window_title === 'capture-native started'
+    ) {
+      const now = Date.now();
+      if (now - this.lastHelperLaunchEventAt < 60_000) return null;
+      this.lastHelperLaunchEventAt = now;
+    }
     if (event.type !== 'screenshot' || !event.asset_path) return event;
     try {
       return await this.postProcessScreenshot(event);

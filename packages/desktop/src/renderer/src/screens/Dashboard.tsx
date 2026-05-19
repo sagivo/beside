@@ -15,10 +15,12 @@ import { CaptureHookWidgets } from '@/components/CaptureHookWidgets';
 import { dayEventSourceShortLabel } from '@/lib/day-events';
 import { bootstrapMessage, dedupeAllDayCalendarDuplicates, formatBytes, formatDayEventTime, formatLocalDateTime, formatLocalTime, formatNumber, indexingStatusText, localDayKey } from '@/lib/format';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
+import { findModelChoice } from '@/lib/model-catalog';
 import { cn } from '@/lib/utils';
-import type { ActivitySession, DayEvent, DoctorCheck, Frame, JournalDay, Meeting, ModelBootstrapProgress, RuntimeOverview } from '@/global';
+import type { ActivitySession, DayEvent, DoctorCheck, Frame, JournalDay, Meeting, ModelBootstrapProgress, RuntimeModelRole, RuntimeOverview } from '@/global';
 
 const FULL_JOURNAL_FRAME_LIMIT = 600, ACTIVITY_SAMPLE_LIMIT = 500, TIMELINE_UPCOMING_LIMIT = 3, TIMELINE_RECENT_LIMIT = 6;
+type StatusTone = 'live' | 'paused' | 'idle' | 'busy';
 
 export function Dashboard({
   overview, doctor, bootstrapEvents, onRefresh, onStart, onStop, onPause, onResume,
@@ -180,28 +182,120 @@ function InsightsPanel({ items, onOpenItem }: any) {
 
 function CapturePanel({ overview, captureLive, capturePaused, running, journal, onStart, onStop, onPause, onResume }: any) {
   const am = journal?.sessions.reduce((acc: number, s: any) => acc + (s.active_ms || 0), 0) || 0;
+  const audio = audioStatus(overview, captureLive, capturePaused);
+  const headline = !running ? 'Beside is stopped' : captureLive ? 'Beside is capturing' : capturePaused ? 'Capture paused' : 'Beside is running';
+  const summary = captureLive ? 'Screen capture is live.' : capturePaused ? 'Screen capture is paused.' : running ? 'Runtime is up, capture is idle.' : 'Start capture to begin building memory.';
   return (
     <section className="rounded-lg border bg-card/70 p-4 shadow-card">
       <div className="flex justify-between gap-3">
-        <div><StatusBadge tone={captureLive ? 'live' : capturePaused ? 'paused' : 'idle'}>{captureLive ? 'Live' : capturePaused ? 'Paused' : 'Stopped'}</StatusBadge><h3 className="mt-3 text-lg font-semibold">{captureLive ? 'Capturing today' : capturePaused ? 'Capture paused' : 'Capture ready'}</h3></div>
+        <div>
+          <StatusBadge tone={running && !capturePaused ? 'live' : capturePaused ? 'paused' : 'idle'}>{running ? (capturePaused ? 'Paused' : 'Running') : 'Stopped'}</StatusBadge>
+          <h3 className="mt-3 text-lg font-semibold">{headline}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">{summary} Audio is {audio.sentence}.</p>
+        </div>
         <div className="flex gap-1.5">{!running ? <Button size="icon" onClick={onStart}><Play /></Button> : captureLive ? <Button size="icon" variant="secondary" onClick={onPause}><Pause /></Button> : capturePaused ? <Button size="icon" onClick={onResume}><Play /></Button> : <Button size="icon" variant="ghost" onClick={onStop}><CircleStop /></Button>}</div>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <StatusTile label="App" value={running ? 'Running' : 'Stopped'} tone={running ? 'live' : 'idle'} />
+        <StatusTile label="Screen" value={captureLive ? 'Capturing' : capturePaused ? 'Paused' : 'Stopped'} tone={captureLive ? 'live' : capturePaused ? 'paused' : 'idle'} />
+        <StatusTile label="Audio" value={audio.label} detail={audio.detail} tone={audio.tone} />
+        <StatusTile label="AI" value={overview.model.ready ? 'Ready' : 'Needs setup'} tone={overview.model.ready ? 'live' : 'paused'} />
+        <StatusTile label="Indexing" value={overview.indexing.running ? 'Running' : 'Idle'} tone={overview.indexing.running ? 'busy' : 'idle'} className="col-span-2" />
       </div>
       <div className="mt-4 grid grid-cols-3 gap-3"><MiniStat label="Moments" value={formatNumber(overview.capture.eventsToday)} /><MiniStat label="Last hour" value={overview.capture.eventsLastHour != null ? formatNumber(overview.capture.eventsLastHour) : '-'} /><MiniStat label="Active" value={am > 0 ? (am < 60000 ? `${Math.round(am / 60000)}m` : `${Math.floor(am / 3600000)}h ${Math.round((am % 3600000) / 60000)}m`) : '—'} /></div>
       <ActivityBars frames={journal?.frames ?? []} loading={false} accent={captureLive} />
+      <ModelStack overview={overview} />
     </section>
   );
 }
 
+function audioStatus(overview: RuntimeOverview, captureLive: boolean, capturePaused: boolean): { label: string; sentence: string; tone: StatusTone; detail?: string } {
+  if (overview.capture.audioRecording) return { label: 'Recording', sentence: 'recording now', tone: 'live', detail: overview.capture.audioBackend ? formatAudioBackend(overview.capture.audioBackend) : undefined };
+  if (overview.capture.audioEnabled === false) return { label: 'Off', sentence: 'off', tone: 'idle', detail: undefined };
+  if (capturePaused) return { label: 'Paused', sentence: 'paused', tone: 'paused', detail: overview.capture.audioModel ? `Whisper ${overview.capture.audioModel}` : undefined };
+  if (captureLive && overview.capture.audioLiveRecordingEnabled) return { label: 'Ready', sentence: 'ready for live recording', tone: 'live', detail: overview.capture.audioModel ? `Whisper ${overview.capture.audioModel}` : undefined };
+  return { label: 'Enabled', sentence: 'enabled', tone: 'idle', detail: overview.capture.audioModel ? `Whisper ${overview.capture.audioModel}` : undefined };
+}
+
+function formatAudioBackend(value: string) {
+  return value === 'core_audio_tap' ? 'Core Audio' : value === 'screencapturekit' ? 'ScreenCaptureKit' : value;
+}
+
+function StatusTile({ label, value, detail, tone, className }: { label: string; value: string; detail?: string; tone: StatusTone; className?: string }) {
+  return (
+    <div className={cn('rounded-lg border bg-background/55 p-3', tone === 'live' && 'border-success/30 bg-success/10', tone === 'paused' && 'border-warning/35 bg-warning/10', tone === 'busy' && 'border-primary/30 bg-primary/10', className)}>
+      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground"><StatusDot tone={tone} />{label}</div>
+      <div className="mt-1 text-sm font-semibold">{value}</div>
+      {detail && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{detail}</div>}
+    </div>
+  );
+}
+
+function StatusDot({ tone }: { tone: StatusTone }) {
+  return <span className={cn('size-1.5 rounded-full', tone === 'live' && 'bg-success', tone === 'paused' && 'bg-warning', tone === 'busy' && 'bg-primary animate-pulse', tone === 'idle' && 'bg-muted-foreground/45')} />;
+}
+
+function ModelStack({ overview }: { overview: RuntimeOverview }) {
+  const roles = overview.model.roles?.length ? overview.model.roles : [{ key: 'primary', label: 'Primary AI', name: overview.model.name, provider: overview.model.provider ?? 'model' } as RuntimeModelRole];
+  return (
+    <div className="mt-4 rounded-lg border bg-background/45 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-semibold"><Sparkles className="size-3.5 text-primary" />Models in use</div>
+        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase text-muted-foreground">{overview.model.provider ?? 'model'}</span>
+      </div>
+      <div className="mt-3 flex flex-col gap-2">
+        {roles.map((role) => (
+          <div key={`${role.key}-${role.name}`} className="flex min-w-0 items-start justify-between gap-3 rounded-md bg-muted/35 px-2.5 py-2">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium uppercase text-muted-foreground">{role.label}</div>
+              <div className="truncate text-sm font-medium">{displayModelName(role.name)}</div>
+            </div>
+            {role.detail && <div className="max-w-[120px] text-right text-[11px] text-muted-foreground">{role.detail}</div>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function displayModelName(name: string) {
+  const choice = findModelChoice(name);
+  return choice ? `${choice.name} (${name})` : name;
+}
+
 function MemorySnapshot({ overview, journal, loading }: any) {
   const apps = journal ? countByApp(journal.frames).slice(0, 3) : [], tot = Math.max(1, journal?.frames.length ?? overview.capture.eventsToday);
+  const storageRows = storageUsageRows(overview);
   return (
     <section className="rounded-lg border bg-card/70 p-4 shadow-card">
       <div className="mb-3 flex justify-between"><h3 className="text-sm font-semibold">Memory snapshot</h3>{overview.indexing.running ? <span className="flex items-center gap-1 text-xs text-primary"><Loader2 className="size-3 animate-spin" />Indexing</span> : <FileText className="size-4 text-muted-foreground" />}</div>
-      <div className="grid grid-cols-2 gap-3"><BigStat value={formatNumber(overview.index.pageCount)} label="pages" /><BigStat value={formatNumber(overview.storage.totalEvents)} label="memories" muted /></div>
+      <div className="grid grid-cols-3 gap-3"><BigStat value={formatNumber(overview.index.pageCount)} label="pages" /><BigStat value={formatNumber(overview.storage.totalEvents)} label="memories" muted /><BigStat value={formatBytes(storageTotalBytes(overview))} label="storage" muted /></div>
+      <div className="mt-4 rounded-lg border bg-background/45 p-3">
+        <div className="mb-2 flex items-center justify-between gap-3"><h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Storage usage</h4><span className="text-xs font-medium">{formatBytes(storageTotalBytes(overview))}</span></div>
+        <div className="flex flex-col gap-1.5">{storageRows.map(row => <div key={row.label} className="flex items-center justify-between gap-3 text-xs"><span className="text-muted-foreground">{row.label}</span><span className="font-medium tabular-nums">{formatBytes(row.bytes)}</span></div>)}</div>
+      </div>
       <Separator className="my-4" />
       {loading && !journal ? <div className="flex flex-col gap-3">{[1, 2, 3].map(i => <div key={i} className="flex gap-3"><Skeleton className="h-4 w-24" /><Skeleton className="h-2.5 flex-1" /><Skeleton className="h-4 w-12" /></div>)}</div> : !apps.length ? <p className="text-sm text-muted-foreground">Top apps will appear soon.</p> : <div className="flex flex-col gap-2">{apps.map((a, i) => <div key={a.app} className="flex items-center gap-3"><div className="w-32 truncate text-sm">{a.app}</div><div className="flex-1 h-2.5 rounded-full bg-muted overflow-hidden"><div className={cn('h-full rounded-full transition-all duration-700', i === 0 ? 'bg-gradient-brand' : 'bg-foreground/30')} style={{ width: `${Math.max(2, (a.count / tot) * 100)}%` }} /></div><div className="w-20 text-right text-xs text-muted-foreground">{a.count} <span className="opacity-50">· {((a.count / tot) * 100).toFixed(0)}%</span></div></div>)}</div>}
     </section>
   );
+}
+
+function storageTotalBytes(overview: RuntimeOverview) {
+  return overview.storage.totalBytes ?? overview.storage.totalAssetBytes ?? 0;
+}
+
+function storageUsageRows(overview: RuntimeOverview): Array<{ label: string; bytes: number }> {
+  const b = overview.storage.bytesByCategory;
+  if (!b) return [{ label: 'Captured assets', bytes: overview.storage.totalAssetBytes ?? 0 }];
+  return [
+    { label: 'Captured assets', bytes: b.assets },
+    { label: 'Raw capture logs', bytes: Math.max(0, b.raw - b.assets) },
+    { label: 'Database', bytes: b.database },
+    { label: 'Index', bytes: b.index },
+    { label: 'Exports', bytes: b.export },
+    { label: 'Backups', bytes: b.backups },
+    { label: 'Other', bytes: b.other },
+  ].filter(row => row.bytes > 0);
 }
 
 function ActivityTimeline({ items, loading, onOpenEvent }: any) {

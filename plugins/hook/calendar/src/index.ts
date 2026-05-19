@@ -80,6 +80,10 @@ class CalendarHookPlugin implements IHookPlugin {
       ctx.skip?.('catch-up found no parseable calendar events in captured text');
       return;
     }
+    if (typeof ctx.config.modelDeferredReason === 'string') {
+      ctx.skip?.(ctx.config.modelDeferredReason);
+      return;
+    }
 
     const ready = await ctx.model.isAvailable().catch(() => false);
     if (!ready) {

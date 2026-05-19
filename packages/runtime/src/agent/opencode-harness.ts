@@ -294,7 +294,7 @@ export class OpenCodeHarness {
 
 function buildOpenCodeConfig(handles: OrchestratorHandles, mcpUrl: string): Record<string, unknown> {
   const ollama = handles.config.index.model.ollama;
-  const model = ollama.model?.trim() || 'gemma4:e4b';
+  const model = ollama.model?.trim() || 'gemma4:e2b';
   const baseURL = toOpenAiBaseUrl(ollama.host || 'http://127.0.0.1:11434');
   // Note: the harness can't push `num_ctx` per request through this
   // path. OpenCode spawns its own process and serialises this config
@@ -915,7 +915,7 @@ async function collectNewAssistantParts(
 }
 
 function getOllamaModel(handles: OrchestratorHandles): { providerID: string; modelID: string } {
-  return { providerID: 'ollama', modelID: handles.config.index.model.ollama.model?.trim() || 'gemma4:e4b' };
+  return { providerID: 'ollama', modelID: handles.config.index.model.ollama.model?.trim() || 'gemma4:e2b' };
 }
 
 function getMcpUrl(handles: OrchestratorHandles): string {

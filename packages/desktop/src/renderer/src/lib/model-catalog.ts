@@ -28,24 +28,24 @@ export interface ModelChoice {
 
 export const MODEL_CHOICES: ModelChoice[] = [
   {
-    id: 'gemma4:e4b',
-    name: 'Gemma 4 · E4B',
-    vendor: 'Google',
-    size: '~9.6 GB',
-    bytes: 9.6 * 1024 ** 3,
-    description:
-      'Latest Gemma 4 default. 8B params with vision + audio, 128K context, and strong reasoning.',
-    badge: 'Recommended',
-    vision: true,
-  },
-  {
     id: 'gemma4:e2b',
     name: 'Gemma 4 · E2B',
     vendor: 'Google',
     size: '~7.2 GB',
     bytes: 7.2 * 1024 ** 3,
     description:
-      'Fastest Gemma 4 variant — optimized for edge/mobile when you want lower latency.',
+      'Default Gemma 4 model. Optimized for lower latency and battery use while preserving vision support.',
+    badge: 'Recommended',
+    vision: true,
+  },
+  {
+    id: 'gemma4:e4b',
+    name: 'Gemma 4 · E4B',
+    vendor: 'Google',
+    size: '~9.6 GB',
+    bytes: 9.6 * 1024 ** 3,
+    description:
+      'Larger Gemma 4 variant with stronger reasoning, vision + audio, and 128K context.',
     vision: true,
   },
   {
