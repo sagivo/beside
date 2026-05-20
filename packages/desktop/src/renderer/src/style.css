@@ -482,27 +482,56 @@
   isolation: isolate;
 }
 .brand-mark-img {
-  transform-origin: 50% 60%;
+  transform-origin: 50% 90%;
   animation:
-    brand-mark-float 5.2s ease-in-out infinite,
+    brand-mark-bob-playful 4.6s ease-in-out infinite,
     brand-mark-glow 4.4s ease-in-out infinite;
   transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
   will-change: transform, filter;
 }
+/* Halo: a slowly-rotating conic aurora ring (outer) layered with a
+   softly-breathing inner ring. Together they read as "alive" without
+   distracting from the mascot. Both are pseudo-elements on .brand-mark
+   so they stay independent of the mark's playful hop. */
+.brand-mark::before {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  pointer-events: none;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(
+    from 0deg,
+    rgba(139, 140, 245, 0.0)  0%,
+    rgba(139, 140, 245, 0.55) 18%,
+    rgba(184, 208, 230, 0.0)  38%,
+    rgba(168, 140, 245, 0.55) 58%,
+    rgba(184, 208, 230, 0.0)  78%,
+    rgba(139, 140, 245, 0.55) 92%,
+    rgba(139, 140, 245, 0.0)  100%
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: brand-mark-halo-spin 9s linear infinite;
+  filter: drop-shadow(0 0 6px rgba(107, 108, 240, 0.45));
+}
 .brand-mark::after {
   content: '';
   position: absolute;
-  inset: 0;
+  inset: -6px;
   pointer-events: none;
-  background: linear-gradient(
-    115deg,
-    transparent 30%,
-    rgba(255, 255, 255, 0.55) 48%,
-    rgba(255, 255, 255, 0.0) 60%
-  );
-  transform: translateX(-120%);
-  animation: brand-mark-sheen 7s ease-in-out 1.5s infinite;
-  mix-blend-mode: overlay;
+  border-radius: inherit;
+  border: 1px solid rgba(139, 140, 245, 0.42);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+    0 0 22px rgba(107, 108, 240, 0.35);
+  animation: brand-mark-halo-ring 4.6s ease-in-out infinite;
 }
 .brand-mark:hover .brand-mark-img {
   animation:
@@ -510,46 +539,76 @@
     brand-mark-glow 2.2s ease-in-out infinite;
   transform: scale(1.08);
 }
-.brand-mark-capture {
-  animation: brand-mark-capture-halo 1.7s ease-in-out infinite;
+/* ── Capture: tiny camera badge + white flash overlay fired per shot. */
+.brand-mark-camera-badge {
+  position: absolute;
+  bottom: -4px;
+  right: -4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 4px 10px rgba(107, 108, 240, 0.55);
+  z-index: 3;
+  pointer-events: none;
+  transform-origin: 70% 70%;
+  animation: brand-mark-badge-shot 1.4s cubic-bezier(0.34, 1.56, 0.64, 1) 1 forwards;
 }
-.brand-mark-capture::before {
+.brand-mark-camera-badge::before {
   content: '';
   position: absolute;
-  inset: 4px;
+  inset: -3px;
   border-radius: inherit;
-  pointer-events: none;
-  border: 1px solid rgba(255, 255, 255, 0.68);
+  border: 2px solid rgba(107, 108, 240, 0.65);
   opacity: 0;
-  animation: brand-mark-capture-flash 1.7s ease-in-out infinite;
-  mix-blend-mode: screen;
-  z-index: 1;
+  animation: brand-mark-badge-shutter 1.4s ease-out 1 forwards;
 }
-.brand-mark-img-capture {
-  animation:
-    brand-mark-capture-snap 1.7s ease-in-out infinite,
-    brand-mark-glow 1.7s ease-in-out infinite !important;
-}
-.brand-mark-audio {
-  animation: brand-mark-audio-halo 1.9s ease-in-out infinite;
-}
-.brand-mark-audio::before {
-  content: '';
+.brand-mark-flash {
   position: absolute;
-  inset: 1px;
+  inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  background:
-    radial-gradient(circle at 50% 50%, transparent 46%, rgba(107, 108, 240, 0.30) 48%, transparent 53%),
-    radial-gradient(circle at 50% 50%, transparent 60%, rgba(184, 208, 230, 0.34) 62%, transparent 68%);
-  animation: brand-mark-audio-rings 1.9s ease-out infinite;
-  z-index: 1;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 24px 6px rgba(255, 255, 255, 0.85);
+  opacity: 0;
+  z-index: 2;
+  animation: brand-mark-flash 520ms ease-out 1 forwards;
+  mix-blend-mode: screen;
 }
-.brand-mark-img-audio {
-  animation:
-    brand-mark-listen 1.35s ease-in-out infinite,
-    brand-mark-glow 1.9s ease-in-out infinite !important;
+
+/* ── Audio: 4-bar equalizer overlay anchored to the bottom of the mark. */
+.brand-mark-equalizer {
+  position: absolute;
+  inset: auto 0 6px 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  height: 40%;
+  padding: 0 18%;
+  pointer-events: none;
+  z-index: 3;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
 }
+.brand-mark-equalizer > span {
+  flex: 1;
+  min-width: 2px;
+  max-width: 4px;
+  background: linear-gradient(180deg, #ffffff 0%, #c8c9fb 100%);
+  border-radius: 999px;
+  transform-origin: bottom;
+  animation: brand-mark-equalizer-bar 0.9s ease-in-out infinite;
+}
+.brand-mark-equalizer > span:nth-child(1) { animation-delay: 0ms;   }
+.brand-mark-equalizer > span:nth-child(2) { animation-delay: 110ms; }
+.brand-mark-equalizer > span:nth-child(3) { animation-delay: 220ms; }
+.brand-mark-equalizer > span:nth-child(4) { animation-delay: 330ms; }
+
 .brand-mark-busy {
   animation: brand-mark-halo 2.6s ease-in-out infinite;
 }
@@ -558,51 +617,55 @@
     brand-mark-bob 2.6s ease-in-out infinite,
     brand-mark-glow 2.6s ease-in-out infinite !important;
 }
-@keyframes brand-mark-float {
-  0%, 100% { transform: translateY(0)    rotate(0deg); }
-  50%      { transform: translateY(-1.5px) rotate(0.6deg); }
+/* Playful idle: a small jellyfish-y hop with a gentle squash-and-stretch
+   anticipation, plus a soft tilt at the apex. Looks alive without ever
+   feeling jittery. Runs on the inner img so the halo ring stays steady. */
+@keyframes brand-mark-bob-playful {
+  0%   { transform: translateY(0)    scaleX(1)    scaleY(1)    rotate(0deg); }
+  18%  { transform: translateY(1px)  scaleX(1.06) scaleY(0.92) rotate(0deg); }
+  38%  { transform: translateY(-4px) scaleX(0.94) scaleY(1.08) rotate(-3deg); }
+  55%  { transform: translateY(-5px) scaleX(0.97) scaleY(1.04) rotate(3deg); }
+  72%  { transform: translateY(-2px) scaleX(1)    scaleY(1)    rotate(0deg); }
+  86%  { transform: translateY(1px)  scaleX(1.04) scaleY(0.94) rotate(0deg); }
+  100% { transform: translateY(0)    scaleX(1)    scaleY(1)    rotate(0deg); }
 }
 @keyframes brand-mark-glow {
   0%, 100% { filter: drop-shadow(0 0 2px rgba(139, 140, 245, 0.25)); }
   50%      { filter: drop-shadow(0 0 7px rgba(139, 140, 245, 0.7)); }
 }
-@keyframes brand-mark-sheen {
-  0%       { transform: translateX(-120%); }
-  18%, 100% { transform: translateX(140%); }
+@keyframes brand-mark-halo-ring {
+  0%, 100% { opacity: 0.55; transform: scale(0.97); }
+  50%      { opacity: 1;    transform: scale(1.04); }
+}
+@keyframes brand-mark-halo-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 @keyframes brand-mark-wobble {
   0%, 100% { transform: scale(1.08) rotate(-4deg) translateY(-1px); }
   50%      { transform: scale(1.10) rotate(4deg)  translateY(-2px); }
 }
-@keyframes brand-mark-capture-halo {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(184, 208, 230, 0), 0 0 0 0 rgba(107, 108, 240, 0); }
-  40%      { box-shadow: 0 0 0 4px rgba(184, 208, 230, 0.22), 0 8px 24px rgba(107, 108, 240, 0.34); }
+@keyframes brand-mark-flash {
+  0%   { opacity: 0;    transform: scale(0.92); }
+  18%  { opacity: 1;    transform: scale(1.05); }
+  60%  { opacity: 0.35; transform: scale(1.02); }
+  100% { opacity: 0;    transform: scale(1); }
 }
-@keyframes brand-mark-capture-flash {
-  0%, 68%, 100% { opacity: 0; transform: scale(0.86); }
-  8%            { opacity: 0.95; transform: scale(1); }
-  16%           { opacity: 0; transform: scale(1.04); }
+@keyframes brand-mark-badge-shot {
+  0%   { opacity: 0; transform: scale(0.4) rotate(-12deg); }
+  20%  { opacity: 1; transform: scale(1.25) rotate(0deg);  }
+  45%  { opacity: 1; transform: scale(1);    rotate: 0deg; }
+  80%  { opacity: 1; transform: scale(1);   }
+  100% { opacity: 0; transform: scale(0.6); }
 }
-@keyframes brand-mark-capture-snap {
-  0%, 100% { transform: translateY(0) scale(1) rotate(0deg); }
-  8%       { transform: translateY(-1px) scale(1.06) rotate(-1deg); }
-  16%      { transform: translateY(0) scale(1) rotate(0deg); }
-  56%      { transform: translateY(-1px) scale(1.02) rotate(1deg); }
+@keyframes brand-mark-badge-shutter {
+  0%   { opacity: 0.9; transform: scale(0.6); }
+  60%  { opacity: 0;   transform: scale(1.7); }
+  100% { opacity: 0;   transform: scale(1.7); }
 }
-@keyframes brand-mark-audio-halo {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(107, 108, 240, 0), 0 0 0 0 rgba(184, 208, 230, 0); }
-  50%      { box-shadow: 0 0 0 5px rgba(107, 108, 240, 0.18), 0 8px 26px rgba(184, 208, 230, 0.38); }
-}
-@keyframes brand-mark-audio-rings {
-  0%   { opacity: 0.25; transform: scale(0.82); }
-  45%  { opacity: 0.9; transform: scale(1); }
-  100% { opacity: 0; transform: scale(1.18); }
-}
-@keyframes brand-mark-listen {
-  0%, 100% { transform: translateY(0) scale(1); }
-  25%      { transform: translateY(-1px) scale(1.03); }
-  50%      { transform: translateY(0) scale(0.99); }
-  75%      { transform: translateY(-1px) scale(1.02); }
+@keyframes brand-mark-equalizer-bar {
+  0%, 100% { transform: scaleY(0.25); }
+  50%      { transform: scaleY(1);    }
 }
 @keyframes brand-mark-halo {
   0%, 100% {
@@ -626,11 +689,11 @@
 @media (prefers-reduced-motion: reduce) {
   .brand-mark::before,
   .brand-mark::after,
+  .brand-mark-flash,
+  .brand-mark-camera-badge,
+  .brand-mark-camera-badge::before,
+  .brand-mark-equalizer > span,
   .brand-mark-img,
-  .brand-mark-capture,
-  .brand-mark-img-capture,
-  .brand-mark-audio,
-  .brand-mark-img-audio,
   .brand-mark-busy,
   .brand-mark-img-busy { animation: none; }
 }

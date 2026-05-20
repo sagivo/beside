@@ -89,7 +89,11 @@ export function Sidebar({
             : 'flex-col items-center gap-2 px-4 text-center',
         )}
       >
-        <BrandMark activity={mascotActivity} className={collapsed ? undefined : 'size-16 rounded-2xl'} />
+        <BrandMark
+          activity={mascotActivity}
+          captureTick={overview?.capture.eventsToday ?? 0}
+          className={collapsed ? undefined : 'size-16 rounded-2xl'}
+        />
         {!collapsed && (
           <div className="min-w-0">
             <div className="brand-wordmark text-[20px] leading-none truncate">
