@@ -66,6 +66,7 @@ export function BrandMark({
       aria-label={activityLabel}
       title={activityLabel}
     >
+      <span aria-hidden className="brand-mark-aura" />
       <img
         src={logoUrl}
         alt=""

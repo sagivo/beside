@@ -606,6 +606,54 @@ async function startStreamSubscription(
           }
           continue;
         }
+        // Newer opencode SDKs emit `session.status` with `{ type: 'idle' |
+        // 'busy' | 'retry' }` instead of (or in addition to) the legacy
+        // `session.idle` event. Treat a status flip to 'idle' as turn
+        // completion so the renderer can clear `pending` and re-enable
+        // the input — without this, a follow-up question is impossible
+        // even though the answer has already streamed in full.
+        if (event?.type === 'session.status') {
+          const status = event.properties as
+            | { sessionID?: string; status?: { type?: string } }
+            | undefined;
+          if (status?.sessionID === sessionId) {
+            const inner = status.status?.type;
+            if (inner === 'busy') {
+              sawActivity = true;
+              continue;
+            }
+            if (inner === 'idle') {
+              if (!sawActivity) {
+                logger.info('opencode SSE ignoring pre-activity session.status idle', { turnId, sessionId });
+                continue;
+              }
+              logger.info('opencode SSE session.status idle received', { turnId, sessionId });
+              settle({ kind: 'idle' });
+            }
+          }
+          continue;
+        }
+        // Some opencode versions don't reliably fire `session.idle`
+        // when the local model finishes — but they always emit a final
+        // `message.updated` carrying `info.time.completed`. Use that as
+        // a backup completion signal so the renderer's `pending` flag
+        // (which gates the input + send button) can clear.
+        if (event?.type === 'message.updated') {
+          const props = event.properties as
+            | { info?: { sessionID?: string; role?: string; time?: { completed?: number } } }
+            | undefined;
+          const info = props?.info;
+          if (
+            info?.sessionID === sessionId &&
+            info.role === 'assistant' &&
+            typeof info.time?.completed === 'number'
+          ) {
+            sawActivity = true;
+            logger.info('opencode SSE assistant message completed', { turnId, sessionId });
+            settle({ kind: 'idle' });
+          }
+          continue;
+        }
         if (event?.type === 'session.error') {
           const errProps = event.properties as { sessionID?: string; error?: unknown } | undefined;
           if (!errProps?.sessionID || errProps.sessionID === sessionId) {

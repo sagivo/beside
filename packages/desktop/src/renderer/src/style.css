@@ -481,24 +481,28 @@
 .brand-mark {
   isolation: isolate;
 }
-.brand-mark-img {
-  transform-origin: 50% 90%;
-  animation:
-    brand-mark-bob-playful 4.6s ease-in-out infinite,
-    brand-mark-glow 4.4s ease-in-out infinite;
-  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
-  will-change: transform, filter;
+/* Circular aura layer that owns every glow/ring/pulse animation. Kept
+   absolute + centered so the .brand-mark's square footprint (used for
+   the rounded mask on the img and for the camera-badge anchor) doesn't
+   bleed into the shape of the animations behind it. */
+.brand-mark-aura {
+  position: absolute;
+  inset: -10%;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: 50%;
+  animation: brand-mark-pulse 2.8s ease-out infinite;
 }
-/* Halo: a slowly-rotating conic aurora ring (outer) layered with a
-   softly-breathing inner ring. Together they read as "alive" without
-   distracting from the mascot. Both are pseudo-elements on .brand-mark
-   so they stay independent of the mark's playful hop. */
-.brand-mark::before {
+.brand-mark-aura::before,
+.brand-mark-aura::after {
   content: '';
   position: absolute;
-  inset: -8px;
+  inset: 0;
+  border-radius: 50%;
   pointer-events: none;
-  border-radius: inherit;
+}
+.brand-mark-aura::before {
+  inset: -2px;
   padding: 2px;
   background: conic-gradient(
     from 0deg,
@@ -521,17 +525,20 @@
   animation: brand-mark-halo-spin 9s linear infinite;
   filter: drop-shadow(0 0 6px rgba(107, 108, 240, 0.45));
 }
-.brand-mark::after {
-  content: '';
-  position: absolute;
-  inset: -6px;
-  pointer-events: none;
-  border-radius: inherit;
+.brand-mark-aura::after {
   border: 1px solid rgba(139, 140, 245, 0.42);
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.08) inset,
     0 0 22px rgba(107, 108, 240, 0.35);
   animation: brand-mark-halo-ring 4.6s ease-in-out infinite;
+}
+.brand-mark-img {
+  transform-origin: 50% 90%;
+  animation:
+    brand-mark-bob-playful 4.6s ease-in-out infinite,
+    brand-mark-glow 4.4s ease-in-out infinite;
+  transition: transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform, filter;
 }
 .brand-mark:hover .brand-mark-img {
   animation:
@@ -641,6 +648,25 @@
   0%   { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+/* Soft expanding pulse — two box-shadow rings staggered for a heartbeat
+   feel. They radiate outward from the mark and fade as they grow. */
+@keyframes brand-mark-pulse {
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(139, 140, 245, 0.42),
+      0 0 0 0 rgba(184, 208, 230, 0.30);
+  }
+  60% {
+    box-shadow:
+      0 0 0 12px rgba(139, 140, 245, 0.0),
+      0 0 0 22px rgba(184, 208, 230, 0.0);
+  }
+  100% {
+    box-shadow:
+      0 0 0 14px rgba(139, 140, 245, 0.0),
+      0 0 0 26px rgba(184, 208, 230, 0.0);
+  }
+}
 @keyframes brand-mark-wobble {
   0%, 100% { transform: scale(1.08) rotate(-4deg) translateY(-1px); }
   50%      { transform: scale(1.10) rotate(4deg)  translateY(-2px); }
@@ -687,8 +713,9 @@
   100% { transform: translateY(0)      rotate(0deg);  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .brand-mark::before,
-  .brand-mark::after,
+  .brand-mark-aura,
+  .brand-mark-aura::before,
+  .brand-mark-aura::after,
   .brand-mark-flash,
   .brand-mark-camera-badge,
   .brand-mark-camera-badge::before,
