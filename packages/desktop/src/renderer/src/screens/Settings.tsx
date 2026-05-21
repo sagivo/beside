@@ -31,6 +31,23 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
   React.useEffect(() => { if (config) setDraft(settingsDraftFromConfig(config)); }, [config]);
   React.useEffect(() => { window.beside.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
+  const openPath = (target: Parameters<typeof window.beside.openPath>[0], label: string) => {
+    void window.beside.openPath(target).catch((err) => {
+      toast.error(`Could not open ${label}`, {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  };
+  const updateStartAtLogin = (enabled: boolean) => {
+    const previous = startAtLogin;
+    setStartAtLogin(enabled);
+    void window.beside.setStartAtLogin(enabled).then(setStartAtLogin).catch((err) => {
+      setStartAtLogin(previous);
+      toast.error('Could not update launch setting', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  };
 
   if (!config || !draft) return (
     <div className="flex flex-col gap-6 pt-6"><PageHeader title="Settings" description="Loading…" /><Skeleton className="h-9 w-72" />
@@ -56,7 +73,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
   return (
     <div className="flex flex-col gap-6 pt-6 pb-24">
-      <PageHeader title="Settings" description="Make Beside work the way you like." actions={<><Button variant="outline" size="sm" onClick={() => window.beside.openPath('config')}><FolderOpen />Open config</Button><Button variant="outline" size="sm" onClick={() => window.beside.openPath('data')}><FolderOpen />Open data</Button></>} />
+      <PageHeader title="Settings" description="Make Beside work the way you like." actions={<><Button variant="outline" size="sm" onClick={() => openPath('config', 'config')}><FolderOpen />Open config</Button><Button variant="outline" size="sm" onClick={() => openPath('data', 'data folder')}><FolderOpen />Open data</Button></>} />
       
       <Tabs defaultValue="general" className="flex flex-col gap-4">
         <TabsList className="h-auto flex-wrap justify-start self-start">
@@ -65,7 +82,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
 
         <TabsContent value="general" className="flex flex-col gap-4">
           <SettingsSection title="Launch and appearance" description="Set how the app starts and how the interface looks.">
-            <ToggleRow title="Open at startup" description="Beside opens quietly in the background." typeLabel="boolean" checked={!!startAtLogin} onChange={(v: any) => { setStartAtLogin(v); window.beside.setStartAtLogin(v).then(setStartAtLogin); }} />
+            <ToggleRow title="Open at startup" description="Beside opens quietly in the background." typeLabel="boolean" checked={!!startAtLogin} onChange={updateStartAtLogin} />
             <Separator className="my-4" />
             <div className="flex flex-col gap-3"><div><h4 className="font-medium">Appearance</h4><p className="text-sm text-muted-foreground mt-0.5">Pick a theme.</p></div><ThemePicker value={themePreference} onChange={setThemePreference} /></div>
           </SettingsSection>

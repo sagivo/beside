@@ -8,6 +8,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
+import { toast } from '@/components/ui/sonner';
 import { buildInstallPhases, formatBootstrapLine, pullPercent, type InstallPhase } from '@/lib/bootstrap-phases';
 import { formatBytes } from '@/lib/format';
 import { MODEL_CHOICES } from '@/lib/model-catalog';
@@ -64,7 +65,7 @@ export function Onboarding({ bootstrapEvents, onClearBootstrapEvents, onComplete
         <div className="flex-1 mx-6 flex flex-col gap-1.5"><div className="flex items-center justify-between text-[11px] font-medium uppercase text-muted-foreground"><span>{STEP_LABELS[step]}</span><span>{stepIndex + 1} / {STEPS.length}</span></div><Progress value={progressPct} /></div>
         {step !== 'done' && <Button variant="ghost" size="sm" onClick={onComplete} disabled={!allGatesMet} title={allGatesMet ? 'Skip setup' : !gateMet.screen ? 'Grant Screen Recording first.' : 'Install local AI first.'} className="app-no-drag">Skip setup</Button>}
       </header>
-      {screenNeedsRelaunch && step !== 'done' && <div className="border-b border-warning/40 bg-warning/10 px-6 py-3"><div className="mx-auto flex max-w-4xl items-center gap-4"><RefreshCw className="size-4 text-warning" /><div className="flex-1 text-sm"><span className="font-medium text-warning">Screen Recording granted.</span> <span className="text-muted-foreground">Restart required.</span></div><Button size="sm" onClick={() => window.beside.relaunchApp()}><RefreshCw />Restart</Button></div></div>}
+      {screenNeedsRelaunch && step !== 'done' && <div className="border-b border-warning/40 bg-warning/10 px-6 py-3"><div className="mx-auto flex max-w-4xl items-center gap-4"><RefreshCw className="size-4 text-warning" /><div className="flex-1 text-sm"><span className="font-medium text-warning">Screen Recording granted.</span> <span className="text-muted-foreground">Restart required.</span></div><Button size="sm" onClick={() => void window.beside.relaunchApp().catch(() => undefined)}><RefreshCw />Restart</Button></div></div>}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className={cn('mx-auto px-6 py-8 sm:py-10', step === 'welcome' ? 'max-w-5xl' : 'max-w-4xl')}>
           {step === 'welcome' && <WelcomeStep onContinue={goNext} />}
@@ -138,7 +139,7 @@ function PermissionsStep({ screen, accessibility, onRefresh, onContinue, onBack 
   React.useEffect(() => { const t = setInterval(onRefresh, 1000); return () => clearInterval(t); }, [onRefresh]);
   React.useEffect(() => { window.addEventListener('focus', onRefresh); return () => window.removeEventListener('focus', onRefresh); }, [onRefresh]);
 
-  const wrapReq = (k: string, fn: any) => async () => { setReq(k); try { await fn(); } finally { setReq(null); onRefresh(); } };
+  const wrapReq = (k: string, fn: any) => async () => { setReq(k); try { await fn(); } catch (err) { toast.error('Permission request failed', { description: err instanceof Error ? err.message : String(err) }); } finally { setReq(null); onRefresh(); } };
   const sSup = screen?.status !== 'unsupported', aSup = accessibility?.status !== 'unsupported', sOk = screen?.status === 'granted' || !sSup, sRelaunch = screen?.needsRelaunch;
   const sPhase = !screen ? 'idle' : sRelaunch ? 'needs-relaunch' : sOk ? 'granted' : req === 'screen' ? 'requesting' : screen.status === 'not-determined' ? 'idle' : 'waiting';
   const aPhase = !accessibility ? 'idle' : ['granted', 'unsupported'].includes(accessibility.status) ? 'granted' : req === 'accessibility' ? 'requesting' : 'waiting';
@@ -147,8 +148,8 @@ function PermissionsStep({ screen, accessibility, onRefresh, onContinue, onBack 
   return (
     <StepCard eyebrow="One-time setup" title="Give Beside what it needs" lede="Screen Recording and Accessibility permissions are needed for capture." back={{ onClick: onBack }} next={{ label: 'Continue', onClick: onContinue, disabled: !sOk, title: sOk ? undefined : 'Grant Screen Recording first.' }}>
       <div className="flex flex-col gap-3">
-        {sSup && <PermissionCard icon={<Monitor className="size-5" />} title="Screen Recording" req="required" phase={sPhase} onReq={wrapReq('screen', window.beside.requestScreenPermission)} onSet={() => window.beside.openPermissionSettings('screen')} msg={sPhase === 'granted' ? 'Granted.' : sPhase === 'needs-relaunch' ? 'Restart required.' : 'Not granted.'} />}
-        {aSup && <PermissionCard icon={<Keyboard className="size-5" />} title="Accessibility" req="recommended" phase={aPhase} onReq={wrapReq('accessibility', window.beside.requestAccessibilityPermission)} onSet={() => window.beside.openPermissionSettings('accessibility')} msg={aPhase === 'granted' ? 'Granted.' : 'Not granted.'} />}
+        {sSup && <PermissionCard icon={<Monitor className="size-5" />} title="Screen Recording" req="required" phase={sPhase} onReq={wrapReq('screen', window.beside.requestScreenPermission)} onSet={() => void window.beside.openPermissionSettings('screen').catch(() => undefined)} msg={sPhase === 'granted' ? 'Granted.' : sPhase === 'needs-relaunch' ? 'Restart required.' : 'Not granted.'} />}
+        {aSup && <PermissionCard icon={<Keyboard className="size-5" />} title="Accessibility" req="recommended" phase={aPhase} onReq={wrapReq('accessibility', window.beside.requestAccessibilityPermission)} onSet={() => void window.beside.openPermissionSettings('accessibility').catch(() => undefined)} msg={aPhase === 'granted' ? 'Granted.' : 'Not granted.'} />}
       </div>
     </StepCard>
   );
@@ -160,7 +161,7 @@ function PermissionCard({ icon, title, req, phase, onReq, onSet, msg }: any) {
     <div className={cn('flex items-start gap-4 rounded-xl border bg-card p-5', g && 'border-success/40 bg-success/5', nr && 'border-warning/40 bg-warning/5')}>
       <div className={cn('size-12 shrink-0 grid place-items-center rounded-lg', g ? 'bg-success/15 text-success' : nr ? 'bg-warning/15 text-warning' : 'bg-primary/10 text-primary')}>{g ? <Check className="size-5" /> : icon}</div>
       <div className="flex-1"><div className="flex gap-2 font-medium">{title} <Badge variant={req === 'required' ? 'default' : 'muted'}>{req === 'required' ? 'Required' : 'Recommended'}</Badge></div><p className="text-sm text-muted-foreground mt-1.5">{msg}</p></div>
-      <div className="flex flex-col gap-2">{nr ? <Button onClick={() => window.beside.relaunchApp()}><RefreshCw />Restart</Button> : !g ? <Button variant={req === 'required' ? 'default' : 'outline'} onClick={onReq} disabled={phase === 'requesting'}>{phase === 'requesting' ? <Loader2 className="animate-spin" /> : 'Grant'}</Button> : <Button variant="ghost" disabled><Check />Granted</Button>} {!g && !nr && <Button variant="ghost" size="sm" onClick={onSet}>Settings</Button>}</div>
+      <div className="flex flex-col gap-2">{nr ? <Button onClick={() => void window.beside.relaunchApp().catch(() => undefined)}><RefreshCw />Restart</Button> : !g ? <Button variant={req === 'required' ? 'default' : 'outline'} onClick={onReq} disabled={phase === 'requesting'}>{phase === 'requesting' ? <Loader2 className="animate-spin" /> : 'Grant'}</Button> : <Button variant="ghost" disabled><Check />Granted</Button>} {!g && !nr && <Button variant="ghost" size="sm" onClick={onSet}>Settings</Button>}</div>
     </div>
   );
 }
@@ -182,7 +183,7 @@ function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEve
     if (modelReady) { setPhase('done'); setErr(null); return; }
     setPhase('running'); setErr(null); onClearEvents();
     window.beside.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: chosenModel, auto_install: true } } } })
-      .then(() => window.beside.bootstrapModel()).then(() => setPhase('done')).catch(e => { setPhase('error'); setErr(e.message); });
+      .then(() => window.beside.bootstrapModel()).then(() => setPhase('done')).catch(e => { setPhase('error'); setErr(e instanceof Error ? e.message : String(e)); });
   }, [phase, chosenModel, modelReady, onClearEvents]);
 
   React.useEffect(() => {
@@ -216,10 +217,10 @@ function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEve
 function AudioStep({ onContinue, onBack }: any) {
   const [en, setEn] = React.useState(false), [wh, setWh] = React.useState<any>(null), [ist, setIst] = React.useState('idle'), [mic, setMic] = React.useState<any>(null), [busy, setBusy] = React.useState(false);
   const rp = React.useCallback(async () => { try { setWh(await window.beside.probeWhisper()); setMic(await window.beside.probeMicPermission()); } catch {} }, []);
-  React.useEffect(() => { rp(); window.beside.detectWhisperInstaller(); }, [rp]);
+  React.useEffect(() => { rp(); void window.beside.detectWhisperInstaller().catch(() => undefined); }, [rp]);
   React.useEffect(() => { window.beside.onWhisperInstallProgress?.(e => { if (e.kind === 'started') setIst('running'); else if (e.kind === 'finished') { setIst(e.available ? 'finished' : 'failed'); rp(); } else if (e.kind === 'failed') setIst('failed'); }); }, [rp]);
 
-  const commit = async (v: boolean) => { setBusy(true); try { if (v && mic?.status === 'not-determined') setMic(await window.beside.requestMicPermission()); await window.beside.saveConfigPatch({ capture: { ...(v ? { plugin: 'native' } : {}), capture_audio: v, audio: { live_recording: { enabled: v, activation: 'other_process_input', poll_interval_sec: 3 } } } }); setEn(v); if (v && wh && !wh.available && ist === 'idle') { setIst('running'); await window.beside.installWhisper().catch(() => setIst('failed')); } } finally { setBusy(false); } };
+  const commit = async (v: boolean) => { setBusy(true); try { if (v && mic?.status === 'not-determined') setMic(await window.beside.requestMicPermission()); await window.beside.saveConfigPatch({ capture: { ...(v ? { plugin: 'native' } : {}), capture_audio: v, audio: { live_recording: { enabled: v, activation: 'other_process_input', poll_interval_sec: 3 } } } }); setEn(v); if (v && wh && !wh.available && ist === 'idle') { setIst('running'); await window.beside.installWhisper().catch(() => setIst('failed')); } } catch (err) { toast.error('Could not update audio capture', { description: err instanceof Error ? err.message : String(err) }); } finally { setBusy(false); } };
 
   return (
     <StepCard eyebrow="Optional" title="Audio capture" lede="Record short microphone chunks locally." back={{ onClick: onBack }} next={{ label: en ? 'Continue' : 'Skip', onClick: onContinue, variant: en ? 'default' : 'outline' }}>

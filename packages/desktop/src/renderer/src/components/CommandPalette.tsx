@@ -24,6 +24,7 @@ import {
   CommandList,
   CommandSeparator,
 } from '@/components/ui/command';
+import { toast } from '@/components/ui/sonner';
 import type { Screen } from '@/types';
 import type { RuntimeOverview } from '@/global';
 
@@ -69,7 +70,17 @@ export function CommandPalette({
   function run(fn: () => unknown) {
     onOpenChange(false);
     queueMicrotask(() => {
-      void fn();
+      try {
+        void Promise.resolve(fn()).catch((err) => {
+          toast.error('Command failed', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        });
+      } catch (err) {
+        toast.error('Command failed', {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
     });
   }
 

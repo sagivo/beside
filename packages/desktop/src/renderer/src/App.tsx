@@ -28,6 +28,7 @@ function AppInner() {
   const [screen, setScreen] = React.useState<Screen>('dashboard'), [overview, setOverview] = React.useState<RuntimeOverview | null>(null), [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null), [days, setDays] = React.useState<string[]>([]), [config, setConfig] = React.useState<LoadedConfig | null>(null), [logs, setLogs] = React.useState(''), [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]), [meetings, setMeetings] = React.useState<Meeting[]>([]), [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]), [meetingsLoading, setMeetingsLoading] = React.useState(false), [meetingFocusRequest, setMeetingFocusRequest] = React.useState<{ id: number; target: { eventId: string; day: string } | null } | null>(null), [error, setError] = React.useState<string | null>(null), [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(null);
   const searchRequestId = React.useRef(0), meetingFocusRequestId = React.useRef(0), agendaRefreshKeyRef = React.useRef('');
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => { try { return localStorage.getItem(ONBOARDING_KEY) !== '1'; } catch { return true; } });
+  const [onboardingChecked, setOnboardingChecked] = React.useState(false);
 
   React.useEffect(() => {
     const cleanups = [
@@ -38,14 +39,31 @@ function AppInner() {
     return () => cleanups.forEach(cleanup => cleanup());
   }, []);
 
-  React.useEffect(() => { if (!showOnboarding) loadScreen(screen); }, [screen, showOnboarding]);
   React.useEffect(() => {
-    if (showOnboarding) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const done = await window.beside?.getOnboardingComplete?.();
+        if (cancelled || typeof done !== 'boolean') return;
+        setShowOnboarding(!done);
+        try {
+          if (done) localStorage.setItem(ONBOARDING_KEY, '1');
+          else localStorage.removeItem(ONBOARDING_KEY);
+        } catch {}
+      } finally {
+        if (!cancelled) setOnboardingChecked(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  React.useEffect(() => { if (onboardingChecked && !showOnboarding) loadScreen(screen); }, [screen, showOnboarding, onboardingChecked]);
+  React.useEffect(() => {
+    if (!onboardingChecked || showOnboarding) return;
     (async () => {
       try { await window.beside?.setOnboardingComplete?.(true); } catch {}
       try { const ov = await window.beside?.getOverview(); if (!ov || ov.status === 'stopped') await window.beside?.startRuntime(); } catch {}
     })();
-  }, [showOnboarding]);
+  }, [showOnboarding, onboardingChecked]);
   React.useEffect(() => {
     if (screen !== 'meetings' || !overview) return;
     const k = (overview.backgroundJobs ?? []).filter(j => ['audio-transcript-worker', 'meeting-builder', 'meeting-summarizer', 'event-extractor'].includes(j.name)).map(j => `${j.name}:${j.lastCompletedAt ?? ''}:${j.runCount}`).join('|');
@@ -95,6 +113,7 @@ function AppInner() {
     onOpenMarkdownExport: async (c?: string) => { try { await window.beside.openPath(c ? { target: 'markdown', category: c } : 'markdown'); } catch (e: any) { toast.error('Could not open export', { description: e.message }); } }
   }), []);
 
+  if (!onboardingChecked) return <div className="grid h-screen place-items-center text-sm text-muted-foreground">Loading Beside…</div>;
   if (showOnboarding) return <React.Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted-foreground">Preparing welcome…</div>}><Onboarding bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onComplete={() => { try { localStorage.setItem(ONBOARDING_KEY, '1'); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} void window.beside?.setOnboardingComplete?.(true).catch(() => {}); setShowOnboarding(false); setScreen('dashboard'); }} /></React.Suspense>;
 
   const c = error ? <div className="pt-6"><ErrorView error={error} onRetry={() => loadScreen(screen)} /></div> : screen === 'dashboard' ? <Dashboard overview={overview} doctor={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('dashboard')} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onTriggerFullReindex={actions.onTriggerFullReindex} onBootstrap={actions.onBootstrap} onOpenMarkdownExport={actions.onOpenMarkdownExport} onGoMeetings={openMeetings} onSearch={runPaletteSearch} /> : screen === 'meetings' ? <Meetings events={dayEvents} meetings={meetings} loading={meetingsLoading} focusRequest={meetingFocusRequest} onRefresh={() => loadScreen('meetings')} /> : screen === 'privacy' ? <Privacy config={config} overview={overview} onRefresh={() => loadScreen('privacy')} onSaved={setConfig} onOverview={setOverview} onStart={actions.onStart} onPause={actions.onPause} onResume={actions.onResume} /> : screen === 'search' ? <Search days={days} searchRequest={searchRequest} /> : screen === 'ai' ? <Ai /> : screen === 'connect' ? <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} /> : screen === 'settings' ? <Settings config={config} overview={overview} bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onSaved={setConfig} /> : <Help logs={logs} onRestartOnboarding={() => { try { localStorage.removeItem(ONBOARDING_KEY); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} void window.beside?.setOnboardingComplete?.(false).catch(() => {}); setShowOnboarding(true); }} />;

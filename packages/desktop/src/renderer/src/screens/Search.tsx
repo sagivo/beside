@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { formatLocalDateTime, prettyDay } from '@/lib/format';
@@ -105,6 +106,14 @@ function ChipSection({ icon, label, items, onPick, onClear, clearLabel }: any) {
 function ResultCard({ frame, searchQuery, explanation, onDeleted }: any) {
   const [thumb, setThumb] = React.useState<string | null>(null), d = useFrameDetail(), ctx = explanation ?? buildFrameSearchContext(searchQuery, frame), dom = domainFromUrl(frame.url), src = textSourceLabel(frame.text_source);
   const open = React.useCallback(() => d.open(frame, { onDeleted, searchContext: searchQuery ? { query: searchQuery, explanation } : undefined }), [d, explanation, frame, onDeleted, searchQuery]);
+  const openSource = React.useCallback(() => {
+    if (!frame.url) return;
+    void window.beside.openExternalUrl(frame.url).catch((err) => {
+      toast.error('Could not open source', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, [frame.url]);
   React.useEffect(() => { let c = false; const load = async () => { if (!frame.asset_path) return; const ch = thumbnailCache.get(frame.asset_path); if (ch) return setThumb(ch); try { const u = await resolveAssetUrl(frame.asset_path); if (c) return; cacheThumbnail(frame.asset_path, u); setThumb(u); } catch {} }; load(); return () => { c = true; }; }, [frame.asset_path]);
 
   return (
@@ -117,7 +126,7 @@ function ResultCard({ frame, searchQuery, explanation, onDeleted }: any) {
         <div className="text-sm line-clamp-2">{frame.window_title || frame.url || (frame.text ? String(frame.text).replace(/\s+/g, ' ').slice(0, 140) : '—')}</div>
         {ctx && <div className="mt-1 flex items-start gap-1.5 rounded-lg bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground"><Sparkles className="mt-0.5 size-3 shrink-0" /><span className="line-clamp-3">{ctx}</span></div>}
         <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">{dom && <span className="inline-flex items-center gap-1"><Globe2 className="size-3" /><span className="truncate">{dom}</span></span>}{frame.entity_path && <span className="inline-flex items-center gap-1"><Layers3 className="size-3" /><span className="truncate">{frame.entity_path}</span></span>}{frame.text_source === 'audio' && <span className="inline-flex items-center gap-1"><Mic className="size-3" />transcript</span>}</div>
-        <div className="mt-2 flex gap-3"><button type="button" onClick={open} {...listItemProps} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"><SearchIcon className="size-3" />Open memory</button>{isHttpUrl(frame.url) && <button type="button" onClick={() => window.beside.openExternalUrl(frame.url!)} className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-primary hover:underline"><ExternalLink className="size-3" />Open source</button>}</div>
+        <div className="mt-2 flex gap-3"><button type="button" onClick={open} {...listItemProps} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"><SearchIcon className="size-3" />Open memory</button>{isHttpUrl(frame.url) && <button type="button" onClick={openSource} className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-primary hover:underline"><ExternalLink className="size-3" />Open source</button>}</div>
       </div>
     </div>
   );

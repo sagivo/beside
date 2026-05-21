@@ -4,6 +4,8 @@ import YAML from 'yaml';
 import { z } from 'zod';
 import { defaultDataDir, expandPath } from './paths.js';
 
+const STOCK_DATA_DIR = '~/.beside';
+
 const PluginRefSchema = z.object({
   name: z.string(),
   enabled: z.boolean().optional().default(true),
@@ -419,12 +421,18 @@ export async function writeConfig(config: BesideConfig, configPath?: string): Pr
   return { path: target };
 }
 
-function rerootStockPaths(config: BesideConfig): void {
+function stockPathRootOverride(explicitDataDir?: string): string | null {
+  if (explicitDataDir && expandPath(explicitDataDir) !== expandPath(STOCK_DATA_DIR)) return explicitDataDir;
   const envRoot = process.env.BESIDE_DATA_DIR;
-  if (!envRoot || envRoot.trim().length === 0) return;
-  const STOCK = '~/.beside';
+  if (envRoot && envRoot.trim().length > 0) return envRoot;
+  if (process.env.BESIDE_USE_PLATFORM_DATA_DIR === '1') return defaultDataDir();
+  return null;
+}
 
-  const swap = (val: string): string => val === STOCK ? envRoot : val.startsWith(`${STOCK}/`) ? `${envRoot}/${val.slice(STOCK.length + 1)}` : val;
+function rerootStockPaths(config: BesideConfig, rootOverride: string | null = stockPathRootOverride()): void {
+  if (!rootOverride || rootOverride.trim().length === 0) return;
+
+  const swap = (val: string): string => val === STOCK_DATA_DIR ? rootOverride : val.startsWith(`${STOCK_DATA_DIR}/`) ? `${rootOverride}/${val.slice(STOCK_DATA_DIR.length + 1)}` : val;
 
   config.app.data_dir = swap(config.app.data_dir);
   const storageBlock = (config.storage as any)[config.storage.plugin];
@@ -443,5 +451,13 @@ export async function writeDefaultConfigIfMissing(dataDir: string = defaultDataD
   const target = path.join(dataDir, DEFAULT_CONFIG_FILENAME);
   await fs.mkdir(dataDir, { recursive: true });
   try { await fs.access(target); return { created: false, path: target }; }
-  catch { await fs.writeFile(target, DEFAULT_CONFIG_YAML, 'utf8'); return { created: true, path: target }; }
+  catch { await fs.writeFile(target, defaultConfigYaml(dataDir), 'utf8'); return { created: true, path: target }; }
+}
+
+function defaultConfigYaml(dataDir: string): string {
+  const rootOverride = stockPathRootOverride(dataDir);
+  if (!rootOverride) return DEFAULT_CONFIG_YAML;
+  const config = ConfigSchema.parse(YAML.parse(DEFAULT_CONFIG_YAML) ?? {});
+  rerootStockPaths(config, rootOverride);
+  return YAML.stringify(config);
 }

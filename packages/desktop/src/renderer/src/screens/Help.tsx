@@ -70,6 +70,14 @@ export function Help({
     }
   }
 
+  function openPath(target: Parameters<typeof window.beside.openPath>[0], label: string) {
+    void window.beside.openPath(target).catch((err) => {
+      toast.error(`Could not open ${label}`, {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
   return (
     <div className="flex flex-col gap-6 pt-6">
       <PageHeader title="Help" description="Need a hand? You're in the right place." />
@@ -117,7 +125,7 @@ export function Help({
               action={
                 <Button
                   variant="outline"
-                  onClick={() => void window.beside.openPath('data')}
+                  onClick={() => openPath('data', 'data folder')}
                 >
                   <FolderOpen />
                   Open
@@ -131,7 +139,7 @@ export function Help({
               action={
                 <Button
                   variant="outline"
-                  onClick={() => void window.beside.openPath('config')}
+                  onClick={() => openPath('config', 'config file')}
                 >
                   <FolderOpen />
                   Open

@@ -33,6 +33,11 @@ export function Connect({ overview, config, onRefresh }: { overview: RuntimeOver
 
 function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, enableMcp, mcpEnabled, mcpRunning, markdownRunning, markdownPath, onRefresh }: any) {
   const [test, setTest] = React.useState<TestState>({ status: 'idle' }), [enabling, setEnabling] = React.useState(false);
+  const runAction = (label: string, fn: () => Promise<unknown>) => {
+    void fn().catch((err) => {
+      toast.error(label, { description: err instanceof Error ? err.message : String(err) });
+    });
+  };
   React.useEffect(() => { if (test.status === 'ok') { const t = window.setTimeout(() => setTest({ status: 'idle' }), 6000); return () => window.clearTimeout(t); } }, [test]);
 
   const ping = async () => {
@@ -55,7 +60,7 @@ function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, e
           <div className="flex flex-wrap items-center gap-2">
             {!mcpEnabled && <Button size="lg" onClick={async () => { setEnabling(true); try { await enableMcp(); } finally { setEnabling(false); } }} disabled={enabling} className="btn-brand">{enabling ? <Loader2 className="animate-spin" /> : <Wrench />}Enable MCP</Button>}
             <Button variant="outline" size="lg" onClick={ping} disabled={test.status === 'pending'}>{test.status === 'pending' ? <Loader2 className="animate-spin" /> : <Zap />}Test connection</Button>
-            <Button variant="ghost" size="lg" onClick={() => window.beside.openExternalUrl(`${url}/health`)}><Plug />Open health URL</Button>
+            <Button variant="ghost" size="lg" onClick={() => runAction('Could not open health URL', () => window.beside.openExternalUrl(`${url}/health`))}><Plug />Open health URL</Button>
             {test.status === 'idle' ? <span className="text-xs text-muted-foreground/80 font-mono truncate">{`${url}/health`}</span> : test.status === 'pending' ? <span className="text-xs text-muted-foreground">Pinging...</span> : test.status === 'ok' ? <span className="inline-flex items-center gap-1.5 text-xs text-success font-medium animate-in fade-in-0"><CheckCircle2 className="size-3.5" />Connected · {test.latencyMs}ms</span> : <span className="inline-flex items-center gap-1.5 text-xs text-destructive font-medium animate-in fade-in-0" title={test.reason}><XCircle className="size-3.5" /><span className="truncate max-w-[260px]">{test.reason}</span></span>}
           </div>
           <div className="grid gap-3 md:grid-cols-3">
@@ -71,7 +76,7 @@ function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, e
         <span className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground"><FolderOpen className="size-5" /></span>
         <div className="flex-1 min-w-[220px]"><h3 className="font-semibold">Read your memory as files</h3><p className="text-sm text-muted-foreground mt-0.5">Daily journals and index pages are exported as Markdown.</p><code className="mt-2 inline-block rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground">{markdownPath || '~/.beside/export/markdown'}</code></div>
         <StatusPill tone={markdownRunning ? 'success' : 'muted'} pulse={markdownRunning}>{markdownRunning ? 'Running' : 'Not running'}</StatusPill>
-        <Button variant="outline" onClick={() => window.beside.openPath('markdown')}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => window.beside.openPath('config')}><Wrench />Config</Button>
+        <Button variant="outline" onClick={() => runAction('Could not open folder', () => window.beside.openPath('markdown'))}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => runAction('Could not open config', () => window.beside.openPath('config'))}><Wrench />Config</Button>
       </CardContent></Card>
     </div>
   );

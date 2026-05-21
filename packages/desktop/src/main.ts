@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { app, BrowserWindow, clipboard, ipcMain, Menu, net, Tray, nativeImage, protocol, shell, dialog, systemPreferences } from 'electron';
 import electronUpdater from 'electron-updater';
 const { autoUpdater } = electronUpdater;
-import { defaultDataDir, expandPath, loadConfig } from '@beside/core';
+import { defaultDataDir, expandPath, loadConfig, writeDefaultConfigIfMissing } from '@beside/core';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
@@ -245,7 +245,7 @@ async function refreshTray() {
     live ? { label: 'Pause Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('pauseCapture').catch(e => appendLog(`Pause failed: ${e}`)); await refreshTray(); } } : paused ? { label: 'Resume Capture', accelerator: 'CommandOrControl+.', click: async () => { await (await getRuntimeForRequest()).call('resumeCapture').catch(e => appendLog(`Resume failed: ${e}`)); await refreshTray(); } } : { label: 'Start Capture', click: () => startRuntime(), enabled: !live && !paused && !(h.ok && !managedRuntime) },
     { type: 'separator' }, { label: 'Run Doctor', click: () => showStatusWindow({ focus: 'doctor' }) },
     { label: 'Check for Updates...', click: () => checkForUpdates(true) },
-    { label: 'Reveal Files', submenu: [{ label: 'Markdown Export', click: () => shell.openPath(markdownExportDir) }, { label: 'Data Folder', click: () => shell.openPath(dataDir) }, { label: 'Config File', click: () => shell.openPath(configPath) }] },
+    { label: 'Reveal Files', submenu: [{ label: 'Markdown Export', click: () => void openPathTarget('markdown').catch((err) => appendLog(`Open markdown export failed: ${String(err)}`)) }, { label: 'Data Folder', click: () => void openPathTarget('data').catch((err) => appendLog(`Open data folder failed: ${String(err)}`)) }, { label: 'Config File', click: () => void openPathTarget('config').catch((err) => appendLog(`Open config failed: ${String(err)}`)) }] },
     { type: 'separator' }, ...(managedRuntime ? [{ label: 'Stop Managed Runtime', click: () => stopManagedRuntime() }] : []),
     { label: 'Quit', accelerator: 'CommandOrControl+Q', click: () => app.quit() }
   ]));
@@ -541,7 +541,7 @@ function registerRuntimeIpc() {
   h('beside:update-model', async () => (await getRuntimeForRequest()).call('updateModel'));
   h('beside:get-start-at-login', () => app.getLoginItemSettings().openAtLogin);
   h('beside:set-start-at-login', (e, en) => { app.setLoginItemSettings({ openAtLogin: en, openAsHidden: true }); return en; });
-  h('beside:open-path', async (e, t: any) => { const p = t === 'config' ? configPath : t === 'data' ? dataDir : await getMarkdownExportDir(); const err = await shell.openPath(p); if (err) throw new Error(err); return { opened: p }; });
+  h('beside:open-path', async (e, t: OpenPathTarget) => openPathTarget(t));
   h('beside:open-asset-path', async (e, rel: string) => {
     const abs = await resolveAssetPath(rel);
     const err = await shell.openPath(abs);
@@ -578,6 +578,41 @@ async function readCaptureHookWidgetBundle(params: { resolvedBundlePath?: string
   const source = await fs.promises.readFile(abs, 'utf8');
   return { source };
 }
+type OpenPathTarget = 'config' | 'data' | 'markdown' | { target: 'markdown'; category?: string };
+
+async function openPathTarget(target: OpenPathTarget) {
+  const p = await resolveOpenPathTarget(target);
+  await preparePathForOpen(target, p);
+  const err = await shell.openPath(p);
+  if (err) throw new Error(`Failed to open ${p}: ${err}`);
+  return { opened: p };
+}
+
+async function resolveOpenPathTarget(target: OpenPathTarget): Promise<string> {
+  if (target === 'config') return configPath;
+  if (target === 'data') return dataDir;
+
+  const root = await getMarkdownExportDir();
+  if (typeof target === 'object' && target?.target === 'markdown') {
+    const category = typeof target.category === 'string' ? target.category.trim() : '';
+    if (!category) return root;
+
+    const resolved = path.resolve(root, category);
+    if (!isPathInside(resolved, path.resolve(root))) throw new Error('Invalid markdown export category.');
+    return resolved;
+  }
+
+  return root;
+}
+
+async function preparePathForOpen(target: OpenPathTarget, p: string): Promise<void> {
+  if (target === 'config') {
+    await writeDefaultConfigIfMissing(dataDir);
+    return;
+  }
+  await fs.promises.mkdir(p, { recursive: true });
+}
+
 async function getMarkdownExportDir() { try { const c = (await loadConfig(configPath)).config.export.plugins.find((p) => p.name === 'markdown'); if (typeof c?.path === 'string') return expandPath(c.path); } catch {} return markdownExportDir; }
 async function getRuntimeForRequest() { if (!managedRuntime) managedRuntime = new RuntimeServiceClient(); return managedRuntime; }
 function setRuntimeHeartbeat(mode: string) { managedRuntime?.call('setHeartbeat', { mode }).catch(() => {}); }
