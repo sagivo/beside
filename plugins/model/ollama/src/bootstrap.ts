@@ -128,6 +128,54 @@ async function runInstallerCommand(
   });
 }
 
+async function runCommandCapture(
+  command: string,
+  args: string[],
+  options: { shell?: boolean } = {},
+): Promise<{ code: number | null; output: string }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      shell: options.shell,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let output = '';
+    const collect = (chunk: Buffer | string): void => {
+      output += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    };
+    child.stdout?.on('data', collect);
+    child.stderr?.on('data', collect);
+    child.on('error', (err) => reject(err));
+    child.on('exit', (code) => resolve({ code, output: output.trim() }));
+  });
+}
+
+async function clearMacQuarantine(
+  targetPath: string,
+  onProgress?: ModelBootstrapHandler,
+): Promise<void> {
+  if (process.platform !== 'darwin') return;
+  try {
+    const { code, output } = await runCommandCapture('/usr/bin/xattr', [
+      '-dr',
+      'com.apple.quarantine',
+      targetPath,
+    ]);
+    if (code === 0) return;
+    if (output && !/No such xattr/u.test(output)) {
+      onProgress?.({
+        kind: 'install_log',
+        line: `Could not clear macOS quarantine metadata from ${targetPath}: ${output}`,
+      });
+    }
+  } catch (err) {
+    onProgress?.({
+      kind: 'install_log',
+      line: `Could not clear macOS quarantine metadata from ${targetPath}: ${(err as Error).message}`,
+    });
+  }
+}
+
 async function pathWritable(dir: string): Promise<boolean> {
   try {
     await fs.access(dir, constants.W_OK);
@@ -188,6 +236,19 @@ function ollamaHostEnv(host: string): string | undefined {
   }
 }
 
+async function prepareMacOllamaCommand(commandPath: string): Promise<void> {
+  if (process.platform !== 'darwin' || !path.isAbsolute(commandPath)) return;
+  const realCommandPath = await fs.realpath(commandPath).catch(() => commandPath);
+  await clearMacQuarantine(realCommandPath);
+
+  const appMarker = '.app/Contents/';
+  const appMarkerIndex = realCommandPath.indexOf(appMarker);
+  if (appMarkerIndex !== -1) {
+    const appPath = realCommandPath.slice(0, appMarkerIndex + '.app'.length);
+    await clearMacQuarantine(appPath);
+  }
+}
+
 export async function installOllamaMacOS(
   onProgress: ModelBootstrapHandler,
 ): Promise<void> {
@@ -210,20 +271,23 @@ export async function installOllamaMacOS(
       ['-fL', '--progress-bar', OLLAMA_MAC_ZIP_URL, '-o', zipPath],
       onProgress,
     );
+    await clearMacQuarantine(zipPath, onProgress);
 
     onProgress({ kind: 'install_log', line: 'Extracting Ollama.app…' });
-    await runInstallerCommand('ditto', ['-x', '-k', zipPath, extractDir], onProgress);
+    await runInstallerCommand('ditto', ['-x', '-k', '--noqtn', zipPath, extractDir], onProgress);
 
     const sourceApp = path.join(extractDir, 'Ollama.app');
     if (!existsSync(sourceApp)) {
       throw new Error('download did not contain Ollama.app');
     }
+    await clearMacQuarantine(sourceApp, onProgress);
 
     const applicationsDir = await macApplicationsInstallDir();
     const targetApp = path.join(applicationsDir, 'Ollama.app');
     onProgress({ kind: 'install_log', line: `Installing Ollama.app to ${targetApp}…` });
     await fs.rm(targetApp, { recursive: true, force: true });
     await fs.cp(sourceApp, targetApp, { recursive: true });
+    await clearMacQuarantine(targetApp, onProgress);
 
     const commandPath = path.join(targetApp, 'Contents', 'Resources', 'ollama');
     if (!existsSync(commandPath)) {
@@ -376,13 +440,24 @@ function resolveOllamaCommand(): { command: string; shell: boolean } {
  * stdio is detached.
  */
 export async function startOllamaDaemon(host = 'http://127.0.0.1:11434'): Promise<void> {
+  const resolved = resolveOllamaCommand();
+  const hostEnv = ollamaHostEnv(host);
+  await prepareMacOllamaCommand(resolved.command);
+
   await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let output = '';
+    let startupTimer: NodeJS.Timeout | undefined;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (startupTimer) clearTimeout(startupTimer);
+      fn();
+    };
     try {
-      const resolved = resolveOllamaCommand();
-      const hostEnv = ollamaHostEnv(host);
       const child = spawn(resolved.command, ['serve'], {
         detached: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         // On Windows `ollama` is `ollama.exe`, but other potential
         // wrappers may be `.cmd`. shell:true keeps PATHEXT resolution
         // identical to the user's shell. Harmless on POSIX.
@@ -411,11 +486,29 @@ export async function startOllamaDaemon(host = 'http://127.0.0.1:11434'): Promis
             process.env.OLLAMA_KV_CACHE_TYPE ?? 'q8_0',
         },
       });
-      child.on('error', (err) => reject(err));
-      child.unref();
-      resolve();
+      const collect = (chunk: Buffer | string): void => {
+        output += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+      };
+      child.stdout?.on('data', collect);
+      child.stderr?.on('data', collect);
+      child.on('error', (err) => settle(() => reject(err)));
+      child.on('exit', (code, signal) => {
+        settle(() => {
+          const suffix = output.trim() ? `: ${output.trim()}` : '';
+          reject(new Error(`ollama serve exited early (code=${code}, signal=${signal})${suffix}`));
+        });
+      });
+      startupTimer = setTimeout(() => {
+        settle(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
+          resolve();
+        });
+      }, 1500);
+      startupTimer.unref?.();
     } catch (err) {
-      reject(err);
+      settle(() => reject(err));
     }
   });
 }

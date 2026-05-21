@@ -506,17 +506,25 @@ class OllamaAdapter implements IModelAdapter {
       return;
     }
     emit({ kind: 'server_starting', host: this.host });
+    let startIssue: Error | null = null;
     try {
       await startOllamaDaemon(this.host);
     } catch (err) {
       // Some installers (macOS .app, Linux systemd) auto-start the daemon
       // and `ollama serve` will then fail with "address in use" — that's
       // fine, we just keep polling.
+      startIssue = err instanceof Error ? err : new Error(String(err));
       this.logger.debug('startOllamaDaemon spawn issue (often benign)', { err: String(err) });
     }
-    const ready = await waitForOllama(this.host, SERVER_READY_TIMEOUT_MS);
+    const benignStartIssue = startIssue && /address already in use|bind/u.test(startIssue.message);
+    const ready = await waitForOllama(
+      this.host,
+      startIssue && !benignStartIssue ? 10_000 : SERVER_READY_TIMEOUT_MS,
+    );
     if (!ready) {
-      const reason = `daemon did not become reachable within ${SERVER_READY_TIMEOUT_MS / 1000}s`;
+      const reason = startIssue && !benignStartIssue
+        ? `daemon failed to start: ${startIssue.message}`
+        : `daemon did not become reachable within ${SERVER_READY_TIMEOUT_MS / 1000}s`;
       emit({ kind: 'server_failed', host: this.host, reason });
       throw new Error(`Ollama server unreachable at ${this.host} (${reason}).`);
     }

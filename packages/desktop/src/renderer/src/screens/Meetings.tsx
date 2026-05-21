@@ -83,7 +83,18 @@ function eventTimeRange(e: DayEvent) {
 }
 
 function normaliseAgendaTitle(t: string) { return t.toLowerCase().replace(/\b(?:google\s+meet|zoom|teams|meeting|call)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
-function titlesLikelySame(a: string, b: string) { const l = normaliseAgendaTitle(a), r = normaliseAgendaTitle(b); return !!(l && r && (l === r || (l.length >= 6 && r.length >= 6 && (l.includes(r) || r.includes(l))))); }
+function agendaTitleTokens(t: string) { return normaliseAgendaTitle(t).split(' ').filter(x => x.length > 1 && !/^\d+$/.test(x) && !TITLE_TOKEN_STOP_WORDS.has(x)); }
+function titlesLikelySame(a: string, b: string) {
+  const l = normaliseAgendaTitle(a), r = normaliseAgendaTitle(b);
+  if (!l || !r) return false;
+  if (l === r || (l.length >= 6 && r.length >= 6 && (l.includes(r) || r.includes(l)))) return true;
+  const lt = new Set(agendaTitleTokens(a)), rt = new Set(agendaTitleTokens(b));
+  const min = Math.min(lt.size, rt.size);
+  if (min === 0) return false;
+  let overlap = 0;
+  lt.forEach(t => { if (rt.has(t)) overlap++; });
+  return overlap >= Math.min(2, min);
+}
 
 const SOLO_ACTIVITY_TITLE_RE = /\b(focus|deep work|heads down|busy|hold|blocked|personal|lunch|break|commute|ooo|out of office)\b/i;
 const COLLABORATIVE_MEETING_TITLE_RE = /\b(1\s*:\s*1|1-on-1|one[-\s]?on[-\s]?one|stand[-\s]?up|sync|office hours?|all hands|planning|retro|demo|interview|review|check[-\s]?in|kickoff)\b/i;
@@ -91,7 +102,9 @@ const REMOTE_MEETING_SIGNAL_RE = /\b(zoom(?:\.us)?|google meet|meet\.google|team
 const TITLE_TOKEN_STOP_WORDS = new Set(['calendar', 'call', 'conference', 'cupertino', 'event', 'google', 'meet', 'meeting', 'office', 'hour', 'hours', 'palaven', 'room', 'session', 'teams', 'today', 'tomorrow', 'vimire', 'webex', 'whereby', 'zoom']);
 const PARTICIPANT_NOISE_WORDS = new Set([...TITLE_TOKEN_STOP_WORDS, 'zoom room']);
 const LOW_SIGNAL_COMMUNICATION_RE = /\b(newsletter|morning brew|unsubscribe|digest|roundup|promotion|promotional|marketing|sale|discount|coupon|receipt|statement|notification|alert|password reset|security code|verification code|recruit(?:er|ing|s)?|talent on demand|sponsored)\b/i;
-const IMPORTANT_COMMUNICATION_RE = /\b(action item|assigned|blocked|decision|deadline|due|follow[-\s]?up|need(?:s|ed)?|please|proposal|question|request(?:ed|s)?|review|schedule(?:d|ing)?|sync|meeting|call|interview|intro|asks?|asked|reply|respond|waiting on|approval|approved|urgent|customer|client|contract|pricing|invoice dispute|bug|incident|outage|launch|ship|hiring loop)\b/i;
+const IMPORTANT_COMMUNICATION_RE = /\b(action item|assigned|block(?:ed|er|ing)?|decision|deadline|due|follow[-\s]?up|need(?:s|ed)?|proposal|review|waiting on|approval|approved|urgent|customer|client|contract|pricing|invoice dispute|bug|incident|outage|sev(?:\d+)?|post[-\s]?mortem|launch|ship|hiring loop|prod(?:uction)?|error|failure|failed|fix)\b/i;
+const IMPORTANT_TASK_RE = /\b(action item|assigned|block(?:ed|er|ing)?|deadline|due|follow[-\s]?up|post[-\s]?mortem|customer|client|bug|incident|outage|launch|ship|approval|review)\b/i;
+const CALENDAR_ECHO_RE = /\b(a scheduled|scheduled meeting|scheduled standup|calendar invite|updated invitation|meeting details|visible in accessibility text|no audio|the team discussed)\b/i;
 
 function cleanParticipantName(n: string) { return n.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z0-9@.' -]+/gi, ' ').replace(/\s+/g, ' ').trim(); }
 function isMeaningfulParticipantName(n: string) { const c = cleanParticipantName(n), k = c.toLowerCase(); return c.length >= 2 && c.length <= 60 && !/^\d+$/.test(c) && !PARTICIPANT_NOISE_WORDS.has(k) && !/\b(?:meeting|room|zoom room|calendar)\b/i.test(c) && /[a-z]/i.test(c); }
@@ -104,14 +117,27 @@ function isCollaborativeMeetingEvent(e: DayEvent, m: Meeting | null) {
   return REMOTE_MEETING_SIGNAL_RE.test([e.title, e.source_app ?? '', ...e.links, m?.title ?? '', ...(m?.links ?? []), ...(m?.summary_json?.links_shared ?? [])].join(' ')) && e.kind === 'meeting';
 }
 
+function eventSearchText(e: DayEvent): string {
+  return [e.title, e.context_md, e.source_app, ...e.attendees].filter((v): v is string => !!v).join(' ');
+}
+
+function isPrimaryAgendaEvent(e: DayEvent): boolean {
+  return e.source === 'calendar_screen' || e.source === 'meeting_capture' || e.kind === 'calendar' || e.kind === 'meeting' || !!e.meeting_id;
+}
+
 function isAgendaWorthyEvent(e: DayEvent): boolean {
   if (e.title === '__merged__') return false;
-  if (e.kind === 'meeting' || e.kind === 'calendar' || e.kind === 'task') return true;
-  if (e.source === 'meeting_capture' || e.source === 'calendar_screen' || e.source === 'task_screen') return true;
-  if (e.meeting_id) return true;
+  if (isPrimaryAgendaEvent(e)) return true;
+  if (e.source === 'task_screen') return true;
+
+  if (e.kind === 'task') {
+    const text = eventSearchText(e);
+    if (CALENDAR_ECHO_RE.test(text) && COLLABORATIVE_MEETING_TITLE_RE.test(text)) return false;
+    return IMPORTANT_TASK_RE.test(text);
+  }
 
   if (e.kind === 'communication' && (e.source === 'email_screen' || e.source === 'slack_screen')) {
-    const text = [e.title, e.context_md, e.source_app, ...e.attendees].filter(Boolean).join(' ');
+    const text = eventSearchText(e);
     if (LOW_SIGNAL_COMMUNICATION_RE.test(text)) return false;
     return IMPORTANT_COMMUNICATION_RE.test(text);
   }
@@ -131,6 +157,50 @@ function meetingForEvent(e: DayEvent, meetingsById: Map<string, Meeting>): Meeti
   if (!e.meeting_id) return null;
   const meeting = meetingsById.get(e.meeting_id) ?? null;
   return meeting && meeting.day === e.day ? meeting : null;
+}
+
+function agendaEventPriority(e: DayEvent, meetingsById: Map<string, Meeting>): number {
+  const meeting = meetingForEvent(e, meetingsById);
+  let score = 0;
+  if (e.source === 'calendar_screen') score += 120;
+  if (e.kind === 'calendar') score += 80;
+  if (e.meeting_id) score += 45;
+  if (e.kind === 'meeting' || e.source === 'meeting_capture') score += 70;
+  if (e.source === 'task_screen') score += 45;
+  if (e.kind === 'task') score += 25;
+  if (e.kind === 'communication') score += IMPORTANT_COMMUNICATION_RE.test(eventSearchText(e)) ? 18 : 5;
+  if (meeting?.summary_status === 'ready') score += 12;
+  if (meeting?.summary_json?.tldr || e.context_md) score += 4;
+  if (e.attendees.length > 0) score += Math.min(e.attendees.length, 6);
+  return score;
+}
+
+function eventsLikelySameAgendaItem(a: DayEvent, b: DayEvent): boolean {
+  if (a.id === b.id) return true;
+  if (a.day !== b.day) return false;
+  if (!titlesLikelySame(a.title, b.title)) return false;
+  const ar = eventTimeRange(a), br = eventTimeRange(b);
+  if (!ar || !br) return true;
+  const overlap = Math.min(ar.end, br.end) - Math.max(ar.start, br.start);
+  const startDelta = Math.abs(ar.start - br.start);
+  const windowMs = (isPrimaryAgendaEvent(a) || isPrimaryAgendaEvent(b)) ? 20 * 60_000 : 8 * 60_000;
+  return overlap > 0 || startDelta <= windowMs;
+}
+
+function dedupeAgendaItems(events: DayEvent[], meetingsById: Map<string, Meeting>): DayEvent[] {
+  const ranked = events.slice().sort((a, b) => {
+    const ap = agendaEventPriority(a, meetingsById), bp = agendaEventPriority(b, meetingsById);
+    return bp !== ap ? bp - ap : a.starts_at.localeCompare(b.starts_at);
+  });
+  const kept: DayEvent[] = [];
+  for (const event of ranked) {
+    if (!kept.some(existing => eventsLikelySameAgendaItem(existing, event))) kept.push(event);
+  }
+  return kept;
+}
+
+function buildVisibleAgendaEvents(events: DayEvent[], meetingsById: Map<string, Meeting>): DayEvent[] {
+  return dedupeAgendaItems(reconcileCalendarMeetingItems(events, meetingsById).filter(isAgendaWorthyEvent), meetingsById);
 }
 
 function reconcileCalendarMeetingItems(events: DayEvent[], meetingsById: Map<string, Meeting>): DayEvent[] {
@@ -179,7 +249,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
 
   const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0);
 
-  const visibleEvents = React.useMemo(() => reconcileCalendarMeetingItems(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).filter(isAgendaWorthyEvent).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
+  const visibleEvents = React.useMemo(() => buildVisibleAgendaEvents(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -210,7 +280,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   return (
     <div className="flex flex-col h-full gap-5 pt-6 pb-2 min-h-0">
       <div className="flex-none">
-        <PageHeader title="Journal" description="Your day story, meetings, and extracted events." actions={<><Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button></>} />
+        <PageHeader title="Journal" description="A calendar-first agenda with only important follow-ups." actions={<><Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button></>} />
       </div>
 
       {loading && !visibleEvents.length && !dayOverrides.size ? <div className="flex-1 grid place-items-center text-muted-foreground text-sm gap-2"><div className="flex flex-col items-center gap-2"><Loader2 className="size-5 animate-spin" />Loading…</div></div> : (
@@ -269,7 +339,7 @@ function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, on
         <input ref={r} type="date" value={selectedDay} onChange={e => e.target.value && onPick(e.target.value)} className="absolute inset-0 opacity-0 pointer-events-none" />
       </div>
       {!it && <Button variant="ghost" size="sm" onClick={onToday} className="h-9 rounded-full px-3 text-xs font-semibold text-muted-foreground hover:text-foreground">Jump to today</Button>}
-      {eventCount > 0 && <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"><span className="size-1.5 rounded-full bg-primary/70" />{eventCount} event{eventCount > 1 ? 's' : ''}</span>}
+      {eventCount > 0 && <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"><span className="size-1.5 rounded-full bg-primary/70" />{eventCount} agenda item{eventCount > 1 ? 's' : ''}</span>}
     </div>
   );
 }
@@ -399,6 +469,13 @@ function NowIndicator({ now }: { now: Date }) {
 
 function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active: boolean; onClick: () => void; meeting: Meeting | null }) {
   const dur = eventDuration(event), ht = (meeting?.transcript_chars ?? 0) > 0;
+  const preview = event.kind !== 'meeting'
+    ? event.context_md
+    : meeting?.summary_json?.tldr && !event.context_md
+      ? meeting.summary_json.tldr
+      : ht && !meeting?.summary_json?.tldr
+        ? 'Summary pending.'
+        : null;
   return (
     <button type="button" onClick={onClick} className={cn('group relative w-full text-left rounded-xl pl-4 pr-3 py-3 transition-all border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60', active ? 'border-primary/30 bg-primary/[0.06] shadow-[0_1px_0_0_hsl(var(--primary)/0.08)_inset]' : 'border-transparent hover:bg-muted/40')}>
       <span aria-hidden="true" className={cn('absolute left-0 top-2 bottom-2 w-[3px] rounded-full transition-all', active ? 'bg-primary' : 'bg-transparent group-hover:bg-border')} />
@@ -412,9 +489,7 @@ function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active
             <span className={cn('mt-[3px] shrink-0 transition-colors', active ? KIND_COLOR[event.kind] : 'text-muted-foreground/45 group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
             <div className="min-w-0 flex-1">
               <div className={cn('text-sm font-semibold leading-snug line-clamp-2', active ? 'text-foreground' : 'text-foreground/95')}>{event.title}</div>
-              {event.kind !== 'meeting' && event.context_md && <p className="mt-1 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{event.context_md}</p>}
-              {event.kind === 'meeting' && meeting?.summary_json?.tldr && !event.context_md && <p className="mt-1 text-xs text-muted-foreground/75 line-clamp-2 leading-relaxed">{meeting.summary_json.tldr}</p>}
-              {event.kind === 'meeting' && ht && !meeting?.summary_json?.tldr && <p className="mt-1 text-xs text-muted-foreground/55 italic line-clamp-2">Summary pending.</p>}
+              {active && preview && <p className={cn('mt-1 text-xs line-clamp-2 leading-relaxed', preview === 'Summary pending.' ? 'text-muted-foreground/55 italic' : 'text-muted-foreground/75')}>{preview}</p>}
             </div>
           </div>
         </div>
@@ -625,4 +700,3 @@ function MeetingStatusBadge({ status }: any) {
   if (status === 'skipped_short') return <Badge variant="secondary" className="text-xs font-semibold px-2.5 py-0.5 rounded-md opacity-80">Too short</Badge>;
   return null;
 }
-
