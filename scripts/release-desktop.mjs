@@ -99,6 +99,8 @@ if (!initialDmgOk) {
   });
 }
 
+await ensureDmgNotarizedAndStapled({ dmgPath, notaryArgs });
+
 await regenerateDmgBlockmap(dmgPath, dmgBlockmapPath);
 await writeLatestMacYml({ version, zipPath, dmgPath, latestMacPath });
 await assertArtifactsExist(uploadFiles);
@@ -396,6 +398,20 @@ async function duMb(file) {
     fail(`Could not determine size for ${rel(file)}.`);
   }
   return kb / 1024;
+}
+
+async function ensureDmgNotarizedAndStapled({ dmgPath, notaryArgs }) {
+  const validate = await run('xcrun', ['stapler', 'validate', dmgPath], {
+    capture: true,
+    quiet: true,
+    check: false,
+  });
+  if (validate.code === 0) return;
+
+  step('Notarizing and stapling DMG');
+  await run('xcrun', ['notarytool', 'submit', dmgPath, ...notaryArgs, '--wait', '--output-format', 'json']);
+  await run('xcrun', ['stapler', 'staple', dmgPath]);
+  await run('xcrun', ['stapler', 'validate', dmgPath]);
 }
 
 async function regenerateDmgBlockmap(dmg, blockmap) {
