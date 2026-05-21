@@ -175,28 +175,38 @@ function ChooseModelStep({ chosenModel, onChoose, onContinue, onBack }: any) {
   );
 }
 
-function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEvents, onContinue, onBack }: any) {
+function InstallModelStep({ chosenModel, bootstrapEvents, modelReady, onClearEvents, onContinue, onBack }: { chosenModel: string; bootstrapEvents: ModelBootstrapProgress[]; modelReady: boolean; onClearEvents: () => void; onContinue: () => void; onBack: () => void; }) {
   const [phase, setPhase] = React.useState<'idle'|'running'|'done'|'error'>('idle'), [err, setErr] = React.useState<string|null>(null);
   React.useEffect(() => {
-    if (phase !== 'idle') return; setPhase('running'); onClearEvents();
+    if (phase !== 'idle') return;
+    if (modelReady) { setPhase('done'); setErr(null); return; }
+    setPhase('running'); setErr(null); onClearEvents();
     window.beside.saveConfigPatch({ index: { model: { plugin: 'ollama', ollama: { model: chosenModel, auto_install: true } } } })
       .then(() => window.beside.bootstrapModel()).then(() => setPhase('done')).catch(e => { setPhase('error'); setErr(e.message); });
-  }, [phase, chosenModel, onClearEvents]);
+  }, [phase, chosenModel, modelReady, onClearEvents]);
 
   React.useEffect(() => {
-    if (modelReady && phase !== 'done') setPhase('done');
+    const latestTerminal = [...bootstrapEvents].reverse().find(ev => ['install_failed', 'pull_failed', 'server_failed', 'ready'].includes(ev.kind));
+    if (modelReady || latestTerminal?.kind === 'ready') { setPhase('done'); setErr(null); return; }
+    if (latestTerminal && latestTerminal.kind !== 'ready') { setPhase('error'); setErr(latestTerminal.reason || 'Failed'); return; }
     for (let i = bootstrapEvents.length - 1; i >= 0; i--) {
       const ev = bootstrapEvents[i]!;
-      if (['install_failed', 'pull_failed', 'server_failed'].includes(ev.kind)) { setPhase('error'); setErr(ev.reason || 'Failed'); return; }
-      if (ev.kind === 'ready') { setPhase('done'); return; }
+      if (ev.kind === 'ready') { setPhase('done'); setErr(null); return; }
     }
   }, [bootstrapEvents, modelReady, phase]);
 
-  const prog = [...bootstrapEvents].reverse().find(e => e.kind === 'pull_progress' && typeof e.completed === 'number');
-  const phases = buildInstallPhases(bootstrapEvents);
+  const displayEvents: ModelBootstrapProgress[] = modelReady && !bootstrapEvents.some(e => e.kind === 'ready')
+    ? [...bootstrapEvents, { kind: 'ready', model: chosenModel }]
+    : bootstrapEvents;
+  const prog = [...displayEvents].reverse().find(e => e.kind === 'pull_progress' && typeof e.completed === 'number');
+  const phases = buildInstallPhases(displayEvents);
+  const retry = () => { onClearEvents(); setErr(null); setPhase('idle'); };
+  const next = phase === 'error'
+    ? { label: 'Retry', onClick: retry }
+    : { label: phase === 'done' ? 'Continue' : 'Working...', onClick: onContinue, disabled: phase !== 'done' };
 
   return (
-    <StepCard eyebrow="Setting up AI" title={phase === 'done' ? 'Ready' : phase === 'error' ? 'Error' : 'Installing'} lede="Runs locally." back={{ onClick: onBack }} next={{ label: phase === 'done' ? 'Continue' : 'Working...', onClick: onContinue, disabled: phase !== 'done' }}>
+    <StepCard eyebrow="Setting up AI" title={phase === 'done' ? 'Ready' : phase === 'error' ? 'Error' : 'Installing'} lede="Runs locally." back={{ onClick: onBack }} next={next}>
       <div className="grid gap-2">{phases.map(p => <div key={p.id} className={cn('p-3 border rounded-md flex gap-3', p.state === 'pending' && 'opacity-60', p.state === 'error' && 'border-destructive/40')}><div className="mt-0.5">{p.state === 'done' ? <Check className="text-success size-4" /> : p.state === 'active' ? <Loader2 className="animate-spin text-primary size-4" /> : p.state === 'error' ? <X className="text-destructive size-4" /> : <span className="block size-2 rounded-full bg-muted-foreground/40 mt-1.5" />}</div><div className="flex-1"><div className="font-medium text-sm">{p.title}</div>{p.id === 'pull' && p.state === 'active' && prog && <Progress value={pullPercent(prog)} className="mt-2" />}</div></div>)}</div>
       {err && <Alert variant="destructive"><AlertTitle>Failed</AlertTitle><AlertDescription>{err}</AlertDescription></Alert>}
     </StepCard>

@@ -34,16 +34,19 @@ export async function commandExists(cmd: string): Promise<boolean> {
 }
 
 export async function isOllamaReachable(host: string, timeoutMs = 1500): Promise<boolean> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${host}/api/tags`, { signal: ctrl.signal });
-    return res.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
+  for (const candidate of ollamaProbeHosts(host)) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${candidate}/api/tags`, { signal: ctrl.signal });
+      if (res.ok) return true;
+    } catch {
+      // Try the next loopback spelling before declaring Ollama unreachable.
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return false;
 }
 
 export async function waitForOllama(host: string, totalMs: number): Promise<boolean> {
@@ -149,6 +152,40 @@ function macOllamaCommandCandidates(): string[] {
     path.join('/Applications', 'Ollama.app', 'Contents', 'Resources', 'ollama'),
     path.join(os.homedir(), 'Applications', 'Ollama.app', 'Contents', 'Resources', 'ollama'),
   ];
+}
+
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/u, '');
+}
+
+export function normalizeOllamaHost(host: string): string {
+  const trimmed = stripTrailingSlashes(host.trim());
+  if (!trimmed) return trimmed;
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+    return stripTrailingSlashes(url.toString());
+  } catch {
+    return trimmed;
+  }
+}
+
+function ollamaProbeHosts(host: string): string[] {
+  const trimmed = stripTrailingSlashes(host.trim());
+  const normalized = normalizeOllamaHost(trimmed);
+  return [normalized, trimmed]
+    .filter((candidate) => candidate.length > 0)
+    .filter((candidate, index, all) => all.indexOf(candidate) === index);
+}
+
+function ollamaHostEnv(host: string): string | undefined {
+  const normalized = normalizeOllamaHost(host);
+  try {
+    const url = new URL(normalized);
+    return url.host;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function installOllamaMacOS(
@@ -331,18 +368,18 @@ function resolveOllamaCommand(): { command: string; shell: boolean } {
 
 /**
  * Spawn `ollama serve` in the background, detached from this process. On
- * macOS the .app already auto-starts the daemon via launchd, on Windows
- * the installer registers a service, so this is mostly a Linux fallback
- * for when no system service exists.
+ * macOS and Windows, a service may already be running, so duplicate starts
+ * are tolerated by the caller's polling path.
  *
  * The child is unrefed so this process can exit cleanly without leaving
  * the daemon hanging — but the daemon itself keeps running because its
  * stdio is detached.
  */
-export async function startOllamaDaemon(): Promise<void> {
+export async function startOllamaDaemon(host = 'http://127.0.0.1:11434'): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     try {
       const resolved = resolveOllamaCommand();
+      const hostEnv = ollamaHostEnv(host);
       const child = spawn(resolved.command, ['serve'], {
         detached: true,
         stdio: 'ignore',
@@ -366,6 +403,7 @@ export async function startOllamaDaemon(): Promise<void> {
         // pre-starting `ollama serve` with their own env.
         env: {
           ...process.env,
+          ...(hostEnv ? { OLLAMA_HOST: hostEnv } : {}),
           OLLAMA_NUM_PARALLEL: process.env.OLLAMA_NUM_PARALLEL ?? '4',
           OLLAMA_FLASH_ATTENTION:
             process.env.OLLAMA_FLASH_ATTENTION ?? '1',

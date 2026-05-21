@@ -58,6 +58,7 @@ type MenuBarIndicator = { state: MenuBarCaptureState; label: string; };
 
 class RuntimeServiceClient {
   private readonly child: ChildProcess;
+  private closed = false;
   private nextId = 1;
   private readonly listeners = new Map<string, Set<(payload: unknown) => void>>();
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (r?: unknown) => void; }>();
@@ -67,8 +68,9 @@ class RuntimeServiceClient {
     const useElectronAsNode = runtimeNode === process.execPath;
     this.child = spawn(runtimeNode, [path.join(here, 'runtime-service.js')], { env: { ...process.env, BESIDE_RESOURCE_ROOT: workspaceRoot, ...(useElectronAsNode ? { ELECTRON_RUN_AS_NODE: '1' } : {}) }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     this.child.stderr?.setEncoding('utf8').on('data', (c) => appendLog(c.trimEnd()));
-    this.child.on('error', (err) => this.rejectAll(err));
-    this.child.on('exit', (code, signal) => { this.rejectAll(new Error(`exited (code=${code}, signal=${signal})`)); if (managedRuntime === this) managedRuntime = null; applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' }); void refreshTray(); if (statusWindow) void renderStatusWindow().catch((err) => appendLog(`Render refresh failed after runtime exit: ${String(err)}`)); });
+    this.child.stdin?.on('error', (err) => this.handleDisconnect(err, 'Runtime service pipe error'));
+    this.child.on('error', (err) => this.handleDisconnect(err, 'Runtime service process error'));
+    this.child.on('exit', (code, signal) => this.handleDisconnect(new Error(`exited (code=${code}, signal=${signal})`)));
     this.on('bootstrap-progress', (p) => statusWindow?.webContents.send('beside:bootstrap-progress', p));
     this.on('overview', (p) => { lastOverview = p; applyMenuBarIndicator(getMenuBarIndicator(lastOverview)); statusWindow?.webContents.send('beside:overview', p); });
     this.on('capture-hook-update', (p) => statusWindow?.webContents.send('beside:capture-hook-update', p));
@@ -79,13 +81,34 @@ class RuntimeServiceClient {
   async call<T = unknown>(method: string, params?: unknown): Promise<T> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
+      const stdin = this.child.stdin;
+      if (this.closed || !stdin || stdin.destroyed || stdin.writableEnded) {
+        const err = new Error('runtime service closed');
+        this.handleDisconnect(err);
+        reject(err);
+        return;
+      }
+
       this.pending.set(id, { resolve: resolve as any, reject });
-      this.child.stdin?.write(`${JSON.stringify({ id, method, params })}\n`, (err) => { if (err) { this.pending.delete(id); reject(err); } });
+      const fail = (err: unknown) => {
+        const closedErr = this.toClosedError(err);
+        this.pending.delete(id);
+        this.handleDisconnect(closedErr, 'Runtime service write failed');
+        reject(closedErr);
+      };
+
+      try {
+        stdin.write(`${JSON.stringify({ id, method, params })}\n`, (err) => {
+          if (err) fail(err);
+        });
+      } catch (err) {
+        fail(err);
+      }
     });
   }
 
   on(event: string, callback: (payload: unknown) => void) { const l = this.listeners.get(event) ?? new Set(); l.add(callback); this.listeners.set(event, l); }
-  close() { this.child.kill('SIGTERM'); this.rejectAll(new Error('runtime service closed')); }
+  close() { if (this.closed) return; this.closed = true; this.child.kill('SIGTERM'); this.rejectAll(new Error('runtime service closed')); }
 
   private handleLine(line: string) {
     try {
@@ -94,6 +117,27 @@ class RuntimeServiceClient {
       const p = this.pending.get(res.id);
       if (p) { this.pending.delete(res.id); res.ok ? p.resolve(res.result) : p.reject(new Error(res.error)); }
     } catch { appendLog(`[stdout] ${line}`); }
+  }
+
+  private handleDisconnect(reason: unknown, logPrefix?: string) {
+    const err = this.toClosedError(reason);
+    if (this.closed) { this.rejectAll(err); return; }
+
+    if (logPrefix) appendLog(`${logPrefix}: ${err.message}`);
+    this.closed = true;
+    try { if (this.child.exitCode == null && !this.child.killed) this.child.kill('SIGTERM'); } catch {}
+    this.rejectAll(err);
+    if (managedRuntime === this) managedRuntime = null;
+    applyMenuBarIndicator({ state: 'stopped', label: 'Beside — stopped' });
+    void refreshTray();
+    if (statusWindow) void renderStatusWindow().catch((err) => appendLog(`Render refresh failed after runtime disconnect: ${String(err)}`));
+  }
+
+  private toClosedError(reason: unknown) {
+    if (reason instanceof Error && reason.message.startsWith('runtime service closed')) return reason;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const code = typeof (reason as { code?: unknown })?.code === 'string' ? ` (${(reason as { code: string }).code})` : '';
+    return new Error(`runtime service closed${code}: ${message}`);
   }
 
   private rejectAll(err: unknown) { this.pending.forEach((p) => p.reject(err)); this.pending.clear(); }

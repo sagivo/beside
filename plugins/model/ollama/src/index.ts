@@ -13,6 +13,7 @@ import {
   installOllamaWindows,
   isOllamaReachable,
   manualInstallHint,
+  normalizeOllamaHost,
   ollamaCommandExists,
   startOllamaDaemon,
   waitForOllama,
@@ -128,7 +129,7 @@ class OllamaAdapter implements IModelAdapter {
 
   constructor(config: OllamaModelConfig, logger: Logger) {
     this.logger = logger.child('model-ollama');
-    this.host = config.host ?? DEFAULT_HOST;
+    this.host = normalizeOllamaHost(config.host ?? DEFAULT_HOST);
     this.model = config.model ?? DEFAULT_MODEL;
     this.embeddingModel = config.embedding_model ?? DEFAULT_EMBEDDING_MODEL;
     this.visionModel = config.vision_model ?? this.model;
@@ -506,7 +507,7 @@ class OllamaAdapter implements IModelAdapter {
     }
     emit({ kind: 'server_starting', host: this.host });
     try {
-      await startOllamaDaemon();
+      await startOllamaDaemon(this.host);
     } catch (err) {
       // Some installers (macOS .app, Linux systemd) auto-start the daemon
       // and `ollama serve` will then fail with "address in use" — that's
