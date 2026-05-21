@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import "./styles.css";
 import DocsPage from "./docs/DocsPage";
 
-const LATEST_RELEASE_URL = "https://github.com/sagivo/beside/releases/tag/v0.0.2";
-const DOWNLOAD_ARM_URL = "https://github.com/sagivo/beside/releases/download/v0.0.2/Beside-0.0.2-mac-arm64.dmg";
+const LATEST_RELEASE_URL = "https://github.com/sagivo/beside/releases/tag/v0.0.3";
+const DOWNLOAD_ARM_URL = "https://github.com/sagivo/beside/releases/download/v0.0.3/Beside-0.0.3-mac-arm64.dmg";
 const DOWNLOAD_INTEL_URL = LATEST_RELEASE_URL;
 
 export default function App({ initialPath }: { initialPath?: string } = {}) {
