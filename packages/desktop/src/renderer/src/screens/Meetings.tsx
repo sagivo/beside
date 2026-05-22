@@ -11,7 +11,7 @@ import { Markdown } from '@/components/Markdown';
 import { useFrameDetail } from '@/components/FrameDetailDialog';
 import { dayEventTitleKey, dedupeAllDayCalendarDuplicates, formatDayEventTime, formatDayEventTimeRange, formatLocalTime, isAllDayEvent, localDayKey, prettyDay, shiftDay } from '@/lib/format';
 import { uniqueStrings } from '@/lib/collections';
-import { DAY_EVENT_KIND_COLORS as KIND_COLOR, DAY_EVENT_KIND_LABELS as KIND_LABELS, DAY_EVENT_SOURCE_LABELS as SOURCE_LABELS } from '@/lib/day-events';
+import { DAY_EVENT_KIND_COLORS as KIND_COLOR, DAY_EVENT_KIND_LABELS as KIND_LABELS, DAY_EVENT_SOURCE_LABELS as SOURCE_LABELS, isScheduledDayEvent } from '@/lib/day-events';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
 import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
@@ -203,6 +203,13 @@ function buildVisibleAgendaEvents(events: DayEvent[], meetingsById: Map<string, 
   return dedupeAgendaItems(reconcileCalendarMeetingItems(events, meetingsById).filter(isAgendaWorthyEvent), meetingsById);
 }
 
+function shouldShowJournalEvent(event: DayEvent, selectedDay: string, today: string, nowMs: number): boolean {
+  if (isScheduledDayEvent(event)) return true;
+  if (compareDays(selectedDay, today) < 0) return true;
+  const startsAt = Date.parse(event.starts_at);
+  return Number.isFinite(startsAt) && startsAt <= nowMs;
+}
+
 function reconcileCalendarMeetingItems(events: DayEvent[], meetingsById: Map<string, Meeting>): DayEvent[] {
   const dd = dedupeEvents(events), ce = dd.filter(e => e.source === 'calendar_screen' && e.kind === 'calendar');
   if (!ce.length) return dd;
@@ -308,7 +315,9 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
 
   const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0);
 
-  const visibleEvents = React.useMemo(() => buildVisibleAgendaEvents(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
+  const visibleEvents = React.useMemo(() => buildVisibleAgendaEvents(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById)
+    .filter((event) => shouldShowJournalEvent(event, selectedDay, today, currentTime.getTime()))
+    .sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, today, currentTime, events, dayOverrides, meetingsById]);
   const buckets = React.useMemo(() => groupByBucket(visibleEvents), [visibleEvents]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
@@ -897,7 +906,7 @@ function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active
 function JournalLanding({ events, meetingsById, selectedDay, today, now, loading, onSelectEvent, onScan, scanning }: { events: DayEvent[]; meetingsById: Map<string, Meeting>; selectedDay: string; today: string; now: Date; loading: boolean; onSelectEvent: (id: string) => void; onScan: () => void; scanning: boolean; }) {
   const nMs = now.getTime();
   const upcoming = selectedDay === today
-    ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
+    ? events.find((e: DayEvent) => isScheduledDayEvent(e) && eventStartsAfterNow(e, nMs)) ?? null
     : null;
   const upcomingMeeting = upcoming ? meetingForEvent(upcoming, meetingsById) : null;
 

@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { AlertTriangle, Check, CheckCircle2, Cloud, Cpu, Download, FolderOpen, HardDrive, Keyboard, Link2, Loader2, Mic, Monitor, Moon, PlugZap, RefreshCw, RotateCcw, Shield, Sparkles, Sun, Trash2, UploadCloud, X } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Cloud, Cpu, Download, ExternalLink, FolderOpen, HardDrive, Keyboard, Link2, Loader2, Mic, Monitor, Moon, PlugZap, RefreshCw, RotateCcw, Shield, Sparkles, Sun, Trash2, UploadCloud, X } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -365,12 +365,23 @@ function CloudBackupSettings({ draft, backupStatus, set, onRefresh }: { draft: S
                 <h4 className="text-sm font-medium">Cloud Backup</h4>
                 <BackupModeBadge mode={mode} />
               </div>
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">{backupStatus?.remoteLabel ?? providerLabel(draft.backupProvider)}</p>
+              <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="truncate">{backupStatus?.remoteLabel ?? providerLabel(draft.backupProvider)}</span>
+                {backupStatus?.connected && draft.backupProvider === 'drive' && (
+                  <button type="button" onClick={() => window.beside.openExternalUrl('https://drive.google.com/drive/u/0/settings').catch(() => {})} className="inline-flex items-center gap-1 text-primary hover:underline">
+                    <ExternalLink className="size-3" />Open in Drive
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={connect} disabled={busy != null || draft.backupProvider !== 'drive'}>{busy === 'connect' ? <Loader2 className="animate-spin" /> : <Link2 />}Connect</Button>
-            <Button variant="ghost" size="sm" onClick={disconnect} disabled={busy != null || !backupStatus?.connected}><PlugZap />Disconnect</Button>
+            {!backupStatus?.connected && (
+              <Button variant="outline" size="sm" onClick={connect} disabled={busy != null || draft.backupProvider !== 'drive'}>{busy === 'connect' ? <Loader2 className="animate-spin" /> : <Link2 />}Connect</Button>
+            )}
+            {backupStatus?.connected && (
+              <Button variant="ghost" size="sm" onClick={disconnect} disabled={busy != null}><PlugZap />Disconnect</Button>
+            )}
             <Button size="sm" onClick={triggerBackup} disabled={busy != null || !draft.backupEnabled}>{busy === 'backup' ? <Loader2 className="animate-spin" /> : <UploadCloud />}Back up now</Button>
           </div>
         </div>

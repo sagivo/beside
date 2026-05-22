@@ -73,13 +73,17 @@ General rules:
 If CALENDAR APP:
 - ONLY emit events whose date matches the target capture day specified in the user prompt. Even if a week/month view shows other days, IGNORE them — they will be captured separately on their own day.
 - Treat all-day items as starting at midnight of that day.
-If EMAIL, CHAT, or TASK: surface only important threads / tickets with clear user relevance.`;
+If EMAIL, CHAT, or TASK: surface only important threads / tickets with clear user relevance.
+If EMAIL or CHAT: use the frame timestamp as the observed event time. Do NOT treat sender-local clock labels, bot labels, on-call handoff times, or message text times as scheduled starts.`;
 
 const CONTEXT_SYSTEM_PROMPT = `You are filling in a missing context line for an event. Write a SINGLE 1-3 sentence description based on screenshots. Return PLAIN TEXT.`;
 
 const LATEST_CALENDAR_CAPTURE_WINDOW_MS = 5 * 60_000;
 const CANONICAL_APPLE_CALENDAR_SOURCE_KEY = 'apple_calendar:com.apple.ical';
 const MAX_STRUCTURED_CALENDAR_CANDIDATES = 120;
+const OBSERVED_SOURCE_FUTURE_GRACE_MS = 5 * 60_000;
+const OBSERVED_SOURCE_TIME_SKEW_PURGE_MS = 4 * 60 * 60_000;
+const OBSERVED_MATCH_STOP_WORDS = new Set(['app', 'bot', 'channel', 'message', 'notification', 'slack', 'the', 'and', 'for', 'with', 'from']);
 
 interface SourceBucket {
   source: DayEventSource;
@@ -202,8 +206,9 @@ export class EventExtractor {
       try {
         const chromeTitlePurged = await this.purgeChromeTitleCalendarEvents();
         const misdatedPurged = await this.purgeMisdatedStructuredCalendarEvents();
-        const purged = chromeTitlePurged + misdatedPurged;
-        if (purged > 0) this.logger.info(`purged ${purged} legacy calendar event(s)`);
+        const futureObservedPurged = await this.purgeFutureObservedSourceEvents();
+        const purged = chromeTitlePurged + misdatedPurged + futureObservedPurged;
+        if (purged > 0) this.logger.info(`purged ${purged} stale extracted event(s)`);
       } catch (err) {
         this.logger.warn('legacy calendar purge failed', { err: String(err) });
       }
@@ -309,6 +314,40 @@ export class EventExtractor {
         await this.storage.deleteDayEvent(event.id).catch(() => {});
         purged++;
       }
+    }
+
+    return purged;
+  }
+
+  private async purgeFutureObservedSourceEvents(): Promise<number> {
+    const horizonMs = 60 * 24 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+    const from = new Date(nowMs - horizonMs).toISOString();
+    const events = await this.storage.listDayEvents({ from, limit: 5000, order: 'recent' }).catch(() => [] as DayEvent[]);
+    const frameCache = new Map<string, Frame | null>();
+    let purged = 0;
+
+    for (const event of events) {
+      if (!isObservedSource(event.source) || event.meeting_id) continue;
+      const startsMs = Date.parse(event.starts_at);
+      if (!Number.isFinite(startsMs) || startsMs <= nowMs + OBSERVED_SOURCE_FUTURE_GRACE_MS) continue;
+
+      const evidenceTimes: number[] = [];
+      for (const frameId of event.evidence_frame_ids) {
+        let frame = frameCache.get(frameId);
+        if (frame === undefined) {
+          frame = (await this.storage.getFrameContext(frameId, 0, 0).catch(() => null))?.anchor ?? null;
+          frameCache.set(frameId, frame);
+        }
+        const frameMs = frame?.timestamp ? Date.parse(frame.timestamp) : Number.NaN;
+        if (Number.isFinite(frameMs)) evidenceTimes.push(frameMs);
+      }
+      if (!evidenceTimes.length) continue;
+
+      const latestEvidenceMs = Math.max(...evidenceTimes);
+      if (startsMs - latestEvidenceMs < OBSERVED_SOURCE_TIME_SKEW_PURGE_MS) continue;
+      await this.storage.deleteDayEvent(event.id).catch(() => {});
+      purged++;
     }
 
     return purged;
@@ -660,12 +699,14 @@ export class EventExtractor {
       const title = (candidate?.title ?? '').trim();
       if (!title) continue;
 
-      const startsAt = parseCandidateStart(candidate, extractionBucket.source, captureDay);
+      const startsAt = isObservedSource(extractionBucket.source)
+        ? observedTimestampForCandidate(candidate, extractionBucket, captureDay)
+        : parseCandidateStart(candidate, extractionBucket.source, captureDay);
       if (!startsAt) continue;
       const eventDay = localDayKey(new Date(startsAt));
       if (!isValidEventDay(eventDay)) continue;
 
-      const endsAt = parseCandidateEnd(candidate, extractionBucket.source, eventDay);
+      const endsAt = isObservedSource(extractionBucket.source) ? null : parseCandidateEnd(candidate, extractionBucket.source, eventDay);
       const hourBucket = localHourBucket(startsAt);
       const id = deterministicEventId(bucket.source, eventDay, hourBucket, title);
       const contentHash = sha1(`${eventDay}|${hourBucket}|${title}|${endsAt ?? ''}`);
@@ -1163,6 +1204,10 @@ function sourcePriority(source: DayEventSource): number {
   return { calendar_screen: 0 as const, meeting_capture: 1 as const, email_screen: 2 as const, slack_screen: 3 as const, task_screen: 4 as const, other_screen: 9 as const }[source] ?? 9;
 }
 
+function isObservedSource(source: DayEventSource): boolean {
+  return source === 'email_screen' || source === 'slack_screen';
+}
+
 function normaliseTitleForKey(title: string): string {
   return title.trim().toLowerCase().replace(/\s+/g, ' ').replace(/[^\w\s]/g, '');
 }
@@ -1177,7 +1222,7 @@ function buildExtractionPrompt(captureDay: string, bucket: SourceBucket, maxChar
   const header = [`Day: ${captureDay}`, `App: ${bucket.app}`, `Surface: ${bucket.source}`, '', hints[bucket.source as keyof typeof hints] || '', ''].join('\n');
   let used = header.length, blocks = [];
   for (const frame of bucket.frames) {
-    const block = `\n[FRAME ${frame.id}] "${frame.window_title ?? ''}"\n${(frame.text ?? '').trim().slice(0, 2200)}\n`;
+    const block = `\n[FRAME ${frame.id} @ ${frame.timestamp}] "${frame.window_title ?? ''}"\n${(frame.text ?? '').trim().slice(0, 2200)}\n`;
     if (used + block.length > maxChars) break;
     blocks.push(block); used += block.length;
   }
@@ -1489,6 +1534,32 @@ function parseCandidateStart(candidate: ExtractionCandidate, source: DayEventSou
     return '';
   }
   return parseEventTimestamp(candidate.starts_at) ?? coerceTimeOnCaptureDay(candidate.starts_at, captureDay) ?? defaultStartOnDay(captureDay);
+}
+
+function observedTimestampForCandidate(candidate: ExtractionCandidate, bucket: SourceBucket, captureDay: string): string | null {
+  const frames = bucket.frames
+    .filter((frame) => {
+      const frameMs = Date.parse(frame.timestamp);
+      return Number.isFinite(frameMs) && (frame.day === captureDay || localDayKey(new Date(frameMs)) === captureDay);
+    })
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  if (!frames.length) return defaultStartOnDay(captureDay);
+
+  const matched = frames.filter((frame) => frameLikelyContainsCandidate(frame, candidate));
+  return parseEventTimestamp((matched[0] ?? frames[frames.length - 1])?.timestamp) ?? defaultStartOnDay(captureDay);
+}
+
+function frameLikelyContainsCandidate(frame: Frame, candidate: ExtractionCandidate): boolean {
+  const haystack = normaliseTitleForKey([frame.window_title, frame.text].filter(Boolean).join(' '));
+  const title = normaliseTitleForKey(candidate.title ?? '');
+  if (!haystack || !title) return false;
+  if (haystack.includes(title)) return true;
+
+  const tokens = Array.from(new Set(title.split(/\s+/).filter((token) => token.length >= 3 && !OBSERVED_MATCH_STOP_WORDS.has(token))));
+  if (!tokens.length) return false;
+  const overlap = tokens.filter((token) => haystack.includes(token)).length;
+  const needed = tokens.length <= 2 ? tokens.length : Math.min(3, Math.ceil(tokens.length * 0.6));
+  return overlap >= needed;
 }
 
 function parseCandidateEnd(candidate: ExtractionCandidate, source: DayEventSource, eventDay: string): string | null {

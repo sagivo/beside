@@ -1,4 +1,4 @@
-import type { DayEventSource, DayEventKind } from '@/global';
+import type { DayEvent, DayEventSource, DayEventKind } from '@/global';
 
 export const DAY_EVENT_KIND_LABELS: Record<DayEventKind, string> = {
   meeting: 'Meeting',
@@ -40,4 +40,12 @@ export function dayEventSourceLabel(source: DayEventSource): string {
 
 export function dayEventSourceShortLabel(source: DayEventSource): string {
   return DAY_EVENT_SOURCE_SHORT_LABELS[source] ?? source;
+}
+
+export function isScheduledDayEvent(event: DayEvent): boolean {
+  return event.kind === 'calendar'
+    || event.kind === 'meeting'
+    || event.source === 'calendar_screen'
+    || event.source === 'meeting_capture'
+    || !!event.meeting_id;
 }

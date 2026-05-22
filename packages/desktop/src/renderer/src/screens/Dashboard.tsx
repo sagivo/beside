@@ -12,7 +12,7 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader } from '@/components/PageHeader';
 import { CaptureHookWidgets } from '@/components/CaptureHookWidgets';
-import { dayEventSourceShortLabel } from '@/lib/day-events';
+import { dayEventSourceShortLabel, isScheduledDayEvent } from '@/lib/day-events';
 import { bootstrapMessage, dedupeAllDayCalendarDuplicates, formatBytes, formatDayEventTime, formatLocalTime, formatNumber, indexingStatusText, localDayKey } from '@/lib/format';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
 import { cn } from '@/lib/utils';
@@ -120,7 +120,8 @@ function useFounderBrief(overview: RuntimeOverview | null) {
 }
 
 function buildFounderCards(journal: JournalDay | null, events: DayEvent[], meetings: Meeting[]) {
-  const chron = events.slice().sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at)), now = Date.now();
+  const now = Date.now();
+  const chron = events.filter(e => shouldShowDashboardEvent(e, now)).sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at));
   const sigs = collectMeetingSummarySignals(meetings);
   const acts = sigs.actionItems.map(i => ({ title: actionItemLabel(i), meta: i.due ? `Due ${i.due}` : 'From meeting' }));
   const open = sigs.openQuestions.map(q => ({ title: q.text, meta: 'Open question' })), decs = sigs.decisions.map(d => ({ title: d.text, meta: 'Decision' }));
@@ -275,13 +276,20 @@ function buildInsights(meetings: Meeting[], cards: any[]) {
 function buildTimelineItems(journal: JournalDay | null, events: DayEvent[]) {
   const now = Date.now(), upc = [], his = [];
   for (const e of events) {
-    if (!isRelevantSignalEvent(e) || !Number.isFinite(Date.parse(e.starts_at))) continue;
-    const b = Date.parse(e.starts_at) >= now ? 'upcoming' : 'history';
+    if (!shouldShowDashboardEvent(e, now)) continue;
+    const eventMs = Date.parse(e.starts_at);
+    const b = isScheduledDayEvent(e) && eventMs >= now ? 'upcoming' : 'history';
     const item = { id: `evt-${e.id}`, at: e.starts_at, title: signalTitleForEvent(e), meta: [e.kind, eventMeta(e)].filter(Boolean).join(' · '), timeLabel: formatDayEventTime(e), description: cleanSignalContext(e.context_md).slice(0, 180), bucket: b, icon: e.kind === 'meeting' ? Calendar : e.kind === 'communication' ? MessageSquare : e.kind === 'task' ? CheckSquare : Zap, accent: e.kind === 'meeting' ? 'text-amber-500' : e.kind === 'communication' ? 'text-blue-500' : e.kind === 'task' ? 'text-emerald-500' : 'text-primary', event: e };
     b === 'upcoming' ? upc.push(item) : his.push(item);
   }
   for (const s of journal?.sessions ?? []) if (s.started_at && Date.parse(s.started_at) <= now) his.push({ id: `ses-${s.id || s.started_at}`, at: s.started_at, title: s.primary_entity_path ? s.primary_entity_path.split('/').pop()?.replace(/[-_]+/g, ' ') || s.primary_entity_path : s.primary_app || 'Focus', meta: `${Math.round((s.active_ms || 0)/60000)}m · ${s.frame_count || 0} frames`, bucket: 'history', icon: Clock, accent: 'text-primary' });
   return [...upc.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(0, TIMELINE_UPCOMING_LIMIT), ...his.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, TIMELINE_RECENT_LIMIT)];
+}
+
+function shouldShowDashboardEvent(event: DayEvent, now: number) {
+  const eventMs = Date.parse(event.starts_at);
+  if (!Number.isFinite(eventMs) || !isRelevantSignalEvent(event)) return false;
+  return isScheduledDayEvent(event) || eventMs <= now;
 }
 
 function stripMarkdown(v?: string | null) { return (v || '').replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[#>_\-]+/g, ' ').replace(/\s+/g, ' ').trim(); }

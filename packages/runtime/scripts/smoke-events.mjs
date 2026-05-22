@@ -190,6 +190,71 @@ async function main() {
     const events3 = await storage.listDayEvents({ day });
     assert(events3.length === 0, `clearAllDayEvents wiped the table (got ${events3.length})`);
 
+    const chatTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'beside-events-chat-time-'));
+    try {
+      const chatStorage = await storageMod.default({ dataDir: chatTmp, logger, config: { path: chatTmp } });
+      const chatDay = localDayKey();
+      const frameTimestamp = `${chatDay}T18:40:00.000Z`;
+      await chatStorage.upsertFrame({
+        id: `frame_slack_timezone_${randomUUID().slice(0, 8)}`,
+        timestamp: frameTimestamp,
+        day: chatDay,
+        monitor: 0,
+        app: 'Slack',
+        app_bundle_id: 'com.tinyspeck.slackmacgap',
+        window_title: 'sdk-warn-alerts-prod (Channel) - Postman - Slack',
+        url: null,
+        text: 'On-Call Handoff\nincident APP\nMilan Lazic is now on call.\n10:00 PM',
+        text_source: 'ocr_accessibility',
+        asset_path: null,
+        perceptual_hash: `slack_tz_${randomUUID().slice(0, 8)}`,
+        trigger: 'screenshot',
+        session_id: 'sess_slack_timezone_smoke',
+        duration_ms: null,
+        entity_path: null,
+        entity_kind: null,
+        activity_session_id: null,
+        meeting_id: null,
+        source_event_ids: [],
+      });
+      const chatModel = {
+        ...stubModel,
+        isAvailable: async () => true,
+        complete: async () =>
+          JSON.stringify({
+            events: [
+              {
+                title: 'incident APP 10:00 PM',
+                kind: 'task',
+                starts_at: `${chatDay}T22:00:00`,
+                ends_at: null,
+                attendees: [],
+                context: 'On-Call Handoff notification stating Milan Lazic is now on call.',
+              },
+            ],
+          }),
+      };
+      const chatExtractor = new EventExtractor(chatStorage, chatModel, logger, {
+        llmEnabled: true,
+        minTextChars: 20,
+        lookbackDays: 1,
+      });
+      await chatExtractor.tick({ lookbackDays: 1, sources: ['slack_screen'], enrichContexts: false });
+      const chatEvents = await chatStorage.listDayEvents({ day: chatDay, order: 'chronological' });
+      const incidentEvent = chatEvents.find((event) => event.title === 'incident APP 10:00 PM');
+      assert(!!incidentEvent, 'Slack extraction keeps the incident signal');
+      assert(
+        incidentEvent?.starts_at === frameTimestamp,
+        `Slack extraction anchors wall-clock labels to observed frame time (got ${incidentEvent?.starts_at})`,
+      );
+      assert(
+        incidentEvent?.ends_at == null,
+        'Slack extraction does not persist model-supplied end times as schedule data',
+      );
+    } finally {
+      await fs.rm(chatTmp, { recursive: true, force: true });
+    }
+
     // Calendar extraction should only persist events for the target
     // capture day. Week/month views can show other columns, but those
     // belong to their own day scans.
