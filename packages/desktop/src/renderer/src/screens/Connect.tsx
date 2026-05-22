@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { CheckCircle2, Copy, FolderOpen, Loader2, Plug, RefreshCcw, Terminal, Wrench, XCircle, Zap } from 'lucide-react';
+import { CheckCircle2, Copy, ExternalLink, FolderOpen, Loader2, Plug, RefreshCcw, Terminal, Wrench, XCircle, Zap } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/sonner';
 import { PageHeader } from '@/components/PageHeader';
 import { StatusPill } from '@/components/StatusPill';
+import { MARKDOWN_EXPORT_TOOL_TARGETS, getMarkdownExportProfileInfo, normalizeMarkdownExportProfile, type MarkdownExportProfile } from '@/lib/markdown-export-targets';
 import { cn } from '@/lib/utils';
 import type { LoadedConfig, RuntimeOverview } from '@/global';
 
@@ -28,10 +29,15 @@ export function Connect({ overview, config, onRefresh }: { overview: RuntimeOver
     const p = [...config.config.export.plugins], i = p.findIndex(x => x.name === 'mcp'), n = { ...(i >= 0 ? p[i] : {}), name: 'mcp', enabled: true, host, port, transport: 'http' as const };
     i >= 0 ? p[i] = n : p.push(n);
     try { await window.beside.saveConfigPatch({ export: { plugins: p } }); if (overview.status === 'running') await window.beside.startRuntime(); toast.success('MCP server enabled'); await onRefresh(); } catch (err: any) { toast.error('Could not enable MCP', { description: err.message }); }
-  }} mcpEnabled={mcpC?.enabled !== false} mcpRunning={!!mcpS?.running} markdownRunning={!!mdS?.running} markdownPath={typeof mdC?.path === 'string' ? mdC.path : ''} onRefresh={onRefresh} />;
+  }} configureMarkdownProfile={async (profile: MarkdownExportProfile) => {
+    const p = [...config.config.export.plugins], i = p.findIndex(x => x.name === 'markdown'), existing = i >= 0 ? p[i] : null;
+    const n = { ...(existing ?? {}), name: 'markdown', enabled: true, profile };
+    i >= 0 ? p[i] = n : p.push(n);
+    try { await window.beside.saveConfigPatch({ export: { plugins: p } }); if (overview.status === 'running') await window.beside.startRuntime(); toast.success('Markdown export profile updated'); await onRefresh(); } catch (err: any) { toast.error('Could not update Markdown export', { description: err.message }); }
+  }} mcpEnabled={mcpC?.enabled !== false} mcpRunning={!!mcpS?.running} markdownRunning={!!mdS?.running} markdownPath={typeof mdC?.path === 'string' ? mdC.path : ''} markdownProfile={normalizeMarkdownExportProfile(mdC?.profile)} onRefresh={onRefresh} />;
 }
 
-function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, enableMcp, mcpEnabled, mcpRunning, markdownRunning, markdownPath, onRefresh }: any) {
+function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, enableMcp, configureMarkdownProfile, mcpEnabled, mcpRunning, markdownRunning, markdownPath, markdownProfile, onRefresh }: any) {
   const [test, setTest] = React.useState<TestState>({ status: 'idle' }), [enabling, setEnabling] = React.useState(false);
   const runAction = (label: string, fn: () => Promise<unknown>) => {
     void fn().catch((err) => {
@@ -45,6 +51,8 @@ function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, e
     try { const r = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2500) }); if (!r.ok) return setTest({ status: 'fail', reason: `HTTP ${r.status}` }); setTest({ status: 'ok', latencyMs: Math.round(performance.now() - s) }); }
     catch (e: any) { setTest({ status: 'fail', reason: ['TimeoutError', 'AbortError'].includes(e.name) ? 'Timeout' : e.message }); }
   };
+  const profile = getMarkdownExportProfileInfo(markdownProfile);
+  const displayedMarkdownPath = markdownPath || profile.suggestedPath;
 
   return (
     <div className="flex flex-col gap-6 pt-6">
@@ -72,11 +80,32 @@ function ConnectScreen({ url, snippet, claudeSnippet, claudeCommand, copyText, e
         </CardContent>
       </Card>
 
-      <Card><CardContent className="flex flex-wrap items-center gap-4">
-        <span className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground"><FolderOpen className="size-5" /></span>
-        <div className="flex-1 min-w-[220px]"><h3 className="font-semibold">Read your memory as files</h3><p className="text-sm text-muted-foreground mt-0.5">Daily journals and index pages are exported as Markdown.</p><code className="mt-2 inline-block rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground">{markdownPath || '~/.beside/export/markdown'}</code></div>
-        <StatusPill tone={markdownRunning ? 'success' : 'muted'} pulse={markdownRunning}>{markdownRunning ? 'Running' : 'Not running'}</StatusPill>
-        <Button variant="outline" onClick={() => runAction('Could not open folder', () => window.beside.openPath('markdown'))}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => runAction('Could not open config', () => window.beside.openPath('config'))}><Wrench />Config</Button>
+      <Card><CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-4">
+          <span className="grid size-11 place-items-center rounded-xl bg-muted text-muted-foreground"><FolderOpen className="size-5" /></span>
+          <div className="flex-1 min-w-[220px]"><h3 className="font-semibold">Read your memory as files</h3><p className="text-sm text-muted-foreground mt-0.5">Daily journals and index pages are exported as Markdown for Obsidian, Logseq, Notion, VS Code, Cursor, GitHub, and Quartz.</p><code className="mt-2 inline-block max-w-full rounded-md border bg-background px-2 py-1 font-mono text-[11px] text-muted-foreground break-all">{displayedMarkdownPath}</code></div>
+          <div className="flex flex-wrap items-center gap-2"><Badge variant="secondary">{profile.shortLabel}</Badge><StatusPill tone={markdownRunning ? 'success' : 'muted'} pulse={markdownRunning}>{markdownRunning ? 'Running' : 'Not running'}</StatusPill></div>
+          <Button variant="outline" onClick={() => runAction('Could not open folder', () => window.beside.openPath('markdown'))}><FolderOpen />Open folder</Button><Button variant="ghost" onClick={() => runAction('Could not open config', () => window.beside.openPath('config'))}><Wrench />Config</Button>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+          {MARKDOWN_EXPORT_TOOL_TARGETS.map((target) => {
+            const active = markdownProfile === target.profile;
+            return (
+              <div key={target.label} className={cn('flex min-h-40 flex-col gap-3 rounded-lg border bg-background/60 p-4', active && 'border-primary/50 bg-primary/5')}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="text-sm font-semibold">{target.label}</div>
+                  {active && <Badge variant="success"><CheckCircle2 />Ready</Badge>}
+                </div>
+                <p className="text-xs leading-relaxed text-muted-foreground">{target.description}</p>
+                <div className="mt-auto flex flex-wrap gap-2">
+                  {!active && <Button variant="outline" size="sm" onClick={() => runAction('Could not update Markdown profile', () => configureMarkdownProfile(target.profile))}><Wrench />Use profile</Button>}
+                  <Button variant="ghost" size="sm" onClick={() => runAction(`Could not copy ${target.label} path`, () => copyText(`${target.label} path`, displayedMarkdownPath))}><Copy />Copy path</Button>
+                  <Button variant="ghost" size="icon" aria-label={`Open ${target.label}`} title={`Open ${target.label}`} onClick={() => runAction(`Could not open ${target.label}`, () => window.beside.openExternalUrl(target.url))}><ExternalLink /></Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </CardContent></Card>
     </div>
   );

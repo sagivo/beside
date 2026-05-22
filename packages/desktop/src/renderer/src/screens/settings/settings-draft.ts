@@ -1,4 +1,5 @@
 import type { LoadedConfig } from '@/global';
+import { normalizeMarkdownExportProfile, type MarkdownExportProfile } from '@/lib/markdown-export-targets';
 
 export type BackgroundModelJobs = 'manual' | 'scheduled';
 export type CaptureMode = 'active' | 'all';
@@ -27,7 +28,7 @@ export interface SettingsDraft {
   modelPlugin: string; ollamaHost: string; ollamaAutoInstall: boolean; ollamaEmbeddingModel: string; ollamaVisionModel: string;
   ollamaIndexerModel: string; ollamaKeepAlive: string; ollamaUnloadAfterIdleMin: number; ollamaNumCtx: number; ollamaModelRevision: number;
   openaiApiKey: string; openaiBaseUrl: string; openaiModel: string; openaiVisionModel: string; openaiEmbeddingModel: string;
-  claudeApiKey: string; claudeModel: string; markdownEnabled: boolean; markdownPath: string; mcpEnabled: boolean;
+  claudeApiKey: string; claudeModel: string; markdownEnabled: boolean; markdownPath: string; markdownProfile: MarkdownExportProfile; mcpEnabled: boolean;
   mcpHost: string; mcpPort: number; mcpTransport: McpTransport; mcpTextExcerptChars: number; extraExportPlugins: any[];
   captureAudio: boolean; whisperModel: string; audioInboxPath: string; audioProcessedPath: string; audioFailedPath: string;
   audioTickIntervalSec: number; audioBatchSize: number; whisperCommand: string; whisperLanguage: string; maxAudioBytes: number;
@@ -75,7 +76,8 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     ollamaModelRevision: ol?.model_revision ?? 0, openaiApiKey: oa?.api_key ?? '',
     openaiBaseUrl: oa?.base_url ?? 'https://api.openai.com/v1', openaiModel: oa?.model ?? 'gpt-4o-mini', openaiVisionModel: oa?.vision_model ?? '',
     openaiEmbeddingModel: oa?.embedding_model ?? 'text-embedding-3-small', claudeApiKey: cl?.api_key ?? '', claudeModel: cl?.model ?? 'claude-sonnet-4-6',
-    markdownEnabled: md?.enabled ?? true, markdownPath: typeof md?.path === 'string' ? md.path : '', mcpEnabled: mcp?.enabled ?? true,
+    markdownEnabled: md?.enabled ?? true, markdownPath: typeof md?.path === 'string' ? md.path : '',
+    markdownProfile: normalizeMarkdownExportProfile(md?.profile), mcpEnabled: mcp?.enabled ?? true,
     mcpHost: typeof mcp?.host === 'string' ? mcp.host : '127.0.0.1', mcpPort: typeof mcp?.port === 'number' ? mcp.port : 3456,
     mcpTransport: mcp?.transport === 'stdio' ? 'stdio' : 'http', mcpTextExcerptChars: typeof mcp?.text_excerpt_chars === 'number' ? mcp.text_excerpt_chars : 5000,
     extraExportPlugins: c.export.plugins.filter(p => !['markdown', 'mcp'].includes(p.name)), captureAudio: c.capture.capture_audio ?? true,
@@ -133,7 +135,7 @@ export function configPatchFromDraft(d: SettingsDraft) {
         claude: { api_key: optionalString(d.claudeApiKey), model: d.claudeModel.trim() || 'claude-sonnet-4-6' }
       }
     },
-    export: { plugins: [{ name: 'markdown', enabled: d.markdownEnabled, path: d.markdownPath.trim() }, { name: 'mcp', enabled: d.mcpEnabled, host: d.mcpHost.trim() || '127.0.0.1', port: clampInt(d.mcpPort, 1, 65535), transport: d.mcpTransport, text_excerpt_chars: clampInt(d.mcpTextExcerptChars, 0) }, ...d.extraExportPlugins] },
+    export: { plugins: [{ name: 'markdown', enabled: d.markdownEnabled, path: d.markdownPath.trim(), profile: d.markdownProfile }, { name: 'mcp', enabled: d.mcpEnabled, host: d.mcpHost.trim() || '127.0.0.1', port: clampInt(d.mcpPort, 1, 65535), transport: d.mcpTransport, text_excerpt_chars: clampInt(d.mcpTextExcerptChars, 0) }, ...d.extraExportPlugins] },
     system: { background_model_jobs: d.backgroundModelJobs, load_guard: { enabled: d.loadGuardEnabled, threshold: clampNumber(d.loadGuardThreshold, 0.01, 8), memory_threshold: clampNumber(d.loadGuardMemoryThreshold, 0.01, 1), low_battery_threshold_pct: clampInt(d.loadGuardLowBatteryThresholdPct, 0, 100), max_consecutive_skips: clampInt(d.loadGuardMaxConsecutiveSkips, 0) } }
   };
 }

@@ -37,7 +37,10 @@ Two exports ship with Beside, and both are on by default.
 ```yaml
 export:
   plugins:
-    - { name: markdown, enabled: true }
+    - name: markdown
+      enabled: true
+      profile: obsidian       # obsidian | logseq | portable
+      path: ~/.beside/export/markdown
 ```
 
 What it does:
@@ -46,11 +49,15 @@ What it does:
   `markdown.path`).
 - Always-on, always idempotent — you can `rm -rf` the export directory and the
   next page write rebuilds it.
-- Strips internal-only fields, renders `[[wikilinks]]` to plain relative paths,
-  and writes a top-level `README.md` mirroring the index strategy’s root.
+- Strips internal-only fields and keeps screenshot links relative to the
+  exported page.
+- Supports tool profiles: `obsidian` and `logseq` preserve native
+  `[[wikilinks]]`; `portable` rewrites wikilinks to normal relative Markdown
+  links for imports, GitHub, editors, and static-site generators.
 
 This is the export to point your existing tools at: Obsidian, Logseq, your own
-note-taking flow, a `git` repo, anything that consumes Markdown.
+note-taking flow, Notion Markdown import, VS Code/Cursor, a `git` repo, Quartz,
+or anything else that consumes Markdown.
 
 ## `mcp` — agents talk to Beside via MCP
 

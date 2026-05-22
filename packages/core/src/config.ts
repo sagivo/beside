@@ -353,6 +353,7 @@ export:
   plugins:
     - name: markdown
       path: ~/.beside/export/markdown
+      profile: obsidian
     - name: mcp
       port: 3456
       host: 127.0.0.1

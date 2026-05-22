@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { BookOpen, Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronDown, ChevronLeft, ChevronRight, Clock, ImageOff, Inbox, Loader2, MessageSquare, Mic, RefreshCcw, ScanLine, Sparkles, Users, Video } from 'lucide-react';
+import { ArrowRight, BookOpen, Calendar, CalendarClock, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, Compass, ImageOff, Inbox, List, Loader2, MessageSquare, Mic, Moon, RefreshCcw, ScanLine, Sparkles, Sun, Sunrise, Sunset, Users, Video, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -227,6 +227,65 @@ function reconcileCalendarMeetingItems(events: DayEvent[], meetingsById: Map<str
   });
 }
 
+// ─── New helpers ───────────────────────────────────────────────────
+
+type Bucket = 'allday' | 'morning' | 'midday' | 'afternoon' | 'evening';
+const BUCKET_META: Record<Bucket, { label: string; short: string; icon: React.ComponentType<{ className?: string }> }> = {
+  allday:    { label: 'All day',   short: 'All day',  icon: CalendarDays },
+  morning:   { label: 'Morning',   short: 'Morning',  icon: Sunrise },
+  midday:    { label: 'Midday',    short: 'Midday',   icon: Sun },
+  afternoon: { label: 'Afternoon', short: 'Afternoon',icon: Sunset },
+  evening:   { label: 'Evening',   short: 'Evening',  icon: Moon },
+};
+const BUCKET_ORDER: Bucket[] = ['allday', 'morning', 'midday', 'afternoon', 'evening'];
+
+function bucketFor(e: DayEvent): Bucket {
+  if (isAllDayEvent(e)) return 'allday';
+  const h = new Date(e.starts_at).getHours();
+  if (h < 12) return 'morning';
+  if (h < 15) return 'midday';
+  if (h < 18) return 'afternoon';
+  return 'evening';
+}
+
+function groupByBucket(events: DayEvent[]): Array<{ id: Bucket; events: DayEvent[] }> {
+  const map = new Map<Bucket, DayEvent[]>();
+  for (const e of events) {
+    const b = bucketFor(e);
+    const arr = map.get(b);
+    if (arr) arr.push(e); else map.set(b, [e]);
+  }
+  return BUCKET_ORDER.filter(id => map.has(id)).map(id => ({ id, events: map.get(id)! }));
+}
+
+type KindAccent = 'amber' | 'violet' | 'sky' | 'emerald' | 'muted';
+function kindTone(kind: DayEventKind): { tick: string; icon: string; chip: string; halo: string; accent: KindAccent } {
+  switch (kind) {
+    case 'meeting':
+      return { tick: 'bg-amber-400', icon: 'text-amber-300', chip: 'bg-amber-500/12 ring-1 ring-amber-400/25', halo: 'bg-amber-400', accent: 'amber' };
+    case 'calendar':
+      return { tick: 'bg-violet-400', icon: 'text-violet-300', chip: 'bg-violet-500/12 ring-1 ring-violet-400/25', halo: 'bg-violet-400', accent: 'violet' };
+    case 'communication':
+      return { tick: 'bg-sky-400', icon: 'text-sky-300', chip: 'bg-sky-500/12 ring-1 ring-sky-400/25', halo: 'bg-sky-400', accent: 'sky' };
+    case 'task':
+      return { tick: 'bg-emerald-400', icon: 'text-emerald-300', chip: 'bg-emerald-500/12 ring-1 ring-emerald-400/25', halo: 'bg-emerald-400', accent: 'emerald' };
+    default:
+      return { tick: 'bg-muted-foreground/40', icon: 'text-muted-foreground', chip: 'bg-muted/40 ring-1 ring-border', halo: 'bg-muted-foreground', accent: 'muted' };
+  }
+}
+
+function timeUntil(iso: string, now: Date): string | null {
+  const ms = Date.parse(iso) - now.getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'starting now';
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60), rem = m % 60;
+  return rem ? `in ${h}h ${rem}m` : `in ${h}h`;
+}
+
+// ─── Main screen ───────────────────────────────────────────────────
+
 export function Meetings({ events, meetings, loading, focusRequest, onRefresh }: any) {
   const [scanning, setScanning] = React.useState(false);
   const runScan = React.useCallback(async () => {
@@ -250,6 +309,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   const [selectedDay, setSelectedDay] = React.useState<string>(today), pfRef = React.useRef<string | null>(null), hfRef = React.useRef(0);
 
   const visibleEvents = React.useMemo(() => buildVisibleAgendaEvents(dayOverrides.get(selectedDay) ?? events.filter((e: DayEvent) => e.day === selectedDay), meetingsById).sort((a, b) => a.starts_at.localeCompare(b.starts_at)), [selectedDay, events, dayOverrides, meetingsById]);
+  const buckets = React.useMemo(() => groupByBucket(visibleEvents), [visibleEvents]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -260,8 +320,13 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   }, [focusRequest]);
 
   React.useEffect(() => {
-    if (pfRef.current) { if (visibleEvents.some(e => e.id === pfRef.current)) { setSelectedId(pfRef.current); pfRef.current = null; } else setSelectedId(null); return; }
-    if (!visibleEvents.length) setSelectedId(null); else if (!selectedId || !visibleEvents.find(e => e.id === selectedId)) setSelectedId(visibleEvents[0]!.id);
+    if (pfRef.current) {
+      if (visibleEvents.some(e => e.id === pfRef.current)) { setSelectedId(pfRef.current); pfRef.current = null; }
+      else setSelectedId(null);
+      return;
+    }
+    if (!visibleEvents.length) setSelectedId(null);
+    else if (selectedId && !visibleEvents.find(e => e.id === selectedId)) setSelectedId(null);
   }, [selectedDay, visibleEvents, selectedId]);
 
   const loadDay = React.useCallback(async (day: string) => {
@@ -273,51 +338,95 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
 
   React.useEffect(() => { if (selectedDay && !daysFromProps.includes(selectedDay) && !dayOverrides.has(selectedDay)) loadDay(selectedDay); }, [selectedDay, daysFromProps, dayOverrides, loadDay]);
 
-  const ni = selectedDay === today && visibleEvents.length ? nowIndicatorIndex(visibleEvents, currentTime) : -1;
+  const nowIdx = selectedDay === today && visibleEvents.length ? nowIndicatorIndex(visibleEvents, currentTime) : -1;
   const selEvent = visibleEvents.find(e => e.id === selectedId) ?? null;
   const selMeeting = selEvent ? meetingForEvent(selEvent, meetingsById) : null;
+  const isToday = selectedDay === today;
+
+  const brief = useDayBrief(selectedDay);
+  const [briefOpen, setBriefOpen] = React.useState(false);
+  React.useEffect(() => { if (brief.status === 'ready' && !brief.content) setBriefOpen(false); }, [brief.status, brief.content]);
+
+  const openBrief = React.useCallback(() => { setBriefOpen(true); setSelectedId(null); }, []);
+  const handleSelectEvent = React.useCallback((id: string) => { setBriefOpen(false); setSelectedId(prev => prev === id ? null : id); }, []);
+  const handleSetSelectedEvent = React.useCallback((id: string) => { setBriefOpen(false); setSelectedId(id); }, []);
 
   return (
-    <div className="flex flex-col h-full gap-5 pt-6 pb-2 min-h-0">
-      <div className="flex-none">
-        <PageHeader title="Journal" description="A calendar-first agenda with only important follow-ups." actions={<><Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button><Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button></>} />
+    <div className="relative flex flex-col h-full min-h-0 gap-4 pt-6 pb-2">
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 -top-12 h-48 opacity-50"
+        style={{ background: 'radial-gradient(60% 80% at 30% 0%, hsl(var(--primary) / 0.08), transparent 70%)' }}
+      />
+
+      <div className="relative flex-none flex flex-col gap-4">
+        <PageHeader
+          title="Journal"
+          actions={<>
+            <Button variant="outline" size="sm" onClick={runScan} disabled={scanning} className="gap-1.5">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button>
+            <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading} className="gap-1.5">{loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCcw className="size-3.5" />}Refresh</Button>
+          </>}
+        />
+        <DayStrip
+          selectedDay={selectedDay}
+          today={today}
+          loading={perDayLoading === selectedDay}
+          buckets={buckets}
+          eventCount={visibleEvents.length}
+          onPrev={() => setSelectedDay(d => shiftDay(d, -1))}
+          onNext={() => setSelectedDay(d => shiftDay(d, 1))}
+          onToday={() => setSelectedDay(today)}
+          onPick={setSelectedDay}
+        />
       </div>
 
-      {loading && !visibleEvents.length && !dayOverrides.size ? <div className="flex-1 grid place-items-center text-muted-foreground text-sm gap-2"><div className="flex flex-col items-center gap-2"><Loader2 className="size-5 animate-spin" />Loading…</div></div> : (
-        <div className="flex gap-5 min-h-0 flex-1">
-          <div className="w-[340px] shrink-0 flex flex-col gap-4">
-            <div className="flex-none">
-              <DayPicker selectedDay={selectedDay} today={today} loading={perDayLoading === selectedDay} eventCount={visibleEvents.length} onPrev={() => setSelectedDay(d => shiftDay(d, -1))} onNext={() => setSelectedDay(d => shiftDay(d, 1))} onToday={() => setSelectedDay(today)} onPick={setSelectedDay} />
-            </div>
-            <Card className="flex-1 flex flex-col min-h-0 overflow-hidden bg-card border-border/50 shadow-sm">
+      {loading && !visibleEvents.length && !dayOverrides.size ? (
+        <div className="relative flex-1 grid place-items-center text-muted-foreground text-sm">
+          <div className="flex flex-col items-center gap-2"><Loader2 className="size-5 animate-spin" />Loading…</div>
+        </div>
+      ) : (
+        <div className="relative flex gap-5 min-h-0 flex-1">
+          <div className="w-[380px] shrink-0 flex flex-col min-h-0 gap-3">
+            <DayBriefCard day={selectedDay} brief={brief} active={briefOpen} onOpen={openBrief} />
+            <div className="flex-1 min-h-0 flex flex-col overflow-hidden rounded-2xl border border-border/40 bg-card/40 backdrop-blur-sm shadow-[0_1px_0_0_hsl(var(--border)/0.4)_inset,0_30px_60px_-40px_rgba(0,0,0,0.6)]">
               <ScrollArea className="flex-1">
-                <div className="flex flex-col p-2 gap-1.5">
-                  {!visibleEvents.length ? <DayEmptyState day={selectedDay} loading={perDayLoading === selectedDay} onScan={runScan} scanning={scanning} /> : visibleEvents.map((e, i) => <React.Fragment key={e.id}>{i === ni && <NowIndicator now={currentTime} />}<EventRow event={e} active={e.id === selectedId} onClick={() => setSelectedId(e.id === selectedId ? null : e.id)} meeting={meetingForEvent(e, meetingsById)} /></React.Fragment>)}
-                  {ni === visibleEvents.length && <NowIndicator now={currentTime} />}
+                <div className="px-3 py-3">
+                  {!visibleEvents.length ? (
+                    <DayEmptyState day={selectedDay} loading={perDayLoading === selectedDay} onScan={runScan} scanning={scanning} />
+                  ) : (
+                    <AgendaList buckets={buckets} now={currentTime} isToday={isToday} nowIdx={nowIdx} selectedId={selectedId} onSelect={handleSelectEvent} meetingsById={meetingsById} />
+                  )}
                 </div>
               </ScrollArea>
-            </Card>
+            </div>
           </div>
-          
-          <div className="flex-1 flex flex-col min-w-0 gap-5">
-            <DaySummary day={selectedDay} />
-            <DayBriefRecap events={visibleEvents} meetingsById={meetingsById} selectedDay={selectedDay} today={today} now={currentTime} onSelectEvent={setSelectedId} />
-            <Card className="flex-1 flex flex-col min-h-0 overflow-hidden bg-card border-border/50 shadow-sm">
-              {!selEvent ? (
-                <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-4">
-                  <CalendarDays className="size-12 opacity-20" />
-                  <p className="text-sm font-medium">Select an event to view details</p>
-                </div>
-              ) : (
+
+          <div className="flex-1 flex flex-col min-w-0 min-h-0">
+            {briefOpen ? (
+              <DayBriefReader day={selectedDay} brief={brief} onClose={() => setBriefOpen(false)} />
+            ) : !selEvent ? (
+              <JournalLanding
+                events={visibleEvents}
+                meetingsById={meetingsById}
+                selectedDay={selectedDay}
+                today={today}
+                now={currentTime}
+                loading={perDayLoading === selectedDay}
+                onSelectEvent={handleSetSelectedEvent}
+                onScan={runScan}
+                scanning={scanning}
+              />
+            ) : (
+              <div className="flex-1 min-h-0 flex flex-col overflow-hidden rounded-2xl border border-border/40 bg-card/60 backdrop-blur-sm shadow-[0_1px_0_0_hsl(var(--border)/0.4)_inset,0_30px_80px_-50px_rgba(0,0,0,0.6)]">
                 <ScrollArea className="flex-1">
                   <div className="flex flex-col p-8 max-w-4xl mx-auto w-full gap-8">
                     <EventDetailHeader event={selEvent} meeting={selMeeting} />
-                    <Separator className="bg-border/50" />
+                    <Separator className="bg-border/40" />
                     {selMeeting ? <MeetingBody event={selEvent} meeting={selMeeting} allMeetings={meetings} now={currentTime} /> : <NonMeetingBody event={selEvent} allMeetings={meetings} now={currentTime} />}
                   </div>
                 </ScrollArea>
-              )}
-            </Card>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -325,28 +434,64 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
   );
 }
 
-function DayPicker({ selectedDay, today, loading, eventCount, onPrev, onNext, onToday, onPick }: any) {
-  const r = React.useRef<HTMLInputElement>(null), it = selectedDay === today;
+// ─── Top strip ─────────────────────────────────────────────────────
+
+function DayStrip({ selectedDay, today, loading, buckets, eventCount, onPrev, onNext, onToday, onPick }: any) {
+  const r = React.useRef<HTMLInputElement>(null);
+  const isToday = selectedDay === today;
+  const date = new Date(`${selectedDay}T12:00:00`);
+  const weekday = date.toLocaleDateString(undefined, { weekday: 'long' });
+  const monthDay = date.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
+
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <div className="relative inline-flex items-center gap-0.5 rounded-full border border-border/60 bg-card/80 p-1 shadow-sm backdrop-blur-sm">
-        <Button variant="ghost" size="icon" onClick={onPrev} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronLeft className="size-4" /></Button>
-        <button type="button" onClick={() => { if (r.current?.showPicker) { try { r.current.showPicker(); } catch { r.current.focus(); r.current.click(); } } else { r.current?.focus(); r.current?.click(); } }} className="inline-flex h-8 min-w-32 items-center justify-center gap-2 rounded-full px-4 text-sm font-semibold transition-colors hover:bg-accent hover:text-accent-foreground">
-          {loading ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : <CalendarDays className="size-3.5 text-muted-foreground" />}
-          <span className="tabular-nums">{it ? 'Today' : prettyDay(selectedDay)}</span>
-        </button>
-        <Button variant="ghost" size="icon" onClick={onNext} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronRight className="size-4" /></Button>
-        <input ref={r} type="date" value={selectedDay} onChange={e => e.target.value && onPick(e.target.value)} className="absolute inset-0 opacity-0 pointer-events-none" />
+    <div className="flex flex-wrap items-end justify-between gap-4 border-b border-border/30 pb-4">
+      <div className="flex items-end gap-5 min-w-0">
+        <div className="relative inline-flex items-center gap-0.5 rounded-full border border-border/50 bg-card/60 p-0.5 backdrop-blur-sm">
+          <Button variant="ghost" size="icon" onClick={onPrev} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronLeft className="size-4" /></Button>
+          <button
+            type="button"
+            onClick={() => { if (r.current?.showPicker) { try { r.current.showPicker(); } catch { r.current.focus(); } } else { r.current?.focus(); r.current?.click(); } }}
+            className="relative inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[11px] font-bold uppercase tracking-[0.16em] text-foreground/80 transition-colors hover:bg-accent"
+          >
+            {loading ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : <CalendarDays className="size-3.5 text-muted-foreground" />}
+            <span className="tabular-nums">{isToday ? 'Today' : prettyDay(selectedDay)}</span>
+          </button>
+          <Button variant="ghost" size="icon" onClick={onNext} className="rounded-full size-8 text-muted-foreground hover:text-foreground"><ChevronRight className="size-4" /></Button>
+          <input ref={r} type="date" value={selectedDay} onChange={e => e.target.value && onPick(e.target.value)} className="absolute inset-0 -z-10 opacity-0 pointer-events-none" />
+        </div>
+
+        <div className="min-w-0 leading-none">
+          <div className="text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70 font-semibold">{weekday}</div>
+          <div className="mt-1.5 text-3xl font-semibold tracking-tight text-foreground tabular-nums" style={{ fontFamily: 'var(--font-sans)' }}>{monthDay}</div>
+        </div>
       </div>
-      {!it && <Button variant="ghost" size="sm" onClick={onToday} className="h-9 rounded-full px-3 text-xs font-semibold text-muted-foreground hover:text-foreground">Jump to today</Button>}
-      {eventCount > 0 && <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"><span className="size-1.5 rounded-full bg-primary/70" />{eventCount} agenda item{eventCount > 1 ? 's' : ''}</span>}
+
+      {eventCount > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-[0.22em] text-muted-foreground/70 font-semibold pr-1 tabular-nums">{eventCount} item{eventCount === 1 ? '' : 's'}</span>
+          {buckets.map((b: { id: Bucket; events: DayEvent[] }) => {
+            const Icon = BUCKET_META[b.id].icon;
+            return (
+              <span key={b.id} className="inline-flex items-center gap-1.5 rounded-full border border-border/40 bg-card/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                <Icon className="size-3 opacity-60" />
+                {BUCKET_META[b.id].short}
+                <span className="tabular-nums text-foreground/70 ml-0.5">{b.events.length}</span>
+              </span>
+            );
+          })}
+          {!isToday && <Button variant="ghost" size="sm" onClick={onToday} className="ml-1 h-7 rounded-full px-2.5 text-[11px] font-semibold text-muted-foreground hover:text-foreground">Jump to today</Button>}
+        </div>
+      )}
     </div>
   );
 }
 
-function DaySummary({ day }: { day: string }) {
-  const [state, setState] = React.useState<{ status: 'loading' | 'ready'; content: string | null }>({ status: 'loading', content: null });
-  const [open, setOpen] = React.useState(true);
+// ─── Day brief (card + reading view) ───────────────────────────────
+
+type BriefState = { status: 'loading' | 'ready'; content: string | null };
+
+function useDayBrief(day: string): BriefState {
+  const [state, setState] = React.useState<BriefState>({ status: 'loading', content: null });
   React.useEffect(() => {
     let cancelled = false;
     setState({ status: 'loading', content: null });
@@ -358,117 +503,330 @@ function DaySummary({ day }: { day: string }) {
     })();
     return () => { cancelled = true; };
   }, [day]);
-  if (state.status !== 'ready' || !state.content) return null;
+  return state;
+}
+
+const TIMELINE_HEADING_RE = /^(?:timeline|loose frames)$/i;
+function isSkippableSection(text: string): boolean { return TIMELINE_HEADING_RE.test(text.trim()); }
+function slugifyHeading(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'section';
+}
+function briefWordCount(md: string): number {
+  return md.replace(/```[\s\S]*?```/g, ' ').replace(/[#>*_`~\[\]()-]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean).length;
+}
+function briefTeaser(md: string): string {
+  for (const raw of md.split(/\n{2,}/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^#{1,6}\s/.test(line)) continue;
+    if (/^[_*]+[^*_]+[_*]+$/.test(line) && line.length < 80) continue;
+    if (/^!\[/.test(line)) continue;
+    const cleaned = line.replace(/\[\[([^\]]+)\]\]/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[*_`~>]/g, '').replace(/\s+/g, ' ').trim();
+    if (cleaned.length > 24) return cleaned;
+  }
+  return '';
+}
+type BriefSection = { id: string; level: 2 | 3; text: string };
+function briefSections(md: string): BriefSection[] {
+  const out: BriefSection[] = [];
+  const seen = new Set<string>();
+  let inFence = false;
+  for (const raw of md.split('\n')) {
+    if (/^```/.test(raw)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const m = raw.match(/^(##{1,2})\s+(.+?)\s*$/);
+    if (!m) continue;
+    const level = (m[1].length === 2 ? 2 : 3) as 2 | 3;
+    const text = m[2].replace(/[*_`]/g, '').trim();
+    if (!text || isSkippableSection(text)) continue;
+    let id = slugifyHeading(text), i = 2;
+    while (seen.has(id)) { id = `${slugifyHeading(text)}-${i++}`; }
+    seen.add(id);
+    out.push({ id, level, text });
+  }
+  return out;
+}
+function briefReadMinutes(words: number): number { return Math.max(1, Math.round(words / 220)); }
+
+function DayBriefCard({ day, brief, active, onOpen }: { day: string; brief: BriefState; active: boolean; onOpen: () => void }) {
+  if (brief.status !== 'ready' || !brief.content) return null;
+  const content = brief.content;
+  const words = React.useMemo(() => briefWordCount(content), [content]);
+  const teaser = React.useMemo(() => briefTeaser(content), [content]);
+  const sections = React.useMemo(() => briefSections(content), [content]);
+  const sectionCount = sections.filter(s => s.level === 2).length;
+  const readMin = briefReadMinutes(words);
+
   return (
-    <Card className="flex-none border-border/50 bg-card shadow-sm overflow-hidden">
-      <button type="button" onClick={() => setOpen(o => !o)} className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-muted/30 transition-colors">
-        <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground">
-          <span className="grid size-7 place-items-center rounded-full bg-primary/10 text-primary"><BookOpen className="size-3.5" /></span>
-          Day summary
-        </div>
-        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform duration-200', open && 'rotate-180')} />
-      </button>
-      {open && (
-        <CardContent className="pt-0 pb-5 px-5">
-          <div className="relative">
-            <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-headings:font-semibold prose-h2:text-base prose-h3:text-sm prose-p:leading-relaxed prose-pre:bg-muted/50 prose-img:rounded-lg prose-a:text-primary prose-a:no-underline hover:prose-a:underline max-h-[420px] overflow-y-auto pr-1">
-              <Markdown content={state.content} />
-            </div>
-            <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-card to-transparent" />
-          </div>
-        </CardContent>
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-pressed={active}
+      aria-label={`Read day story for ${prettyDay(day)}`}
+      className={cn(
+        'group relative flex-none w-full overflow-hidden rounded-xl border text-left transition-all',
+        'bg-gradient-to-br from-primary/[0.06] via-card/40 to-card/20 backdrop-blur-sm',
+        active ? 'border-primary/60 ring-1 ring-primary/30 shadow-[0_8px_28px_-12px_hsl(var(--primary)/0.45)]' : 'border-border/40 hover:border-primary/40 hover:bg-card/55',
       )}
-    </Card>
+    >
+      <span aria-hidden className="pointer-events-none absolute -right-8 -top-10 size-28 rounded-full bg-primary/15 blur-2xl opacity-70 transition-opacity group-hover:opacity-100" />
+      <div className="relative flex items-start gap-3 px-3.5 pt-3.5">
+        <span className={cn('grid size-9 place-items-center rounded-lg bg-primary/15 text-primary ring-1 ring-primary/20', active && 'bg-primary/25')}>
+          <BookOpen className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary/80">Day story</span>
+            {active && <span className="rounded-full bg-primary/15 px-1.5 py-px text-[9px] font-bold uppercase tracking-wider text-primary">Reading</span>}
+          </div>
+          <div className="mt-1 text-sm font-semibold text-foreground leading-snug">
+            What happened on {prettyDay(day)}
+          </div>
+        </div>
+        <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground/70 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+      </div>
+      {teaser && (
+        <p className="relative mt-2 px-3.5 line-clamp-3 text-[12.5px] leading-relaxed text-muted-foreground/90">
+          {teaser}
+        </p>
+      )}
+      <div className="relative mt-3 flex items-center justify-between gap-3 border-t border-border/30 bg-background/30 px-3.5 py-2 text-[10.5px] font-medium tabular-nums text-muted-foreground/80">
+        <span className="inline-flex items-center gap-1"><Clock className="size-3" />{readMin} min read</span>
+        <span className="inline-flex items-center gap-1"><List className="size-3" />{sectionCount || 1} section{sectionCount === 1 ? '' : 's'}</span>
+        <span className="tabular-nums">{words.toLocaleString()} words</span>
+      </div>
+    </button>
   );
 }
 
-function DayBriefRecap({ events, meetingsById, selectedDay, today, now, onSelectEvent }: any) {
-  if (!events.length) return null;
-  const nMs = now.getTime();
-  const upc = selectedDay === today
-    ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
-    : null;
-  const mtgs = events.map((e: DayEvent) => meetingForEvent(e, meetingsById)).filter(Boolean);
-  const sigs = collectMeetingSummarySignals(mtgs);
-  const followups = sigs.actionItems.slice(0, 4);
-  if (!upc && followups.length === 0) return null;
+function DayBriefReader({ day, brief, onClose }: { day: string; brief: BriefState; onClose: () => void }) {
+  const content = brief.content;
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  const sections = React.useMemo(() => content ? briefSections(content) : [], [content]);
+  const [activeId, setActiveId] = React.useState<string | null>(null);
 
-  const meetingIdForAction = (task: string): string | null => {
-    for (const m of mtgs as Meeting[]) {
-      if (m.summary_json?.action_items?.some((a: any) => a.task === task)) {
-        const ev = events.find((e: DayEvent) => e.meeting_id === m.id);
-        return ev?.id ?? null;
+  const sectionedContent = React.useMemo(() => {
+    if (!content) return null;
+    return splitBriefForReader(content, sections);
+  }, [content, sections]);
+
+  React.useEffect(() => { setActiveId(sections[0]?.id ?? null); }, [day, sections.length]);
+
+  const onJump = React.useCallback((id: string) => {
+    const root = scrollRef.current; if (!root) return;
+    const el = root.querySelector<HTMLElement>(`[data-brief-section="${id}"]`); if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setActiveId(id);
+  }, []);
+
+  React.useEffect(() => {
+    const root = scrollRef.current; if (!root || !sections.length) return;
+    const viewport = root.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null;
+    const scroller = viewport ?? root;
+    const handler = () => {
+      const top = scroller.getBoundingClientRect().top + 80;
+      let current = sections[0]?.id ?? null;
+      for (const s of sections) {
+        const el = root.querySelector<HTMLElement>(`[data-brief-section="${s.id}"]`);
+        if (!el) continue;
+        if (el.getBoundingClientRect().top <= top) current = s.id; else break;
       }
-    }
-    return null;
-  };
+      setActiveId(current);
+    };
+    scroller.addEventListener('scroll', handler, { passive: true });
+    handler();
+    return () => { scroller.removeEventListener('scroll', handler); };
+  }, [sections]);
 
   return (
-    <div className={cn('grid gap-4 flex-none', upc && followups.length > 0 ? 'md:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]' : 'grid-cols-1')}>
-      {upc && (
-        <button type="button" onClick={() => onSelectEvent(upc.id)} className="relative overflow-hidden rounded-xl border border-border/50 bg-card p-5 text-left transition-all hover:border-primary/40 hover:shadow-md group flex flex-col gap-2 min-w-0">
-          <span aria-hidden="true" className="absolute left-0 top-4 bottom-4 w-1 rounded-r-full bg-primary/60 group-hover:bg-primary transition-colors" />
-          <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground group-hover:text-primary transition-colors"><CalendarClock className="size-3.5" />Next up</div>
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden rounded-2xl border border-border/40 bg-card/60 backdrop-blur-sm shadow-[0_1px_0_0_hsl(var(--border)/0.4)_inset,0_30px_80px_-50px_rgba(0,0,0,0.6)]">
+      <div className="flex items-center justify-between gap-3 border-b border-border/40 px-6 py-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/15 text-primary ring-1 ring-primary/20"><BookOpen className="size-4" /></span>
           <div className="min-w-0">
-            <div className="text-base font-semibold leading-snug truncate">{upc.title}</div>
-            <div className="mt-1 text-sm text-muted-foreground font-medium truncate tabular-nums">{formatDayEventTimeRange(upc)}{upc.attendees.length > 0 && <span className="opacity-80"> · {upc.attendees.slice(0, 2).join(', ')}{upc.attendees.length > 2 ? `, +${upc.attendees.length - 2}` : ''}</span>}</div>
+            <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-primary/80">Day story</div>
+            <div className="text-base font-semibold leading-tight text-foreground truncate" style={{ fontFamily: 'var(--font-sans)' }}>{prettyDay(day)}</div>
           </div>
-        </button>
-      )}
-
-      {followups.length > 0 && <div className="rounded-xl border border-border/50 bg-card p-5 shadow-sm flex flex-col gap-3 min-w-0">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted-foreground"><CheckSquare className="size-3.5" />Follow-ups</div>
-          {followups.length > 0 && <Badge variant="default" className="px-2 h-5 text-[10px] font-bold">{sigs.actionItems.length}</Badge>}
         </div>
-        {followups.length > 0 ? (
-          <ul className="flex flex-col gap-1.5 text-sm text-foreground/90">
-            {followups.map((item: any, i: number) => {
-              const evId = meetingIdForAction(item.task);
-              const content = (
-                <>
-                  <span className="text-primary mt-0.5 shrink-0">•</span>
-                  <span className="min-w-0 line-clamp-1"><span className="font-medium">{item.task}</span>{item.owner && <span className="text-muted-foreground"> — {item.owner}</span>}</span>
-                </>
-              );
-              return evId ? (
-                <li key={i}><button type="button" onClick={() => onSelectEvent(evId)} className="flex gap-2 items-start text-left w-full rounded-md px-1.5 py-1 -mx-1.5 hover:bg-muted/60 transition-colors">{content}</button></li>
-              ) : (
-                <li key={i} className="flex gap-2 items-start px-1.5 py-1">{content}</li>
-              );
-            })}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground">No action items captured for this day.</p>
-        )}
-      </div>}
+        <Button variant="ghost" size="sm" onClick={onClose} className="gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:text-foreground">
+          <X className="size-3.5" />Close
+        </Button>
+      </div>
+
+      {!content && brief.status === 'loading' ? (
+        <div className="flex-1 grid place-items-center text-muted-foreground"><Loader2 className="size-5 animate-spin" /></div>
+      ) : !content ? (
+        <div className="flex-1 grid place-items-center text-center text-sm text-muted-foreground px-8">
+          <div className="flex flex-col items-center gap-3"><Compass className="size-8 opacity-40" /><p className="max-w-sm leading-relaxed">No story for {prettyDay(day)} yet. Capture some activity or wait for the next indexing pass.</p></div>
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex">
+          {sections.length > 1 && (
+            <nav aria-label="Sections" className="hidden lg:flex w-56 shrink-0 flex-col gap-1 border-r border-border/30 px-3 py-5 overflow-y-auto">
+              <div className="px-2 pb-2 text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/70">In this story</div>
+              {sections.map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => onJump(s.id)}
+                  className={cn(
+                    'group relative flex items-start gap-2 rounded-md px-2 py-1.5 text-left text-[12px] leading-snug transition-colors',
+                    s.level === 3 && 'pl-5 text-[11.5px]',
+                    activeId === s.id ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground',
+                  )}
+                >
+                  <span className={cn('mt-1.5 inline-block size-1 shrink-0 rounded-full', activeId === s.id ? 'bg-primary' : 'bg-muted-foreground/40')} />
+                  <span className="line-clamp-2">{s.text}</span>
+                </button>
+              ))}
+            </nav>
+          )}
+
+          <ScrollArea className="flex-1 min-h-0">
+            <article ref={scrollRef} className="mx-auto w-full max-w-3xl px-8 py-8">
+              <header className="mb-6 border-b border-border/40 pb-5">
+                <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-muted-foreground/70">Captured story</div>
+                <h1 className="mt-1.5 text-2xl font-semibold tracking-tight text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>
+                  Your day on {prettyDay(day)}
+                </h1>
+                <p className="mt-1.5 text-[12px] text-muted-foreground/80">
+                  {briefReadMinutes(briefWordCount(content))} min read · {briefWordCount(content).toLocaleString()} words
+                </p>
+              </header>
+
+              <div className="prose prose-sm md:prose-base dark:prose-invert max-w-none prose-headings:scroll-mt-6 prose-headings:font-semibold prose-h2:text-lg prose-h2:mt-8 prose-h2:mb-3 prose-h2:tracking-tight prose-h2:border-b prose-h2:border-border/40 prose-h2:pb-2 prose-h3:text-base prose-h3:mt-6 prose-h3:mb-2 prose-p:leading-[1.75] prose-p:text-foreground/90 prose-li:leading-relaxed prose-li:my-1 prose-pre:bg-muted/40 prose-pre:border prose-pre:border-border/40 prose-img:rounded-xl prose-img:border prose-img:border-border/40 prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-blockquote:border-l-primary/50 prose-blockquote:text-muted-foreground">
+                {sectionedContent ?? <Markdown content={content} />}
+              </div>
+            </article>
+          </ScrollArea>
+        </div>
+      )}
     </div>
   );
 }
 
-function DayEmptyState({ day, loading, onScan, scanning }: any) {
-  if (loading) return <div className="flex items-center gap-2 py-16 px-3 text-muted-foreground text-sm font-medium justify-center"><Loader2 className="size-5 animate-spin text-primary" />Loading {prettyDay(day)}…</div>;
-  return <div className="flex flex-col items-center text-center gap-4 py-16 px-4 text-muted-foreground"><CalendarClock className="size-10 opacity-20" /><div className="space-y-1"><p className="text-base font-semibold text-foreground">No events on {prettyDay(day)}</p><p className="text-sm max-w-[16rem] leading-relaxed">The event extractor runs on a 15-min cadence. Scan it manually to refresh.</p></div><Button variant="outline" size="sm" onClick={onScan} disabled={scanning} className="gap-1.5 mt-2 rounded-full px-4">{scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now</Button></div>;
+function stripLeadingH1AndMeta(md: string): string {
+  const lines = md.split('\n');
+  let start = 0;
+  while (start < lines.length && lines[start].trim() === '') start++;
+  if (start < lines.length && /^#\s+/.test(lines[start])) {
+    start++;
+    while (start < lines.length && (lines[start].trim() === '' || /^_.*_$/.test(lines[start].trim()))) start++;
+  }
+  return lines.slice(start).join('\n');
 }
+
+function splitBriefForReader(md: string, sections: BriefSection[]) {
+  const body = stripLeadingH1AndMeta(md);
+  if (!sections.length) return <Markdown content={body} />;
+  const lines = body.split('\n');
+  const blocks: Array<{ id: string | null; lines: string[] }> = [];
+  let current: { id: string | null; lines: string[] } = { id: null, lines: [] };
+  const sectionByText = new Map(sections.map(s => [s.text.toLowerCase(), s] as const));
+  let inFence = false;
+  for (const raw of lines) {
+    if (/^```/.test(raw)) inFence = !inFence;
+    const m = !inFence ? raw.match(/^(##{1,2})\s+(.+?)\s*$/) : null;
+    if (m) {
+      const text = m[2].replace(/[*_`]/g, '').trim().toLowerCase();
+      const hit = sectionByText.get(text);
+      if (hit) {
+        if (current.lines.length) blocks.push(current);
+        current = { id: hit.id, lines: [raw] };
+        continue;
+      }
+    }
+    current.lines.push(raw);
+  }
+  if (current.lines.length) blocks.push(current);
+  return (
+    <>
+      {blocks.map((b, i) => (
+        <section key={`${b.id ?? 'lede'}-${i}`} data-brief-section={b.id ?? undefined}>
+          <Markdown content={b.lines.join('\n').trim()} />
+        </section>
+      ))}
+    </>
+  );
+}
+
+// ─── Agenda list ───────────────────────────────────────────────────
+
+function AgendaList({ buckets, now, isToday, nowIdx, selectedId, onSelect, meetingsById }: { buckets: Array<{ id: Bucket; events: DayEvent[] }>; now: Date; isToday: boolean; nowIdx: number; selectedId: string | null; onSelect: (id: string) => void; meetingsById: Map<string, Meeting>; }) {
+  let counter = 0;
+  return (
+    <div className="flex flex-col gap-4">
+      {buckets.map((b, bi) => {
+        const Icon = BUCKET_META[b.id].icon;
+        return (
+          <section key={b.id} className="flex flex-col">
+            <div className={cn('flex items-center gap-2 px-1.5', bi === 0 ? 'mb-1.5' : 'mb-1.5 mt-1')}>
+              <Icon className="size-3 text-muted-foreground/60" />
+              <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/80">{BUCKET_META[b.id].label}</span>
+              <span className="text-[10px] tabular-nums text-muted-foreground/40">·</span>
+              <span className="text-[10px] tabular-nums text-muted-foreground/60">{b.events.length}</span>
+              <div className="ml-1 h-px flex-1 bg-gradient-to-r from-border/50 to-transparent" />
+            </div>
+            <ul className="flex flex-col">
+              {b.events.map((e) => {
+                const showNow = isToday && counter === nowIdx;
+                counter++;
+                return (
+                  <React.Fragment key={e.id}>
+                    {showNow && <NowIndicator now={now} />}
+                    <li><EventRow event={e} active={e.id === selectedId} onClick={() => onSelect(e.id)} meeting={meetingForEvent(e, meetingsById)} /></li>
+                  </React.Fragment>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
+      {isToday && nowIdx >= counter && <NowIndicator now={now} />}
+    </div>
+  );
+}
+
+// ─── Empty bucket state ────────────────────────────────────────────
+
+function DayEmptyState({ day, loading, onScan, scanning }: any) {
+  if (loading) return <div className="flex items-center gap-2 py-16 px-3 text-muted-foreground text-sm font-medium justify-center"><Loader2 className="size-4 animate-spin text-primary" />Loading {prettyDay(day)}…</div>;
+  return (
+    <div className="flex flex-col items-center text-center gap-3 py-14 px-4 text-muted-foreground">
+      <CalendarClock className="size-8 opacity-25" />
+      <div className="space-y-1">
+        <p className="text-sm font-semibold text-foreground">No events on {prettyDay(day)}</p>
+        <p className="text-xs max-w-[16rem] leading-relaxed">The extractor runs every 15 min — scan to pick up anything new.</p>
+      </div>
+      <Button variant="outline" size="sm" onClick={onScan} disabled={scanning} className="gap-1.5 mt-1 rounded-full px-3.5 h-7 text-[11px]">
+        {scanning ? <Loader2 className="size-3 animate-spin" /> : <ScanLine className="size-3" />}Scan now
+      </Button>
+    </div>
+  );
+}
+
+// ─── Now indicator (inline hairline) ───────────────────────────────
 
 function NowIndicator({ now }: { now: Date }) {
   return (
-    <div className="grid grid-cols-[3.5rem_1fr] items-center gap-2 px-1 py-1.5">
-      <span className="text-[10px] font-bold tabular-nums text-primary tracking-tight">{formatLocalTime(now.toISOString())}</span>
-      <div className="flex items-center gap-2">
-        <span className="relative flex size-2 items-center justify-center">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/60 opacity-75" />
-          <span className="relative inline-flex size-2 rounded-full bg-primary shadow-[0_0_0_3px_hsl(var(--primary)/0.18)]" />
-        </span>
-        <span className="h-px flex-1 bg-gradient-to-r from-primary/50 to-transparent" />
-        <span className="text-[9px] font-bold uppercase tracking-[0.18em] text-primary">Now</span>
-      </div>
+    <div className="relative my-2 flex items-center gap-2 px-1.5" role="separator" aria-label="Current time">
+      <span className="relative flex size-1.5 items-center justify-center">
+        <span className="absolute inline-flex size-3 animate-ping rounded-full bg-primary/60 opacity-60" />
+        <span className="relative inline-flex size-1.5 rounded-full bg-primary shadow-[0_0_0_3px_hsl(var(--primary)/0.18)]" />
+      </span>
+      <span className="h-px flex-1 bg-gradient-to-r from-primary/60 via-primary/30 to-transparent" />
+      <span className="text-[9px] font-bold uppercase tracking-[0.24em] text-primary tabular-nums whitespace-nowrap">Now · {formatLocalTime(now.toISOString())}</span>
     </div>
   );
 }
 
+// ─── Event row ─────────────────────────────────────────────────────
+
 function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active: boolean; onClick: () => void; meeting: Meeting | null }) {
-  const dur = eventDuration(event), ht = (meeting?.transcript_chars ?? 0) > 0;
+  const dur = eventDuration(event);
+  const ht = (meeting?.transcript_chars ?? 0) > 0;
+  const tone = kindTone(event.kind);
+  const allDay = isAllDayEvent(event);
   const preview = event.kind !== 'meeting'
     ? event.context_md
     : meeting?.summary_json?.tldr && !event.context_md
@@ -476,27 +834,268 @@ function EventRow({ event, active, onClick, meeting }: { event: DayEvent; active
       : ht && !meeting?.summary_json?.tldr
         ? 'Summary pending.'
         : null;
+
   return (
-    <button type="button" onClick={onClick} className={cn('group relative w-full text-left rounded-xl pl-4 pr-3 py-3 transition-all border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60', active ? 'border-primary/30 bg-primary/[0.06] shadow-[0_1px_0_0_hsl(var(--primary)/0.08)_inset]' : 'border-transparent hover:bg-muted/40')}>
-      <span aria-hidden="true" className={cn('absolute left-0 top-2 bottom-2 w-[3px] rounded-full transition-all', active ? 'bg-primary' : 'bg-transparent group-hover:bg-border')} />
-      <div className="flex items-start gap-3">
-        <div className="flex flex-col items-start min-w-[3.25rem] pt-0.5">
-          <span className={cn('text-[11px] font-bold tabular-nums tracking-tight uppercase', active ? 'text-primary' : 'text-foreground/90')}>{formatDayEventTime(event)}</span>
-          {dur != null && <span className="text-[10px] text-muted-foreground/70 tabular-nums font-medium mt-0.5">{formatDuration(dur)}</span>}
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'group relative w-full text-left rounded-lg px-2.5 py-2.5 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+        active ? 'bg-card shadow-[0_1px_0_0_hsl(var(--border)/0.5)_inset,0_8px_24px_-12px_rgba(0,0,0,0.5)]' : 'hover:bg-muted/30'
+      )}
+    >
+      <span aria-hidden className={cn('absolute left-0 top-2.5 bottom-2.5 w-[2px] rounded-full transition-colors', active ? tone.tick : 'bg-transparent group-hover:bg-border')} />
+      <div className="flex items-start gap-2.5 pl-2">
+        <div className="flex flex-col items-start min-w-[2.6rem] pt-0.5">
+          {allDay ? (
+            <span className={cn('text-[9px] font-bold uppercase tracking-[0.14em]', active ? 'text-foreground/90' : 'text-muted-foreground/70')}>All day</span>
+          ) : (
+            <>
+              <span className={cn('text-[11px] font-semibold tabular-nums tracking-tight uppercase leading-none', active ? 'text-foreground' : 'text-foreground/80')}>{formatDayEventTime(event)}</span>
+              {dur != null && <span className="mt-1 text-[9px] tabular-nums font-medium text-muted-foreground/60">{formatDuration(dur)}</span>}
+            </>
+          )}
         </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start gap-2">
-            <span className={cn('mt-[3px] shrink-0 transition-colors', active ? KIND_COLOR[event.kind] : 'text-muted-foreground/45 group-hover:text-muted-foreground/80')} aria-hidden="true"><KindIcon kind={event.kind} className="size-3.5" /></span>
-            <div className="min-w-0 flex-1">
-              <div className={cn('text-sm font-semibold leading-snug line-clamp-2', active ? 'text-foreground' : 'text-foreground/95')}>{event.title}</div>
-              {active && preview && <p className={cn('mt-1 text-xs line-clamp-2 leading-relaxed', preview === 'Summary pending.' ? 'text-muted-foreground/55 italic' : 'text-muted-foreground/75')}>{preview}</p>}
+        <span className={cn('mt-0.5 grid size-5 shrink-0 place-items-center rounded-md', tone.chip)} aria-hidden>
+          <KindIcon kind={event.kind} className={cn('size-3', tone.icon)} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className={cn('text-[13px] font-medium leading-snug line-clamp-2', active ? 'text-foreground' : 'text-foreground/90')}>{event.title}</div>
+          {active && preview && (
+            <p className={cn('mt-1 text-[11.5px] line-clamp-2 leading-relaxed', preview === 'Summary pending.' ? 'text-muted-foreground/55 italic' : 'text-muted-foreground/80')}>{preview}</p>
+          )}
+          {active && event.attendees.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {event.attendees.slice(0, 3).map(a => <span key={a} className="inline-flex rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{a}</span>)}
+              {event.attendees.length > 3 && <span className="inline-flex items-center text-[10px] text-muted-foreground/60">+{event.attendees.length - 3}</span>}
             </div>
-          </div>
+          )}
         </div>
       </div>
     </button>
   );
 }
+
+// ─── Landing (right side when nothing selected) ────────────────────
+
+function JournalLanding({ events, meetingsById, selectedDay, today, now, loading, onSelectEvent, onScan, scanning }: { events: DayEvent[]; meetingsById: Map<string, Meeting>; selectedDay: string; today: string; now: Date; loading: boolean; onSelectEvent: (id: string) => void; onScan: () => void; scanning: boolean; }) {
+  const nMs = now.getTime();
+  const upcoming = selectedDay === today
+    ? events.find((e: DayEvent) => eventStartsAfterNow(e, nMs)) ?? null
+    : null;
+  const upcomingMeeting = upcoming ? meetingForEvent(upcoming, meetingsById) : null;
+
+  const allMeetings: Meeting[] = events.map((e: DayEvent) => meetingForEvent(e, meetingsById)).filter((m): m is Meeting => !!m);
+  const sigs = collectMeetingSummarySignals(allMeetings);
+  const followups = sigs.actionItems.slice(0, 8);
+  const decisions = sigs.decisions.slice(0, 3);
+  const openQs = sigs.openQuestions.slice(0, 3);
+
+  const meetingIdForAction = (task: string): { evId: string; title: string } | null => {
+    for (const m of allMeetings) {
+      if (m.summary_json?.action_items?.some((a: any) => a.task === task)) {
+        const ev = events.find((e: DayEvent) => e.meeting_id === m.id);
+        if (ev) return { evId: ev.id, title: m.summary_json?.title ?? m.title ?? 'Meeting' };
+      }
+    }
+    return null;
+  };
+
+  if (!events.length) {
+    return (
+      <div className="flex-1 grid place-items-center rounded-2xl border border-dashed border-border/40 bg-card/20 backdrop-blur-sm">
+        <div className="flex flex-col items-center gap-4 text-center px-8 py-16 text-muted-foreground">
+          <div className="relative">
+            <div className="absolute -inset-6 rounded-full bg-primary/10 blur-2xl" />
+            <CalendarDays className="relative size-12 opacity-40 text-foreground" />
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-xl font-semibold text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>A quiet day on {prettyDay(selectedDay)}.</p>
+            <p className="text-sm max-w-sm leading-relaxed">Nothing pinned to your calendar yet. The event extractor runs every 15 minutes — scan manually to refresh.</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={onScan} disabled={scanning || loading} className="gap-1.5 mt-2 rounded-full px-4">
+            {scanning ? <Loader2 className="size-3.5 animate-spin" /> : <ScanLine className="size-3.5" />}Scan now
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ScrollArea className="flex-1 min-h-0 -mr-2 pr-2">
+      <div className="flex flex-col gap-5 pb-4">
+        {upcoming
+          ? <NextUpHero event={upcoming} meeting={upcomingMeeting} now={now} onOpen={() => onSelectEvent(upcoming.id)} />
+          : <DayQuietBanner selectedDay={selectedDay} today={today} />
+        }
+
+        {followups.length > 0 && (
+          <FollowUpsBoard items={followups} totalCount={sigs.actionItems.length} meetingIdForAction={meetingIdForAction} onSelectEvent={onSelectEvent} />
+        )}
+
+        {(decisions.length > 0 || openQs.length > 0) && (
+          <div className={cn('grid gap-4', decisions.length > 0 && openQs.length > 0 ? 'md:grid-cols-2' : 'grid-cols-1')}>
+            {decisions.length > 0 && <SignalRail items={decisions.map((d: any) => d.text)} title="Decisions" subtitle="Settled today" accent="violet" />}
+            {openQs.length > 0 && <SignalRail items={openQs.map((q: any) => q.text)} title="Open questions" subtitle="Still unresolved" accent="amber" />}
+          </div>
+        )}
+
+        <SelectACue />
+      </div>
+    </ScrollArea>
+  );
+}
+
+function NextUpHero({ event, meeting, now, onOpen }: { event: DayEvent; meeting: Meeting | null; now: Date; onOpen: () => void }) {
+  const tone = kindTone(event.kind);
+  const tu = timeUntil(event.starts_at, now);
+  const attendees = event.attendees.slice(0, 5);
+  const blurb = meeting?.summary_json?.tldr ?? event.context_md;
+
+  return (
+    <article className="relative overflow-hidden rounded-2xl border border-border/50 bg-card/70 backdrop-blur-sm shadow-[0_30px_80px_-50px_rgba(0,0,0,0.7)]">
+      <div aria-hidden className={cn('pointer-events-none absolute -top-32 -right-24 size-64 rounded-full blur-3xl opacity-25', tone.halo)} />
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-border/60 to-transparent" />
+
+      <div className="relative flex flex-col gap-5 p-7">
+        <div className="flex items-center gap-3">
+          <span className={cn('grid size-7 place-items-center rounded-md', tone.chip)}><KindIcon kind={event.kind} className={cn('size-3.5', tone.icon)} /></span>
+          <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground">Next up</span>
+          {tu && (
+            <span className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+              <span className="relative flex size-1.5">
+                <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/70" />
+                <span className="relative inline-flex size-1.5 rounded-full bg-primary" />
+              </span>
+              {tu}
+            </span>
+          )}
+        </div>
+
+        <h2 className="text-3xl font-semibold leading-[1.15] tracking-tight text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>{event.title}</h2>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5 font-medium tabular-nums text-foreground/85"><Clock className="size-3.5 opacity-60" />{formatDayEventTimeRange(event)}</span>
+          {event.source_app && <><span className="text-border/60" aria-hidden>·</span><span className="inline-flex items-center gap-1.5"><Inbox className="size-3.5 opacity-60" />{event.source_app}</span></>}
+          {meeting && <><span className="text-border/60" aria-hidden>·</span><span className="inline-flex items-center gap-1.5"><Video className="size-3.5 opacity-60" />{platformLabel(meeting.platform)}</span></>}
+        </div>
+
+        {attendees.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Users className="size-3.5 text-muted-foreground/60 mr-1" />
+            {attendees.map(a => <span key={a} className="inline-flex rounded-full bg-muted/60 px-2.5 py-0.5 text-[11px] font-medium text-foreground/80">{a}</span>)}
+            {event.attendees.length > attendees.length && <span className="text-[11px] text-muted-foreground">+{event.attendees.length - attendees.length}</span>}
+          </div>
+        )}
+
+        {blurb && <p className="text-sm leading-relaxed text-foreground/75 line-clamp-3 border-l-2 border-border/60 pl-3 italic">{blurb}</p>}
+
+        <div className="flex items-center justify-between pt-1">
+          <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground/60">{prettyDay(event.day)}</span>
+          <Button onClick={onOpen} className="group gap-2 rounded-full px-4">Open<ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" /></Button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function DayQuietBanner({ selectedDay, today }: { selectedDay: string; today: string }) {
+  const isPast = compareDays(selectedDay, today) < 0;
+  return (
+    <div className="rounded-2xl border border-border/40 bg-card/40 backdrop-blur-sm px-6 py-5">
+      <div className="flex items-center gap-3">
+        <span className="grid size-9 place-items-center rounded-lg bg-muted/60"><CalendarClock className="size-4 text-muted-foreground" /></span>
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/80">{isPast ? 'Looking back' : 'Looking ahead'}</div>
+          <div className="text-base font-semibold text-foreground mt-1" style={{ fontFamily: 'var(--font-sans)' }}>{isPast ? `${prettyDay(selectedDay)} is in the past.` : 'No upcoming items on the books.'}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FollowUpsBoard({ items, totalCount, meetingIdForAction, onSelectEvent }: { items: any[]; totalCount: number; meetingIdForAction: (t: string) => { evId: string; title: string } | null; onSelectEvent: (id: string) => void; }) {
+  return (
+    <section className="rounded-2xl border border-border/40 bg-card/40 backdrop-blur-sm overflow-hidden">
+      <header className="flex items-center justify-between gap-3 px-6 pt-5 pb-3 border-b border-border/30">
+        <div className="flex items-center gap-2.5">
+          <span className="grid size-7 place-items-center rounded-md bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/25"><CheckSquare className="size-3.5" /></span>
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/80">Follow-ups</div>
+            <div className="text-sm font-semibold text-foreground">Promises on the day</div>
+          </div>
+        </div>
+        <Badge variant="outline" className="rounded-full border-emerald-400/30 bg-emerald-500/10 text-emerald-300 px-2.5 py-0.5 text-[10px] font-bold tabular-nums">{totalCount}</Badge>
+      </header>
+      <ol className="px-2">
+        {items.map((item: any, idx: number) => {
+          const ref = meetingIdForAction(item.task);
+          const inner = (
+            <>
+              <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40 tabular-nums pt-1 shrink-0 w-7">{String(idx + 1).padStart(2, '0')}</span>
+              <span className="min-w-0 flex-1 flex flex-col gap-1.5 pr-4">
+                <span className="text-sm leading-relaxed text-foreground/95">{item.task}</span>
+                {(item.owner || ref) && (
+                  <span className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                    {item.owner && <span className="inline-flex rounded-md bg-muted/60 px-1.5 py-0.5 font-medium text-muted-foreground">{item.owner}</span>}
+                    {ref && <span className="inline-flex items-center gap-1 text-muted-foreground/70">from <span className="text-foreground/80 font-medium">{ref.title}</span></span>}
+                  </span>
+                )}
+              </span>
+              {ref && <ArrowRight className="size-3.5 mt-1.5 shrink-0 text-muted-foreground/40 group-hover:text-foreground transition-colors" />}
+            </>
+          );
+          return ref ? (
+            <li key={idx} className="border-b border-border/20 last:border-b-0">
+              <button type="button" onClick={() => onSelectEvent(ref.evId)} className="group flex w-full items-start gap-3 px-4 py-3.5 text-left transition-colors hover:bg-muted/25">
+                {inner}
+              </button>
+            </li>
+          ) : (
+            <li key={idx} className="flex items-start gap-3 px-4 py-3.5 border-b border-border/20 last:border-b-0">{inner}</li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+function SignalRail({ items, title, subtitle, accent }: { items: string[]; title: string; subtitle: string; accent: 'violet' | 'amber' }) {
+  const cls = accent === 'violet'
+    ? { chip: 'bg-violet-500/15 text-violet-300 ring-1 ring-violet-400/25', dot: 'bg-violet-400/80' }
+    : { chip: 'bg-amber-500/15 text-amber-300 ring-1 ring-amber-400/25', dot: 'bg-amber-400/80' };
+  return (
+    <section className="rounded-2xl border border-border/40 bg-card/40 backdrop-blur-sm px-5 py-4">
+      <div className="flex items-center gap-2.5 mb-3">
+        <span className={cn('grid size-7 place-items-center rounded-md', cls.chip)}><Sparkles className="size-3.5" /></span>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/80">{title}</div>
+          <div className="text-sm font-semibold text-foreground">{subtitle}</div>
+        </div>
+      </div>
+      <ul className="flex flex-col gap-2">
+        {items.map((t, i) => (
+          <li key={i} className="flex items-start gap-2.5 text-[13px] text-foreground/85 leading-relaxed">
+            <span className={cn('mt-1.5 size-1.5 shrink-0 rounded-full', cls.dot)} />
+            <span className="line-clamp-3">{t}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SelectACue() {
+  return (
+    <div className="flex items-center justify-center gap-3 pt-1 pb-2 text-[10px] uppercase tracking-[0.24em] text-muted-foreground/40">
+      <span className="h-px w-10 bg-border/40" />
+      <span>Pick an item to read its full story</span>
+      <span className="h-px w-10 bg-border/40" />
+    </div>
+  );
+}
+
+// ─── Event detail (unchanged below) ────────────────────────────────
 
 function EventDetailHeader({ event, meeting }: { event: DayEvent; meeting: Meeting | null }) {
   const dur = eventDuration(event), sl = SOURCE_LABELS[event.source] ?? event.source;

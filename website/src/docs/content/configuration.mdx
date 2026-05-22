@@ -201,6 +201,7 @@ export:
     - name: markdown
       enabled: true
       path: ~/.beside/export/markdown
+      profile: obsidian              # obsidian | logseq | portable
     - name: mcp
       enabled: true
       host: 127.0.0.1
@@ -210,9 +211,12 @@ export:
 ```
 
 Export plugin settings live inline on each `export.plugins[]` entry. The
-runtime passes the whole entry to the plugin factory, so `path`, `host`, `port`,
-`transport`, and `text_excerpt_chars` stay next to the `enabled` flag you use
-from the desktop Settings screen.
+runtime passes the whole entry to the plugin factory, so `path`, `profile`,
+`host`, `port`, `transport`, and `text_excerpt_chars` stay next to the
+`enabled` flag you use from the desktop Settings screen. Markdown profiles
+choose the link style: Obsidian/Logseq preserve wikilinks, while `portable`
+writes relative Markdown links for Notion import, GitHub, editors, and static
+sites.
 
 ## `system`
 

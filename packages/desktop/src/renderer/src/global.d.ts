@@ -496,6 +496,8 @@ export interface BesideConfig {
       name: string;
       enabled?: boolean;
       path?: string;
+      profile?: 'obsidian' | 'logseq' | 'portable';
+      link_style?: 'wikilink' | 'markdown';
       host?: string;
       port?: number;
       transport?: 'http' | 'stdio';

@@ -20,6 +20,7 @@ import { formatBootstrapLine, pullPercent } from '@/lib/bootstrap-phases';
 import { MODEL_CHOICES, findModelChoice, isPlausibleOllamaTag } from '@/lib/model-catalog';
 import { useTheme, type ThemePreference } from '@/lib/theme';
 import { cn } from '@/lib/utils';
+import { MARKDOWN_EXPORT_PROFILES, getMarkdownExportProfileInfo, type MarkdownExportProfile } from '@/lib/markdown-export-targets';
 import { NumberField, OptionalNumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
 import { HookSettings } from '@/screens/settings/HookSettings';
 import { configPatchFromDraft, settingsDraftFromConfig, type BackgroundModelJobs, type CaptureMode, type LiveRecordingFormat, type LogLevel, type McpTransport, type ScreenshotFormat, type SettingsDraft, type SystemAudioBackend } from '@/screens/settings/settings-draft';
@@ -58,6 +59,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
   const set = (key: keyof SettingsDraft, value: any) => setDraft({ ...draft, [key]: value });
   const hasUnsavedChanges = JSON.stringify(draft) !== JSON.stringify(settingsDraftFromConfig(config));
   const resetDraft = () => setDraft(settingsDraftFromConfig(config!));
+  const selectedMarkdownProfile = getMarkdownExportProfileInfo(draft.markdownProfile);
 
   async function save(opts: { restart?: boolean } = {}) {
     if (!hasUnsavedChanges) return;
@@ -245,7 +247,36 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
           <SettingsSection title="Markdown export" description="Mirror pages to Markdown files.">
             <ToggleRow title="Enable Markdown export" description="Writes journals to folder." typeLabel="boolean" checked={draft.markdownEnabled} onChange={(v: any) => set('markdownEnabled', v)} />
             <Separator className="my-4" />
-            <TextField label="Folder path" value={draft.markdownPath} onChange={(v: any) => set('markdownPath', v)} typeLabel="path" />
+            <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <SelectField label="Target app" value={draft.markdownProfile} onChange={(v: MarkdownExportProfile) => set('markdownProfile', v)} typeLabel="enum" options={MARKDOWN_EXPORT_PROFILES.map((profile) => ({ value: profile.id, label: profile.label }))} hint={`${selectedMarkdownProfile.linkStyle}. ${selectedMarkdownProfile.description}`} />
+              <TextField label="Folder path" value={draft.markdownPath} onChange={(v: any) => set('markdownPath', v)} typeLabel="path" hint="Leave blank to use the data-directory default." />
+            </div>
+            <div className="grid gap-2 lg:grid-cols-3">
+              {MARKDOWN_EXPORT_PROFILES.map((profile) => {
+                const selected = draft.markdownProfile === profile.id;
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    onClick={() => setDraft({ ...draft, markdownProfile: profile.id })}
+                    className={cn(
+                      'rounded-md border bg-background/60 p-3 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+                      selected && 'border-primary bg-primary/5 ring-1 ring-primary/20',
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium">{profile.shortLabel}</span>
+                      {selected ? <Badge variant="success"><CheckCircle2 />Active</Badge> : <Badge variant="muted">{profile.linkStyle}</Badge>}
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{profile.description}</p>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => set('markdownPath', selectedMarkdownProfile.suggestedPath)}><FolderOpen />Use {selectedMarkdownProfile.shortLabel} path</Button>
+              <Button variant="ghost" size="sm" onClick={() => openPath('markdown', 'markdown export')}><FolderOpen />Open folder</Button>
+            </div>
           </SettingsSection>
           <SettingsSection title="AI app connection" description="Configure built-in MCP server.">
             <ToggleRow title="Enable MCP server" description="Exposes memory tools." typeLabel="boolean" checked={draft.mcpEnabled} onChange={(v: any) => set('mcpEnabled', v)} />

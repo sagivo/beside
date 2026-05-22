@@ -4,11 +4,21 @@
   "layer": "export",
   "interface": "IExport",
   "entrypoint": "dist/index.js",
-  "description": "Default export — mirrors indexed wiki pages to a stable, human/agent-readable .md tree (default ~/.beside/export/markdown). Always on.",
+  "description": "Default export — mirrors indexed wiki pages to a stable, human/agent-readable .md tree for Obsidian, Logseq, portable Markdown tools, and agents.",
   "config_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string" }
+      "path": { "type": "string" },
+      "profile": {
+        "type": "string",
+        "enum": ["obsidian", "logseq", "portable"],
+        "default": "obsidian"
+      },
+      "link_style": {
+        "type": "string",
+        "enum": ["wikilink", "markdown"],
+        "description": "Override profile link style. Defaults to wikilink for Obsidian/Logseq and markdown for portable exports."
+      }
     }
   }
 }
