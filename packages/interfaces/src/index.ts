@@ -340,11 +340,24 @@ export interface Logger { debug(msg: string, ...rest: unknown[]): void; info(msg
 
 export interface JournalRenderOptions { assetUrlPrefix?: string; sessions?: ActivitySession[]; meetings?: Meeting[]; afkThresholdMs?: number; }
 
+/** Format an ISO timestamp as HH:MM (or HH:MM:SS) in the host's local timezone.
+ *  Falls back to UTC string slice on unparseable input. */
+export function localClockTime(iso: string | null | undefined, options?: { seconds?: boolean }): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(11, options?.seconds ? 19 : 16);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  if (!options?.seconds) return `${hh}:${mm}`;
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
 export function renderJournalMarkdown(day: string, frames: Frame[], optionsOrPrefix: JournalRenderOptions | string = {}): string {
   const o = typeof optionsOrPrefix === 'string' ? { assetUrlPrefix: optionsOrPrefix } : optionsOrPrefix, a = o.assetUrlPrefix ?? '', s = o.sessions ?? [], m = o.meetings ?? [], t = o.afkThresholdMs ?? 120000;
   if (!frames.length) return `# Journal — ${day}\n\n_No frames captured on this day._\n`;
   const l: string[] = [`# Journal — ${day}`, ''];
-  if (m.length) { l.push(`## Meetings (${m.length})`, ''); m.sort((a, b) => a.started_at.localeCompare(b.started_at)).forEach(mtg => { if (mtg.summary_md?.trim()) l.push(mtg.summary_md.trim(), ''); else l.push(`- **${mtg.started_at.slice(11,16)}-${mtg.ended_at.slice(11,16)}** · [[${mtg.entity_path}]] · ${Math.max(1, Math.round(mtg.duration_ms/60000))} min · ${mtg.platform}`); }); l.push(''); }
+  if (m.length) { l.push(`## Meetings (${m.length})`, ''); m.sort((a, b) => a.started_at.localeCompare(b.started_at)).forEach(mtg => { if (mtg.summary_md?.trim()) l.push(mtg.summary_md.trim(), ''); else l.push(`- **${localClockTime(mtg.started_at)}-${localClockTime(mtg.ended_at)}** · [[${mtg.entity_path}]] · ${Math.max(1, Math.round(mtg.duration_ms/60000))} min · ${mtg.platform}`); }); l.push(''); }
   const ms = frames.reduce((a, f) => a + (f.duration_ms ?? 0), 0), mins = Math.round(ms / 60000), sp = [`${frames.length} frame(s) captured`];
   if (mins > 0) sp.push(`~${mins} min focused`);
   if (s.length) sp.push(`${s.length} session(s), ${Math.round(s.reduce((a, x) => a + x.active_ms, 0)/60000)} active min`);
@@ -356,15 +369,15 @@ export function renderJournalMarkdown(day: string, frames: Frame[], optionsOrPre
     let pe: string | null = null;
     s.sort((a, b) => a.started_at.localeCompare(b.started_at)).forEach(ss => {
       if (pe) { const g = Date.parse(ss.started_at) - Date.parse(pe); if (g >= t) l.push('---', `_…idle for ${Math.round(g/60000)}m…_`, ''); }
-      const fs = fbs.get(ss.id) ?? [], st = ss.started_at.slice(11,16), et = ss.ended_at.slice(11,16), am = Math.max(1, Math.round(ss.active_ms/60000));
+      const fs = fbs.get(ss.id) ?? [], st = localClockTime(ss.started_at), et = localClockTime(ss.ended_at), am = Math.max(1, Math.round(ss.active_ms/60000));
       l.push(`### ${st} – ${et} · ${ss.primary_entity_path ? `[[${ss.primary_entity_path}]]` : ss.primary_app || 'Focus'} · ${am} min active${fs.length ? ` · ${fs.length} frames` : ''}`);
-      if (fs.length) { let la: string | null = null; fs.forEach(f => { if (f.app !== la) { l.push(`#### ${f.app || '(unknown)'}`); la = f.app; } const tm = f.timestamp.slice(11,19), d = f.duration_ms ? ` _(${Math.round(f.duration_ms/1000)}s)_` : '', tgt = [f.window_title ? `"${f.window_title}"` : null, f.url ? `<${f.url}>` : null].filter(Boolean).join(' · '), ep = f.entity_path ? ` → [[${f.entity_path}]]` : ''; l.push(`- **${tm}**${d} — ${tgt || '(no title)'}${ep}`); if (f.text && ['accessibility', 'audio'].includes(f.text_source!) && f.text.trim()) l.push(`  > ${f.text.trim().slice(0, 200)}...`); if (f.asset_path) l.push(`  ![](${a}${f.asset_path})`); }); }
+      if (fs.length) { let la: string | null = null; fs.forEach(f => { if (f.app !== la) { l.push(`#### ${f.app || '(unknown)'}`); la = f.app; } const tm = localClockTime(f.timestamp, { seconds: true }), d = f.duration_ms ? ` _(${Math.round(f.duration_ms/1000)}s)_` : '', tgt = [f.window_title ? `"${f.window_title}"` : null, f.url ? `<${f.url}>` : null].filter(Boolean).join(' · '), ep = f.entity_path ? ` → [[${f.entity_path}]]` : ''; l.push(`- **${tm}**${d} — ${tgt || '(no title)'}${ep}`); if (f.text && ['accessibility', 'audio'].includes(f.text_source!) && f.text.trim()) l.push(`  > ${f.text.trim().slice(0, 200)}...`); if (f.asset_path) l.push(`  ![](${a}${f.asset_path})`); }); }
       pe = ss.ended_at;
     });
-    if (fbs.has('__loose__')) { l.push('---', '### Loose frames', `_${fbs.get('__loose__')!.length} frames_`, ''); let la: string | null = null; fbs.get('__loose__')!.forEach(f => { if (f.app !== la) { l.push(`#### ${f.app || '(unknown)'}`); la = f.app; } l.push(`- **${f.timestamp.slice(11,19)}** — ${f.window_title}`); }); }
+    if (fbs.has('__loose__')) { l.push('---', '### Loose frames', `_${fbs.get('__loose__')!.length} frames_`, ''); let la: string | null = null; fbs.get('__loose__')!.forEach(f => { if (f.app !== la) { l.push(`#### ${f.app || '(unknown)'}`); la = f.app; } l.push(`- **${localClockTime(f.timestamp, { seconds: true })}** — ${f.window_title}`); }); }
   } else {
     l.push('## Timeline', ''); let la: string | null = null;
-    frames.forEach(f => { if (f.app !== la) { l.push(`### ${f.app || '(unknown)'}`); la = f.app; } l.push(`- **${f.timestamp.slice(11,19)}** — ${f.window_title}`); });
+    frames.forEach(f => { if (f.app !== la) { l.push(`### ${f.app || '(unknown)'}`); la = f.app; } l.push(`- **${localClockTime(f.timestamp, { seconds: true })}** — ${f.window_title}`); });
   }
   return l.join('\n') + '\n';
 }

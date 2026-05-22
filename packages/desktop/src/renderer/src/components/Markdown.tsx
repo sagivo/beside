@@ -1,8 +1,59 @@
 import * as React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { cacheThumbnail, resolveAssetUrl, thumbnailCache } from '@/lib/thumbnail-cache';
 import { cn } from '@/lib/utils';
+
+const APP_NAME_OVERRIDES: Record<string, string> = {
+  vscode: 'VS Code',
+  iterm: 'iTerm',
+  iterm2: 'iTerm',
+  macos: 'macOS',
+  ios: 'iOS',
+  github: 'GitHub',
+  gitlab: 'GitLab',
+  notion: 'Notion',
+  obsidian: 'Obsidian',
+  firefox: 'Firefox',
+  chrome: 'Chrome',
+  safari: 'Safari',
+  slack: 'Slack',
+  mail: 'Mail',
+  zoom: 'Zoom',
+};
+
+function titleCaseSegment(s: string): string {
+  if (!s) return s;
+  const lower = s.toLowerCase();
+  if (APP_NAME_OVERRIDES[lower]) return APP_NAME_OVERRIDES[lower];
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function humanizeEntityPath(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith('apps/')) {
+    return titleCaseSegment(trimmed.slice(5));
+  }
+  if (trimmed.startsWith('channels/')) {
+    return `#${trimmed.slice(9)}`;
+  }
+  if (trimmed.startsWith('contacts/')) {
+    return trimmed
+      .slice(9)
+      .split('-')
+      .filter(Boolean)
+      .map(titleCaseSegment)
+      .join(' & ');
+  }
+  const last = trimmed.split('/').pop() ?? trimmed;
+  return last.replace(/-/g, ' ');
+}
+
+function humanizeWikiLinks(md: string): string {
+  return md.replace(/\[\[([^\]\n]+)\]\]/g, (_, target) => humanizeEntityPath(String(target)));
+}
 
 export function Markdown({
   content,
@@ -11,6 +62,7 @@ export function Markdown({
   content: string;
   className?: string;
 }) {
+  const processed = React.useMemo(() => humanizeWikiLinks(content), [content]);
   return (
     <div className={cn('text-sm leading-relaxed text-inherit', className)}>
       <ReactMarkdown
@@ -104,7 +156,7 @@ export function Markdown({
           ),
         }}
       >
-        {content}
+        {processed}
       </ReactMarkdown>
     </div>
   );
@@ -121,6 +173,7 @@ function AssetImage({
   ...rest
 }: React.ImgHTMLAttributes<HTMLImageElement> & { src: string }) {
   const [resolved, setResolved] = React.useState<string | null>(null);
+  const [open, setOpen] = React.useState(false);
   React.useEffect(() => {
     let cancelled = false;
     if (!src) {
@@ -165,12 +218,40 @@ function AssetImage({
       </span>
     );
   }
+  const caption = alt || 'Screenshot';
   return (
-    <img
-      {...rest}
-      src={resolved}
-      alt={alt}
-      className="my-2 max-h-72 w-full rounded-md border border-border object-contain"
-    />
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-label={`Open ${caption} at full size`}
+        className="group relative my-2 block w-full overflow-hidden rounded-md border border-border bg-background/40 transition hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+      >
+        <img
+          {...rest}
+          src={resolved}
+          alt={alt}
+          className="max-h-72 w-full object-contain transition-transform duration-200 group-hover:scale-[1.01]"
+        />
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-end gap-2 bg-gradient-to-t from-background/85 via-background/40 to-transparent px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-foreground/80 opacity-0 transition-opacity group-hover:opacity-100"
+        >
+          Click to expand
+        </span>
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-[92vw] gap-0 overflow-hidden p-0 sm:rounded-xl">
+          <DialogTitle className="sr-only">{caption}</DialogTitle>
+          <div className="flex max-h-[90vh] items-center justify-center bg-black/40">
+            <img
+              src={resolved}
+              alt={alt}
+              className="max-h-[90vh] w-auto max-w-full object-contain"
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

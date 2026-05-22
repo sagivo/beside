@@ -386,7 +386,7 @@ export function Meetings({ events, meetings, loading, focusRequest, onRefresh }:
         </div>
       ) : (
         <div className="relative flex gap-5 min-h-0 flex-1">
-          <div className="w-[380px] shrink-0 flex flex-col min-h-0 gap-3">
+          <div className={cn('w-[380px] shrink-0 flex flex-col min-h-0 gap-3', briefOpen && 'hidden')}>
             <DayBriefCard day={selectedDay} brief={brief} active={briefOpen} onOpen={openBrief} />
             <div className="flex-1 min-h-0 flex flex-col overflow-hidden rounded-2xl border border-border/40 bg-card/40 backdrop-blur-sm shadow-[0_1px_0_0_hsl(var(--border)/0.4)_inset,0_30px_60px_-40px_rgba(0,0,0,0.6)]">
               <ScrollArea className="flex-1">
@@ -662,7 +662,7 @@ function DayBriefReader({ day, brief, onClose }: { day: string; brief: BriefStat
       ) : (
         <div className="flex-1 min-h-0 flex">
           {sections.length > 1 && (
-            <nav aria-label="Sections" className="hidden lg:flex w-56 shrink-0 flex-col gap-1 border-r border-border/30 px-3 py-5 overflow-y-auto">
+            <nav aria-label="Sections" className="hidden xl:flex w-52 shrink-0 flex-col gap-1 border-r border-border/30 px-3 py-6 overflow-y-auto">
               <div className="px-2 pb-2 text-[10px] font-bold uppercase tracking-[0.22em] text-muted-foreground/70">In this story</div>
               {sections.map(s => (
                 <button
@@ -683,18 +683,18 @@ function DayBriefReader({ day, brief, onClose }: { day: string; brief: BriefStat
           )}
 
           <ScrollArea className="flex-1 min-h-0">
-            <article ref={scrollRef} className="mx-auto w-full max-w-3xl px-8 py-8">
-              <header className="mb-6 border-b border-border/40 pb-5">
+            <article ref={scrollRef} className="mx-auto w-full max-w-5xl px-10 lg:px-14 py-10">
+              <header className="mb-8 border-b border-border/40 pb-6">
                 <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-muted-foreground/70">Captured story</div>
-                <h1 className="mt-1.5 text-2xl font-semibold tracking-tight text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>
+                <h1 className="mt-2 text-3xl font-semibold tracking-tight text-foreground" style={{ fontFamily: 'var(--font-sans)' }}>
                   Your day on {prettyDay(day)}
                 </h1>
-                <p className="mt-1.5 text-[12px] text-muted-foreground/80">
+                <p className="mt-2 text-[12.5px] text-muted-foreground/80">
                   {briefReadMinutes(briefWordCount(content))} min read · {briefWordCount(content).toLocaleString()} words
                 </p>
               </header>
 
-              <div className="prose prose-sm md:prose-base dark:prose-invert max-w-none prose-headings:scroll-mt-6 prose-headings:font-semibold prose-h2:text-lg prose-h2:mt-8 prose-h2:mb-3 prose-h2:tracking-tight prose-h2:border-b prose-h2:border-border/40 prose-h2:pb-2 prose-h3:text-base prose-h3:mt-6 prose-h3:mb-2 prose-p:leading-[1.75] prose-p:text-foreground/90 prose-li:leading-relaxed prose-li:my-1 prose-pre:bg-muted/40 prose-pre:border prose-pre:border-border/40 prose-img:rounded-xl prose-img:border prose-img:border-border/40 prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-blockquote:border-l-primary/50 prose-blockquote:text-muted-foreground">
+              <div className="prose prose-base lg:prose-lg dark:prose-invert max-w-none prose-headings:scroll-mt-6 prose-headings:font-semibold prose-h2:text-2xl prose-h2:mt-10 prose-h2:mb-4 prose-h2:tracking-tight prose-h2:border-b prose-h2:border-border/40 prose-h2:pb-3 prose-h3:text-lg prose-h3:mt-8 prose-h3:mb-2 prose-p:leading-[1.8] prose-p:text-foreground/90 prose-li:leading-relaxed prose-li:my-1.5 prose-pre:bg-muted/40 prose-pre:border prose-pre:border-border/40 prose-img:rounded-xl prose-img:border prose-img:border-border/40 prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-blockquote:border-l-primary/50 prose-blockquote:text-muted-foreground">
                 {sectionedContent ?? <Markdown content={content} />}
               </div>
             </article>

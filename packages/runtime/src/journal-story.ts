@@ -1,4 +1,4 @@
-import type { ActivitySession, Frame } from '@beside/interfaces';
+import { localClockTime, type ActivitySession, type Frame } from '@beside/interfaces';
 
 export function renderDeterministicObservedJournalStory(frames: Frame[], sessions: ActivitySession[]): string | null {
   if (!frames.length || !sessions.length) return null;
@@ -55,7 +55,8 @@ function communicationDigestForFrame(f: Frame): Omit<CommunicationDigest, 'frame
 }
 
 function renderCommunicationDigestItem(i: CommunicationDigest) {
-  const t = i.frames[0]!.timestamp.slice(11, 16) === i.frames[i.frames.length - 1]!.timestamp.slice(11, 16) ? i.frames[0]!.timestamp.slice(11, 16) : `${i.frames[0]!.timestamp.slice(11, 16)}-${i.frames[i.frames.length - 1]!.timestamp.slice(11, 16)}`;
+  const firstT = localClockTime(i.frames[0]!.timestamp), lastT = localClockTime(i.frames[i.frames.length - 1]!.timestamp);
+  const t = firstT === lastT ? firstT : `${firstT}-${lastT}`;
   const tc = communicationTopicFromDigest(i);
   return `- **${t} ${i.surface} (${i.label})**: ${tc ?? `You opened this conversation or inbox, but the capture did not include enough readable message body text to summarize what was discussed${distinctValues(i.frames, f => f.window_title, 2).length ? ` (${distinctValues(i.frames, f => f.window_title, 2).map(v => `"${v}"`).join('; ')})` : ''}.`}`;
 }
@@ -123,7 +124,7 @@ function observedSessionBeat(s: ActivitySession, fs: Frame[]) {
   const evs = [extractFileNamesForStory(fs, 6).length ? `the files ${extractFileNamesForStory(fs, 6).map(f => `\`${f}\``).join(', ')}` : null, distinctValues(fs, f => { try { return f.url ? new URL(f.url).hostname.replace(/^www\./, '') : null; } catch { return null; } }, 3).length ? `web pages on ${distinctValues(fs, f => { try { return f.url ? new URL(f.url).hostname.replace(/^www\./, '') : null; } catch { return null; } }, 3).join(', ')}` : null, comms.filter(e => !/announce|product-updates|newsletter/i.test(e)).length ? `communication in ${comms.filter(e => !/announce|product-updates|newsletter/i.test(e)).map(formatObservedEntity).join(', ')}` : null].filter(Boolean);
   const h = [...distinctValues(fs, f => f.window_title, 8), ...extractFileNamesForStory(fs, 6), ...distinctValues(fs, f => f.app, 4)].join(' ').toLowerCase();
   const t = /journal narrative|indexed journal|communication tl;dr|what happened/.test(h) ? 'improved the journal narrative so it reads more like a story' : /settings screen|load guard|pause heavy work/.test(h) ? 'worked on the settings and load-guard experience' : (h.includes('codex') && !extractFileNamesForStory(fs, 6).length) ? (/reduce cpu usage|improve app efficiency/.test(h) ? 'worked with Codex and briefly revisited CPU usage or app efficiency work' : 'worked with Codex') : /redesign app interface|modern ux/.test(h) ? 'worked on redesigning the Beside app interface' : /reduce cpu usage|improve app efficiency/.test(h) ? 'looked at CPU usage and app efficiency work' : extractFileNamesForStory(fs, 6).length ? `worked through project files ${extractFileNamesForStory(fs, 6).slice(0, 3).map(f => `\`${f}\``).join(', ')}` : h.includes('all inboxes') ? 'checked your email inbox' : h.includes('workday') ? 'checked Workday pages' : h.includes('slack') ? 'checked Slack' : h.includes('codex') ? 'worked with Codex' : h.includes('cursor') ? 'worked in Cursor' : h.includes('beside') ? 'reviewed the Beside app' : 'worked through the captured desktop context';
-  return { sentenceBody: `${t}${evs.length ? `, with ${evs.length <= 1 ? evs[0] : evs.length === 2 ? `${evs[0]} and ${evs[1]}` : `${evs.slice(0, -1).join(', ')}, and ${evs[evs.length - 1]}`}` : ''} around ${s.started_at.slice(11, 16)}-${s.ended_at.slice(11, 16)}`, communications: comms };
+  return { sentenceBody: `${t}${evs.length ? `, with ${evs.length <= 1 ? evs[0] : evs.length === 2 ? `${evs[0]} and ${evs[1]}` : `${evs.slice(0, -1).join(', ')}, and ${evs[evs.length - 1]}`}` : ''} around ${localClockTime(s.started_at)}-${localClockTime(s.ended_at)}`, communications: comms };
 }
 
 function formatObservedEntity(e: string) { return e.startsWith('contacts/') ? ((n) => { const p = n.split('-').filter(Boolean), k = [['adam', 'Adam'], ['david', 'David'], ['diana', 'Diana'], ['jacob', 'Jacob'], ['tony', 'Tony'], ['milan', 'Milan']].filter(x => p.includes(x[0]!)).map(x => x[1]!); return k.length >= 3 ? `group DM with ${k.slice(0, 5).join(', ')}${k.length > 5 ? ', and others' : ''}` : k.length ? k.join(', ') : n.replace(/-/g, ' '); })(e.replace(/^contacts\//, '')) : e.replace(/^apps\//, '').replace(/^channels\//, '#').replace(/-/g, ' '); }

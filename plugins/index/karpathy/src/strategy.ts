@@ -16,6 +16,7 @@ import type {
   RawEvent,
   ReorganisationSummary,
 } from '@beside/interfaces';
+import { localClockTime } from '@beside/interfaces';
 import { isoTimestamp } from '@beside/core';
 import { slugify } from './bucketer.js';
 import { PageStore } from './page-store.js';
@@ -1648,7 +1649,7 @@ function renderEntityMarkdown(
   if (evidence.keyframes.length) {
     lines.push('## Top screenshots');
     for (const k of evidence.keyframes) {
-      const time = k.timestamp.slice(11, 19);
+      const time = localClockTime(k.timestamp, { seconds: true });
       lines.push(`![${entity.title} @ ${time} (${k.frameId})](${k.assetPath})`);
     }
     lines.push('');

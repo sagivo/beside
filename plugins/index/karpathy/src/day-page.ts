@@ -11,7 +11,7 @@ import type {
   Logger,
   Meeting,
 } from '@beside/interfaces';
-import { renderJournalMarkdown } from '@beside/interfaces';
+import { localClockTime, renderJournalMarkdown } from '@beside/interfaces';
 import { isoTimestamp } from '@beside/core';
 
 /**
@@ -118,6 +118,10 @@ export async function renderDayPage(
   };
 }
 
+/** Bump when the renderer's output format changes so cached day pages are
+ *  regenerated. v2: timeline timestamps now use the host's local time. */
+const DAY_PAGE_RENDERER_VERSION = 'v2-local-time';
+
 function computeDayEvidenceHash(
   day: string,
   frames: Frame[],
@@ -126,6 +130,7 @@ function computeDayEvidenceHash(
   dayEvents: DayEvent[],
 ): string {
   const hash = createHash('sha256');
+  hash.update(`renderer:${DAY_PAGE_RENDERER_VERSION}|`);
   hash.update(day);
   hash.update('|frames:');
   for (const f of frames) {
@@ -250,7 +255,7 @@ async function buildNarrativePrompt(
         const abs = path.join(dataDir, frame.asset_path);
         images.push(await fs.readFile(abs));
         imageLabels.push(
-          `image_${imageNo}: ${frame.timestamp.slice(11, 19)} ${frame.app} "${truncate(frame.window_title || '', 80)}"`,
+          `image_${imageNo}: ${localClockTime(frame.timestamp, { seconds: true })} ${frame.app} "${truncate(frame.window_title || '', 80)}"`,
         );
         imageNo += 1;
       } catch {
@@ -297,8 +302,8 @@ function renderSessionDossier(
   imageLabels: string[],
 ): string {
   const lines: string[] = [];
-  const start = session.started_at.slice(11, 16);
-  const end = session.ended_at.slice(11, 16);
+  const start = localClockTime(session.started_at);
+  const end = localClockTime(session.ended_at);
   lines.push(
     `SESSION ${session.id} (${start}-${end}, active ${Math.round(session.active_ms / 60_000)} min, ${frames.length} frames)`,
   );
