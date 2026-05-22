@@ -8,6 +8,7 @@ export type ScreenshotFormat = 'webp' | 'jpeg';
 export type SystemAudioBackend = 'core_audio_tap' | 'screencapturekit' | 'off';
 export type LiveRecordingFormat = 'm4a';
 export type McpTransport = 'http' | 'stdio';
+export type BackupProvider = 'drive' | 'box';
 
 export interface SettingsDraft {
   appName: string; appDataDir: string; logLevel: LogLevel; sessionId: string; capturePlugin: string;
@@ -20,6 +21,8 @@ export interface SettingsDraft {
   storagePath: string; maxSizeGb: number; retentionDays: number; compressAfterDays: number; compressAfterMinutes: string;
   compressQuality: number; thumbnailAfterDays: number; thumbnailAfterMinutes: string; thumbnailMaxDim: number;
   deleteAfterDays: number; deleteAfterMinutes: string; vacuumTickIntervalMin: number; vacuumBatchSize: number;
+  backupEnabled: boolean; backupProvider: BackupProvider; backupUploadAll: boolean; backupTickIntervalMin: number;
+  backupBatchSize: number; backupEvictBatchSize: number; driveClientId: string; driveClientSecret: string;
   indexStrategy: string; indexPath: string; incrementalIntervalMin: number; reorganiseSchedule: string; reorganiseOnIdle: boolean;
   indexIdleTriggerMin: number; indexBatchSize: number; sessionsIdleThresholdSec: number; sessionsAfkThresholdSec: number;
   sessionsMinActiveMs: number; sessionsFallbackFrameAttentionMs: number; meetingsIdleThresholdSec: number; meetingsMinDurationSec: number;
@@ -41,6 +44,7 @@ export interface SettingsDraft {
 export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
   const c = loaded.config, md = c.export.plugins.find(p => p.name === 'markdown'), mcp = c.export.plugins.find(p => p.name === 'mcp');
   const v = c.storage.local.vacuum, a = c.capture.audio, lr = a?.live_recording, ax = c.capture.accessibility;
+  const bk = c.backup;
   const ol = c.index.model.ollama, oa = c.index.model.openai, cl = c.index.model.claude;
 
   return {
@@ -60,7 +64,11 @@ export function settingsDraftFromConfig(loaded: LoadedConfig): SettingsDraft {
     compressAfterDays: v.compress_after_days, compressAfterMinutes: v.compress_after_minutes == null ? '' : String(v.compress_after_minutes),
     compressQuality: v.compress_quality, thumbnailAfterDays: v.thumbnail_after_days, thumbnailAfterMinutes: v.thumbnail_after_minutes == null ? '' : String(v.thumbnail_after_minutes),
     thumbnailMaxDim: v.thumbnail_max_dim, deleteAfterDays: v.delete_after_days, deleteAfterMinutes: v.delete_after_minutes == null ? '' : String(v.delete_after_minutes),
-    vacuumTickIntervalMin: v.tick_interval_min, vacuumBatchSize: v.batch_size, indexStrategy: c.index.strategy, indexPath: c.index.index_path,
+    vacuumTickIntervalMin: v.tick_interval_min, vacuumBatchSize: v.batch_size,
+    backupEnabled: bk?.enabled ?? false, backupProvider: bk?.provider ?? 'drive',
+    backupUploadAll: bk?.upload_all ?? true, backupTickIntervalMin: bk?.tick_interval_min ?? 10, backupBatchSize: bk?.batch_size ?? 10,
+    backupEvictBatchSize: bk?.evict_batch_size ?? 25, driveClientId: bk?.drive?.client_id ?? '', driveClientSecret: bk?.drive?.client_secret ?? '',
+    indexStrategy: c.index.strategy, indexPath: c.index.index_path,
     incrementalIntervalMin: c.index.incremental_interval_min, reorganiseSchedule: c.index.reorganise_schedule, reorganiseOnIdle: c.index.reorganise_on_idle,
     indexIdleTriggerMin: c.index.idle_trigger_min, indexBatchSize: c.index.batch_size, sessionsIdleThresholdSec: c.index.sessions.idle_threshold_sec,
     sessionsAfkThresholdSec: c.index.sessions.afk_threshold_sec, sessionsMinActiveMs: c.index.sessions.min_active_ms,
@@ -121,6 +129,15 @@ export function configPatchFromDraft(d: SettingsDraft) {
         path: d.storagePath.trim() || '~/.beside', max_size_gb: clampNumber(d.maxSizeGb, 0.1), retention_days: clampInt(d.retentionDays, 0),
         vacuum: { compress_after_days: clampInt(d.compressAfterDays, 0), compress_after_minutes: optionalInt(d.compressAfterMinutes, 0), compress_quality: clampInt(d.compressQuality, 1, 100), thumbnail_after_days: clampInt(d.thumbnailAfterDays, 0), thumbnail_after_minutes: optionalInt(d.thumbnailAfterMinutes, 0), thumbnail_max_dim: clampInt(d.thumbnailMaxDim, 64, 2048), delete_after_days: clampInt(d.deleteAfterDays, 0), delete_after_minutes: optionalInt(d.deleteAfterMinutes, 0), tick_interval_min: clampInt(d.vacuumTickIntervalMin, 1), batch_size: clampInt(d.vacuumBatchSize, 1) }
       }
+    },
+    backup: {
+      enabled: d.backupEnabled,
+      provider: d.backupProvider,
+      upload_all: d.backupUploadAll,
+      tick_interval_min: clampInt(d.backupTickIntervalMin, 1),
+      batch_size: clampInt(d.backupBatchSize, 1),
+      evict_batch_size: clampInt(d.backupEvictBatchSize, 1),
+      drive: { client_id: d.driveClientId.trim(), client_secret: d.driveClientSecret.trim() },
     },
     index: {
       strategy: d.indexStrategy.trim() || 'karpathy', index_path: d.indexPath.trim() || '~/.beside/index', incremental_interval_min: clampInt(d.incrementalIntervalMin, 1),

@@ -16,34 +16,9 @@ Hooks can also expose React widgets that the desktop app mounts on the
 dashboard, so a hook is a complete vertical: capture matchers + LLM logic +
 storage records + UI.
 
-Two hook plugins ship with Beside today.
-
-## `calendar` — extract events from screen captures
-
-Watches Apple Calendar, Google Calendar, Outlook web, and iCloud Calendar
-screenshots, and writes typed event records (start/end, attendees, links,
-location) into its `events` collection. The desktop app uses the built-in
-`calendar` widget to render them on the dashboard.
-
-```yaml
-hooks:
-  enabled: true
-  plugins:
-    - { name: calendar, enabled: true }
-```
-
-## `followups` — find open threads across communication tools
-
-Reads OCR/accessibility text from Slack, Microsoft Teams, Gmail, Outlook, Apple
-Mail, and meeting transcripts, asks the model to identify open follow-ups, and
-writes them into the `followups` collection. Renders via the built-in
-`followups` widget.
-
-```yaml
-hooks:
-  plugins:
-    - { name: followups, enabled: true }
-```
+No hook plugins are enabled by default. Add config-only hooks under
+`hooks.definitions`, or drop plugin hooks into `plugins/hook/` and list them in
+`hooks.plugins`.
 
 ## How the engine runs your hook
 
@@ -89,7 +64,7 @@ interface CaptureHookDefinition {
     id: string;
     title: string;
     bundlePath?: string;          // ship a compiled React bundle
-    builtin?: 'calendar' | 'followups' | 'list' | 'json';
+    builtin?: 'list' | 'json';
     defaultCollection?: string;
     placement?: 'dashboard-main' | 'dashboard-aside';
   };
@@ -165,7 +140,7 @@ ctx.storage.clear('pricing-threads');
 If you want your hook to surface in the desktop app, add a `widget` block to
 the definition. Two paths:
 
-1. **Use a built-in renderer** — `calendar`, `followups`, `list`, or `json`.
+1. **Use a built-in renderer** — `list` or `json`.
    You write zero React.
 2. **Ship a compiled bundle** — point `bundlePath` at a built React bundle and
    the renderer mounts it inside the dashboard. The renderer hands your bundle
@@ -183,13 +158,11 @@ hooks:
   max_image_bytes: 2097152          # don't load huge screenshots into LLM calls
   max_prompt_chars: 14000           # cap on OCR text per prompt
   max_records_per_hook: 2000        # eviction ceiling per hook
-  plugins:
-    - { name: calendar, enabled: true }
-    - { name: followups, enabled: true }
+  plugins: []
   definitions: []                   # inline definitions, no plugin needed
 ```
 
 You can also declare hook definitions inline under `hooks.definitions` without
 writing a plugin — handy for quick `promptTemplate`-driven extractors. Built-in
-widgets (`calendar`, `followups`, `list`, `json`) cover the common shapes, so a
+widgets (`list`, `json`) cover the common shapes, so a
 useful hook can be a single prompt template with zero React.

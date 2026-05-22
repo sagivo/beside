@@ -7,7 +7,7 @@ import { Toaster, toast } from '@/components/ui/sonner';
 import { SidebarStateProvider } from '@/lib/sidebar-state';
 import { ThemeProvider } from '@/lib/theme';
 import { ONBOARDING_KEY, ONBOARDING_MODEL_KEY, ONBOARDING_STEP_KEY, type Screen } from '@/types';
-import type { DayEvent, DoctorCheck, LoadedConfig, Meeting, ModelBootstrapProgress, RuntimeOverview } from '@/global';
+import type { AppUpdateReadyInfo, DayEvent, DoctorCheck, LoadedConfig, Meeting, ModelBootstrapProgress, RuntimeOverview } from '@/global';
 import '@/lib/thumbnail-cache';
 
 const Ai = React.lazy(() => import('@/screens/Ai').then(m => ({ default: m.Ai })));
@@ -26,17 +26,23 @@ export function App() {
 
 function AppInner() {
   const [screen, setScreen] = React.useState<Screen>('dashboard'), [overview, setOverview] = React.useState<RuntimeOverview | null>(null), [doctor, setDoctor] = React.useState<DoctorCheck[] | null>(null), [days, setDays] = React.useState<string[]>([]), [config, setConfig] = React.useState<LoadedConfig | null>(null), [logs, setLogs] = React.useState(''), [bootstrapEvents, setBootstrapEvents] = React.useState<ModelBootstrapProgress[]>([]), [meetings, setMeetings] = React.useState<Meeting[]>([]), [dayEvents, setDayEvents] = React.useState<DayEvent[]>([]), [meetingsLoading, setMeetingsLoading] = React.useState(false), [meetingFocusRequest, setMeetingFocusRequest] = React.useState<{ id: number; target: { eventId: string; day: string } | null } | null>(null), [error, setError] = React.useState<string | null>(null), [searchRequest, setSearchRequest] = React.useState<{ id: number; query: string } | null>(null);
+  const [appUpdateReady, setAppUpdateReady] = React.useState<AppUpdateReadyInfo | null>(null);
   const searchRequestId = React.useRef(0), meetingFocusRequestId = React.useRef(0), agendaRefreshKeyRef = React.useRef('');
   const [showOnboarding, setShowOnboarding] = React.useState<boolean>(() => { try { return localStorage.getItem(ONBOARDING_KEY) !== '1'; } catch { return true; } });
   const [onboardingChecked, setOnboardingChecked] = React.useState(false);
 
   React.useEffect(() => {
+    let cancelled = false;
+    void window.beside?.getAppUpdateReady?.()
+      .then((info) => { if (!cancelled) setAppUpdateReady(info); })
+      .catch(() => {});
     const cleanups = [
       window.beside?.onDesktopLogs?.(l => setLogs(l || '')),
       window.beside?.onBootstrapProgress?.(p => setBootstrapEvents(e => [...e.slice(-80), p])),
       window.beside?.onOverview?.(setOverview),
+      window.beside?.onAppUpdateReady?.(setAppUpdateReady),
     ].filter((cleanup): cleanup is () => void => typeof cleanup === 'function');
-    return () => cleanups.forEach(cleanup => cleanup());
+    return () => { cancelled = true; cleanups.forEach(cleanup => cleanup()); };
   }, []);
 
   React.useEffect(() => {
@@ -98,6 +104,13 @@ function AppInner() {
   const runPaletteSearch = (q: string) => { const t = q.trim(); if (t) { searchRequestId.current++; setSearchRequest({ id: searchRequestId.current, query: t }); setScreen('search'); } };
   const openMeetings = (t: any = null) => { meetingFocusRequestId.current++; setMeetingFocusRequest({ id: meetingFocusRequestId.current, target: t }); setScreen('meetings'); };
   const navigateToScreen = React.useCallback((n: Screen) => setScreen(n), []);
+  const installAppUpdate = React.useCallback(async () => {
+    try {
+      await window.beside.installAppUpdate();
+    } catch (e: any) {
+      toast.error('Could not restart and update', { description: e.message || String(e) });
+    }
+  }, []);
 
   const wrapAction = (fn: any, successMsg: string, desc?: string) => async (...args: any[]) => { try { const r = await fn(...args); if (r) setOverview(r); toast.success(successMsg, { description: desc }); } catch (e: any) { toast.error(`Could not ${successMsg.toLowerCase()}`, { description: e.message || String(e) }); } };
 
@@ -116,7 +129,7 @@ function AppInner() {
   if (!onboardingChecked) return <div className="grid h-screen place-items-center text-sm text-muted-foreground">Loading Beside…</div>;
   if (showOnboarding) return <React.Suspense fallback={<div className="grid h-screen place-items-center text-sm text-muted-foreground">Preparing welcome…</div>}><Onboarding bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onComplete={() => { try { localStorage.setItem(ONBOARDING_KEY, '1'); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} void window.beside?.setOnboardingComplete?.(true).catch(() => {}); setShowOnboarding(false); setScreen('dashboard'); }} /></React.Suspense>;
 
-  const c = error ? <div className="pt-6"><ErrorView error={error} onRetry={() => loadScreen(screen)} /></div> : screen === 'dashboard' ? <Dashboard overview={overview} doctor={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('dashboard')} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onTriggerFullReindex={actions.onTriggerFullReindex} onBootstrap={actions.onBootstrap} onOpenMarkdownExport={actions.onOpenMarkdownExport} onGoMeetings={openMeetings} onSearch={runPaletteSearch} /> : screen === 'meetings' ? <Meetings events={dayEvents} meetings={meetings} loading={meetingsLoading} focusRequest={meetingFocusRequest} onRefresh={() => loadScreen('meetings')} /> : screen === 'privacy' ? <Privacy config={config} overview={overview} onRefresh={() => loadScreen('privacy')} onSaved={setConfig} onOverview={setOverview} onStart={actions.onStart} onPause={actions.onPause} onResume={actions.onResume} /> : screen === 'search' ? <Search days={days} searchRequest={searchRequest} /> : screen === 'ai' ? <Ai /> : screen === 'connect' ? <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} /> : screen === 'settings' ? <Settings config={config} overview={overview} bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onSaved={setConfig} /> : <Help logs={logs} onRestartOnboarding={() => { try { localStorage.removeItem(ONBOARDING_KEY); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} void window.beside?.setOnboardingComplete?.(false).catch(() => {}); setShowOnboarding(true); }} />;
+  const c = error ? <div className="pt-6"><ErrorView error={error} onRetry={() => loadScreen(screen)} /></div> : screen === 'dashboard' ? <Dashboard overview={overview} doctor={doctor} bootstrapEvents={bootstrapEvents} onRefresh={() => loadScreen('dashboard')} onStart={actions.onStart} onStop={actions.onStop} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onTriggerFullReindex={actions.onTriggerFullReindex} onBootstrap={actions.onBootstrap} onOpenMarkdownExport={actions.onOpenMarkdownExport} onGoMeetings={openMeetings} onSearch={runPaletteSearch} /> : screen === 'meetings' ? <Meetings events={dayEvents} meetings={meetings} loading={meetingsLoading} focusRequest={meetingFocusRequest} onRefresh={() => loadScreen('meetings')} /> : screen === 'privacy' ? <Privacy config={config} overview={overview} onRefresh={() => loadScreen('privacy')} onSaved={setConfig} onOverview={setOverview} onStart={actions.onStart} /> : screen === 'search' ? <Search days={days} searchRequest={searchRequest} /> : screen === 'ai' ? <Ai /> : screen === 'connect' ? <Connect overview={overview} config={config} onRefresh={() => loadScreen('connect')} /> : screen === 'settings' ? <Settings config={config} overview={overview} bootstrapEvents={bootstrapEvents} onClearBootstrapEvents={() => setBootstrapEvents([])} onSaved={setConfig} /> : <Help logs={logs} onRestartOnboarding={() => { try { localStorage.removeItem(ONBOARDING_KEY); localStorage.removeItem(ONBOARDING_STEP_KEY); localStorage.removeItem(ONBOARDING_MODEL_KEY); } catch {} void window.beside?.setOnboardingComplete?.(false).catch(() => {}); setShowOnboarding(true); }} />;
 
-  return <AppShell screen={screen} onChange={navigateToScreen} overview={overview} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onSearch={runPaletteSearch} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onBootstrap={actions.onBootstrap} onCopyMcpSnippet={copyMcpSnippet}><ErrorBoundary resetKey={screen}><React.Suspense fallback={<div className="grid min-h-[50vh] place-items-center text-sm text-muted-foreground">Loading…</div>}>{c}</React.Suspense></ErrorBoundary></AppShell>;
+  return <AppShell screen={screen} onChange={navigateToScreen} overview={overview} appUpdateReady={appUpdateReady} onInstallAppUpdate={installAppUpdate} onStart={actions.onStart} onStop={actions.onStop} onPause={actions.onPause} onResume={actions.onResume} onSearch={runPaletteSearch} onTriggerIndex={actions.onTriggerIndex} onTriggerReorganise={actions.onTriggerReorganise} onBootstrap={actions.onBootstrap} onCopyMcpSnippet={copyMcpSnippet}><ErrorBoundary resetKey={screen}><React.Suspense fallback={<div className="grid min-h-[50vh] place-items-center text-sm text-muted-foreground">Loading…</div>}>{c}</React.Suspense></ErrorBoundary></AppShell>;
 }

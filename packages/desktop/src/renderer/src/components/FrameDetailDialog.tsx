@@ -28,7 +28,7 @@ export function useFrameDetail(): FrameDetailContextValue {
 }
 
 function FrameDetailDialog({ frame, searchContext, onOpenChange, onDeleted }: any) {
-  return <Dialog open={frame !== null} onOpenChange={onOpenChange}><DialogContent className="max-w-4xl gap-0 overflow-hidden p-0">{frame ? <FrameDetailBody frame={frame} searchContext={searchContext} onDeleted={() => onDeleted(frame)} /> : null}</DialogContent></Dialog>;
+  return <Dialog open={frame !== null} onOpenChange={onOpenChange}><DialogContent className="w-[min(96vw,1280px)] max-w-none gap-0 overflow-hidden p-0">{frame ? <FrameDetailBody frame={frame} searchContext={searchContext} onDeleted={() => onDeleted(frame)} /> : null}</DialogContent></Dialog>;
 }
 
 function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
@@ -73,11 +73,11 @@ function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
   }, [frame.asset_path]);
 
   return (
-    <div className="grid h-[80vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[1.4fr_1fr]">
-      <div className="bg-muted/40 flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
+    <div className="grid h-[85vh] grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+      <div className="bg-muted/40 flex h-full min-h-0 min-w-0 items-center justify-center overflow-hidden p-4">
         {thumbUrl ? (
-          <button type="button" onClick={openScreenshotFile} disabled={!frame.asset_path} title={frame.asset_path ? 'Open full screenshot in default app' : undefined} className="group/img relative flex max-h-full max-w-full cursor-pointer disabled:cursor-default outline-offset-2 focus-visible:ring-2 focus-visible:ring-ring rounded-md">
-            <img src={thumbUrl} alt="Screenshot" onError={() => setThumbUrl(null)} className="block max-h-[calc(80vh-1.5rem)] max-w-full object-contain rounded-md border border-border bg-black shadow-sm transition-opacity group-hover/img:opacity-95" />
+          <button type="button" onClick={openScreenshotFile} disabled={!frame.asset_path} title={frame.asset_path ? 'Open full screenshot in default app' : undefined} className="group/img relative flex h-full w-full cursor-pointer disabled:cursor-default outline-offset-2 focus-visible:ring-2 focus-visible:ring-ring rounded-md">
+            <img src={thumbUrl} alt="Screenshot" onError={() => setThumbUrl(null)} className="block h-full w-full object-contain rounded-md border border-border bg-black shadow-sm transition-opacity group-hover/img:opacity-95" />
           </button>
         ) : (
           <div className="flex flex-col items-center gap-2 text-muted-foreground p-8"><ImageOff className="size-10" /><span className="text-sm">No screenshot available</span></div>
@@ -97,8 +97,14 @@ function FrameDetailBody({ frame, searchContext, onDeleted }: any) {
           {frame.entity_path && <DetailRow icon={<Layers />} label="Entity" value={<span className="font-mono text-xs break-all">{frame.entity_path}</span>} />}
           {searchContext && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Sparkles className="size-3.5" /><span>Search context</span></div><div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">{scTxt || 'No searchable context is available for this result yet.'}</div></div>}
           {idxDet?.caption && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Sparkles className="size-3.5" /><span>AI caption</span></div><div className="rounded-md border bg-muted/40 p-3 text-sm leading-relaxed">{idxDet.caption}</div></div>}
-          {(idxDet?.indexingText || idxLoad) && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Layers className="size-3.5" /><span>Indexed metadata</span></div><div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-40 overflow-auto font-mono">{idxDet?.indexingText ?? (idxLoad ? 'Loading indexing metadata…' : '')}</div></div>}
-          {mdE.length > 0 && <div><div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Event metadata</div><dl className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">{mdE.map(([k, v]) => <div key={k} className="grid grid-cols-[120px_1fr] gap-2"><dt className="font-mono text-muted-foreground break-all">{k}</dt><dd className="font-mono break-all">{v == null ? '—' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v)}</dd></div>)}</dl></div>}
+          {(idxDet?.indexingText || idxLoad) && <div className="min-w-0"><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><Layers className="size-3.5" /><span>Indexed metadata</span></div><div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-all leading-relaxed max-h-48 overflow-y-auto overflow-x-hidden font-mono">{idxDet?.indexingText ?? (idxLoad ? 'Loading indexing metadata…' : '')}</div></div>}
+          {mdE.length > 0 && <div className="min-w-0"><div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Event metadata</div><dl className="rounded-md border bg-muted/40 p-3 text-xs space-y-2">{mdE.map(([k, v]) => {
+            const valStr = v == null ? '—' : typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : JSON.stringify(v);
+            const isLong = valStr.length > 160 || valStr.includes('\n');
+            return isLong
+              ? <div key={k} className="flex flex-col gap-1 min-w-0"><dt className="font-mono text-muted-foreground break-all">{k}</dt><dd className="font-mono break-all whitespace-pre-wrap max-h-32 overflow-y-auto overflow-x-hidden rounded bg-background/60 border border-border/50 p-2 leading-relaxed">{valStr}</dd></div>
+              : <div key={k} className="grid grid-cols-[110px_minmax(0,1fr)] gap-2 min-w-0"><dt className="font-mono text-muted-foreground break-all">{k}</dt><dd className="font-mono break-all min-w-0">{valStr}</dd></div>;
+          })}</dl></div>}
           {frame.text && <div><div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-2"><FileText className="size-3.5" /><span>Captured text</span></div><div className="rounded-md border bg-muted/40 p-3 text-xs whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-auto font-mono">{frame.text}</div></div>}
           {frame.asset_path && <div><div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Screenshot path</div><div className="font-mono text-[11px] text-muted-foreground break-all">{frame.asset_path}</div></div>}
         </div></ScrollArea>

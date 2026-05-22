@@ -101,26 +101,99 @@ final class StatusApp: NSObject, NSApplicationDelegate {
     }
   }
 
-  private func makeImage(for state: CaptureState) -> NSImage {
+  private func makeImage(for _: CaptureState) -> NSImage {
     let size = NSSize(width: 18, height: 18)
+    if
+      let data = Data(base64Encoded: Self.mascotTemplatePngBase64),
+      let image = NSImage(data: data)
+    {
+      image.size = size
+      image.isTemplate = true
+      return image
+    }
+
+    return Self.makeFallbackMascotImage(size: size)
+  }
+
+  private static let mascotTemplatePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAYAAAAehFoBAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAqklEQVR4nO3UywrAIAxE0fn/n56uhCCV+ojGKbngNj2ktkCWZauxOqEPZwfCBTw6pAVlx5wtYDpg2Zi1DO7dzgyUL/OW7+7MVlbQ9PjYToHp+Xf4eoVXYbEZyJ3gU3C5LVMJSg94FJYz6GgsR9DRSI6go3EcRUuBefF5LRrFBCPB+CW4mRS2JAO1yUBtMtA6OXCdFNYmB4YatiQHhiIYalibFLYkhc0yHO4BVkKufK+50CoAAAAASUVORK5CYII="
+
+  private static func makeFallbackMascotImage(size: NSSize) -> NSImage {
     let image = NSImage(size: size)
     image.lockFocus()
     NSColor.black.setFill()
+    NSColor.black.setStroke()
 
-    // Two stacked blobs echoing the Beside app logo (figure-8 silhouette).
-    let cx: CGFloat = 9
-    let radius: CGFloat = 4.6
-    let topCy: CGFloat = 12.4
-    let bottomCy: CGFloat = 5.6
+    let body = NSBezierPath()
+    body.move(to: NSPoint(x: 1.4, y: 6.6))
+    body.curve(
+      to: NSPoint(x: 4.8, y: 12.6),
+      controlPoint1: NSPoint(x: 1.4, y: 9.2),
+      controlPoint2: NSPoint(x: 2.8, y: 11.5)
+    )
+    body.curve(
+      to: NSPoint(x: 8.9, y: 14.3),
+      controlPoint1: NSPoint(x: 6.1, y: 13.8),
+      controlPoint2: NSPoint(x: 7.6, y: 14.7)
+    )
+    body.curve(
+      to: NSPoint(x: 14.7, y: 11.1),
+      controlPoint1: NSPoint(x: 11.2, y: 14.5),
+      controlPoint2: NSPoint(x: 13.1, y: 12.7)
+    )
+    body.curve(
+      to: NSPoint(x: 16.7, y: 7.8),
+      controlPoint1: NSPoint(x: 16.1, y: 10.5),
+      controlPoint2: NSPoint(x: 16.9, y: 9.1)
+    )
+    body.curve(
+      to: NSPoint(x: 14.6, y: 6.4),
+      controlPoint1: NSPoint(x: 16.6, y: 6.9),
+      controlPoint2: NSPoint(x: 15.6, y: 6.5)
+    )
+    body.curve(
+      to: NSPoint(x: 12.7, y: 2.8),
+      controlPoint1: NSPoint(x: 14.4, y: 5.0),
+      controlPoint2: NSPoint(x: 14.0, y: 3.8)
+    )
+    body.curve(
+      to: NSPoint(x: 9.1, y: 1.2),
+      controlPoint1: NSPoint(x: 11.6, y: 1.9),
+      controlPoint2: NSPoint(x: 10.2, y: 1.0)
+    )
+    body.curve(
+      to: NSPoint(x: 6.1, y: 3.1),
+      controlPoint1: NSPoint(x: 7.9, y: 1.5),
+      controlPoint2: NSPoint(x: 7.1, y: 2.5)
+    )
+    body.curve(
+      to: NSPoint(x: 2.5, y: 4.2),
+      controlPoint1: NSPoint(x: 4.7, y: 3.8),
+      controlPoint2: NSPoint(x: 3.3, y: 3.4)
+    )
+    body.curve(
+      to: NSPoint(x: 1.4, y: 6.6),
+      controlPoint1: NSPoint(x: 1.8, y: 4.8),
+      controlPoint2: NSPoint(x: 1.4, y: 5.6)
+    )
+    body.close()
+    body.fill()
 
-    let top = NSBezierPath(ovalIn: NSRect(
-      x: cx - radius, y: topCy - radius, width: radius * 2, height: radius * 2
-    ))
-    let bottom = NSBezierPath(ovalIn: NSRect(
-      x: cx - radius, y: bottomCy - radius, width: radius * 2, height: radius * 2
-    ))
-    top.fill()
-    bottom.fill()
+    let leftStem = NSBezierPath()
+    leftStem.move(to: NSPoint(x: 4.9, y: 12.5))
+    leftStem.line(to: NSPoint(x: 3.4, y: 15.4))
+    leftStem.lineWidth = 0.9
+    leftStem.lineCapStyle = .round
+    leftStem.stroke()
+
+    let rightStem = NSBezierPath()
+    rightStem.move(to: NSPoint(x: 13.1, y: 12.5))
+    rightStem.line(to: NSPoint(x: 14.7, y: 15.5))
+    rightStem.lineWidth = 0.9
+    rightStem.lineCapStyle = .round
+    rightStem.stroke()
+
+    NSBezierPath(ovalIn: NSRect(x: 2.2, y: 14.6, width: 2.4, height: 2.4)).fill()
+    NSBezierPath(ovalIn: NSRect(x: 13.6, y: 14.7, width: 2.5, height: 2.5)).fill()
 
     image.unlockFocus()
     image.isTemplate = true

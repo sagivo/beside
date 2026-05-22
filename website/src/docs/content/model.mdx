@@ -115,7 +115,7 @@ A few places where your choice matters:
 
 1. **Index strategy** (`indexBatch`, `reorganise`) — the heaviest user. Runs in
    the background, batched, and load-guarded. Local models are fine here.
-2. **Capture hooks** (`followups`, `calendar`, anything custom) — short prompts
+2. **Capture hooks** (anything custom) — short prompts
    over OCR text, sometimes with image attachments. Latency-sensitive but
    throttled per surface (`throttleMs`).
 3. **Meeting summarisation** — long-context, vision-attached. Best when the

@@ -85,6 +85,7 @@
     "afterPack": "scripts/after-pack.cjs",
     "files": [
       "dist/**/*",
+      "assets/**/*",
       "package.json",
       "node_modules/sharp/**",
       "node_modules/@img/**"

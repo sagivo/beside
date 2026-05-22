@@ -11,11 +11,11 @@ const clientDir = path.join(root, "dist/client");
 const serverDir = path.join(root, "dist/server");
 
 const template = fs.readFileSync(path.join(clientDir, "index.html"), "utf-8");
-const { render, getDocRoutes } = await import(
+const { render, getDocRoutes, getLegalRoutes } = await import(
   pathToFileURL(path.join(serverDir, "entry-server.js")).href
 );
 
-const routes = ["/", ...getDocRoutes()];
+const routes = ["/", ...getDocRoutes(), ...getLegalRoutes()];
 
 for (const route of routes) {
   const appHtml = render(route);

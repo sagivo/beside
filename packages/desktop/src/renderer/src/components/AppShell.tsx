@@ -1,10 +1,12 @@
 import * as React from 'react';
+import { RefreshCw } from 'lucide-react';
 import { Sidebar } from '@/components/Sidebar';
 import { CommandPalette } from '@/components/CommandPalette';
+import { Button } from '@/components/ui/button';
 import { useHasUnreadChangelog } from '@/lib/changelog';
 import { useSidebarWidthVar } from '@/lib/sidebar-state';
 import type { Screen } from '@/types';
-import type { RuntimeOverview } from '@/global';
+import type { AppUpdateReadyInfo, RuntimeOverview } from '@/global';
 
 export function AppShell({
   screen,
@@ -20,10 +22,13 @@ export function AppShell({
   onTriggerReorganise,
   onBootstrap,
   onCopyMcpSnippet,
+  appUpdateReady,
+  onInstallAppUpdate,
 }: {
   screen: Screen;
   onChange: (next: Screen) => void;
   overview: RuntimeOverview | null;
+  appUpdateReady: AppUpdateReadyInfo | null;
   children: React.ReactNode;
   onStart: () => Promise<void> | void;
   onStop: () => Promise<void> | void;
@@ -34,6 +39,7 @@ export function AppShell({
   onTriggerReorganise: () => Promise<void> | void;
   onBootstrap: () => Promise<void> | void;
   onCopyMcpSnippet?: () => Promise<void> | void;
+  onInstallAppUpdate: () => Promise<void> | void;
 }) {
   const [paletteOpen, setPaletteOpen] = React.useState(false);
 
@@ -126,11 +132,16 @@ export function AppShell({
         onChange={onChange}
         overview={overview}
         onOpenCommand={() => setPaletteOpen(true)}
+        onPause={onPause}
+        onResume={onResume}
         helpHasUnread={helpHasUnread}
       />
 
       <main className="flex flex-1 flex-col overflow-hidden">
         <div className="app-drag h-8 shrink-0" aria-hidden />
+        {appUpdateReady && (
+          <UpdateReadyBanner update={appUpdateReady} onInstall={onInstallAppUpdate} />
+        )}
         <div className="flex-1 overflow-y-auto">
           <div className="app-no-drag mx-auto max-w-5xl px-8 pb-12">{children}</div>
         </div>
@@ -151,6 +162,40 @@ export function AppShell({
         onBootstrap={onBootstrap}
         onCopyMcpSnippet={onCopyMcpSnippet}
       />
+    </div>
+  );
+}
+
+function UpdateReadyBanner({
+  update,
+  onInstall,
+}: {
+  update: AppUpdateReadyInfo;
+  onInstall: () => Promise<void> | void;
+}) {
+  const versionLabel = update.version ? `Beside ${update.version}` : 'A new Beside version';
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="app-no-drag border-y border-primary/15 bg-primary-soft/80 shadow-xs backdrop-blur"
+    >
+      <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-3 px-8 py-3">
+        <div className="grid size-8 shrink-0 place-items-center rounded-md border border-primary/20 bg-background/70 text-primary">
+          <RefreshCw className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold leading-5">{versionLabel} is ready.</p>
+          <p className="text-xs leading-5 text-muted-foreground">
+            Restart to finish installing the update that downloaded in the background.
+          </p>
+        </div>
+        <Button size="sm" onClick={() => void onInstall()}>
+          <RefreshCw />
+          Restart and Update
+        </Button>
+      </div>
     </div>
   );
 }

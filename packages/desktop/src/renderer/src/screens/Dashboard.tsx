@@ -1,8 +1,8 @@
 import * as React from 'react';
 import {
-  AlertCircle, Calendar, ChevronDown, CheckSquare, CircleStop, Clock,
-  ExternalLink, FileText, FolderOpen, History, Inbox, Loader2, MessageSquare, Mic,
-  Pause, Play, RefreshCcw, Search as SearchIcon, Sparkles, Wand2, XCircle, Zap,
+  AlertCircle, Calendar, ChevronDown, CheckSquare, Clock,
+  FileText, FolderOpen, HardDrive, History, Inbox, Loader2, MessageSquare,
+  Play, RefreshCcw, Search as SearchIcon, Sparkles, Wand2, XCircle, Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -13,21 +13,20 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { PageHeader } from '@/components/PageHeader';
 import { CaptureHookWidgets } from '@/components/CaptureHookWidgets';
 import { dayEventSourceShortLabel } from '@/lib/day-events';
-import { bootstrapMessage, dedupeAllDayCalendarDuplicates, formatBytes, formatDayEventTime, formatLocalDateTime, formatLocalTime, formatNumber, indexingStatusText, localDayKey } from '@/lib/format';
+import { bootstrapMessage, dedupeAllDayCalendarDuplicates, formatBytes, formatDayEventTime, formatLocalTime, formatNumber, indexingStatusText, localDayKey } from '@/lib/format';
 import { actionItemLabel, collectMeetingSummarySignals } from '@/lib/meeting-signals';
-import { findModelChoice } from '@/lib/model-catalog';
 import { cn } from '@/lib/utils';
-import type { ActivitySession, DayEvent, DoctorCheck, Frame, JournalDay, Meeting, ModelBootstrapProgress, RuntimeModelRole, RuntimeOverview } from '@/global';
+import type { DayEvent, DoctorCheck, Frame, JournalDay, Meeting, ModelBootstrapProgress, RuntimeOverview } from '@/global';
 
-const FULL_JOURNAL_FRAME_LIMIT = 600, ACTIVITY_SAMPLE_LIMIT = 500, TIMELINE_UPCOMING_LIMIT = 3, TIMELINE_RECENT_LIMIT = 6;
+const FULL_JOURNAL_FRAME_LIMIT = 600, ACTIVITY_SAMPLE_LIMIT = 500, TIMELINE_UPCOMING_LIMIT = 2, TIMELINE_RECENT_LIMIT = 4;
 type StatusTone = 'live' | 'paused' | 'idle' | 'busy';
 
 export function Dashboard({
-  overview, doctor, bootstrapEvents, onRefresh, onStart, onStop, onPause, onResume,
+  overview, doctor, bootstrapEvents, onRefresh, onStart, onStop,
   onTriggerIndex, onTriggerReorganise, onTriggerFullReindex, onBootstrap, onOpenMarkdownExport, onGoMeetings, onSearch,
 }: {
   overview: RuntimeOverview | null; doctor: DoctorCheck[] | null; bootstrapEvents: ModelBootstrapProgress[];
-  onRefresh: () => void; onStart: () => Promise<void>; onStop: () => Promise<void>; onPause: () => Promise<void>; onResume: () => Promise<void>;
+  onRefresh: () => void; onStart: () => Promise<void>; onStop: () => Promise<void>;
   onTriggerIndex: () => Promise<void>; onTriggerReorganise: () => Promise<void>; onTriggerFullReindex: (fromDate: string) => Promise<void>;
   onBootstrap: () => Promise<void>; onOpenMarkdownExport: (category?: string) => Promise<void>; onGoMeetings: (target?: { eventId: string; day: string } | null) => void; onSearch: (query: string) => void;
 }) {
@@ -46,7 +45,7 @@ export function Dashboard({
     <div className="flex flex-col gap-6 pt-4 pb-6">
       <PageHeader title="Today" eyebrow={new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} description="Search, timeline, and capture status for the day." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
       
-      <TodayHome overview={overview} captureLive={captureLive} capturePaused={capturePaused} running={overview.status === 'running'} journal={journal} loading={loading || founderBrief.loading} events={founderBrief.events} meetings={founderBrief.meetings} onStart={onStart} onStop={onStop} onPause={onPause} onResume={onResume} onSearch={onSearch} onGoMeetings={onGoMeetings} />
+      <TodayHome overview={overview} captureLive={captureLive} capturePaused={capturePaused} running={overview.status === 'running'} journal={journal} loading={loading || founderBrief.loading} events={founderBrief.events} meetings={founderBrief.meetings} onStart={onStart} onStop={onStop} onSearch={onSearch} onGoMeetings={onGoMeetings} />
 
       {overview.indexing.running && <Alert><Loader2 className="animate-spin" /><AlertTitle>{indexingStatusText(overview.indexing)}</AlertTitle><AlertDescription>This runs in the background and may take a few minutes.</AlertDescription></Alert>}
 
@@ -70,11 +69,17 @@ export function Dashboard({
 
 function TodayHomeSkeleton() {
   return (
-    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-      <div className="flex min-w-0 flex-col gap-4">
-        {[1, 2, 3].map((i) => <div key={i} className="rounded-lg border bg-card/70 p-4 shadow-card"><Skeleton className="h-11 w-full rounded-lg" /></div>)}
+    <section className="flex flex-col gap-4">
+      <div className="rounded-lg border bg-card/70 p-4 shadow-card">
+        <Skeleton className="h-11 w-full rounded-lg" />
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 rounded-lg" />)}
+        </div>
       </div>
-      <div className="flex min-w-0 flex-col gap-4"><Skeleton className="h-72 rounded-lg" /><Skeleton className="h-52 rounded-lg" /></div>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.8fr)_minmax(420px,1fr)]">
+        <Skeleton className="h-48 rounded-lg" />
+        <Skeleton className="h-72 rounded-lg" />
+      </div>
     </section>
   );
 }
@@ -138,35 +143,86 @@ function isRelevantSignalEvent(event: DayEvent) { return event.title !== '__merg
 function cleanSignalContext(value?: string | null) { const c = stripMarkdown(value).trim(); return isLowSignalText(c) || /^visible in .+ accessibility text\.?$/i.test(c) ? '' : c; }
 function isLowSignalText(value?: string | null) { const c = stripMarkdown(value).trim().toLowerCase(); return !c || ['n/a', 'na', 'none', 'unknown', 'untitled', '__merged__'].includes(c) || /^no (summary|context|title) available/.test(c); }
 
-function TodayHome({ overview, captureLive, capturePaused, running, journal, loading, events, meetings, onStart, onStop, onPause, onResume, onSearch, onGoMeetings }: any) {
+function TodayHome({ overview, captureLive, capturePaused, running, journal, loading, events, meetings, onStart, onStop, onSearch, onGoMeetings }: any) {
   const fCards = React.useMemo(() => buildFounderCards(journal, events, meetings), [journal, events, meetings]);
+  const insights = React.useMemo(() => buildInsights(meetings, fCards), [meetings, fCards]);
+  const timeline = React.useMemo(() => buildTimelineItems(journal, events), [journal, events]);
   return (
-    <section className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-      <div className="flex min-w-0 flex-col gap-4">
-        <QuickSearchPanel onSearch={onSearch} />
-        <CaptureHookWidgets />
-        <InsightsPanel items={React.useMemo(() => buildInsights(meetings, fCards), [meetings, fCards])} onOpenItem={(i: any) => i.eventId && i.day && onGoMeetings({ eventId: i.eventId, day: i.day })} />
-        <ActivityTimeline items={React.useMemo(() => buildTimelineItems(journal, events), [journal, events])} loading={loading} onOpenEvent={(e: any) => onGoMeetings({ eventId: e.id, day: e.day })} />
-      </div>
-      <aside className="flex min-w-0 flex-col gap-4">
-        <CapturePanel overview={overview} captureLive={captureLive} capturePaused={capturePaused} running={running} journal={journal} onStart={onStart} onStop={onStop} onPause={onPause} onResume={onResume} />
-        <MemorySnapshot overview={overview} journal={journal} loading={loading} />
-      </aside>
+    <section className="flex flex-col gap-4">
+      <HomeCommandPanel overview={overview} captureLive={captureLive} capturePaused={capturePaused} running={running} journal={journal} onStart={onStart} onStop={onStop} onSearch={onSearch} />
+      {insights.length > 0 ? (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.82fr)_minmax(420px,1fr)]">
+          <InsightsPanel items={insights} onOpenItem={(i: any) => i.eventId && i.day && onGoMeetings({ eventId: i.eventId, day: i.day })} />
+          <ActivityTimeline items={timeline} loading={loading} onOpenEvent={(e: any) => onGoMeetings({ eventId: e.id, day: e.day })} />
+        </div>
+      ) : (
+        <ActivityTimeline items={timeline} loading={loading} onOpenEvent={(e: any) => onGoMeetings({ eventId: e.id, day: e.day })} />
+      )}
     </section>
   );
 }
 
-function QuickSearchPanel({ onSearch }: { onSearch: (q: string) => void }) {
+function HomeCommandPanel({ overview, captureLive, capturePaused, running, journal, onStart, onStop, onSearch }: any) {
   const [q, setQ] = React.useState('');
   const submit = (v = q) => v.trim() && onSearch(v.trim());
+  const activeMs = journal?.sessions.reduce((acc: number, s: any) => acc + (s.active_ms || 0), 0) || 0;
+  const audio = audioStatus(overview, captureLive, capturePaused);
+  const statusTone: StatusTone = running && !capturePaused ? 'live' : capturePaused ? 'paused' : 'idle';
+  const headline = !running ? 'Start capture when you are ready' : captureLive ? 'Capture is live' : capturePaused ? 'Capture is paused' : 'Runtime is ready';
   return (
     <section className="rounded-lg border bg-card/70 p-4 shadow-card">
-      <form className="flex flex-col gap-3 sm:flex-row" onSubmit={e => { e.preventDefault(); submit(); }}>
-        <div className="relative min-w-0 flex-1"><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={q} onChange={e => setQ(e.target.value)} placeholder="Search memory..." className="h-11 rounded-lg pl-9 text-base" /></div>
-        <Button type="submit" className="h-11 sm:w-28"><SearchIcon />Search</Button>
-      </form>
-      <div className="mt-3 flex flex-wrap gap-2">{['what changed today', 'open loops today', 'meetings today', 'what was I doing this morning'].map(s => <button key={s} type="button" onClick={() => submit(s)} className="rounded-md border bg-background/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/35 hover:text-foreground">{s}</button>)}</div>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.55fr)]">
+        <div className="min-w-0">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <StatusBadge tone={statusTone}>{running ? (capturePaused ? 'Paused' : 'Running') : 'Stopped'}</StatusBadge>
+            <span className="text-sm text-muted-foreground">{headline}</span>
+          </div>
+          <form className="flex flex-col gap-3 sm:flex-row" onSubmit={e => { e.preventDefault(); submit(); }}>
+            <div className="relative min-w-0 flex-1"><SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={q} onChange={e => setQ(e.target.value)} placeholder="Search memory..." className="h-11 rounded-lg pl-9 text-base" /></div>
+            <Button type="submit" className="h-11 sm:w-28"><SearchIcon />Search</Button>
+          </form>
+          <div className="mt-3 flex flex-wrap gap-2">{['what changed today', 'meetings today', 'what was I doing this morning'].map(s => <button key={s} type="button" onClick={() => submit(s)} className="rounded-md border bg-background/60 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/35 hover:text-foreground">{s}</button>)}</div>
+        </div>
+        <div className="flex min-w-0 flex-col justify-between gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <HomeMetric icon={Zap} label="Moments" value={formatNumber(overview.capture.eventsToday)} />
+            <HomeMetric icon={Clock} label="Last hour" value={overview.capture.eventsLastHour != null ? formatNumber(overview.capture.eventsLastHour) : '-'} />
+            <HomeMetric icon={FileText} label="Pages" value={formatNumber(overview.index.pageCount)} />
+            <HomeMetric icon={HardDrive} label="Storage" value={formatBytes(overview.storage?.totalBytes ?? 0)} onClick={() => window.beside.openPath('data').catch(() => {})} actionTitle="Open storage folder" />
+          </div>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-xs text-muted-foreground">
+            <SystemLine label="Screen" value={captureLive ? 'Capturing' : capturePaused ? 'Paused' : running ? 'Idle' : 'Off'} tone={captureLive ? 'live' : capturePaused ? 'paused' : 'idle'} />
+            <SystemLine label="Audio" value={audio.label} tone={audio.tone} />
+            <SystemLine label="AI" value={overview.model.ready ? 'Ready' : 'Needs setup'} tone={overview.model.ready ? 'live' : 'paused'} />
+            <SystemLine label="Active" value={formatActiveDuration(activeMs)} tone="idle" />
+            <button type="button" onClick={() => window.beside.openPath('data').catch(() => {})} className="ml-auto inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"><FolderOpen className="size-3.5" />Open storage folder</button>
+            {!running && <Button size="icon" onClick={onStart} title="Start capture"><Play /></Button>}
+          </div>
+        </div>
+      </div>
+      <ActivityBars frames={journal?.frames ?? []} loading={false} accent={captureLive} />
     </section>
+  );
+}
+
+function HomeMetric({ icon: Icon, label, value, onClick, actionTitle }: { icon: React.ComponentType<{ className?: string }>; label: string; value: string; onClick?: () => void; actionTitle?: string }) {
+  const body = (
+    <>
+      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground"><Icon className="size-3" />{label}</div>
+      <div className="mt-1 truncate text-xl font-semibold tabular-nums">{value}</div>
+    </>
+  );
+  if (onClick) return <button type="button" onClick={onClick} title={actionTitle} className="min-w-0 text-left rounded-md -m-1 p-1 transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{body}</button>;
+  return <div className="min-w-0">{body}</div>;
+}
+
+function SystemLine({ label, value, tone }: { label: string; value: string; tone: StatusTone }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      <StatusDot tone={tone} />
+      <span>{label}</span>
+      <span className="font-medium text-foreground">{value}</span>
+    </span>
   );
 }
 
@@ -174,37 +230,8 @@ function InsightsPanel({ items, onOpenItem }: any) {
   if (!items.length) return null;
   return (
     <section className="rounded-lg border bg-card/70 p-4 shadow-card">
-      <div className="mb-3 flex justify-between gap-3"><div><h3 className="text-sm font-semibold">Insights</h3><p className="text-xs text-muted-foreground">Actionable context.</p></div><Sparkles className="size-4 text-primary" /></div>
-      <div className="grid gap-3 md:grid-cols-2">{items.map((i: any) => { const Icon = i.icon; return <button key={i.id} onClick={() => i.eventId && onOpenItem(i)} className={cn('min-w-0 rounded-lg border bg-background/55 p-3 text-left transition-colors', i.eventId ? 'hover:border-primary/35 hover:bg-accent/35' : 'cursor-default')}><div className="flex items-start gap-3"><span className={cn('grid size-8 place-items-center rounded-md bg-muted', i.accent)}><Icon className="size-4" /></span><div className="min-w-0"><div className="line-clamp-1 text-sm font-medium">{i.title}</div><p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{i.body}</p><div className="mt-2 truncate text-[11px] text-muted-foreground">{i.meta}</div></div></div></button>; })}</div>
-    </section>
-  );
-}
-
-function CapturePanel({ overview, captureLive, capturePaused, running, journal, onStart, onStop, onPause, onResume }: any) {
-  const am = journal?.sessions.reduce((acc: number, s: any) => acc + (s.active_ms || 0), 0) || 0;
-  const audio = audioStatus(overview, captureLive, capturePaused);
-  const headline = !running ? 'Beside is stopped' : captureLive ? 'Beside is capturing' : capturePaused ? 'Capture paused' : 'Beside is running';
-  const summary = captureLive ? 'Screen capture is live.' : capturePaused ? 'Screen capture is paused.' : running ? 'Runtime is up, capture is idle.' : 'Start capture to begin building memory.';
-  return (
-    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
-      <div className="flex justify-between gap-3">
-        <div>
-          <StatusBadge tone={running && !capturePaused ? 'live' : capturePaused ? 'paused' : 'idle'}>{running ? (capturePaused ? 'Paused' : 'Running') : 'Stopped'}</StatusBadge>
-          <h3 className="mt-3 text-lg font-semibold">{headline}</h3>
-          <p className="mt-1 text-sm text-muted-foreground">{summary} Audio is {audio.sentence}.</p>
-        </div>
-        <div className="flex gap-1.5">{!running ? <Button size="icon" onClick={onStart}><Play /></Button> : captureLive ? <Button size="icon" variant="secondary" onClick={onPause}><Pause /></Button> : capturePaused ? <Button size="icon" onClick={onResume}><Play /></Button> : <Button size="icon" variant="ghost" onClick={onStop}><CircleStop /></Button>}</div>
-      </div>
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <StatusTile label="App" value={running ? 'Running' : 'Stopped'} tone={running ? 'live' : 'idle'} />
-        <StatusTile label="Screen" value={captureLive ? 'Capturing' : capturePaused ? 'Paused' : 'Stopped'} tone={captureLive ? 'live' : capturePaused ? 'paused' : 'idle'} />
-        <StatusTile label="Audio" value={audio.label} detail={audio.detail} tone={audio.tone} />
-        <StatusTile label="AI" value={overview.model.ready ? 'Ready' : 'Needs setup'} tone={overview.model.ready ? 'live' : 'paused'} />
-        <StatusTile label="Indexing" value={overview.indexing.running ? 'Running' : 'Idle'} tone={overview.indexing.running ? 'busy' : 'idle'} className="col-span-2" />
-      </div>
-      <div className="mt-4 grid grid-cols-3 gap-3"><MiniStat label="Moments" value={formatNumber(overview.capture.eventsToday)} /><MiniStat label="Last hour" value={overview.capture.eventsLastHour != null ? formatNumber(overview.capture.eventsLastHour) : '-'} /><MiniStat label="Active" value={am > 0 ? (am < 60000 ? `${Math.round(am / 60000)}m` : `${Math.floor(am / 3600000)}h ${Math.round((am % 3600000) / 60000)}m`) : '—'} /></div>
-      <ActivityBars frames={journal?.frames ?? []} loading={false} accent={captureLive} />
-      <ModelStack overview={overview} />
+      <div className="mb-3 flex justify-between gap-3"><h3 className="text-sm font-semibold">Signals</h3><Sparkles className="size-4 text-primary" /></div>
+      <div className="flex flex-col divide-y">{items.map((i: any) => { const Icon = i.icon; return <button key={i.id} onClick={() => i.eventId && onOpenItem(i)} className={cn('flex min-w-0 gap-3 py-3 text-left first:pt-0 last:pb-0', i.eventId ? 'hover:text-foreground' : 'cursor-default')}><span className={cn('mt-0.5 grid size-7 shrink-0 place-items-center rounded-md bg-muted', i.accent)}><Icon className="size-3.5" /></span><span className="min-w-0 flex-1"><span className="line-clamp-1 text-sm font-medium">{i.title}</span><span className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">{i.body}</span><span className="mt-1 block truncate text-[11px] text-muted-foreground">{i.meta}</span></span></button>; })}</div>
     </section>
   );
 }
@@ -221,81 +248,8 @@ function formatAudioBackend(value: string) {
   return value === 'core_audio_tap' ? 'Core Audio' : value === 'screencapturekit' ? 'ScreenCaptureKit' : value;
 }
 
-function StatusTile({ label, value, detail, tone, className }: { label: string; value: string; detail?: string; tone: StatusTone; className?: string }) {
-  return (
-    <div className={cn('rounded-lg border bg-background/55 p-3', tone === 'live' && 'border-success/30 bg-success/10', tone === 'paused' && 'border-warning/35 bg-warning/10', tone === 'busy' && 'border-primary/30 bg-primary/10', className)}>
-      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground"><StatusDot tone={tone} />{label}</div>
-      <div className="mt-1 text-sm font-semibold">{value}</div>
-      {detail && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{detail}</div>}
-    </div>
-  );
-}
-
 function StatusDot({ tone }: { tone: StatusTone }) {
   return <span className={cn('size-1.5 rounded-full', tone === 'live' && 'bg-success', tone === 'paused' && 'bg-warning', tone === 'busy' && 'bg-primary animate-pulse', tone === 'idle' && 'bg-muted-foreground/45')} />;
-}
-
-function ModelStack({ overview }: { overview: RuntimeOverview }) {
-  const roles = overview.model.roles?.length ? overview.model.roles : [{ key: 'primary', label: 'Primary AI', name: overview.model.name, provider: overview.model.provider ?? 'model' } as RuntimeModelRole];
-  return (
-    <div className="mt-4 rounded-lg border bg-background/45 p-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm font-semibold"><Sparkles className="size-3.5 text-primary" />Models in use</div>
-        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase text-muted-foreground">{overview.model.provider ?? 'model'}</span>
-      </div>
-      <div className="mt-3 flex flex-col gap-2">
-        {roles.map((role) => (
-          <div key={`${role.key}-${role.name}`} className="flex min-w-0 items-start justify-between gap-3 rounded-md bg-muted/35 px-2.5 py-2">
-            <div className="min-w-0">
-              <div className="text-[11px] font-medium uppercase text-muted-foreground">{role.label}</div>
-              <div className="truncate text-sm font-medium">{displayModelName(role.name)}</div>
-            </div>
-            {role.detail && <div className="max-w-[120px] text-right text-[11px] text-muted-foreground">{role.detail}</div>}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function displayModelName(name: string) {
-  const choice = findModelChoice(name);
-  return choice ? `${choice.name} (${name})` : name;
-}
-
-function MemorySnapshot({ overview, journal, loading }: any) {
-  const apps = journal ? countByApp(journal.frames).slice(0, 3) : [], tot = Math.max(1, journal?.frames.length ?? overview.capture.eventsToday);
-  const storageRows = storageUsageRows(overview);
-  return (
-    <section className="rounded-lg border bg-card/70 p-4 shadow-card">
-      <div className="mb-3 flex justify-between"><h3 className="text-sm font-semibold">Memory snapshot</h3>{overview.indexing.running ? <span className="flex items-center gap-1 text-xs text-primary"><Loader2 className="size-3 animate-spin" />Indexing</span> : <FileText className="size-4 text-muted-foreground" />}</div>
-      <div className="grid grid-cols-3 gap-3"><BigStat value={formatNumber(overview.index.pageCount)} label="pages" /><BigStat value={formatNumber(overview.storage.totalEvents)} label="memories" muted /><BigStat value={formatBytes(storageTotalBytes(overview))} label="storage" muted /></div>
-      <div className="mt-4 rounded-lg border bg-background/45 p-3">
-        <div className="mb-2 flex items-center justify-between gap-3"><h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Storage usage</h4><span className="text-xs font-medium">{formatBytes(storageTotalBytes(overview))}</span></div>
-        <div className="flex flex-col gap-1.5">{storageRows.map(row => <div key={row.label} className="flex items-center justify-between gap-3 text-xs"><span className="text-muted-foreground">{row.label}</span><span className="font-medium tabular-nums">{formatBytes(row.bytes)}</span></div>)}</div>
-      </div>
-      <Separator className="my-4" />
-      {loading && !journal ? <div className="flex flex-col gap-3">{[1, 2, 3].map(i => <div key={i} className="flex gap-3"><Skeleton className="h-4 w-24" /><Skeleton className="h-2.5 flex-1" /><Skeleton className="h-4 w-12" /></div>)}</div> : !apps.length ? <p className="text-sm text-muted-foreground">Top apps will appear soon.</p> : <div className="flex flex-col gap-2">{apps.map((a, i) => <div key={a.app} className="flex items-center gap-3"><div className="w-32 truncate text-sm">{a.app}</div><div className="flex-1 h-2.5 rounded-full bg-muted overflow-hidden"><div className={cn('h-full rounded-full transition-all duration-700', i === 0 ? 'bg-gradient-brand' : 'bg-foreground/30')} style={{ width: `${Math.max(2, (a.count / tot) * 100)}%` }} /></div><div className="w-20 text-right text-xs text-muted-foreground">{a.count} <span className="opacity-50">· {((a.count / tot) * 100).toFixed(0)}%</span></div></div>)}</div>}
-    </section>
-  );
-}
-
-function storageTotalBytes(overview: RuntimeOverview) {
-  return overview.storage.totalBytes ?? overview.storage.totalAssetBytes ?? 0;
-}
-
-function storageUsageRows(overview: RuntimeOverview): Array<{ label: string; bytes: number }> {
-  const b = overview.storage.bytesByCategory;
-  if (!b) return [{ label: 'Captured assets', bytes: overview.storage.totalAssetBytes ?? 0 }];
-  return [
-    { label: 'Captured assets', bytes: b.assets },
-    { label: 'Raw capture logs', bytes: Math.max(0, b.raw - b.assets) },
-    { label: 'Database', bytes: b.database },
-    { label: 'Index', bytes: b.index },
-    { label: 'Exports', bytes: b.export },
-    { label: 'Backups', bytes: b.backups },
-    { label: 'Other', bytes: b.other },
-  ].filter(row => row.bytes > 0);
 }
 
 function ActivityTimeline({ items, loading, onOpenEvent }: any) {
@@ -315,7 +269,7 @@ function buildInsights(meetings: Meeting[], cards: any[]) {
   if (prm?.items.length) res.push({ id: 'prm', title: `${prm.items.length} promises`, body: prm.items[0].title, meta: prm.items[0].meta, icon: CheckSquare, accent: 'text-emerald-500', eventId: prm.items[0].eventId, day: prm.items[0].day });
   if (fup?.items.length) res.push({ id: 'fup', title: `${fup.items.length} follow-ups`, body: fup.items[0].title, meta: fup.items[0].meta, icon: AlertCircle, accent: 'text-amber-500', eventId: fup.items[0].eventId, day: fup.items[0].day });
   if (rep?.items.length) res.push({ id: 'rep', title: `${rep.items.length} replies`, body: rep.items[0].title, meta: rep.items[0].meta, icon: Inbox, accent: 'text-blue-500', eventId: rep.items[0].eventId, day: rep.items[0].day });
-  return res.slice(0, 4);
+  return res.slice(0, 3);
 }
 
 function buildTimelineItems(journal: JournalDay | null, events: DayEvent[]) {
@@ -327,12 +281,12 @@ function buildTimelineItems(journal: JournalDay | null, events: DayEvent[]) {
     b === 'upcoming' ? upc.push(item) : his.push(item);
   }
   for (const s of journal?.sessions ?? []) if (s.started_at && Date.parse(s.started_at) <= now) his.push({ id: `ses-${s.id || s.started_at}`, at: s.started_at, title: s.primary_entity_path ? s.primary_entity_path.split('/').pop()?.replace(/[-_]+/g, ' ') || s.primary_entity_path : s.primary_app || 'Focus', meta: `${Math.round((s.active_ms || 0)/60000)}m · ${s.frame_count || 0} frames`, bucket: 'history', icon: Clock, accent: 'text-primary' });
-  return [...upc.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(0, 3), ...his.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 6)];
+  return [...upc.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(0, TIMELINE_UPCOMING_LIMIT), ...his.sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, TIMELINE_RECENT_LIMIT)];
 }
 
 function stripMarkdown(v?: string | null) { return (v || '').replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/[#>_\-]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function StatusBadge({ tone, children }: any) { return <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium uppercase', tone === 'live' ? 'bg-success/15 text-success' : tone === 'paused' ? 'bg-warning/15 text-warning' : 'bg-muted text-muted-foreground')}><span className="relative grid place-items-center size-2"><span className={cn('size-1.5 rounded-full', tone === 'live' ? 'bg-success' : tone === 'paused' ? 'bg-warning' : 'bg-muted-foreground/60')} />{tone === 'live' && <span className="absolute inset-0 rounded-full bg-success/50 animate-ping" />}</span>{children}</span>; }
-function MiniStat({ label, value }: any) { return <div className="min-w-0"><div className="text-[10px] uppercase text-muted-foreground">{label}</div><div className="text-2xl font-semibold tabular">{value}</div></div>; }
+function formatActiveDuration(ms: number) { if (ms <= 0) return '—'; if (ms < 60000) return '<1m'; return ms < 3600000 ? `${Math.round(ms / 60000)}m` : `${Math.floor(ms / 3600000)}h ${Math.round((ms % 3600000) / 60000)}m`; }
 
 function ActivityBars({ frames, loading, accent }: any) {
   const hr = new Array(24).fill(0); frames.forEach((f: any) => { if (f.timestamp && !Number.isNaN(Date.parse(f.timestamp))) hr[new Date(f.timestamp).getHours()]++; });
@@ -346,7 +300,6 @@ function ActivityBars({ frames, loading, accent }: any) {
   );
 }
 
-function BigStat({ value, label, muted }: any) { return <div><div className={cn('text-2xl font-semibold tabular', muted && 'text-foreground/70')}>{value}</div><div className="text-[11px] uppercase text-muted-foreground">{label}</div></div>; }
 function countByApp(frames: Frame[]) { const c = new Map<string, number>(); frames.forEach(f => c.set(f.app || 'Unknown', (c.get(f.app || 'Unknown') || 0) + 1)); return Array.from(c.entries()).map(([app, count]) => ({ app, count })).sort((a, b) => b.count - a.count); }
 
 function AdvancedSection({ overview, warnings, onTriggerIndex, onTriggerReorganise, onTriggerFullReindex, onOpenMarkdownExport }: any) {
@@ -361,6 +314,7 @@ function AdvancedSection({ overview, warnings, onTriggerIndex, onTriggerReorgani
         <div className="mt-4 flex flex-col gap-4 animate-in fade-in slide-in-from-top-1">
           <KnowledgeExport overview={overview} onOpenMarkdownExport={onOpenMarkdownExport} />
           <MemoryOrganization overview={overview} onTriggerIndex={onTriggerIndex} onTriggerReorganise={onTriggerReorganise} onTriggerFullReindex={onTriggerFullReindex} />
+          <CaptureHookWidgets />
           {overview.backgroundJobs?.length > 0 && <BackgroundWorkCard overview={overview} />}
           {warnings.length > 0 && <div className="grid gap-2">{warnings.slice(0, 5).map((c: any, i: number) => <Alert key={i} variant="warning"><AlertCircle /><AlertTitle>{c.area}</AlertTitle><AlertDescription><p>{c.message}</p>{c.action && <p className="text-xs mt-1">→ {c.action}</p>}</AlertDescription></Alert>)}</div>}
         </div>

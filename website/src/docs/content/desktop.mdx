@@ -79,7 +79,7 @@ capture:
 The desktop app is what makes capture hooks visible. The renderer hosts every
 hook widget the active hooks declare:
 
-- **Built-in widgets** (`calendar`, `followups`, `list`, `json`) cover the
+- **Built-in widgets** (`list`, `json`) cover the
   common shapes; a hook just declares `widget.builtin` and the dashboard renders
   it without any plugin-side React.
 - **Custom React bundles** can be loaded via `widget.bundlePath` — the
@@ -87,8 +87,8 @@ hook widget the active hooks declare:
   hook’s records through the same `IHookStorageNamespace` API.
 
 This is what keeps Beside from collapsing into "just a database with a UI".
-Domain-specific intelligence (calendar, follow-ups, your own bespoke watcher)
-gets a first-class home on the dashboard.
+Domain-specific intelligence from your own bespoke watchers gets a first-class
+home on the dashboard.
 
 ## Packaging & shipping
 
@@ -115,5 +115,5 @@ double-click, grant the three macOS permissions, done. No CLI, no API keys,
 nothing leaving the machine. The settings panel exposes the same knobs as
 `config.yaml`, so power users and casual users land on the same surface — and
 because hook widgets render natively on the dashboard, the proactive parts of
-Beside (calendar, follow-ups, anything custom you ship) are visible instead
+Beside (anything custom you ship) are visible instead
 of hidden behind a config flag.

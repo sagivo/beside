@@ -562,11 +562,14 @@ function DayBriefCard({ day, brief, active, onOpen }: { day: string; brief: Brie
       type="button"
       onClick={onOpen}
       aria-pressed={active}
+      aria-expanded={active}
       aria-label={`Read day story for ${prettyDay(day)}`}
       className={cn(
-        'group relative flex-none w-full overflow-hidden rounded-xl border text-left transition-all',
+        'group relative flex-none w-full overflow-hidden rounded-xl border text-left transition-all cursor-pointer',
         'bg-gradient-to-br from-primary/[0.06] via-card/40 to-card/20 backdrop-blur-sm',
-        active ? 'border-primary/60 ring-1 ring-primary/30 shadow-[0_8px_28px_-12px_hsl(var(--primary)/0.45)]' : 'border-border/40 hover:border-primary/40 hover:bg-card/55',
+        active
+          ? 'border-primary/60 ring-1 ring-primary/30 shadow-[0_8px_28px_-12px_hsl(var(--primary)/0.45)]'
+          : 'border-border/40 hover:border-primary/50 hover:bg-card/60 hover:shadow-[0_10px_30px_-18px_hsl(var(--primary)/0.55)] hover:-translate-y-px active:translate-y-0',
       )}
     >
       <span aria-hidden className="pointer-events-none absolute -right-8 -top-10 size-28 rounded-full bg-primary/15 blur-2xl opacity-70 transition-opacity group-hover:opacity-100" />
@@ -583,17 +586,30 @@ function DayBriefCard({ day, brief, active, onOpen }: { day: string; brief: Brie
             What happened on {prettyDay(day)}
           </div>
         </div>
-        <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground/70 transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
       </div>
       {teaser && (
         <p className="relative mt-2 px-3.5 line-clamp-3 text-[12.5px] leading-relaxed text-muted-foreground/90">
           {teaser}
         </p>
       )}
-      <div className="relative mt-3 flex items-center justify-between gap-3 border-t border-border/30 bg-background/30 px-3.5 py-2 text-[10.5px] font-medium tabular-nums text-muted-foreground/80">
+      <div className="relative mt-3 flex items-center justify-between gap-2 border-t border-border/30 bg-background/30 px-3.5 py-1.5 text-[10.5px] font-medium tabular-nums text-muted-foreground/80">
         <span className="inline-flex items-center gap-1"><Clock className="size-3" />{readMin} min read</span>
         <span className="inline-flex items-center gap-1"><List className="size-3" />{sectionCount || 1} section{sectionCount === 1 ? '' : 's'}</span>
         <span className="tabular-nums">{words.toLocaleString()} words</span>
+      </div>
+      <div
+        className={cn(
+          'relative flex items-center justify-between gap-2 border-t px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] transition-colors',
+          active
+            ? 'border-primary/40 bg-primary/15 text-primary'
+            : 'border-primary/25 bg-primary/[0.08] text-primary/90 group-hover:bg-primary/15 group-hover:text-primary',
+        )}
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <BookOpen className="size-3.5" />
+          {active ? 'Reading full story' : 'Read full story'}
+        </span>
+        <ChevronRight className={cn('size-4 transition-transform', active ? 'translate-x-0.5' : 'group-hover:translate-x-1')} />
       </div>
     </button>
   );

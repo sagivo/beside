@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { defaultDataDir, expandPath } from './paths.js';
 
 const STOCK_DATA_DIR = '~/.beside';
+export const BESIDE_GOOGLE_DRIVE_CLIENT_ID = '486513479427-l946an1a2fi0ho6onn03npi7omkm74ai.apps.googleusercontent.com';
 
 const PluginRefSchema = z.object({
   name: z.string(),
@@ -75,7 +76,7 @@ const StorageSchema = z.object({
   plugin: z.string().default('local'),
   local: z.object({
     path: z.string().default('~/.beside'),
-    max_size_gb: z.number().positive().default(50),
+    max_size_gb: z.number().positive().default(1),
     retention_days: z.number().int().nonnegative().default(365),
     vacuum: z.object({
       compress_after_days: z.number().int().nonnegative().default(1),
@@ -89,8 +90,25 @@ const StorageSchema = z.object({
       tick_interval_min: z.number().int().positive().default(15),
       batch_size: z.number().int().positive().default(50),
     }).default({ compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 }),
-  }).default({ path: '~/.beside', max_size_gb: 50, retention_days: 365, vacuum: { compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 } }),
+  }).default({ path: '~/.beside', max_size_gb: 1, retention_days: 365, vacuum: { compress_after_days: 0, compress_after_minutes: 60, compress_quality: 40, thumbnail_after_days: 30, thumbnail_max_dim: 480, delete_after_days: 180, tick_interval_min: 15, batch_size: 50 } }),
 }).passthrough();
+
+const BackupSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(['drive', 'box']).default('drive'),
+  upload_all: z.boolean().default(true),
+  tick_interval_min: z.number().int().positive().default(10),
+  batch_size: z.number().int().positive().default(10),
+  evict_batch_size: z.number().int().positive().default(25),
+  drive: z.object({
+    client_id: z.string().default(BESIDE_GOOGLE_DRIVE_CLIENT_ID),
+    client_secret: z.string().default(''),
+  }).default({ client_id: BESIDE_GOOGLE_DRIVE_CLIENT_ID, client_secret: '' }),
+  box: z.object({
+    client_id: z.string().default(''),
+    client_secret: z.string().default(''),
+  }).default({ client_id: '', client_secret: '' }),
+}).default({});
 
 const IndexSchema = z.object({
   strategy: z.string().default('karpathy'),
@@ -180,7 +198,7 @@ const HookWidgetSchema = z.object({
   id: z.string().optional(),
   title: z.string().optional(),
   bundlePath: z.string().optional(),
-  builtin: z.enum(['calendar', 'followups', 'list', 'json']).optional(),
+  builtin: z.enum(['list', 'json']).optional(),
   defaultCollection: z.string().optional(),
   placement: z.enum(['dashboard-main', 'dashboard-aside']).optional(),
   description: z.string().optional(),
@@ -206,10 +224,7 @@ const HookPluginRefSchema = z.object({
 
 const HooksSchema = z.object({
   enabled: z.boolean().default(true),
-  plugins: z.array(HookPluginRefSchema).default([
-    { name: 'calendar', enabled: true },
-    { name: 'followups', enabled: true },
-  ]),
+  plugins: z.array(HookPluginRefSchema).default([]),
   definitions: z.array(HookDefinitionSchema).default([]),
   throttle_ms_default: z.number().int().nonnegative().default(60_000),
   max_image_bytes: z.number().int().positive().default(2 * 1024 * 1024),
@@ -222,6 +237,7 @@ export const ConfigSchema = z.object({
   app: AppSchema.default({}),
   capture: CaptureSchema.default({}),
   storage: StorageSchema.default({}),
+  backup: BackupSchema,
   index: IndexSchema.default({}),
   export: ExportSchema.default({}),
   hooks: HooksSchema.default({}),
@@ -293,7 +309,7 @@ storage:
   plugin: local
   local:
     path: ~/.beside
-    max_size_gb: 50
+    max_size_gb: 1
     retention_days: 365
     vacuum:
       compress_after_minutes: 60
@@ -303,6 +319,20 @@ storage:
       delete_after_days: 180
       tick_interval_min: 15
       batch_size: 50
+
+backup:
+  enabled: false
+  provider: drive
+  upload_all: true
+  tick_interval_min: 10
+  batch_size: 10
+  evict_batch_size: 25
+  drive:
+    client_id: "486513479427-l946an1a2fi0ho6onn03npi7omkm74ai.apps.googleusercontent.com"
+    client_secret: ""
+  box:
+    client_id: ""
+    client_secret: ""
 
 index:
   strategy: karpathy
@@ -361,11 +391,7 @@ export:
 
 hooks:
   enabled: true
-  plugins:
-    - name: calendar
-      enabled: true
-    - name: followups
-      enabled: true
+  plugins: []
   # Custom user-defined text hooks. Each entry runs the captured
   # screenshot+OCR (or audio+transcript) through the LLM with the prompt
   # below, and stores the JSON result in its own collection. The result

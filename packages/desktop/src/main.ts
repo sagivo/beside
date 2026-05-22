@@ -11,6 +11,7 @@ import { defaultDataDir, expandPath, loadConfig, writeDefaultConfigIfMissing } f
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../../..');
+const appName = 'Beside';
 const workspaceRoot = resolveRuntimeWorkspaceRoot();
 if (app.isPackaged && !process.env.BESIDE_DATA_DIR) process.env.BESIDE_USE_PLATFORM_DATA_DIR ??= '1';
 const dataDir = defaultDataDir();
@@ -26,6 +27,21 @@ const rendererDevUrl = process.env.BESIDE_RENDERER_URL;
 const ASSET_PROTOCOL = 'beside-asset';
 
 protocol.registerSchemesAsPrivileged([{ scheme: ASSET_PROTOCOL, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } }]);
+
+function resolveDesktopAppVersion() {
+  for (const candidate of [
+    path.resolve(here, '../package.json'),
+    path.resolve(repoRoot, 'packages/desktop/package.json'),
+    path.resolve(repoRoot, 'package.json'),
+  ]) {
+    try {
+      const version = JSON.parse(fs.readFileSync(candidate, 'utf8'))?.version;
+      if (typeof version === 'string' && version.trim()) return version;
+    } catch {}
+  }
+
+  return app.getVersion();
+}
 
 interface WindowState { width: number; height: number; x?: number; y?: number; maximized?: boolean; }
 const DEFAULT_WINDOW_STATE: WindowState = { width: 860, height: 760 };
@@ -49,9 +65,11 @@ let lastLogs: string[] = [], lastOverview: any = null;
 const useMacAccessoryMode = process.platform === 'darwin' && process.env.BESIDE_DESKTOP_SHOW_DOCK !== '1';
 let updateCheckInFlight = false;
 let manualUpdateCheckRequested = false;
-let updateDownloadPromptOpen = false;
 let updateInstallPromptOpen = false;
 let updateCheckTimer: NodeJS.Timeout | null = null;
+let downloadedUpdateInfo: AppUpdateReadyInfo | null = null;
+
+type AppUpdateReadyInfo = { version: string | null; releaseDate: string | null; };
 
 type MenuBarCaptureState = 'capturing' | 'paused' | 'stopped';
 type MenuBarIndicator = { state: MenuBarCaptureState; label: string; };
@@ -143,8 +161,13 @@ class RuntimeServiceClient {
   private rejectAll(err: unknown) { this.pending.forEach((p) => p.reject(err)); this.pending.clear(); }
 }
 
-app.setName('Beside');
-if (process.platform === 'darwin') try { app.setAboutPanelOptions({ applicationName: 'Beside' }); } catch {}
+app.setName(appName);
+if (process.platform === 'darwin') {
+  try {
+    const version = resolveDesktopAppVersion();
+    app.setAboutPanelOptions({ applicationName: appName, applicationVersion: version, version });
+  } catch {}
+}
 
 let initialScreenStatus: string | null = null;
 
@@ -252,11 +275,11 @@ async function refreshTray() {
 }
 
 function configureAutoUpdates() {
-  autoUpdater.autoDownload = false;
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('checking-for-update', () => appendLog('Checking for app updates.'));
-  autoUpdater.on('update-available', (info) => { updateCheckInFlight = false; manualUpdateCheckRequested = false; void promptToDownloadUpdate(info); });
+  autoUpdater.on('update-available', (info) => appendLog(`App update ${info?.version ?? 'is'} available; downloading automatically.`));
   autoUpdater.on('update-not-available', (info) => {
     const wasManual = manualUpdateCheckRequested;
     manualUpdateCheckRequested = false;
@@ -265,7 +288,13 @@ function configureAutoUpdates() {
     if (wasManual) void dialog.showMessageBox({ type: 'info', message: 'Beside is up to date.', detail: `You are running ${app.getVersion()}.` });
   });
   autoUpdater.on('download-progress', (progress) => appendLog(`Downloading app update ${Math.round(progress.percent)}%.`));
-  autoUpdater.on('update-downloaded', (info) => { updateCheckInFlight = false; manualUpdateCheckRequested = false; void promptToInstallUpdate(info); });
+  autoUpdater.on('update-downloaded', (info) => {
+    downloadedUpdateInfo = toAppUpdateReadyInfo(info);
+    statusWindow?.webContents.send('beside:app-update-ready', downloadedUpdateInfo);
+    updateCheckInFlight = false;
+    manualUpdateCheckRequested = false;
+    void promptToInstallUpdate(info);
+  });
   autoUpdater.on('error', (err) => {
     const wasManual = manualUpdateCheckRequested;
     manualUpdateCheckRequested = false;
@@ -308,25 +337,6 @@ async function checkForUpdates(manual: boolean) {
   }
 }
 
-async function promptToDownloadUpdate(info: any) {
-  appendLog(`App update ${info?.version ?? 'is'} available.`);
-  if (updateDownloadPromptOpen) return;
-  updateDownloadPromptOpen = true;
-  try {
-    const res = await dialog.showMessageBox({
-      type: 'info',
-      buttons: ['Download Update', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      message: `Beside ${info?.version ?? 'update'} is available.`,
-      detail: `You are running ${app.getVersion()}. Download the update now?`,
-    });
-    if (res.response === 0) await autoUpdater.downloadUpdate();
-  } finally {
-    updateDownloadPromptOpen = false;
-  }
-}
-
 async function promptToInstallUpdate(info: any) {
   appendLog(`App update ${info?.version ?? ''} downloaded.`);
   if (updateInstallPromptOpen) return;
@@ -340,10 +350,23 @@ async function promptToInstallUpdate(info: any) {
       message: `Beside ${info?.version ?? 'update'} is ready to install.`,
       detail: 'Restart Beside to finish installing the update.',
     });
-    if (res.response === 0) autoUpdater.quitAndInstall(false, true);
+    if (res.response === 0) installDownloadedUpdate();
   } finally {
     updateInstallPromptOpen = false;
   }
+}
+
+function toAppUpdateReadyInfo(info: any): AppUpdateReadyInfo {
+  return {
+    version: typeof info?.version === 'string' ? info.version : null,
+    releaseDate: typeof info?.releaseDate === 'string' ? info.releaseDate : null,
+  };
+}
+
+function installDownloadedUpdate() {
+  if (!downloadedUpdateInfo) throw new Error('No downloaded update is ready to install.');
+  autoUpdater.quitAndInstall(false, true);
+  return { installing: true };
 }
 
 async function showStatusWindow(opts: { focus?: 'doctor' } = {}) {
@@ -375,7 +398,12 @@ function enterMacStatusWindowMode() { if (useMacAccessoryMode) { app.setActivati
 
 async function renderStatusWindow() {
   const w = statusWindow; if (!w || w.isDestroyed()) return;
-  const init = () => { if (w.isDestroyed()) return; w.webContents.send('beside:desktop-logs', lastLogs.slice(-120).join('\n')); if (lastOverview) w.webContents.send('beside:overview', lastOverview); };
+  const init = () => {
+    if (w.isDestroyed()) return;
+    w.webContents.send('beside:desktop-logs', lastLogs.slice(-120).join('\n'));
+    if (lastOverview) w.webContents.send('beside:overview', lastOverview);
+    if (downloadedUpdateInfo) w.webContents.send('beside:app-update-ready', downloadedUpdateInfo);
+  };
   w.webContents.once('did-finish-load', init);
   try { rendererDevUrl ? await w.loadURL(rendererDevUrl) : await w.loadFile(path.join(here, 'renderer', 'index.html')); }
   catch (err) { w.webContents.removeListener('did-finish-load', init); if (!rendererDevUrl || !/ERR_/.test(String(err))) throw err; appendLog(`Dev render nav err: ${err}`); }
@@ -508,6 +536,15 @@ function relaunchApp() { app.relaunch(); setTimeout(() => app.exit(0), 100); ret
 function registerRuntimeIpc() {
   const h = ipcMain.handle;
   h('beside:overview', () => getOverviewForRequest());
+  h('beside:backup-status', async () => (await getRuntimeForRequest()).call('backupStatus'));
+  h('beside:trigger-backup', async () => (await getRuntimeForRequest()).call('triggerBackup'));
+  h('beside:restore-backups', async (e, params) => (await getRuntimeForRequest()).call('restoreBackups', params));
+  h('beside:connect-backup-provider', async (e, params) => {
+    const result = await (await getRuntimeForRequest()).call<{ url: string; expiresAt: string }>('startBackupProviderConnect', params);
+    await shell.openExternal(result.url);
+    return result;
+  });
+  h('beside:disconnect-backup-provider', async (e, params) => (await getRuntimeForRequest()).call('disconnectBackupProvider', params));
   h('beside:doctor', async () => (await getRuntimeForRequest()).call('doctor'));
   h('beside:read-config', async () => (await getRuntimeForRequest()).call('readConfig'));
   h('beside:validate-config', async (e, c) => (await getRuntimeForRequest()).call('validateConfig', c));
@@ -565,6 +602,8 @@ function registerRuntimeIpc() {
   h('beside:request-accessibility-permission', requestAccessibilityPermission);
   h('beside:open-permission-settings', (e, k: any) => openPermissionSettings(k));
   h('beside:relaunch-app', relaunchApp);
+  h('beside:get-app-update-ready', () => downloadedUpdateInfo);
+  h('beside:install-app-update', installDownloadedUpdate);
   h('beside:get-onboarding-complete', () => isOnboardingComplete());
   h('beside:set-onboarding-complete', (_e, done: boolean) => setOnboardingComplete(!!done));
 }

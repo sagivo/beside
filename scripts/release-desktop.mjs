@@ -51,12 +51,7 @@ const uploadFiles = [dmgPath, dmgBlockmapPath, zipPath, zipBlockmapPath, latestM
 if (!repo) {
   fail('Could not infer GitHub repo from package.json. Pass --repo owner/name.');
 }
-if (rootPkg.version !== desktopPkg.version) {
-  fail(`Root package version (${rootPkg.version}) must match desktop version (${desktopPkg.version}).`);
-}
-if (opts.version && opts.version !== desktopPkg.version) {
-  fail(`--version ${opts.version} does not match packages/desktop/package.json (${desktopPkg.version}).`);
-}
+assertReleaseVersionInputs({ rootPkg, desktopPkg, version, tag, explicitVersion: opts.version });
 
 await assertToolchain();
 if (!opts.skipGitCheck) {
@@ -106,7 +101,7 @@ await writeLatestMacYml({ version, zipPath, dmgPath, latestMacPath });
 await assertArtifactsExist(uploadFiles);
 
 step('Verifying signed and notarized artifacts');
-await verifyReleaseArtifacts({ appPath, dmgPath, productName });
+await verifyReleaseArtifacts({ appPath, dmgPath, latestMacPath, productName, version });
 
 if (opts.noUpload) {
   step('Skipping GitHub upload (--no-upload)');
@@ -217,6 +212,19 @@ Options:
 
 async function readJson(file) {
   return JSON.parse(await readFile(file, 'utf8'));
+}
+
+function assertReleaseVersionInputs(input) {
+  const expectedTag = `v${input.version}`;
+  if (input.rootPkg.version !== input.desktopPkg.version) {
+    fail(`Root package version (${input.rootPkg.version}) must match desktop version (${input.desktopPkg.version}).`);
+  }
+  if (input.explicitVersion && input.explicitVersion !== input.desktopPkg.version) {
+    fail(`--version ${input.explicitVersion} does not match packages/desktop/package.json (${input.desktopPkg.version}).`);
+  }
+  if (input.tag !== expectedTag) {
+    fail(`Release tag (${input.tag}) must match package version (${input.version}); expected ${expectedTag}.`);
+  }
 }
 
 function parseGitHubRepo(url) {
@@ -452,6 +460,7 @@ releaseDate: '${new Date().toISOString()}'
 }
 
 async function verifyReleaseArtifacts(input) {
+  await verifyReleaseVersionMetadata(input);
   await run('node', [path.join(desktopDir, 'scripts', 'smoke-test-packaged.mjs'), input.appPath], { cwd: root });
   await run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', input.appPath]);
   await run('xcrun', ['stapler', 'validate', input.appPath]);
@@ -459,6 +468,55 @@ async function verifyReleaseArtifacts(input) {
   await run('spctl', ['-a', '-vvv', '-t', 'exec', input.appPath]);
   await run('spctl', ['-a', '-vvv', '-t', 'open', '--context', 'context:primary-signature', input.dmgPath]);
   await verifyDmgContents(input.dmgPath, input.productName, { fatal: true });
+}
+
+async function verifyReleaseVersionMetadata(input) {
+  const plistPath = path.join(input.appPath, 'Contents', 'Info.plist');
+  const embeddedVersion = await readPackagedAppVersion(input.appPath, input.productName);
+  const latestVersion = await readLatestMacVersion(input.latestMacPath);
+  const checks = [
+    ['CFBundleShortVersionString', await readPlistValue(plistPath, 'CFBundleShortVersionString'), input.version],
+    ['CFBundleVersion', await readPlistValue(plistPath, 'CFBundleVersion'), input.version],
+    ['CFBundleIconFile', await readPlistValue(plistPath, 'CFBundleIconFile'), 'icon.icns'],
+    ['app.asar package.json version', embeddedVersion, input.version],
+    ['latest-mac.yml version', latestVersion, input.version],
+  ];
+
+  for (const [label, actual, expected] of checks) {
+    if (actual !== expected) {
+      fail(`Release metadata mismatch for ${label}: ${actual || '<missing>'} != ${expected}`);
+    }
+  }
+}
+
+async function readPlistValue(plistPath, key) {
+  const result = await run('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plistPath], {
+    capture: true,
+    quiet: true,
+  });
+  return result.stdout.trim();
+}
+
+async function readPackagedAppVersion(appPath, productName) {
+  const electronExe = path.join(appPath, 'Contents', 'MacOS', productName);
+  const asarPath = path.join(appPath, 'Contents', 'Resources', 'app.asar');
+  const probe = `
+const fs = require('node:fs');
+const path = require('node:path');
+const pkg = JSON.parse(fs.readFileSync(path.join(process.argv[1], 'package.json'), 'utf8'));
+process.stdout.write(pkg.version || '');
+`;
+  const result = await run(electronExe, ['-e', probe, asarPath], {
+    capture: true,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    quiet: true,
+  });
+  return result.stdout.trim();
+}
+
+async function readLatestMacVersion(latestMacPath) {
+  const yml = await readFile(latestMacPath, 'utf8');
+  return yml.match(/^version:\s*(.+)$/m)?.[1]?.trim() ?? null;
 }
 
 async function prepareTag(tagName, forceTag) {

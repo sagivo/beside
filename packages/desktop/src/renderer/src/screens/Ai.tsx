@@ -539,15 +539,6 @@ function ActivityIndicator({
   );
 }
 
-function StreamingCaret() {
-  return (
-    <span
-      aria-hidden
-      className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-primary align-middle"
-    />
-  );
-}
-
 function EmptyState({ onPick }: { onPick: (text: string) => void }) {
   return (
     <div className="mx-auto flex max-w-3xl flex-col items-center gap-8 px-6 pt-16 pb-12 text-center">
@@ -652,7 +643,6 @@ function AssistantMessage({ message }: { message: Message }) {
         {message.content && (
           <div className="rounded-2xl rounded-tl-md bg-card px-4 py-3 text-sm shadow-xs">
             <Markdown content={message.content} />
-            {message.pending && <StreamingCaret />}
           </div>
         )}
         <div className="mt-1.5 flex items-center gap-1.5 pl-1 text-muted-foreground">

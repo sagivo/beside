@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { AlertTriangle, Check, CheckCircle2, Cpu, Download, ExternalLink, FolderOpen, Keyboard, Loader2, Mic, Monitor, Moon, RefreshCw, Shield, Sparkles, Sun, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Cloud, Cpu, Download, FolderOpen, HardDrive, Keyboard, Link2, Loader2, Mic, Monitor, Moon, PlugZap, RefreshCw, RotateCcw, Shield, Sparkles, Sun, Trash2, UploadCloud, X } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -24,14 +24,20 @@ import { MARKDOWN_EXPORT_PROFILES, getMarkdownExportProfileInfo, type MarkdownEx
 import { NumberField, OptionalNumberField, SaveBar, SelectField, SettingsSection, TextAreaField, TextField, ToggleRow } from '@/screens/settings/settings-controls';
 import { HookSettings } from '@/screens/settings/HookSettings';
 import { configPatchFromDraft, settingsDraftFromConfig, type BackgroundModelJobs, type CaptureMode, type LiveRecordingFormat, type LogLevel, type McpTransport, type ScreenshotFormat, type SettingsDraft, type SystemAudioBackend } from '@/screens/settings/settings-draft';
-import type { AccessibilityPermission, LoadedConfig, MicPermission, ModelBootstrapProgress, RuntimeOverview, ScreenPermission, WhisperProbe } from '@/global';
+import type { AccessibilityPermission, BackupStatus, LoadedConfig, MicPermission, ModelBootstrapProgress, RuntimeOverview, ScreenPermission, WhisperProbe } from '@/global';
 
 export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEvents, onSaved }: { config: LoadedConfig | null; overview: RuntimeOverview | null; bootstrapEvents: ModelBootstrapProgress[]; onClearBootstrapEvents: () => void; onSaved: (config: LoadedConfig) => void; }) {
   const [draft, setDraft] = React.useState<SettingsDraft | null>(null), [saving, setSaving] = React.useState(false), [startAtLogin, setStartAtLogin] = React.useState<boolean | null>(null);
+  const [backupStatus, setBackupStatus] = React.useState<BackupStatus | null>(overview?.backup ?? null);
   const { preference: themePreference, setPreference: setThemePreference } = useTheme();
 
   React.useEffect(() => { if (config) setDraft(settingsDraftFromConfig(config)); }, [config]);
+  React.useEffect(() => { if (overview?.backup) setBackupStatus(overview.backup); }, [overview?.backup]);
   React.useEffect(() => { window.beside.getStartAtLogin().then(setStartAtLogin).catch(() => setStartAtLogin(false)); }, []);
+  const refreshBackupStatus = React.useCallback(() => {
+    void window.beside.getBackupStatus().then(setBackupStatus).catch(() => {});
+  }, []);
+  React.useEffect(() => { refreshBackupStatus(); }, [refreshBackupStatus, config]);
   const openPath = (target: Parameters<typeof window.beside.openPath>[0], label: string) => {
     void window.beside.openPath(target).catch((err) => {
       toast.error(`Could not open ${label}`, {
@@ -67,6 +73,7 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
     try {
       const next = await window.beside.saveConfigPatch(configPatchFromDraft(draft!));
       onSaved(next);
+      refreshBackupStatus();
       if (opts.restart) { await window.beside.stopRuntime(); await window.beside.startRuntime(); toast.success('Settings saved & runtime restarted'); }
       else toast.success('Settings saved', { description: 'Some changes apply on next start.' });
     } catch (err: any) { toast.error('Could not save settings', { description: err.message || String(err) }); }
@@ -155,10 +162,11 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
             <div className="grid gap-4 sm:grid-cols-2">
               <TextField label="Storage plugin" value={draft.storagePlugin} onChange={(v: any) => set('storagePlugin', v)} typeLabel="string" />
               <TextField label="Storage path" value={draft.storagePath} onChange={(v: any) => set('storagePath', v)} typeLabel="path" />
-              <NumberField label="Maximum space" value={draft.maxSizeGb} onChange={(v: any) => set('maxSizeGb', v)} min={0.1} step={1} unit="GB" typeLabel="number" />
+              <NumberField label="Local cache limit" value={draft.maxSizeGb} onChange={(v: any) => set('maxSizeGb', v)} min={0.1} step={1} unit="GB" typeLabel="number" hint="Cloud Backup evicts verified uploads above this limit." />
               <NumberField label="Keep memories for" value={draft.retentionDays} onChange={(v: any) => set('retentionDays', v)} min={0} step={1} unit="days" typeLabel="integer" />
             </div>
           </SettingsSection>
+          <CloudBackupSettings draft={draft} backupStatus={backupStatus} set={set} onRefresh={refreshBackupStatus} />
           <SettingsSection title="Screenshot vacuum" description="Downsize or remove old screenshot files.">
             <div className="grid gap-4 sm:grid-cols-2">
               <OptionalNumberField label="Compress after (min)" value={draft.compressAfterMinutes} onChange={(v: any) => set('compressAfterMinutes', v)} min={0} step={15} typeLabel="integer" />
@@ -308,6 +316,119 @@ export function Settings({ config, overview, bootstrapEvents, onClearBootstrapEv
       </Tabs>
 
       <SaveBar hasUnsavedChanges={hasUnsavedChanges} saving={saving} onSave={() => save()} onSaveAndRestart={() => save({ restart: true })} onReset={resetDraft} />
+    </div>
+  );
+}
+
+function CloudBackupSettings({ draft, backupStatus, set, onRefresh }: { draft: SettingsDraft; backupStatus: BackupStatus | null; set: (key: keyof SettingsDraft, value: any) => void; onRefresh: () => void; }) {
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const usagePct = backupStatus?.localMaxBytes ? Math.min(100, Math.round((backupStatus.localBytes / backupStatus.localMaxBytes) * 100)) : 0;
+  const mode = backupStatus?.mode ?? (draft.backupEnabled ? 'needs_provider_config' : 'disabled');
+
+  const run = async (name: string, fn: () => Promise<void>) => {
+    setBusy(name);
+    try { await fn(); }
+    finally { setBusy(null); onRefresh(); }
+  };
+
+  const connect = () => run('connect', async () => {
+    await window.beside.connectBackupProvider({ provider: draft.backupProvider });
+    toast.info('Finish connecting in your browser');
+  }).catch((err: any) => toast.error('Could not connect provider', { description: err.message || String(err) }));
+
+  const disconnect = () => run('disconnect', async () => {
+    await window.beside.disconnectBackupProvider({ provider: draft.backupProvider });
+    toast.success('Backup provider disconnected');
+  }).catch((err: any) => toast.error('Could not disconnect provider', { description: err.message || String(err) }));
+
+  const triggerBackup = () => run('backup', async () => {
+    const res = await window.beside.triggerBackup();
+    if (res.skippedReason) toast.info('Backup skipped', { description: res.skippedReason });
+    else toast.success('Backup finished', { description: `${res.uploaded} uploaded, ${formatBytes(res.freedBytes)} freed.` });
+  }).catch((err: any) => toast.error('Backup failed', { description: err.message || String(err) }));
+
+  const restore = () => run('restore', async () => {
+    const res = await window.beside.restoreBackups({ limit: 100 });
+    toast.success('Restore finished', { description: `${res.restored} restored, ${formatBytes(res.bytes)} downloaded.` });
+  }).catch((err: any) => toast.error('Restore failed', { description: err.message || String(err) }));
+
+  return (
+    <SettingsSection title="Cloud backup providers" description="Encrypted online backup. Google Drive is supported first; more providers can use the same local backup engine later.">
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/25 p-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className={cn('grid size-9 shrink-0 place-items-center rounded-md', mode === 'ready' ? 'bg-success/15 text-success' : mode === 'error' ? 'bg-destructive/15 text-destructive' : 'bg-primary/10 text-primary')}>
+              <Cloud className="size-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h4 className="text-sm font-medium">Cloud Backup</h4>
+                <BackupModeBadge mode={mode} />
+              </div>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">{backupStatus?.remoteLabel ?? providerLabel(draft.backupProvider)}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={connect} disabled={busy != null || draft.backupProvider !== 'drive'}>{busy === 'connect' ? <Loader2 className="animate-spin" /> : <Link2 />}Connect</Button>
+            <Button variant="ghost" size="sm" onClick={disconnect} disabled={busy != null || !backupStatus?.connected}><PlugZap />Disconnect</Button>
+            <Button size="sm" onClick={triggerBackup} disabled={busy != null || !draft.backupEnabled}>{busy === 'backup' ? <Loader2 className="animate-spin" /> : <UploadCloud />}Back up now</Button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-4">
+          <BackupStat icon={<HardDrive />} label="Local" value={formatBytes(backupStatus?.localBytes ?? 0)} />
+          <BackupStat icon={<Cloud />} label="Remote" value={formatBytes(backupStatus?.remoteBytes ?? 0)} />
+          <BackupStat icon={<CheckCircle2 />} label="Uploaded" value={String(backupStatus?.uploadedObjects ?? 0)} />
+          <BackupStat icon={<RotateCcw />} label="Evicted" value={String(backupStatus?.evictedObjects ?? 0)} />
+        </div>
+
+        <div className="rounded-md border bg-background/60 p-3">
+          <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+            <span className="font-medium">Local cache</span>
+            <span className="text-muted-foreground">{formatBytes(backupStatus?.localBytes ?? 0)} / {formatBytes(backupStatus?.localMaxBytes ?? draft.maxSizeGb * 1024 * 1024 * 1024)}</span>
+          </div>
+          <Progress value={usagePct} />
+          {backupStatus?.lastError && <p className="mt-2 text-xs text-destructive">{backupStatus.lastError}</p>}
+        </div>
+
+        <ToggleRow title="Enable cloud backup" description="Run encrypted uploads in the background." typeLabel="boolean" checked={draft.backupEnabled} onChange={(v: any) => set('backupEnabled', v)} />
+        <Separator />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField label="Provider" value={draft.backupProvider} onChange={(v: any) => set('backupProvider', v)} typeLabel="enum" options={[{ value: 'drive', label: 'Google Drive' }, { value: 'box', label: 'Box (coming later)' }]} />
+          <TextField label="Google OAuth client ID" value={draft.driveClientId} onChange={(v: any) => set('driveClientId', v)} typeLabel="string" />
+          <TextField label="Google OAuth client secret" value={draft.driveClientSecret} onChange={(v: any) => set('driveClientSecret', v)} typeLabel="secret string" inputType="password" placeholder="optional" />
+          <NumberField label="Backup interval" value={draft.backupTickIntervalMin} onChange={(v: any) => set('backupTickIntervalMin', v)} min={1} step={1} unit="min" typeLabel="integer" />
+          <NumberField label="Upload batch size" value={draft.backupBatchSize} onChange={(v: any) => set('backupBatchSize', v)} min={1} step={1} typeLabel="integer" />
+          <NumberField label="Eviction batch size" value={draft.backupEvictBatchSize} onChange={(v: any) => set('backupEvictBatchSize', v)} min={1} step={1} typeLabel="integer" />
+        </div>
+        <Separator />
+        <ToggleRow title="Upload before eviction" description="Keep a verified online copy before local cleanup." typeLabel="boolean" checked={draft.backupUploadAll} onChange={(v: any) => set('backupUploadAll', v)} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" size="sm" onClick={restore} disabled={busy != null || !backupStatus?.evictedObjects}>{busy === 'restore' ? <Loader2 className="animate-spin" /> : <RotateCcw />}Restore evicted</Button>
+          <Button variant="ghost" size="sm" onClick={onRefresh} disabled={busy != null}><RefreshCw />Refresh</Button>
+        </div>
+      </div>
+    </SettingsSection>
+  );
+}
+
+function BackupModeBadge({ mode }: { mode: BackupStatus['mode'] }) {
+  if (mode === 'ready') return <Badge variant="success"><CheckCircle2 />Connected</Badge>;
+  if (mode === 'needs_connection') return <Badge variant="warning"><Link2 />Connect</Badge>;
+  if (mode === 'needs_provider_config') return <Badge variant="muted">Setup</Badge>;
+  if (mode === 'error') return <Badge variant="destructive"><AlertTriangle />Error</Badge>;
+  return <Badge variant="muted">Off</Badge>;
+}
+
+function providerLabel(provider: SettingsDraft['backupProvider']) {
+  return provider === 'drive' ? 'Google Drive app data' : 'Box';
+}
+
+function BackupStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-background/60 p-3">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="[&>svg]:size-3.5">{icon}</span>{label}</div>
+      <div className="mt-1 text-sm font-semibold tabular-nums">{value}</div>
     </div>
   );
 }

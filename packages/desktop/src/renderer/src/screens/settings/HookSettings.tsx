@@ -38,15 +38,15 @@ interface HookSettingsProps {
   onSaved: (config: LoadedConfig) => void;
 }
 
-const BUILTIN_PLUGIN_NAMES = ['calendar', 'followups'] as const;
+const REMOVED_HOOK_PLUGIN_NAMES = new Set(['calendar', 'followups']);
+const BUILTIN_PLUGIN_NAMES = [] as const;
+type BuiltinHookWidget = 'list' | 'json';
 const INPUT_KIND_OPTIONS: Array<{ value: CaptureHookInputKind; label: string }> = [
   { value: 'screen', label: 'Screen (screenshot + OCR)' },
   { value: 'audio', label: 'Audio (transcript)' },
 ];
-const BUILTIN_WIDGET_OPTIONS = [
+const BUILTIN_WIDGET_OPTIONS: Array<{ value: BuiltinHookWidget; label: string }> = [
   { value: 'list', label: 'Generic list' },
-  { value: 'calendar', label: 'Calendar' },
-  { value: 'followups', label: 'Follow-ups' },
   { value: 'json', label: 'Raw JSON' },
 ];
 
@@ -70,9 +70,7 @@ export function HookSettings({ config, onSaved }: HookSettingsProps): React.JSX.
     if (!config) return;
     const h = config.config.hooks ?? {};
     setHooksEnabled(h.enabled !== false);
-    setPluginRefs(
-      (h.plugins ?? []).map((p) => ({ name: p.name, enabled: p.enabled !== false })),
-    );
+    setPluginRefs(serializePluginRefs(h.plugins ?? []));
     setDefinitions(((h.definitions ?? []) as CaptureHookDefinition[]).map(cloneDefinition));
     setThrottleDefault(h.throttle_ms_default ?? 60_000);
     setMaxRecords(h.max_records_per_hook ?? 2_000);
@@ -151,7 +149,7 @@ export function HookSettings({ config, onSaved }: HookSettingsProps): React.JSX.
   const resetDraft = () => {
     const h = config.config.hooks ?? {};
     setHooksEnabled(h.enabled !== false);
-    setPluginRefs((h.plugins ?? []).map((p) => ({ name: p.name, enabled: p.enabled !== false })));
+    setPluginRefs(serializePluginRefs(h.plugins ?? []));
     setDefinitions(((h.definitions ?? []) as CaptureHookDefinition[]).map(cloneDefinition));
     setThrottleDefault(h.throttle_ms_default ?? 60_000);
     setMaxRecords(h.max_records_per_hook ?? 2_000);
@@ -189,12 +187,17 @@ export function HookSettings({ config, onSaved }: HookSettingsProps): React.JSX.
   }
 
   function addPluginRef(name: string) {
-    if (!name.trim()) return;
-    if (pluginRefs.some((p) => p.name === name.trim())) {
-      toast.error(`Plugin "${name}" is already added`);
+    const normalized = name.trim();
+    if (!normalized) return;
+    if (REMOVED_HOOK_PLUGIN_NAMES.has(normalized)) {
+      toast.error(`Plugin "${normalized}" has been removed`);
       return;
     }
-    setPluginRefs([...pluginRefs, { name: name.trim(), enabled: true }]);
+    if (pluginRefs.some((p) => p.name === normalized)) {
+      toast.error(`Plugin "${normalized}" is already added`);
+      return;
+    }
+    setPluginRefs([...pluginRefs, { name: normalized, enabled: true }]);
   }
 
   function togglePluginRef(index: number, enabled: boolean) {
@@ -577,7 +580,7 @@ interface EditorDraft {
   promptTemplate: string;
   outputCollection: string;
   widgetTitle: string;
-  widgetBuiltin: 'list' | 'calendar' | 'followups' | 'json';
+  widgetBuiltin: BuiltinHookWidget;
 }
 
 function blankDraft(): EditorDraft {
@@ -1000,9 +1003,15 @@ function serializeHooksState(config: LoadedConfig | null): string {
   const h = config?.config.hooks ?? {};
   return JSON.stringify({
     enabled: h.enabled !== false,
-    plugins: (h.plugins ?? []).map((p) => ({ name: p.name, enabled: p.enabled !== false })),
+    plugins: serializePluginRefs(h.plugins ?? []),
     definitions: (h.definitions ?? []) as CaptureHookDefinition[],
     throttle_ms_default: h.throttle_ms_default ?? 60_000,
     max_records_per_hook: h.max_records_per_hook ?? 2_000,
   });
+}
+
+function serializePluginRefs(refs: Array<{ name: string; enabled?: boolean }>): Array<{ name: string; enabled: boolean }> {
+  return refs
+    .filter((p) => !REMOVED_HOOK_PLUGIN_NAMES.has(p.name))
+    .map((p) => ({ name: p.name, enabled: p.enabled !== false }));
 }

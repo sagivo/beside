@@ -16,7 +16,7 @@ import type {
  * Loads widget manifests from the runtime. For each enabled hook with a
  * widget, either evaluates the plugin-provided React bundle (via a
  * sandboxed factory pattern) or renders a built-in fallback widget
- * (calendar, followups, generic list, json).
+ * (generic list, json).
  */
 
 interface HookWidgetApi {
@@ -64,14 +64,27 @@ export function CaptureHookWidgets(): React.JSX.Element | null {
   }, []);
 
   if (manifests == null) return null;
-  if (manifests.length === 0) return null;
+  const visibleManifests = manifests.filter(isVisibleHookWidgetManifest);
+  if (visibleManifests.length === 0) return null;
 
   return (
     <section className="flex flex-col gap-4">
-      {manifests.map((m) => (
+      {visibleManifests.map((m) => (
         <HookWidgetCard key={`${m.hookId}:${m.widget.id}`} manifest={m} />
       ))}
     </section>
+  );
+}
+
+function isVisibleHookWidgetManifest(manifest: CaptureHookWidgetManifestRuntime): boolean {
+  const builtin = manifest.widget.builtin as string | undefined;
+  return (
+    manifest.hookId !== 'calendar' &&
+    manifest.hookId !== 'followups' &&
+    manifest.pluginName !== 'calendar' &&
+    manifest.pluginName !== 'followups' &&
+    builtin !== 'calendar' &&
+    builtin !== 'followups'
   );
 }
 
@@ -226,10 +239,6 @@ function BuiltinWidget({ manifest }: { manifest: CaptureHookWidgetManifestRuntim
   }
 
   switch (manifest.widget.builtin ?? 'list') {
-    case 'calendar':
-      return <CalendarBuiltinWidget records={records} />;
-    case 'followups':
-      return <FollowupsBuiltinWidget records={records} />;
     case 'json':
       return <JsonBuiltinWidget records={records} />;
     case 'list':
@@ -277,56 +286,6 @@ function useHookRecords(hookId: string, query: CaptureHookStorageQuery) {
   return { records, loading };
 }
 
-function CalendarBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
-  const allItems = records.flatMap((r) => extractCalendarItems(r));
-  const now = Date.now();
-  const upcoming = allItems
-    .filter((item) => isUpcomingCalendarItem(item, now))
-    .sort((a, b) => calendarItemSortKey(a) - calendarItemSortKey(b));
-  if (upcoming.length === 0)
-    return <p className="text-sm text-muted-foreground">No upcoming events.</p>;
-  return (
-    <ul className="flex flex-col gap-2">
-      {upcoming.slice(0, 10).map((item, idx) => (
-        <li key={idx} className="rounded-md border bg-background/55 px-3 py-2 text-sm">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="font-medium truncate">{item.title}</span>
-            {item.starts_at && (
-              <span className="text-[11px] text-muted-foreground">{item.starts_at}</span>
-            )}
-          </div>
-          {item.context && (
-            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.context}</p>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function FollowupsBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
-  const items = records.flatMap((r) => extractFollowupItems(r));
-  if (items.length === 0)
-    return <p className="text-sm text-muted-foreground">No follow-ups yet.</p>;
-  return (
-    <ul className="flex flex-col gap-2">
-      {items.slice(0, 10).map((item, idx) => (
-        <li key={idx} className="rounded-md border bg-background/55 px-3 py-2 text-sm">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="font-medium truncate">{item.title}</span>
-            {item.urgency && (
-              <span className="text-[10px] uppercase text-muted-foreground">{item.urgency}</span>
-            )}
-          </div>
-          {item.body && (
-            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{item.body}</p>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function ListBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React.JSX.Element {
   return (
     <ul className="flex flex-col gap-2 text-sm">
@@ -358,94 +317,6 @@ function JsonBuiltinWidget({ records }: { records: CaptureHookRecord[] }): React
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-type CalendarItem = {
-  title: string;
-  starts_at?: string;
-  ends_at?: string;
-  context?: string;
-};
-type FollowupItem = { title: string; body?: string; urgency?: string };
-
-function extractCalendarItems(record: CaptureHookRecord): CalendarItem[] {
-  const data = record.data as any;
-  if (!data) return [];
-  const arr = Array.isArray(data?.events)
-    ? data.events
-    : Array.isArray(data?.items)
-      ? data.items
-      : Array.isArray(data)
-        ? data
-        : [];
-  return arr
-    .map((item: any) => {
-      if (!item || typeof item !== 'object') return null;
-      const title = pickString(item, 'title', 'name', 'summary');
-      if (!title) return null;
-      return {
-        title,
-        starts_at: pickString(item, 'starts_at', 'startsAt', 'start', 'when') ?? undefined,
-        ends_at: pickString(item, 'ends_at', 'endsAt', 'end') ?? undefined,
-        context: pickString(item, 'context', 'description', 'body') ?? undefined,
-      } as CalendarItem;
-    })
-    .filter((x: CalendarItem | null): x is CalendarItem => x !== null);
-}
-
-// Returns ms-since-epoch for an event time string, or null if unparseable.
-// Handles ISO timestamps, "May 11, 2026 9:00 AM", and "May 11, 2026 all day".
-function parseCalendarTime(value: string | undefined): number | null {
-  if (!value) return null;
-  const cleaned = value.replace(/\s+all day$/i, '').trim();
-  if (!cleaned) return null;
-  const ts = Date.parse(cleaned);
-  return Number.isFinite(ts) ? ts : null;
-}
-
-function isAllDay(item: CalendarItem): boolean {
-  return /\ball day\b/i.test(item.starts_at ?? '');
-}
-
-function isUpcomingCalendarItem(item: CalendarItem, now: number): boolean {
-  const end = parseCalendarTime(item.ends_at);
-  if (end !== null) return end >= now;
-  const start = parseCalendarTime(item.starts_at);
-  if (start === null) return true; // unknown time → keep so we don't accidentally hide
-  if (isAllDay(item)) {
-    // Include any all-day event whose day hasn't fully passed.
-    const endOfDay = start + 24 * 60 * 60 * 1000;
-    return endOfDay >= now;
-  }
-  return start >= now;
-}
-
-function calendarItemSortKey(item: CalendarItem): number {
-  return parseCalendarTime(item.starts_at) ?? Number.MAX_SAFE_INTEGER;
-}
-
-function extractFollowupItems(record: CaptureHookRecord): FollowupItem[] {
-  const data = record.data as any;
-  if (!data) return [];
-  const arr = Array.isArray(data?.followups)
-    ? data.followups
-    : Array.isArray(data?.items)
-      ? data.items
-      : Array.isArray(data)
-        ? data
-        : [];
-  return arr
-    .map((item: any) => {
-      if (!item || typeof item !== 'object') return null;
-      const title = pickString(item, 'title', 'task', 'text');
-      if (!title) return null;
-      return {
-        title,
-        body: pickString(item, 'body', 'context', 'detail') ?? undefined,
-        urgency: pickString(item, 'urgency', 'priority') ?? undefined,
-      } as FollowupItem;
-    })
-    .filter((x: FollowupItem | null): x is FollowupItem => x !== null);
-}
 
 function useHookDiagnostics(hookId: string): CaptureHookDiagnostics | null {
   const [diagnostics, setDiagnostics] = React.useState<CaptureHookDiagnostics | null>(null);

@@ -20,6 +20,7 @@ import { EntityResolverWorker } from './entity-resolver.js';
 import { StorageVacuum } from './storage-vacuum.js';
 import { OfflineFallbackAdapter } from './offline-model.js';
 import { CaptureHookEngine } from './capture-hooks.js';
+import { BackupService } from './backup-service.js';
 
 export interface OrchestratorOptions { configPath?: string; workspaceRoot?: string; }
 export interface OrchestratorHandles {
@@ -30,6 +31,7 @@ export interface OrchestratorHandles {
   entityResolver: EntityResolverWorker; sessionBuilder: SessionBuilder; meetingBuilder: MeetingBuilder;
   meetingSummarizer: MeetingSummarizer; eventExtractor: EventExtractor; embeddingWorker: EmbeddingWorker;
   vacuum: StorageVacuum; loadGuard: LoadGuard; activityCoalescer: ActivityCoalescer; idlePowerCatchup: IdlePowerCatchup;
+  backupService: BackupService;
   captureHooks: CaptureHookEngine;
   hookWidgetManifests: HookWidgetManifestRuntime[];
 }
@@ -47,7 +49,8 @@ const JOBS = {
   OCR_WORKER: 'ocr-worker', AUDIO_TRANSCRIPT: 'audio-transcript-worker', ENTITY_RESOLVER: 'entity-resolver',
   SESSION_BUILDER: 'session-builder', MEETING_BUILDER: 'meeting-builder', MEETING_SUMMARIZER: 'meeting-summarizer',
   EVENT_EXTRACTOR: 'event-extractor', EMBEDDING_WORKER: 'embedding-worker', VACUUM: 'storage-vacuum',
-  STORAGE_MAINTENANCE: 'storage-maintenance', STORAGE_RETENTION: 'storage-retention', IDLE_POWER_CATCHUP: 'idle-power-catchup'
+  STORAGE_MAINTENANCE: 'storage-maintenance', STORAGE_RETENTION: 'storage-retention', IDLE_POWER_CATCHUP: 'idle-power-catchup',
+  CLOUD_BACKUP: 'cloud-backup'
 };
 
 const INTERVALS = {
@@ -55,6 +58,7 @@ const INTERVALS = {
   MEETING: 120_000, SUMMARIZER: 5 * 60_000, EVENT: 15 * 60_000, STORAGE_MAINT: 7 * 86400_000, RETENTION: 86400_000,
   COALESCE_DEBOUNCE: 60_000, COALESCE_MAX_WAIT: 240_000
 };
+const REMOVED_HOOK_PLUGIN_NAMES = new Set(['calendar', 'followups']);
 
 class ActivityCoalescer {
   private timer: NodeJS.Timeout | null = null;
@@ -188,6 +192,7 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
   const stageMs = (d: number, m?: number) => typeof m === 'number' ? m * 60000 : d * 86400000;
   const vCfg = config.storage.local.vacuum;
   const vacuum = new StorageVacuum(storage, logger, { storageRoot: storage.getRoot(), compressAfterMs: stageMs(vCfg.compress_after_days, vCfg.compress_after_minutes), compressQuality: vCfg.compress_quality, thumbnailAfterMs: stageMs(vCfg.thumbnail_after_days, vCfg.thumbnail_after_minutes), thumbnailMaxDim: vCfg.thumbnail_max_dim, deleteAfterMs: stageMs(vCfg.delete_after_days, vCfg.delete_after_minutes), batchSize: vCfg.batch_size });
+  const backupService = new BackupService(storage, logger, config, dataDir);
 
   const activityCoalescer = new ActivityCoalescer(bus, logger.child('coalescer'), async () => {
     if (await hasActiveIndexMaintenanceLock(dataDir)) return;
@@ -206,6 +211,7 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
   if (config.hooks?.enabled !== false) {
     for (const ref of config.hooks?.plugins ?? []) {
       if (ref.enabled === false) continue;
+      if (REMOVED_HOOK_PLUGIN_NAMES.has(ref.name)) continue;
       try {
         const plugin = await registry.loadHook(ref.name, baseCtx({ ...ref }));
         await captureHooks.register(plugin);
@@ -245,7 +251,7 @@ export async function buildOrchestrator(logger: Logger, opts: OrchestratorOption
     }
   }
 
-  handlesRef = { capture, storage, model, indexerModel, strategy, exports, scheduler, bus, config, logger, loaded, registry, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, eventExtractor, embeddingWorker, vacuum, loadGuard, activityCoalescer, idlePowerCatchup, captureHooks, hookWidgetManifests };
+  handlesRef = { capture, storage, model, indexerModel, strategy, exports, scheduler, bus, config, logger, loaded, registry, frameBuilder, ocrWorker, audioTranscriptWorker, entityResolver, sessionBuilder, meetingBuilder, meetingSummarizer, eventExtractor, embeddingWorker, vacuum, loadGuard, activityCoalescer, idlePowerCatchup, backupService, captureHooks, hookWidgetManifests };
   return handlesRef;
 }
 
@@ -422,6 +428,7 @@ export function scheduleAll(h: OrchestratorHandles) {
   h.scheduler.every(JOBS.EVENT_EXTRACTOR, INTERVALS.EVENT, skipLock(JOBS.EVENT_EXTRACTOR, () => h.eventExtractor.tick().catch(() => {})));
   h.scheduler.every(JOBS.EMBEDDING_WORKER, Math.max(60000, h.config.index.embeddings.tick_interval_min * 60000), skipLock(JOBS.EMBEDDING_WORKER, guard(JOBS.EMBEDDING_WORKER, async () => { if (h.config.system.background_model_jobs === 'scheduled') await h.embeddingWorker.tick().catch(() => {}); })));
   h.scheduler.every(JOBS.VACUUM, Math.max(60000, h.config.storage.local.vacuum.tick_interval_min * 60000), skipLock(JOBS.VACUUM, guard(JOBS.VACUUM, () => h.vacuum.tick().catch(() => {}))));
+  h.scheduler.every(JOBS.CLOUD_BACKUP, Math.max(60000, h.config.backup.tick_interval_min * 60000), skipLock(JOBS.CLOUD_BACKUP, () => h.backupService.tick().catch(() => {})));
   h.scheduler.every(JOBS.STORAGE_MAINTENANCE, INTERVALS.STORAGE_MAINT, skipLock(JOBS.STORAGE_MAINTENANCE, async () => { if (h.loadGuard.check(JOBS.STORAGE_MAINTENANCE, { requireAcPower: true, allowForced: false }).proceed) await h.storage.runMaintenance().catch(() => {}); }));
   if (h.config.storage.local.retention_days > 0) h.scheduler.every(JOBS.STORAGE_RETENTION, INTERVALS.RETENTION, skipLock(JOBS.STORAGE_RETENTION, async () => { if (h.loadGuard.check(JOBS.STORAGE_RETENTION, { requireAcPower: true, allowForced: false }).proceed) await h.storage.deleteOldData(h.config.storage.local.retention_days).catch(() => {}); }));
   h.scheduler.every(JOBS.INCREMENTAL, h.config.index.incremental_interval_min * 60000, skipLock(JOBS.INCREMENTAL, guard(JOBS.INCREMENTAL, async () => { if (h.config.system.background_model_jobs === 'scheduled') await runIncremental(h).catch(() => {}); })));

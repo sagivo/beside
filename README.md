@@ -607,24 +607,14 @@ Two input envelopes:
 - **`audio`** — transcribed text + audio metadata (and audio bytes when
   the file is still on disk).
 
-Two built-in example hooks ship in `plugins/hook/`:
-
-| Hook | Triggers on | Output |
-|---|---|---|
-| `calendar` | Apple Calendar, Fantastical, Google Calendar, Outlook web/desktop, iCloud, Notion Calendar, Cal.com, Cron, Amie, BusyCal. | `events` collection: `{ title, starts_at, ends_at, attendees, location, context }` rows. Rendered with the built-in `calendar` widget. |
-| `followups` | Slack, Discord, Microsoft Teams, Apple Mail, Gmail, Outlook, Spark, Superhuman, plus meeting transcripts (`audio`). | `followups` collection: `{ title, body, urgency, category }` rows. Rendered with the built-in `followups` widget. |
-
-Hooks are enabled by default. Disable a single hook, or all of them, in
-`config.yaml`:
+No hook plugins are enabled by default. Add config-only hooks under
+`hooks.definitions`, or drop plugin hooks into `plugins/hook/` and reference
+them from `config.yaml`:
 
 ```yaml
 hooks:
   enabled: true
-  plugins:
-    - name: calendar
-      enabled: true
-    - name: followups
-      enabled: true
+  plugins: []
 ```
 
 ### Writing a config-only hook
@@ -632,7 +622,7 @@ hooks:
 The fastest way to add a hook is to declare it in `config.yaml`. No
 plugin code required — the engine runs an LLM call with your prompt and
 stores the JSON result in the chosen collection. Pick one of the built-in
-widgets (`calendar`, `followups`, `list`, `json`) to render the records:
+widgets (`list`, `json`) to render the records:
 
 ```yaml
 hooks:
@@ -734,7 +724,7 @@ their compiled `dist/` output.
 ### Custom React widgets
 
 Each hook can opt into a built-in widget by setting
-`widget.builtin = "calendar" | "followups" | "list" | "json"`, or ship a
+`widget.builtin = "list" | "json"`, or ship a
 fully custom React component by pointing `widget.bundlePath` at a
 compiled JS file inside the plugin folder. The bundle is loaded by the
 desktop renderer and must register itself via `defineWidget`:
@@ -771,7 +761,7 @@ keyed by `(hook_id, collection, id)`:
 | Column | Purpose |
 |---|---|
 | `hook_id` | The hook that owns the record. Enforced by the host on every read/write. |
-| `collection` | Logical "table name" the hook chose (e.g. `events`, `followups`). |
+| `collection` | Logical "table name" the hook chose (e.g. `records`, `threads`). |
 | `id` | Stable id; same `(hook_id, collection, id)` upserts instead of inserting twice. |
 | `data_json` | JSON payload the hook produced. |
 | `evidence_ids_json` | Source event / frame ids — used by the host when frames are deleted (privacy / retention) to prune the hook's records. |
@@ -941,9 +931,7 @@ beside/
     ├── export/
     │   ├── markdown/           Default export — mirror to ~/.beside/export/markdown.
     │   └── mcp/                Built-in MCP server on 127.0.0.1:3456.
-    └── hook/
-        ├── calendar/           Extract calendar events from calendar surfaces.
-        └── followups/          Extract follow-ups from chat / email / transcripts.
+    └── hook/                   Drop custom hook plugins here.
 ```
 
 ### Adding a plugin
@@ -993,7 +981,7 @@ Beside is usable today as a local-first desktop app plus CLI/runtime:
 | Storage | `plugins/storage/local/` is the default local JSONL + SQLite store under `~/.beside`. |
 | Models | Ollama is the default local model adapter; OpenAI-compatible hosted APIs are available through the `openai` plugin. |
 | Index/export | The Karpathy wiki strategy, Markdown export, built-in MCP server, semantic embeddings, full re-index, and raw-event replay are implemented. |
-| Hooks/widgets | Capture hooks and dashboard widgets ship with calendar and follow-up examples under `plugins/hook/`. |
+| Hooks/widgets | Capture hook infrastructure and dashboard widget hosting are implemented for custom hooks. |
 | Cloud storage | The `IStorage` interface is stable, but this repo currently ships only the local storage plugin. |
 
 GitHub Actions are intentionally disabled for now. Desktop releases are signed

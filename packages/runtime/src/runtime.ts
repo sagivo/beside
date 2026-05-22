@@ -10,7 +10,7 @@ import {
   writeDefaultConfigIfMissing,
 } from '@beside/core';
 import type {
-  ActivitySession, CaptureStatus, CaptureHookDefinition, DayEvent, DayEventKind, ExportStatus, Frame,
+  ActivitySession, BackupRestoreResult, BackupRunResult, BackupStatus, CaptureStatus, CaptureHookDefinition, DayEvent, DayEventKind, ExportStatus, Frame,
   FrameQuery, HookRecord, HookRecordQuery, IndexState, Logger, Meeting, ModelInfo, RawEvent, StorageStats,
 } from '@beside/interfaces';
 import { renderJournalMarkdown } from '@beside/interfaces';
@@ -39,6 +39,7 @@ export interface RuntimeOverview {
   storageRoot: string;
   capture: CaptureStatus;
   storage: StorageStats;
+  backup: BackupStatus;
   index: IndexState & { categories: RuntimeIndexCategory[] };
   indexing: RuntimeIndexingStatus;
   model: { name: string; isLocal: boolean; ready: boolean; provider: string; roles: RuntimeModelRole[] };
@@ -344,6 +345,7 @@ export class BesideRuntime {
       } catch {}
 
       const storage = await timed('storageStats', () => handles.storage.getStats());
+      const backup = await timed('backupStatus', () => handles.backupService.getStatus(storage));
       const index = await timed('indexState', () => handles.strategy.getState());
       const categories = await timed('indexCategories', () => readIndexCategories(index.rootPath).catch(() => []));
       const indexing = await timed('indexingStatus', () => getIndexingStatus(handles, this.manualJob, this.lastManualJobCompletedAt));
@@ -358,7 +360,7 @@ export class BesideRuntime {
 
       return {
         status: this.status, configPath: handles.loaded.sourcePath, dataDir: handles.loaded.dataDir,
-        storageRoot: handles.storage.getRoot(), capture, storage, index: { ...index, categories },
+        storageRoot: handles.storage.getRoot(), capture, storage, backup, index: { ...index, categories },
         indexing, model: buildRuntimeModelOverview(handles.config, modelInfo, ready), exports, backgroundJobs,
         system: {
           load: loadSnapshot.normalised, memory: loadSnapshot.memory, power: loadSnapshot.power,
@@ -406,6 +408,32 @@ export class BesideRuntime {
       const recentEntities = await handles.storage.listEntities({ limit: 10 }).catch(() => []);
       return { overview, journalDays, entities: { total: recentEntities.length, recent: recentEntities } };
     });
+  }
+
+  async getBackupStatus(): Promise<BackupStatus> {
+    return await this.withHandles((handles) => handles.backupService.getStatus());
+  }
+
+  async triggerBackup(): Promise<BackupRunResult> {
+    const result = await this.withHandles((handles) => handles.backupService.tick());
+    this.invalidateOverview();
+    return result;
+  }
+
+  async restoreBackups(limit?: number): Promise<BackupRestoreResult> {
+    const result = await this.withHandles((handles) => handles.backupService.restoreEvicted(limit));
+    this.invalidateOverview();
+    return result;
+  }
+
+  async startBackupProviderConnect(provider?: 'drive' | 'box'): Promise<{ url: string; expiresAt: string }> {
+    return await this.withHandles((handles) => handles.backupService.startProviderConnect(provider));
+  }
+
+  async disconnectBackupProvider(provider?: 'drive' | 'box'): Promise<{ disconnected: true }> {
+    await this.withHandles((handles) => handles.backupService.disconnectProvider(provider));
+    this.invalidateOverview();
+    return { disconnected: true };
   }
 
   async runDoctor(): Promise<RuntimeDoctorCheck[]> {

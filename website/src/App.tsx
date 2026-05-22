@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import "./styles.css";
 import DocsPage from "./docs/DocsPage";
+import LegalPage from "./legal/LegalPage";
+import { findLegalPage } from "./legal/pages";
 
 const LATEST_RELEASE_URL = "https://github.com/sagivo/beside/releases/tag/v0.0.3";
 const DOWNLOAD_ARM_URL = "https://github.com/sagivo/beside/releases/download/v0.0.3/Beside-0.0.3-mac-arm64.dmg";
@@ -8,9 +10,14 @@ const DOWNLOAD_INTEL_URL = LATEST_RELEASE_URL;
 
 export default function App({ initialPath }: { initialPath?: string } = {}) {
   const pathname = initialPath ?? (typeof window === "undefined" ? "/" : window.location.pathname);
+  const legalPage = findLegalPage(pathname);
 
   if (pathname.startsWith("/docs")) {
     return <DocsPage pathname={pathname} />;
+  }
+
+  if (legalPage) {
+    return <LegalPage page={legalPage} />;
   }
 
   return <LandingPage />;
@@ -452,10 +459,11 @@ function LandingPage() {
       <footer>
         <div className="container footer-inner">
           <div>© {new Date().getFullYear()} beside · Local-first AI memory.</div>
-          <div style={{ display: "flex", gap: 22 }}>
+          <div className="footer-links">
             <a href="https://github.com/sagivo/beside">GitHub</a>
             <a href="/privacy">Privacy</a>
-            <a href="mailto:hello@beside.ai">Contact</a>
+            <a href="/terms">Terms</a>
+            <a href="mailto:hello@beside.so">Contact</a>
           </div>
         </div>
       </footer>

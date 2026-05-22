@@ -4,6 +4,8 @@ import {
   HelpCircle,
   LayoutDashboard,
   NotebookPen,
+  Pause,
+  Play,
   Plug,
   Search,
   Settings,
@@ -50,12 +52,16 @@ export function Sidebar({
   onChange,
   overview,
   onOpenCommand,
+  onPause,
+  onResume,
   helpHasUnread = false,
 }: {
   screen: Screen;
   onChange: (next: Screen) => void;
   overview: RuntimeOverview | null;
   onOpenCommand: () => void;
+  onPause?: () => Promise<void> | void;
+  onResume?: () => Promise<void> | void;
   helpHasUnread?: boolean;
 }) {
   const { collapsed, toggle } = useSidebar();
@@ -198,9 +204,9 @@ export function Sidebar({
         )}
       >
         {collapsed ? (
-          <CollapsedStatusDot overview={overview} />
+          <CollapsedStatusDot overview={overview} onPause={onPause} onResume={onResume} />
         ) : (
-          <StatusFooter overview={overview} />
+          <StatusFooter overview={overview} onPause={onPause} onResume={onResume} />
         )}
       </div>
     </aside>
@@ -273,31 +279,54 @@ function NavButton({
   );
 }
 
-function CollapsedStatusDot({ overview }: { overview: RuntimeOverview | null }) {
+function CollapsedStatusDot({
+  overview,
+  onPause,
+  onResume,
+}: {
+  overview: RuntimeOverview | null;
+  onPause?: () => Promise<void> | void;
+  onResume?: () => Promise<void> | void;
+}) {
   const captureLive = !!overview?.capture.running && !overview.capture.paused;
   const capturePaused = !!overview?.capture.running && !!overview.capture.paused;
   const indexing = !!overview?.indexing.running;
+  const actionable = captureLive || capturePaused;
+  const title = indexing
+    ? 'Indexing'
+    : captureLive
+      ? 'Pause capture (⌘.)'
+      : capturePaused
+        ? 'Resume capture (⌘.)'
+        : 'Not capturing';
+  const dotClass = cn(
+    'block size-2 rounded-full',
+    indexing
+      ? 'bg-primary animate-pulse'
+      : captureLive
+        ? 'bg-success animate-pulse'
+        : capturePaused
+          ? 'bg-warning'
+          : 'bg-muted-foreground/40',
+  );
+
+  if (!actionable) return <span title={title} className={dotClass} />;
+
   return (
-    <span
-      title={
-        indexing
-          ? 'Indexing'
-          : captureLive
-            ? 'Capturing'
-            : capturePaused
-              ? 'Paused'
-              : 'Not capturing'
-      }
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={() => (captureLive ? void onPause?.() : void onResume?.())}
       className={cn(
-        'block size-2 rounded-full',
-        indexing
-          ? 'bg-primary animate-pulse'
-          : captureLive
-            ? 'bg-success animate-pulse'
-            : capturePaused
-              ? 'bg-warning'
-              : 'bg-muted-foreground/40',
+        'grid size-7 place-items-center rounded-md border transition-colors',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40',
+        captureLive
+          ? 'border-success/35 bg-success/10 hover:bg-success/20'
+          : 'border-warning/40 bg-warning/15 hover:bg-warning/25',
       )}
-    />
+    >
+      {captureLive ? <Pause className="size-3" /> : <Play className="size-3" />}
+    </button>
   );
 }

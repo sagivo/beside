@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { AlertTriangle, Ban, Globe2, Loader2, LockKeyhole, Pause, Play, Plus, RefreshCcw, ShieldCheck, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Ban, Globe2, Loader2, LockKeyhole, Play, Plus, RefreshCcw, ShieldCheck, Trash2, X } from 'lucide-react';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,7 @@ import { domainFromUrl, normalizeDomainInput } from '@/lib/url';
 import { cn } from '@/lib/utils';
 import type { Frame, LoadedConfig, RuntimeOverview } from '@/global';
 
-export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onStart, onPause, onResume }: any) {
+export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onStart }: any) {
   const [recentFrames, setRecentFrames] = React.useState<Frame[]>([]), [loadingRecent, setLoadingRecent] = React.useState(false), [saving, setSaving] = React.useState(false), [deleting, setDeleting] = React.useState(false);
   const [appDraft, setAppDraft] = React.useState(''), [urlDraft, setUrlDraft] = React.useState(''), [keywordDraft, setKeywordDraft] = React.useState(''), [blurPasswordFields, setBlurPasswordFields] = React.useState(true), [pauseOnScreenLock, setPauseOnScreenLock] = React.useState(true), [purgeApp, setPurgeApp] = React.useState(''), [purgeDomain, setPurgeDomain] = React.useState('');
 
@@ -55,7 +55,7 @@ export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onSt
   return (
     <div className="flex flex-col gap-6 pt-6 pb-12">
       <PageHeader title="Privacy" description="Control what Beside remembers." actions={<Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCcw />Refresh</Button>} />
-      <CaptureControl live={captureLive} paused={capturePaused} eventsToday={overview?.capture.eventsToday ?? 0} totalBytes={overview?.storage.totalAssetBytes ?? 0} onStart={onStart} onPause={onPause} onResume={onResume} />
+      <CaptureControl live={captureLive} paused={capturePaused} eventsToday={overview?.capture.eventsToday ?? 0} totalBytes={overview?.storage.totalAssetBytes ?? 0} onStart={onStart} />
 
       <Card><CardContent className="flex flex-col gap-5">
         <SectionTitle icon={<Ban />} title="Ignore Rules" description="Apps and sites skipped." />
@@ -85,14 +85,14 @@ export function Privacy({ config, overview, onRefresh, onSaved, onOverview, onSt
   );
 }
 
-function CaptureControl({ live, paused, eventsToday, totalBytes, onStart, onPause, onResume }: any) {
+function CaptureControl({ live, paused, eventsToday, totalBytes, onStart }: any) {
   return (
     <Card><CardContent className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
       <div className="flex items-start gap-3">
         <div className={cn('grid size-10 place-items-center rounded-lg', live ? 'bg-success/15 text-success' : paused ? 'bg-warning/15 text-warning' : 'bg-muted text-muted-foreground')}><ShieldCheck className="size-5" /></div>
         <div><div className="flex items-center gap-2"><h2 className="font-semibold">Capture Guard</h2><Badge variant={live ? 'success' : paused ? 'warning' : 'muted'}>{live ? 'Capturing' : paused ? 'Paused' : 'Off'}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{formatNumber(eventsToday)} moments today · {formatBytes(totalBytes)} stored locally</p></div>
       </div>
-      <div className="flex gap-2">{!live && !paused && <Button onClick={onStart}><Play />Start</Button>}{live && <Button variant="outline" onClick={onPause}><Pause />Pause</Button>}{paused && <Button onClick={onResume}><Play />Resume</Button>}</div>
+      <div className="flex gap-2">{!live && !paused && <Button onClick={onStart}><Play />Start</Button>}</div>
     </CardContent></Card>
   );
 }

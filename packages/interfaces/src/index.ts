@@ -96,6 +96,75 @@ export interface StorageStats {
   eventsByApp: Record<string, number>;
 }
 
+export type BackupObjectKind = 'asset';
+export type BackupObjectStatus = 'pending' | 'uploading' | 'uploaded' | 'failed' | 'evicted' | 'restoring';
+export type BackupProvider = 'drive' | 'box';
+
+export interface BackupObjectCandidate {
+  id: string;
+  kind: BackupObjectKind;
+  localPath: string;
+  frameIds: string[];
+  contentHash: string;
+  plaintextBytes: number;
+  updatedAt: string;
+}
+
+export interface BackupObjectRecord extends BackupObjectCandidate {
+  encryptedHash: string | null;
+  encryptedBytes: number | null;
+  remoteKey: string | null;
+  status: BackupObjectStatus;
+  uploadedAt: string | null;
+  evictedAt: string | null;
+  restoredAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+}
+
+export interface BackupStoreStats {
+  pendingObjects: number;
+  uploadedObjects: number;
+  evictedObjects: number;
+  failedObjects: number;
+  remoteBytes: number;
+  lastUploadedAt: string | null;
+  lastError: string | null;
+}
+
+export interface BackupStatus {
+  enabled: boolean;
+  provider: BackupProvider;
+  configured: boolean;
+  connected: boolean;
+  mode: 'disabled' | 'needs_provider_config' | 'needs_connection' | 'ready' | 'error';
+  remoteLabel: string | null;
+  localMaxBytes: number;
+  localBytes: number;
+  remoteBytes: number;
+  pendingObjects: number;
+  uploadedObjects: number;
+  evictedObjects: number;
+  failedObjects: number;
+  lastRunAt: string | null;
+  lastUploadedAt: string | null;
+  lastError: string | null;
+}
+
+export interface BackupRunResult {
+  uploaded: number;
+  failed: number;
+  evicted: number;
+  freedBytes: number;
+  skippedReason?: string;
+}
+
+export interface BackupRestoreResult {
+  restored: number;
+  failed: number;
+  bytes: number;
+}
+
 export interface IStorage {
   init(): Promise<void>; write(event: RawEvent): Promise<void>; writeAsset(assetPath: string, data: Buffer): Promise<void>; readEvents(query: StorageQuery): Promise<RawEvent[]>; countEvents(query: StorageQuery): Promise<number>; readAsset(assetPath: string): Promise<Buffer>; listDays(): Promise<string[]>; getStats(): Promise<StorageStats>; isAvailable(): Promise<boolean>;
   markIndexed(strategy: string, eventIds: string[]): Promise<void>; clearIndexCheckpoint(strategy: string): Promise<void>; getIndexCheckpoint(strategy: string): Promise<string | null>; getRoot(): string;
@@ -116,6 +185,18 @@ export interface IStorage {
   hookDelete?(hookId: string, collection: string, id: string): Promise<void>;
   hookList?(hookId: string, query?: HookRecordQuery): Promise<HookRecord[]>;
   hookClear?(hookId: string, collection?: string): Promise<{ removed: number }>;
+
+  // Cloud backup support. Implemented by local storage; optional so older
+  // third-party storage plugins still load.
+  listBackupCandidates?(limit: number): Promise<BackupObjectCandidate[]>;
+  markBackupUploading?(candidate: BackupObjectCandidate): Promise<void>;
+  markBackupUploaded?(input: { id: string; encryptedHash: string; encryptedBytes: number; remoteKey: string; uploadedAt: string }): Promise<void>;
+  markBackupFailed?(id: string, error: string): Promise<void>;
+  getBackupObject?(id: string): Promise<BackupObjectRecord | null>;
+  listEvictedBackupObjects?(limit: number): Promise<BackupObjectRecord[]>;
+  getBackupStoreStats?(): Promise<BackupStoreStats>;
+  evictBackedUpAssets?(localMaxBytes: number, batchSize: number): Promise<{ evicted: number; freedBytes: number }>;
+  restoreBackedUpAsset?(id: string, data: Buffer): Promise<{ restoredPath: string; bytes: number }>;
 }
 
 export interface ModelInfo { name: string; contextWindowTokens: number; isLocal: boolean; supportsVision: boolean; costPerMillionTokens: number; }
@@ -221,7 +302,7 @@ export interface CaptureHookWidgetManifest {
   /** Absolute path (or path relative to the plugin root) to the compiled React bundle. */
   bundlePath?: string;
   /** Renderer-defined built-in widget kind, when no React bundle is shipped. */
-  builtin?: 'calendar' | 'followups' | 'list' | 'json';
+  builtin?: 'list' | 'json';
   /** Default collection to fetch records from when the widget loads. */
   defaultCollection?: string;
   placement?: CaptureHookWidgetPlacement;

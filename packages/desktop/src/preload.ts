@@ -10,6 +10,11 @@ function onIpc<T>(channel: string, callback: (payload: T) => void): () => void {
 
 const api = {
   getOverview: () => ipcRenderer.invoke('beside:overview'),
+  getBackupStatus: () => ipcRenderer.invoke('beside:backup-status'),
+  triggerBackup: () => ipcRenderer.invoke('beside:trigger-backup'),
+  restoreBackups: (params?: { limit?: number }) => ipcRenderer.invoke('beside:restore-backups', params),
+  connectBackupProvider: (params: { provider: 'drive' | 'box' }) => ipcRenderer.invoke('beside:connect-backup-provider', params),
+  disconnectBackupProvider: (params: { provider: 'drive' | 'box' }) => ipcRenderer.invoke('beside:disconnect-backup-provider', params),
   runDoctor: () => ipcRenderer.invoke('beside:doctor'),
   readConfig: () => ipcRenderer.invoke('beside:read-config'),
   validateConfig: (config: unknown) => ipcRenderer.invoke('beside:validate-config', config),
@@ -57,6 +62,8 @@ const api = {
   openPermissionSettings: (kind: 'screen' | 'accessibility' | 'microphone' | 'automation') =>
     ipcRenderer.invoke('beside:open-permission-settings', kind),
   relaunchApp: () => ipcRenderer.invoke('beside:relaunch-app'),
+  getAppUpdateReady: () => ipcRenderer.invoke('beside:get-app-update-ready'),
+  installAppUpdate: () => ipcRenderer.invoke('beside:install-app-update'),
   getOnboardingComplete: (): Promise<boolean> => ipcRenderer.invoke('beside:get-onboarding-complete'),
   setOnboardingComplete: (done: boolean): Promise<boolean> => ipcRenderer.invoke('beside:set-onboarding-complete', done),
   onDesktopLogs: (callback: (logs: string) => void) => {
@@ -70,6 +77,9 @@ const api = {
   },
   onOverview: (callback: (overview: unknown) => void) => {
     return onIpc('beside:overview', callback);
+  },
+  onAppUpdateReady: (callback: (info: unknown) => void) => {
+    return onIpc('beside:app-update-ready', callback);
   },
   onChatStream: (callback: (event: unknown) => void) => {
     return onIpc('beside:chat-stream', callback);

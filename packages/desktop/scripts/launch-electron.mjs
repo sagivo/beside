@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const desktopRoot = path.resolve(import.meta.dirname, '..');
 const appName = 'Beside';
 const macBundleIdentifier = 'so.beside.desktop.dev';
+const macBundleCategory = 'public.app-category.productivity';
 
 function execFileAsync(command, args) {
   return new Promise((resolve, reject) => {
@@ -33,20 +34,60 @@ async function setPlistString(plistPath, key, value) {
   }
 }
 
+function run(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? desktopRoot,
+      stdio: options.stdio ?? 'inherit',
+    });
+    child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`${command} exited ${code}`)));
+    child.on('error', reject);
+  });
+}
+
+async function readDesktopVersion() {
+  const pkg = JSON.parse(await fs.readFile(path.join(desktopRoot, 'package.json'), 'utf8'));
+  return pkg.version;
+}
+
+async function ensureMacDevIcon() {
+  const source = path.join(desktopRoot, 'assets', 'icon.png');
+  const icon = path.join(desktopRoot, 'build', 'icon.icns');
+
+  try {
+    const [sourceStat, iconStat] = await Promise.all([fs.stat(source), fs.stat(icon)]);
+    if (iconStat.mtimeMs >= sourceStat.mtimeMs) return icon;
+  } catch {
+    // Fall through and rebuild the generated icon resources.
+  }
+
+  await run(process.execPath, [path.join(desktopRoot, 'scripts', 'build-icons.mjs')]);
+  await fs.access(icon);
+  return icon;
+}
+
 async function prepareMacDevApp(electronExecutable) {
   const sourceApp = findMacAppBundle(electronExecutable);
   if (!sourceApp) return electronExecutable;
 
   const electronVersion = require('electron/package.json').version;
+  const appVersion = await readDesktopVersion();
+  const iconSource = await ensureMacDevIcon();
+  const iconStat = await fs.stat(iconSource);
   const targetRoot = path.join(desktopRoot, 'build', 'dev-app');
   const targetApp = path.join(targetRoot, `${appName}.app`);
   const markerPath = path.join(targetRoot, '.electron-source.json');
   const targetExecutable = path.join(targetApp, 'Contents', 'MacOS', path.basename(electronExecutable));
+  const targetResources = path.join(targetApp, 'Contents', 'Resources');
+  const targetIcon = path.join(targetResources, 'icon.icns');
   const expectedMarker = {
     electronVersion,
     sourceApp,
     appName,
+    appVersion,
     bundleIdentifier: macBundleIdentifier,
+    iconMtimeMs: iconStat.mtimeMs,
+    iconSize: iconStat.size,
     copyMode: 'verbatim-symlinks-v1',
   };
 
@@ -66,6 +107,11 @@ async function prepareMacDevApp(electronExecutable) {
   await setPlistString(plistPath, 'CFBundleName', appName);
   await setPlistString(plistPath, 'CFBundleDisplayName', appName);
   await setPlistString(plistPath, 'CFBundleIdentifier', macBundleIdentifier);
+  await setPlistString(plistPath, 'CFBundleShortVersionString', appVersion);
+  await setPlistString(plistPath, 'CFBundleVersion', appVersion);
+  await setPlistString(plistPath, 'CFBundleIconFile', 'icon.icns');
+  await setPlistString(plistPath, 'LSApplicationCategoryType', macBundleCategory);
+  await fs.copyFile(iconSource, targetIcon);
 
   await fs.writeFile(markerPath, `${JSON.stringify(expectedMarker, null, 2)}\n`, 'utf8');
   return targetExecutable;

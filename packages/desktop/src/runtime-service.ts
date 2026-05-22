@@ -216,6 +216,29 @@ async function handle(req: Request): Promise<unknown> {
     }
     case 'overview':
       return await runtime.getOverview();
+    case 'backupStatus':
+      return await runtime.getBackupStatus();
+    case 'triggerBackup': {
+      const result = await runtime.triggerBackup();
+      void pushOverview('full');
+      return result;
+    }
+    case 'restoreBackups': {
+      const params = (req.params ?? {}) as { limit?: number };
+      const result = await runtime.restoreBackups(typeof params.limit === 'number' ? params.limit : undefined);
+      void pushOverview('full');
+      return result;
+    }
+    case 'startBackupProviderConnect': {
+      const params = (req.params ?? {}) as { provider?: 'drive' | 'box' };
+      return await runtime.startBackupProviderConnect(params.provider);
+    }
+    case 'disconnectBackupProvider': {
+      const params = (req.params ?? {}) as { provider?: 'drive' | 'box' };
+      const result = await runtime.disconnectBackupProvider(params.provider);
+      void pushOverview('full');
+      return result;
+    }
     case 'setHeartbeat': {
       // Main process tells us whether the desktop window is visible;
       // we slow the broadcast cadence to 60s when no UI is consuming the

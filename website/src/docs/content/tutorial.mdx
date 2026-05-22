@@ -141,18 +141,30 @@ work.
 
 ## Step 6 — Add a hook for proactive surfacing
 
-Follow-ups are the easiest valuable hook to enable. Make sure it’s on:
+Hooks start empty by default. Add an inline definition when you want Beside to
+extract a signal from matching captures:
 
 ```yaml
 hooks:
   enabled: true
-  plugins:
-    - { name: calendar, enabled: true }
-    - { name: followups, enabled: true }
+  plugins: []
+  definitions:
+    - id: pricing-decisions
+      title: Pricing Decisions
+      match:
+        inputKinds: [screen]
+        textIncludes: [pricing]
+      outputCollection: records
+      systemPrompt: |
+        Extract pricing decisions from this captured screen.
+        Return JSON: {"items":[{"title":string,"body":string}]}
+      widget:
+        builtin: list
+        title: Pricing Decisions
+        defaultCollection: records
 ```
 
-Now anything that looks like an open thread in Slack, Teams, Gmail, Outlook,
-or Apple Mail gets stored as a `followup` record and rendered on the desktop
+Now matching screens can be stored as hook records and rendered on the desktop
 dashboard.
 
 For a domain-specific watcher — say "any pricing decision mentioned this
@@ -224,8 +236,7 @@ You now have:
   `~/.beside/export/markdown/` for Obsidian, Logseq, Notion imports,
   editors, GitHub, Quartz, or any tool that reads Markdown.
 - An MCP server feeding your agent of choice with grounded context.
-- One built-in hook (follow-ups) and one custom hook (pricing decisions),
-  both visible on the dashboard.
+- Custom hooks that can surface domain-specific signals on the dashboard.
 - A storage policy that won’t silently fill your disk.
 
 From here, the natural next steps are: write an [export plugin](/docs/export/)

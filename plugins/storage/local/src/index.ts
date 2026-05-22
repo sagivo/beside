@@ -5,6 +5,10 @@ import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type {
   IStorage,
+  BackupObjectCandidate,
+  BackupObjectRecord,
+  BackupObjectStatus,
+  BackupStoreStats,
   RawEvent,
   StorageQuery,
   StorageStats,
@@ -96,6 +100,46 @@ interface HookRecordRow {
   content_hash: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface BackupObjectRow {
+  id: string;
+  kind: string;
+  local_path: string;
+  frame_ids_json: string;
+  content_hash: string;
+  plaintext_bytes: number;
+  encrypted_hash: string | null;
+  encrypted_bytes: number | null;
+  remote_key: string | null;
+  status: string;
+  uploaded_at: string | null;
+  evicted_at: string | null;
+  restored_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function backupObjectFromRow(row: BackupObjectRow): BackupObjectRecord {
+  return {
+    id: row.id,
+    kind: row.kind as BackupObjectRecord['kind'],
+    localPath: row.local_path,
+    frameIds: parseJsonStringArray(row.frame_ids_json),
+    contentHash: row.content_hash,
+    plaintextBytes: row.plaintext_bytes,
+    encryptedHash: row.encrypted_hash,
+    encryptedBytes: row.encrypted_bytes,
+    remoteKey: row.remote_key,
+    status: row.status as BackupObjectStatus,
+    uploadedAt: row.uploaded_at,
+    evictedAt: row.evicted_at,
+    restoredAt: row.restored_at,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function hookRecordFromRow(row: HookRecordRow): HookRecord {
@@ -332,6 +376,14 @@ function parseJsonStringArray(raw: string | null | undefined): string[] {
   } catch {
     return [];
   }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function backupObjectId(localPath: string, contentHash: string): string {
+  return `asset_${sha256(`${localPath}\0${contentHash}`).slice(0, 48)}`;
 }
 
 class LocalStorage implements IStorage {
@@ -2376,6 +2428,289 @@ class LocalStorage implements IStorage {
     return out;
   }
 
+  async listBackupCandidates(limit: number): Promise<BackupObjectCandidate[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT asset_path, GROUP_CONCAT(id) AS frame_ids, MAX(timestamp) AS updated_at
+         FROM frames
+         WHERE asset_path IS NOT NULL AND asset_path != ''
+           AND NOT EXISTS (
+             SELECT 1 FROM backup_objects
+             WHERE backup_objects.local_path = frames.asset_path
+               AND backup_objects.status IN ('uploading', 'uploaded', 'evicted', 'restoring')
+           )
+         GROUP BY asset_path
+         ORDER BY MIN(timestamp) ASC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(limit * 4))) as Array<{
+        asset_path: string;
+        frame_ids: string | null;
+        updated_at: string | null;
+      }>;
+
+    const candidates: BackupObjectCandidate[] = [];
+    for (const row of rows) {
+      if (candidates.length >= limit) break;
+      try {
+        const abs = this.absoluteAssetPath(row.asset_path);
+        const data = await fsp.readFile(abs);
+        const contentHash = createHash('sha256').update(data).digest('hex');
+        const id = backupObjectId(row.asset_path, contentHash);
+        const existing = this.db
+          .prepare('SELECT status, content_hash FROM backup_objects WHERE id = ?')
+          .get(id) as { status: string; content_hash: string } | undefined;
+        if (
+          existing?.content_hash === contentHash &&
+          ['uploaded', 'evicted', 'restoring'].includes(existing.status)
+        ) {
+          continue;
+        }
+        candidates.push({
+          id,
+          kind: 'asset',
+          localPath: row.asset_path,
+          frameIds: (row.frame_ids ?? '').split(',').filter(Boolean),
+          contentHash,
+          plaintextBytes: data.byteLength,
+          updatedAt: row.updated_at ?? new Date().toISOString(),
+        });
+      } catch (err) {
+        this.logger.debug('backup candidate skipped', { assetPath: row.asset_path, err: String(err) });
+      }
+    }
+    return candidates;
+  }
+
+  async markBackupUploading(candidate: BackupObjectCandidate): Promise<void> {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO backup_objects (
+          id, kind, local_path, frame_ids_json, content_hash, plaintext_bytes,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'uploading', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          frame_ids_json = excluded.frame_ids_json,
+          plaintext_bytes = excluded.plaintext_bytes,
+          status = 'uploading',
+          last_error = NULL,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        candidate.id,
+        candidate.kind,
+        candidate.localPath,
+        JSON.stringify(candidate.frameIds),
+        candidate.contentHash,
+        candidate.plaintextBytes,
+        now,
+        now,
+      );
+  }
+
+  async markBackupUploaded(input: {
+    id: string;
+    encryptedHash: string;
+    encryptedBytes: number;
+    remoteKey: string;
+    uploadedAt: string;
+  }): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE backup_objects SET
+          encrypted_hash = ?,
+          encrypted_bytes = ?,
+          remote_key = ?,
+          status = 'uploaded',
+          uploaded_at = ?,
+          evicted_at = NULL,
+          last_error = NULL,
+          updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        input.encryptedHash,
+        input.encryptedBytes,
+        input.remoteKey,
+        input.uploadedAt,
+        input.uploadedAt,
+        input.id,
+      );
+  }
+
+  async markBackupFailed(id: string, error: string): Promise<void> {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE backup_objects SET status = 'failed', last_error = ?, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(error.slice(0, 2000), now, id);
+  }
+
+  async getBackupObject(id: string): Promise<BackupObjectRecord | null> {
+    const row = this.db
+      .prepare('SELECT * FROM backup_objects WHERE id = ?')
+      .get(id) as BackupObjectRow | undefined;
+    return row ? backupObjectFromRow(row) : null;
+  }
+
+  async listEvictedBackupObjects(limit: number): Promise<BackupObjectRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM backup_objects
+         WHERE status = 'evicted' AND remote_key IS NOT NULL
+         ORDER BY evicted_at DESC, uploaded_at DESC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(limit))) as BackupObjectRow[];
+    return rows.map(backupObjectFromRow);
+  }
+
+  async getBackupStoreStats(): Promise<BackupStoreStats> {
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS n, COALESCE(SUM(encrypted_bytes), 0) AS bytes
+         FROM backup_objects
+         GROUP BY status`,
+      )
+      .all() as Array<{ status: string; n: number; bytes: number }>;
+    const out: BackupStoreStats = {
+      pendingObjects: 0,
+      uploadedObjects: 0,
+      evictedObjects: 0,
+      failedObjects: 0,
+      remoteBytes: 0,
+      lastUploadedAt: null,
+      lastError: null,
+    };
+    for (const row of rows) {
+      if (row.status === 'pending' || row.status === 'uploading') out.pendingObjects += row.n;
+      if (row.status === 'uploaded') out.uploadedObjects += row.n;
+      if (row.status === 'evicted') out.evictedObjects += row.n;
+      if (row.status === 'failed') out.failedObjects += row.n;
+      if (row.status === 'uploaded' || row.status === 'evicted') out.remoteBytes += row.bytes;
+    }
+    const uploaded = this.db
+      .prepare('SELECT MAX(uploaded_at) AS uploaded_at FROM backup_objects')
+      .get() as { uploaded_at: string | null } | undefined;
+    const failed = this.db
+      .prepare(
+        `SELECT last_error FROM backup_objects
+         WHERE last_error IS NOT NULL
+         ORDER BY updated_at DESC LIMIT 1`,
+      )
+      .get() as { last_error: string | null } | undefined;
+    out.lastUploadedAt = uploaded?.uploaded_at ?? null;
+    out.lastError = failed?.last_error ?? null;
+    return out;
+  }
+
+  async evictBackedUpAssets(
+    localMaxBytes: number,
+    batchSize: number,
+  ): Promise<{ evicted: number; freedBytes: number }> {
+    const stats = await this.getStats();
+    if (stats.totalBytes <= localMaxBytes) return { evicted: 0, freedBytes: 0 };
+
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM backup_objects
+         WHERE status = 'uploaded' AND remote_key IS NOT NULL
+         ORDER BY uploaded_at ASC, created_at ASC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.floor(batchSize))) as BackupObjectRow[];
+
+    let currentBytes = stats.totalBytes;
+    let evicted = 0;
+    let freedBytes = 0;
+    for (const row of rows) {
+      if (currentBytes <= localMaxBytes) break;
+      const abs = this.absoluteAssetPath(row.local_path);
+      let size = 0;
+      try {
+        size = (await fsp.stat(abs)).size;
+      } catch {
+        size = row.plaintext_bytes;
+      }
+
+      const currentFrameIds = (
+        this.db
+          .prepare('SELECT id FROM frames WHERE asset_path = ?')
+          .all(row.local_path) as Array<{ id: string }>
+      ).map((r) => r.id);
+      const frameIds = uniqueStrings([...parseJsonStringArray(row.frame_ids_json), ...currentFrameIds]);
+      const now = new Date().toISOString();
+      const tx = this.db.transaction(() => {
+        this.db
+          .prepare(
+            `UPDATE frames SET asset_path = NULL, vacuum_tier = 'deleted'
+             WHERE asset_path = ?`,
+          )
+          .run(row.local_path);
+        this.db
+          .prepare(
+            `UPDATE backup_objects SET status = 'evicted', evicted_at = ?, frame_ids_json = ?, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(now, JSON.stringify(frameIds), now, row.id);
+      });
+      tx();
+
+      try {
+        await fsp.unlink(abs);
+      } catch {
+        // The metadata move above is the important bit. Missing files are
+        // common after manual cleanup or previous failed eviction attempts.
+      }
+      evicted += 1;
+      freedBytes += size;
+      currentBytes -= size;
+    }
+    if (evicted > 0) this.invalidateAssetBytesCache();
+    return { evicted, freedBytes };
+  }
+
+  async restoreBackedUpAsset(
+    id: string,
+    data: Buffer,
+  ): Promise<{ restoredPath: string; bytes: number }> {
+    const row = this.db
+      .prepare('SELECT * FROM backup_objects WHERE id = ?')
+      .get(id) as BackupObjectRow | undefined;
+    if (!row) throw new Error(`backup object not found: ${id}`);
+    const actualHash = createHash('sha256').update(data).digest('hex');
+    if (actualHash !== row.content_hash) throw new Error('restored asset hash mismatch');
+
+    const abs = this.absoluteAssetPath(row.local_path);
+    await ensureDir(path.dirname(abs));
+    await fsp.writeFile(abs, data);
+    const frameIds = parseJsonStringArray(row.frame_ids_json);
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      if (frameIds.length > 0) {
+        const placeholders = frameIds.map(() => '?').join(',');
+        this.db
+          .prepare(
+            `UPDATE frames SET asset_path = ?, vacuum_tier = COALESCE(NULLIF(vacuum_tier, 'deleted'), 'compressed')
+             WHERE id IN (${placeholders})`,
+          )
+          .run(row.local_path, ...frameIds);
+      }
+      this.db
+        .prepare(
+          `UPDATE backup_objects SET status = 'uploaded', evicted_at = NULL, restored_at = ?, updated_at = ?, last_error = NULL
+           WHERE id = ?`,
+        )
+        .run(now, now, id);
+    });
+    tx();
+    this.invalidateAssetBytesCache();
+    return { restoredPath: row.local_path, bytes: data.byteLength };
+  }
+
   async deleteAssetIfUnreferenced(assetPath: string): Promise<void> {
     await this.unlinkAsset(assetPath);
   }
@@ -4231,6 +4566,29 @@ class LocalStorage implements IStorage {
         ON hook_records(hook_id, collection, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_hook_records_evidence
         ON hook_records(evidence_ids_json);
+
+      CREATE TABLE IF NOT EXISTS backup_objects (
+        id                  TEXT PRIMARY KEY,
+        kind                TEXT NOT NULL,
+        local_path          TEXT NOT NULL,
+        frame_ids_json      TEXT NOT NULL DEFAULT '[]',
+        content_hash        TEXT NOT NULL,
+        plaintext_bytes     INTEGER NOT NULL DEFAULT 0,
+        encrypted_hash      TEXT,
+        encrypted_bytes     INTEGER,
+        remote_key          TEXT,
+        status              TEXT NOT NULL DEFAULT 'pending',
+        uploaded_at         TEXT,
+        evicted_at          TEXT,
+        restored_at         TEXT,
+        last_error          TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_backup_objects_status
+        ON backup_objects(status, uploaded_at);
+      CREATE INDEX IF NOT EXISTS idx_backup_objects_local_path
+        ON backup_objects(local_path);
     `);
 
     this.runSchemaMigrations();

@@ -85,7 +85,7 @@ export const DOC_PAGES: DocPage[] = [
     path: "/docs/hooks/",
     title: "Capture hooks",
     group: "Layers",
-    description: "React to specific moments — calendar events, follow-ups, custom signals.",
+    description: "React to specific moments with custom signals.",
     Component: Hooks,
   },
   {

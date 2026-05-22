@@ -7,6 +7,11 @@ declare global {
   interface Window {
     beside: {
       getOverview: () => Promise<RuntimeOverview>;
+      getBackupStatus: () => Promise<BackupStatus>;
+      triggerBackup: () => Promise<BackupRunResult>;
+      restoreBackups: (params?: { limit?: number }) => Promise<BackupRestoreResult>;
+      connectBackupProvider: (params: { provider: BackupProvider }) => Promise<{ url: string; expiresAt: string }>;
+      disconnectBackupProvider: (params: { provider: BackupProvider }) => Promise<{ disconnected: true }>;
       runDoctor: () => Promise<DoctorCheck[]>;
       readConfig: () => Promise<LoadedConfig>;
       validateConfig: (config: unknown) => Promise<ConfigValidation>;
@@ -60,6 +65,8 @@ declare global {
         kind: 'screen' | 'accessibility' | 'microphone' | 'automation',
       ) => Promise<{ opened: boolean }>;
       relaunchApp: () => Promise<{ relaunching: true }>;
+      getAppUpdateReady: () => Promise<AppUpdateReadyInfo | null>;
+      installAppUpdate: () => Promise<{ installing: true }>;
       getOnboardingComplete: () => Promise<boolean>;
       setOnboardingComplete: (done: boolean) => Promise<boolean>;
       onDesktopLogs?: (callback: (logs: string) => void) => () => void;
@@ -68,6 +75,7 @@ declare global {
         callback: (event: WhisperInstallProgress) => void,
       ) => () => void;
       onOverview?: (callback: (overview: RuntimeOverview) => void) => () => void;
+      onAppUpdateReady?: (callback: (info: AppUpdateReadyInfo) => void) => () => void;
       onChatStream?: (callback: (event: ChatStreamEvent) => void) => () => void;
       listMeetings: (query?: { from?: string; to?: string; limit?: number }) => Promise<Meeting[]>;
       listDayEvents: (query?: {
@@ -110,6 +118,11 @@ declare global {
       }>;
     };
   }
+}
+
+export interface AppUpdateReadyInfo {
+  version: string | null;
+  releaseDate: string | null;
 }
 
 export interface ChatTurnHistoryItem {
@@ -174,6 +187,7 @@ export interface RuntimeOverview {
       other: number;
     };
   };
+  backup: BackupStatus;
   index: {
     strategy?: string;
     rootPath?: string;
@@ -216,6 +230,41 @@ export interface RuntimeOverview {
     overviewMode?: 'full' | 'fast';
     overviewTimings?: Record<string, number>;
   };
+}
+
+export interface BackupStatus {
+  enabled: boolean;
+  provider: BackupProvider;
+  configured: boolean;
+  connected: boolean;
+  mode: 'disabled' | 'needs_provider_config' | 'needs_connection' | 'ready' | 'error';
+  remoteLabel: string | null;
+  localMaxBytes: number;
+  localBytes: number;
+  remoteBytes: number;
+  pendingObjects: number;
+  uploadedObjects: number;
+  evictedObjects: number;
+  failedObjects: number;
+  lastRunAt: string | null;
+  lastUploadedAt: string | null;
+  lastError: string | null;
+}
+
+export type BackupProvider = 'drive' | 'box';
+
+export interface BackupRunResult {
+  uploaded: number;
+  failed: number;
+  evicted: number;
+  freedBytes: number;
+  skippedReason?: string;
+}
+
+export interface BackupRestoreResult {
+  restored: number;
+  failed: number;
+  bytes: number;
 }
 
 export interface RuntimeModelRole {
@@ -436,6 +485,16 @@ export interface BesideConfig {
         batch_size: number;
       };
     };
+  };
+  backup: {
+    enabled: boolean;
+    provider: BackupProvider;
+    upload_all: boolean;
+    tick_interval_min: number;
+    batch_size: number;
+    evict_batch_size: number;
+    drive: { client_id: string; client_secret: string };
+    box: { client_id: string; client_secret: string };
   };
   index: {
     strategy: string;
@@ -660,7 +719,7 @@ export interface CaptureHookWidgetManifest {
   id: string;
   title: string;
   bundlePath?: string;
-  builtin?: 'calendar' | 'followups' | 'list' | 'json';
+  builtin?: 'list' | 'json';
   defaultCollection?: string;
   placement?: 'dashboard-main' | 'dashboard-aside';
   description?: string;
