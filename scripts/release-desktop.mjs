@@ -20,6 +20,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const desktopDir = path.join(root, 'packages', 'desktop');
 const releaseDir = path.join(desktopDir, 'release');
+const websiteAppPath = path.join(root, 'website', 'src', 'App.tsx');
 
 const opts = parseArgs(process.argv.slice(2));
 if (opts.help) {
@@ -116,6 +117,7 @@ await run('gh', ['release', 'upload', tag, ...uploadFiles, '--repo', repo, '--cl
 
 step('Verifying GitHub release assets');
 const releaseUrl = await verifyRemoteAssets({ repo, tag, files: uploadFiles });
+await updateWebsiteDownloadLinks({ repo, tag, version, productName, arch });
 printLocalSummary(uploadFiles);
 console.log(`\n[release] Done: ${releaseUrl}`);
 
@@ -207,6 +209,9 @@ Options:
   --no-upload               Build and verify locally, but skip tag/release upload.
   --allow-non-main          Permit releasing from a branch other than main.
   --skip-git-check          Skip clean-worktree and branch checks.
+
+After a successful publish, updates website download links in website/src/App.tsx,
+commits, and pushes to main.
 `);
 }
 
@@ -517,6 +522,43 @@ process.stdout.write(pkg.version || '');
 async function readLatestMacVersion(latestMacPath) {
   const yml = await readFile(latestMacPath, 'utf8');
   return yml.match(/^version:\s*(.+)$/m)?.[1]?.trim() ?? null;
+}
+
+async function updateWebsiteDownloadLinks(input) {
+  step('Updating website download links');
+  const releaseBase = `https://github.com/${input.repo}/releases`;
+  const latestReleaseUrl = `${releaseBase}/tag/${input.tag}`;
+  const downloadArmUrl = `${releaseBase}/download/${input.tag}/${input.productName}-${input.version}-mac-arm64.dmg`;
+
+  let source = await readFile(websiteAppPath, 'utf8');
+  const replacements = [
+    [/^const LATEST_RELEASE_URL = ".*";$/m, `const LATEST_RELEASE_URL = "${latestReleaseUrl}";`],
+  ];
+  if (input.arch === 'arm64') {
+    replacements.push([
+      /^const DOWNLOAD_ARM_URL = ".*";$/m,
+      `const DOWNLOAD_ARM_URL = "${downloadArmUrl}";`,
+    ]);
+  }
+
+  let next = source;
+  for (const [pattern, value] of replacements) {
+    if (!pattern.test(next)) {
+      fail(`Could not find website download link to update in ${rel(websiteAppPath)}`);
+    }
+    next = next.replace(pattern, value);
+  }
+
+  if (next === source) {
+    console.log('[release] Website download links already up to date.');
+    return;
+  }
+
+  await writeFile(websiteAppPath, next);
+  await run('git', ['add', rel(websiteAppPath)], { cwd: root });
+  await run('git', ['commit', '-m', `Update website download links for ${input.tag}`], { cwd: root });
+  await run('git', ['push', 'origin', 'main'], { cwd: root });
+  console.log(`[release] Pushed website download links for ${input.tag}.`);
 }
 
 async function prepareTag(tagName, forceTag) {
