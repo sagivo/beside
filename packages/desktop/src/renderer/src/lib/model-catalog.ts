@@ -11,7 +11,7 @@
  * (badge: 'Recommended') drives the default selection in onboarding.
  */
 export interface ModelChoice {
-  /** Ollama tag, e.g. "gemma4:e2b". */
+  /** Ollama tag, e.g. "gemma4:e4b". */
   id: string;
   /** Human display name. */
   name: string;
@@ -28,24 +28,24 @@ export interface ModelChoice {
 
 export const MODEL_CHOICES: ModelChoice[] = [
   {
-    id: 'gemma4:e2b',
-    name: 'Gemma 4 · E2B',
-    vendor: 'Google',
-    size: '~7.2 GB',
-    bytes: 7.2 * 1024 ** 3,
-    description:
-      'Default Gemma 4 model. Optimized for lower latency and battery use while preserving vision support.',
-    badge: 'Recommended',
-    vision: true,
-  },
-  {
     id: 'gemma4:e4b',
     name: 'Gemma 4 · E4B',
     vendor: 'Google',
     size: '~9.6 GB',
     bytes: 9.6 * 1024 ** 3,
     description:
-      'Larger Gemma 4 variant with stronger reasoning, vision + audio, and 128K context.',
+      'Default Gemma 4 model with stronger reasoning, vision + audio, and 128K context.',
+    badge: 'Recommended',
+    vision: true,
+  },
+  {
+    id: 'gemma4:e2b',
+    name: 'Gemma 4 · E2B',
+    vendor: 'Google',
+    size: '~7.2 GB',
+    bytes: 7.2 * 1024 ** 3,
+    description:
+      'Lower-power Gemma 4 variant optimized for latency and battery while preserving vision support.',
     vision: true,
   },
   {
